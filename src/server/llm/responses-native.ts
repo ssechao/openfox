@@ -31,7 +31,8 @@ import type {
   ChatCompletionTool,
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
-import { ChatHttpClient, DONE, type ChatRequest } from './http-shared.js'
+import { LLMError } from '../utils/errors.js'
+import { ChatHttpClient, DONE, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
 
 export interface ResponsesClientOptions {
   baseURL: string
@@ -51,11 +52,43 @@ export interface ResponsesRequestBody {
   max_output_tokens?: number
   stream?: boolean
   store?: boolean
+  previous_response_id?: string
   reasoning?: { effort?: string }
   [key: string]: unknown
 }
 
 type ResponsesInputItem = Record<string, unknown>
+
+/**
+ * Convert a Chat-Completions content array into the Responses API shape.
+ *   { type:'text', text }            → { type:'input_text', text }
+ *   { type:'image_url', image_url:{url} } → { type:'input_image', image_url: url }
+ * data: URLs and http(s) URLs are preserved verbatim. Malformed image parts
+ * (missing/non-string url) throw a clear error WITHOUT echoing the payload —
+ * the Responses API rejects the unconverted `image_url` type with a 400.
+ */
+function convertContentParts(content: unknown): unknown {
+  if (!Array.isArray(content)) return content
+  return content.map((part) => {
+    if (typeof part !== 'object' || part === null) {
+      throw new LLMError('Invalid message content part: expected an object')
+    }
+    const p = part as Record<string, unknown>
+    const partType = p['type']
+    if (partType === 'text') {
+      return { type: 'input_text', text: typeof p['text'] === 'string' ? p['text'] : '' }
+    }
+    if (partType === 'image_url') {
+      const inner = p['image_url']
+      const url = typeof inner === 'string' ? inner : (inner as { url?: unknown } | undefined)?.url
+      if (typeof url !== 'string' || url.length === 0) {
+        throw new LLMError('Invalid image content part: image_url.url must be a non-empty string')
+      }
+      return { type: 'input_image', image_url: url }
+    }
+    return p
+  })
+}
 
 function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInputItem | null {
   if (message.role === 'system' || message.role === 'developer') return null
@@ -68,7 +101,7 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
     // Assistant messages carrying tool calls become function_call items; the
     // textual part (usually empty in agent loops) is emitted before them.
     const items: ResponsesInputItem[] = []
-    if (message.content) items.push({ role: 'assistant', content: message.content })
+    if (message.content) items.push({ role: 'assistant', content: convertContentParts(message.content) })
     for (const toolCall of message.tool_calls) {
       items.push({
         type: 'function_call',
@@ -80,7 +113,7 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
     return items.length === 1 ? items[0]! : { __multi: items }
   }
 
-  return { role: message.role, content: message.content ?? '' }
+  return { role: message.role, content: convertContentParts(message.content ?? '') }
 }
 
 function flattenInput(items: Array<ResponsesInputItem>): Array<ResponsesInputItem> {
@@ -98,21 +131,31 @@ function convertTools(tools: ChatCompletionTool[]): Array<Record<string, unknown
   }))
 }
 
+export type { ResponsesChainParams }
+
 export function buildResponsesRequest(
   params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
+  chain?: ResponsesChainParams,
 ): ResponsesRequestBody {
+  const isContinuation = Boolean(chain?.previousResponseId)
+  const sourceMessages = isContinuation ? (chain?.deltaMessages ?? []) : params.messages
+  // Instructions are NOT carried over by previous_response_id — the Responses API
+  // applies only the instructions sent with each request — so the active
+  // system/developer prompt is resent every turn (the conversational history is
+  // not: `input` stays the delta).
   const systemMessages = params.messages.filter((m) => m.role === 'system' || m.role === 'developer')
   const instructions = systemMessages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n\n')
 
   const body: ResponsesRequestBody = {
     model: params.model,
     input: flattenInput(
-      params.messages.map(messageToInputItem).filter((item): item is ResponsesInputItem => item !== null),
+      sourceMessages.map(messageToInputItem).filter((item): item is ResponsesInputItem => item !== null),
     ),
     stream: Boolean(params.stream),
-    store: false,
+    store: chain?.store ?? false,
   }
 
+  if (isContinuation && chain?.previousResponseId) body.previous_response_id = chain.previousResponseId
   if (instructions) body.instructions = instructions
   if (params.tools?.length) body.tools = convertTools(params.tools)
   if (params.tool_choice !== undefined) {
@@ -219,6 +262,7 @@ export function parseResponsesResponse(data: ResponsesApiResponse): ChatCompleti
       completion_tokens: completionTokens,
       total_tokens: data.usage?.total_tokens ?? promptTokens + completionTokens,
     },
+    completed: data.status === 'completed',
   }
 }
 
@@ -234,7 +278,13 @@ type StreamToolCall = NonNullable<ChatCompletionChunk['choices'][0]['delta']['to
  */
 export function parseResponsesEvent(event: Record<string, unknown>): ChatCompletionChunk | typeof DONE | null {
   const type = event['type']
-  const responseId = typeof event['response_id'] === 'string' ? event['response_id'] : 'resp'
+  const response = event['response'] as ResponsesApiResponse | undefined
+  const responseId =
+    typeof event['response_id'] === 'string'
+      ? event['response_id']
+      : typeof response?.id === 'string'
+        ? response.id
+        : 'resp'
 
   switch (type) {
     case 'response.output_text.delta':
@@ -275,12 +325,10 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
       return null
 
     case 'response.completed': {
-      const response = event['response'] as ResponsesApiResponse | undefined
       return finalChunk(responseId, response)
     }
 
     case 'response.failed': {
-      const response = event['response'] as ResponsesApiResponse | undefined
       const message = response?.error?.message ?? 'Responses API request failed'
       logger.warn('Responses API stream failed', { message })
       return finalChunk(responseId, response)
@@ -311,6 +359,7 @@ function finalChunk(id: string, response?: ResponsesApiResponse): ChatCompletion
         finish_reason: mapResponseStatus(response?.status, response?.incomplete_details?.reason),
       },
     ],
+    completed: response?.status === 'completed',
   }
   if (usage) {
     c.usage = {
@@ -342,6 +391,7 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
 
   protected buildRequest(
     params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
+    chain?: ResponsesChainParams,
   ): ChatRequest {
     return {
       url: `${this.baseURL}/responses`,
@@ -349,7 +399,7 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify(buildResponsesRequest(params)),
+      body: JSON.stringify(buildResponsesRequest(params, chain)),
     }
   }
 

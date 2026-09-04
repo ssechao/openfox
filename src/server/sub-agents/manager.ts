@@ -31,6 +31,7 @@ import { getEventStore, getCurrentContextWindowId } from '../events/index.js'
 import { createChatMessageMessage } from '../ws/protocol.js'
 import { logger } from '../utils/logger.js'
 import { getConversationMessages, processEventsForConversation } from '../chat/conversation-history.js'
+import { createTurnEventSink } from '../events/turn-event-sink.js'
 
 const RETURN_VALUE_INSTRUCTION = `
 
@@ -319,11 +320,12 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
   // --- Delegate to the shared agent loop ---
 
   const subAgentScope = { type: 'subagent' as const, sessionId, subAgentId, subAgentType }
+  const append = createTurnEventSink(eventStore, sessionId)
 
   const loopResult = await runTopLevelAgentLoop(
     {
       mode: subAgentType,
-      append: (event) => eventStore.append(sessionId, event),
+      append,
       sessionManager,
       sessionId,
       llmClient,
@@ -346,9 +348,7 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
         }),
       getToolRegistry: () => toolRegistry,
       getConversationMessages: async () => {
-        const processedEvents = await processEventsForConversation(sessionId, llmClient, (event) =>
-          eventStore.append(sessionId, event),
-        )
+        const processedEvents = await processEventsForConversation(sessionId, llmClient, append)
         return getConversationMessages(subAgentScope, { events: processedEvents })
       },
       subAgentMetadata: { subAgentId, subAgentType },

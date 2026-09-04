@@ -62,7 +62,10 @@ export function useDoublePressBinding(
     const threshold = binding.threshold ?? 300
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== binding.key) return
+      if (e.key !== binding.key) {
+        lastPressRef.current = 0
+        return
+      }
 
       const skipCtrl = binding.key === 'Control'
       const skipShift = binding.key === 'Shift'

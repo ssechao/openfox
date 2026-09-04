@@ -95,9 +95,19 @@ export type TurnEvent =
       }
     }
   | {
+      type: 'message.checkpoint'
+      data: {
+        messageId: string
+        content: string
+        thinkingContent?: string
+      }
+    }
+  | {
       type: 'message.done'
       data: {
         messageId: string
+        content?: string
+        thinkingContent?: string
         stats?: MessageStats
         segments?: MessageSegment[]
         partial?: boolean // True if interrupted

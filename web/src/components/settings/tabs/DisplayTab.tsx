@@ -1,6 +1,7 @@
 import { ScrollArea } from '../../shared/ScrollArea'
 import { useState, useEffect, useMemo } from 'react'
 import { SETTINGS_KEYS, setSetting } from '../../../lib/resources'
+import { normalizeFeedVirtualizationMode } from '../../../hooks/useDisplaySettings'
 import { useSetting } from '../../../hooks/useSetting'
 import { ThemeEditor } from '../ThemeEditor'
 import { useT } from '../../../hooks/useT'
@@ -115,15 +116,6 @@ const PERF_TOGGLES: ToggleDefinition[] = [
     defaultValue: 'false',
   },
   {
-    key: SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION,
-    label: { en: 'Virtualize long feeds', fr: 'Virtualiser les longs fils' },
-    description: {
-      en: 'Mount only the most recent items and reveal older ones as you scroll up. Faster on very long sessions, but older history loading is experimental.',
-      fr: 'Ne monte que les éléments les plus récents et révèle les plus anciens en remontant. Plus rapide sur les très longues sessions, mais le chargement de l’historique ancien est expérimental.',
-    },
-    defaultValue: 'false',
-  },
-  {
     key: SETTINGS_KEYS.DISPLAY_SHOW_SYNTAX_HIGHLIGHTING,
     label: { en: 'Show syntax highlighting', fr: 'Afficher la coloration syntaxique' },
     description: {
@@ -149,7 +141,7 @@ export function DisplayTab() {
     SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING,
     'false',
   )
-  const feedVirtualization = useSetting(SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION, 'false')
+  const feedVirtualization = useSetting(SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION, 'auto')
   const syntaxHighlighting = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_SYNTAX_HIGHLIGHTING, 'true')
   const maxVisibleItems = useSetting(SETTINGS_KEYS.DISPLAY_MAX_VISIBLE_ITEMS, '300')
   const storedLocale = useSetting(SETTINGS_KEYS.DISPLAY_LOCALE, 'automatic')
@@ -180,7 +172,6 @@ export function DisplayTab() {
     [SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS]: nativeScrollbarsCodeBlocks.value,
     [SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS]: collapseLargeToolCalls.value,
     [SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING]: deferCodeHighlightWhileStreaming.value,
-    [SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION]: feedVirtualization.value,
     [SETTINGS_KEYS.DISPLAY_SHOW_SYNTAX_HIGHLIGHTING]: syntaxHighlighting.value,
   }
   const [local, setLocal] = useState<Record<string, boolean>>(() =>
@@ -231,6 +222,32 @@ export function DisplayTab() {
         <h3 className="text-sm font-medium text-text-primary mb-4">{t({ en: 'Performance', fr: 'Performances' })}</h3>
         <div className="space-y-4">
           <ToggleList toggles={PERF_TOGGLES} local={local} onToggle={handleToggle} />
+
+          <label className="flex items-center justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="text-sm text-text-primary font-medium">
+                {t({ en: 'Virtualize long feeds', fr: 'Virtualiser les longs fils' })}
+              </div>
+              <div className="text-xs text-text-muted mt-0.5">
+                {t({
+                  en: 'Mount only the most recent items and reveal older ones as you scroll up. Auto enables this on feeds longer than 50 items.',
+                  fr: 'Ne monte que les éléments les plus récents et révèle les plus anciens en remontant. Auto active la virtualisation au-delà de 50 éléments.',
+                })}
+              </div>
+            </div>
+            <select
+              aria-label={t({ en: 'Virtualize long feeds', fr: 'Virtualiser les longs fils' })}
+              value={normalizeFeedVirtualizationMode(feedVirtualization.value)}
+              onChange={(e) => {
+                void setSetting(SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION, e.target.value)
+              }}
+              className="w-24 px-2 py-1 text-sm text-text-primary bg-bg-tertiary border border-border rounded text-right"
+            >
+              <option value="auto">{t({ en: 'Auto', fr: 'Auto' })}</option>
+              <option value="on">{t({ en: 'On', fr: 'On' })}</option>
+              <option value="off">{t({ en: 'Off', fr: 'Off' })}</option>
+            </select>
+          </label>
 
           <label className="flex items-center justify-between gap-3">
             <div className="flex-1 min-w-0">

@@ -25,6 +25,7 @@ interface Provider {
   authAdapter?: string
   transportAdapter?: string
   credentialRef?: string
+  apiProtocol?: 'auto' | 'responses' | 'chat-completions'
 }
 
 export interface PlatformInfo {

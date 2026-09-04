@@ -41,6 +41,7 @@ export const SETTINGS_KEYS = {
   CONFIRM_ON_WORKSPACE_ACTIONS: 'tools.confirmOnWorkspaceActions',
   FEATURES_PER_SESSION_MCP: 'features.perSessionMcp',
   MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED: 'maintenance.snapshotStreamsMigratedV1',
+  MAINTENANCE_TRANSIENT_EVENTS_MIGRATED: 'maintenance.transientEventsMigratedV1',
   PROXY_URL: 'network.proxyUrl',
   DEFAULT_AGENT: 'agent.defaultAgent',
   AGENT_MODEL_OVERRIDES: 'agent.modelOverrides',
@@ -86,6 +87,7 @@ export const SETTINGS_DEFAULTS: Record<string, string> = {
   [SETTINGS_KEYS.CONFIRM_ON_WORKSPACE_ACTIONS]: 'false',
   [SETTINGS_KEYS.FEATURES_PER_SESSION_MCP]: 'false',
   [SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED]: 'false',
+  [SETTINGS_KEYS.MAINTENANCE_TRANSIENT_EVENTS_MIGRATED]: 'false',
 }
 
 export type SettingsKey = (typeof SETTINGS_KEYS)[keyof typeof SETTINGS_KEYS]

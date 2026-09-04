@@ -102,6 +102,7 @@ export interface ProviderFormData {
   sendReasoningInMessages?: boolean
   authAdapter?: string
   transportAdapter?: string
+  apiProtocol?: 'auto' | 'responses' | 'chat-completions'
   models: Array<Omit<SharedModelConfig, 'source'>>
 }
 
@@ -116,6 +117,7 @@ export function providerFormPayload(formData: ProviderFormData) {
     sendReasoningInMessages: formData.sendReasoningInMessages,
     authAdapter: formData.authAdapter,
     transportAdapter: formData.transportAdapter,
+    apiProtocol: formData.apiProtocol,
     models: formData.models,
   }
 }
@@ -136,6 +138,7 @@ interface ProviderModalProps {
     sendReasoningInMessages?: boolean
     authAdapter?: string
     transportAdapter?: string
+    apiProtocol?: 'auto' | 'responses' | 'chat-completions'
     models?: Array<Omit<SharedModelConfig, 'source'>>
   }
   editModelId?: string
@@ -726,6 +729,7 @@ export function ProviderModal({
   const [showDefaults, setShowDefaults] = useState(false)
   const [thinkingField, setThinkingField] = useState('')
   const [sendReasoningInMessages, setSendReasoningInMessages] = useState(true)
+  const [formApiProtocol, setFormApiProtocol] = useState<'auto' | 'responses' | 'chat-completions'>('auto')
   const [modelConfigs, setModelConfigs] = useState<Record<string, ModelConfig>>({})
   const [autoConfigState, setAutoConfigState] = useState<{
     loading: boolean
@@ -942,6 +946,7 @@ export function ProviderModal({
       setFetchError(null)
       setThinkingField(editProvider?.thinkingField ?? '')
       setSendReasoningInMessages(editProvider?.sendReasoningInMessages ?? true)
+      setFormApiProtocol(editProvider?.apiProtocol ?? 'auto')
       setTestResults({})
       setRawModalData(null)
       setDraftProviderId(null)
@@ -1354,6 +1359,7 @@ export function ProviderModal({
       sendReasoningInMessages,
       authAdapter: formAuthAdapter,
       transportAdapter: formTransportAdapter,
+      apiProtocol: formApiProtocol,
       models: models.map((m) => ({
         id: m.id,
         name: m.name,
@@ -2248,6 +2254,31 @@ export function ProviderModal({
                 })}
               </span>
             </label>
+            <div>
+              <label className="text-xs text-text-secondary block mb-1">
+                {t({ en: 'API protocol', fr: 'Protocole API' })}
+              </label>
+              <select
+                aria-label={t({ en: 'API protocol', fr: 'Protocole API' })}
+                value={formApiProtocol}
+                onChange={(e) => setFormApiProtocol(e.target.value as 'auto' | 'responses' | 'chat-completions')}
+                className="w-full px-2 py-1.5 bg-bg-tertiary border border-border rounded text-xs text-text-primary"
+              >
+                <option value="auto">{t({ en: 'Auto (derive from model)', fr: 'Auto (dérivé du modèle)' })}</option>
+                <option value="responses">
+                  {t({ en: 'Responses API (/v1/responses)', fr: 'Responses API (/v1/responses)' })}
+                </option>
+                <option value="chat-completions">
+                  {t({ en: 'Chat Completions (/v1/chat/completions)', fr: 'Chat Completions (/v1/chat/completions)' })}
+                </option>
+              </select>
+              <p className="text-xs text-text-muted mt-1">
+                {t({
+                  en: 'Force the endpoint this provider speaks. “Auto” derives it from the model and backend.',
+                  fr: 'Force le point d’entrée utilisé par ce fournisseur. « Auto » le déduit du modèle et du backend.',
+                })}
+              </p>
+            </div>
           </div>
         </Modal>
       )}

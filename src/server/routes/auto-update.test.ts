@@ -51,7 +51,7 @@ describe('Auto Update Routes', () => {
 
     app = express()
     app.use(express.json())
-    app.use('/api/auto-update', createAutoUpdateRoutes())
+    app.use('/api/auto-update', createAutoUpdateRoutes({ version: '1.2.3' }))
 
     return new Promise<void>((resolve) => {
       server = app.listen(0, () => {
@@ -140,6 +140,54 @@ describe('Auto Update Routes', () => {
   })
 })
 
+describe('Auto Update Routes (fork build)', () => {
+  let server: ReturnType<express.Express['listen']>
+  let baseUrl: string
+
+  beforeEach(async () => {
+    mockSpawn.mockReset()
+    const app = express()
+    app.use(express.json())
+    app.use('/api/auto-update', createAutoUpdateRoutes({ version: '2.0.135-fork' }))
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => {
+        baseUrl = `http://localhost:${(server.address() as { port: number }).port}`
+        resolve()
+      })
+    })
+  })
+
+  afterEach(() => {
+    server.close()
+    resetUpdateInProgress()
+    resetVersionCache()
+  })
+
+  it('disables upstream checks without spawning a process', async () => {
+    const response = await fetch(`${baseUrl}/api/auto-update/check?force=true`)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      current: '2.0.135-fork',
+      latest: '2.0.135-fork',
+      isUpdateAvailable: false,
+      isService: false,
+      updatesDisabled: true,
+    })
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+
+  it('refuses upstream updates without spawning a process', async () => {
+    const response = await fetch(`${baseUrl}/api/auto-update`, { method: 'POST' })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({
+      success: false,
+      error: 'Upstream updates are disabled for fork builds',
+      isService: false,
+    })
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+})
+
 describe('Auto Update Routes (auth required)', () => {
   let app: express.Express
   let server: ReturnType<typeof app.listen>
@@ -147,12 +195,15 @@ describe('Auto Update Routes (auth required)', () => {
   let validToken: string
 
   beforeEach(async () => {
+    mockSpawn.mockReset()
+    mockSpawn.mockImplementation(() => makeMockChild({ stdout: 'Updated: 1.2.3\n' }))
     validToken = 'Bearer valid-token-123'
     app = express()
     app.use(express.json())
     app.use(
       '/api/auto-update',
       createAutoUpdateRoutes({
+        version: '1.2.3',
         requireAuth: (req) => {
           const authHeader = req.headers['authorization']
           if (!authHeader || authHeader !== validToken) {

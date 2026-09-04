@@ -214,6 +214,20 @@ export function buildContextMessagesFromStoredEvents(
         handleMessageDelta(messageMap, event.data as Extract<TurnEvent, { type: 'message.delta' }>['data'])
         break
       }
+      case 'message.done': {
+        const data = event.data as Extract<TurnEvent, { type: 'message.done' }>['data']
+        const message = messageMap.get(data.messageId)
+        if (message && data.content !== undefined) message.content = data.content
+        if (message && data.thinkingContent !== undefined) message.thinkingContent = data.thinkingContent
+        break
+      }
+      case 'message.checkpoint': {
+        const data = event.data as Extract<TurnEvent, { type: 'message.checkpoint' }>['data']
+        const message = messageMap.get(data.messageId)
+        if (message) message.content = data.content
+        if (message && data.thinkingContent !== undefined) message.thinkingContent = data.thinkingContent
+        break
+      }
       case 'tool.call': {
         handleToolCall(messageMap, event.data as Extract<TurnEvent, { type: 'tool.call' }>['data'])
         break

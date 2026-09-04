@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 import WebSocket from 'ws'
 import { recordLLMFailure, clearLLMFailure, sleepThroughRetryBackoff } from '../chat/stream-pure.js'
+import { QueueProcessor } from '../queue/processor.js'
 
 const {
   createProjectMock,
@@ -380,6 +381,11 @@ function createSessionManager(overrides: Record<string, unknown> = {}) {
       const s = (manager as { getSession: (id: string) => any }).getSession(sessionId)
       return { providerId: s?.providerId ?? null, model: s?.providerModel ?? null }
     }),
+    getOrCreateSessionLLMClient: vi.fn(
+      (_sessionId: string, _providerId: string, _model: string, _effort: string | undefined, create: () => unknown) =>
+        create(),
+    ),
+    clearSessionLLMClient: vi.fn(),
     getContextState: vi.fn(() => ({
       currentTokens: 10,
       maxTokens: 200000,
@@ -525,7 +531,7 @@ async function createHarness(
     await new Promise<void>((resolve, reject) => httpServer.close((error) => (error ? reject(error) : resolve())))
   }
 
-  return { client, send, sendRaw, nextMessage, close, sessionManager, eventStore, httpServer }
+  return { client, send, sendRaw, nextMessage, close, sessionManager, eventStore, httpServer, wss }
 }
 
 describe('createWebSocketServer', () => {
@@ -1614,6 +1620,233 @@ describe('createWebSocketServer', () => {
     expect(sessionManager.setRunning).toHaveBeenCalledWith('session-1', false)
 
     await harness.close()
+  })
+
+  describe('multi-session subscriptions (cross-session live updates)', () => {
+    const makeTwoSessionManager = () => {
+      const sessionOne: any = {
+        id: 'session-1',
+        projectId: 'project-1',
+        workdir: '/tmp/project-1',
+        mode: 'planner',
+        phase: 'plan',
+        isRunning: false,
+        criteria: [],
+        metadata: { totalTokensUsed: 0, totalToolCalls: 0, iterationCount: 0 },
+      }
+      const sessionTwo: any = { ...sessionOne, id: 'session-2', workdir: '/tmp/project-2' }
+      const sessions = new Map<string, any>([
+        ['session-1', sessionOne],
+        ['session-2', sessionTwo],
+      ])
+      return createSessionManager({
+        getSession: vi.fn((sessionId: string) => sessions.get(sessionId) ?? null),
+        requireSession: vi.fn((sessionId: string) => sessions.get(sessionId)),
+        getEffectiveWorkdir: vi.fn((sessionId: string) => sessions.get(sessionId)?.workdir ?? null),
+      })
+    }
+
+    const delta = (content: string) => ({
+      type: 'chat.delta' as const,
+      payload: { messageId: 'm1', content },
+    })
+
+    it('keeps streaming to a previously loaded session after another one is loaded', async () => {
+      const harness = await createHarness({ sessionManager: makeTwoSessionManager() })
+
+      harness.send({ id: 'sl-1', type: 'session.load', payload: { sessionId: 'session-1' } })
+      await harness.nextMessage((m) => m.id === 'sl-1')
+      harness.send({ id: 'sl-2', type: 'session.load', payload: { sessionId: 'session-2' } })
+      await harness.nextMessage((m) => m.id === 'sl-2')
+
+      // The regression: loading session-2 used to overwrite the single
+      // activeSessionId slot, so session-1 stopped receiving its own stream.
+      harness.wss.broadcastForSession('session-1', delta('from-1') as never)
+      expect(await harness.nextMessage((m) => m.type === 'chat.delta')).toMatchObject({
+        sessionId: 'session-1',
+        payload: { content: 'from-1' },
+      })
+
+      harness.wss.broadcastForSession('session-2', delta('from-2') as never)
+      expect(await harness.nextMessage((m) => m.type === 'chat.delta')).toMatchObject({
+        sessionId: 'session-2',
+        payload: { content: 'from-2' },
+      })
+
+      await harness.close()
+    })
+
+    it('delivers an injected message and its streamed response to a background session', async () => {
+      // The reported bug: session A injects a prompt into session B (MCP
+      // openfox_send_message / POST /api/sessions/:id/message → queueMessage →
+      // QueueProcessor). In B's pane neither the prompt nor the answer showed
+      // up until a full window reload. This drives the REAL injection path.
+      const sessionOne: any = {
+        id: 'session-1',
+        projectId: 'project-1',
+        workdir: '/tmp/project-1',
+        mode: 'planner',
+        phase: 'plan',
+        isRunning: false,
+        criteria: [],
+        metadata: { totalTokensUsed: 0, totalToolCalls: 0, iterationCount: 0 },
+      }
+      const sessionTwo: any = { ...sessionOne, id: 'session-2', workdir: '/tmp/project-2' }
+      const sessions = new Map<string, any>([
+        ['session-1', sessionOne],
+        ['session-2', sessionTwo],
+      ])
+
+      // Minimal but faithful queue: queueMessage emits `queue_added`, which is
+      // exactly what wakes the QueueProcessor in production.
+      const queues = new Map<string, Array<Record<string, unknown>>>()
+      const subscribers: Array<(event: Record<string, unknown>) => void> = []
+      const sessionManager = createSessionManager({
+        getSession: vi.fn((sessionId: string) => sessions.get(sessionId) ?? null),
+        requireSession: vi.fn((sessionId: string) => sessions.get(sessionId)),
+        getEffectiveWorkdir: vi.fn((sessionId: string) => sessions.get(sessionId)?.workdir ?? null),
+        subscribe: vi.fn((listener: (event: Record<string, unknown>) => void) => {
+          subscribers.push(listener)
+          return () => {}
+        }),
+        queueMessage: vi.fn((sessionId: string, mode: string, content: string) => {
+          const msg = { queueId: `queue-${sessionId}`, mode, content, queuedAt: 'now' }
+          queues.set(sessionId, [...(queues.get(sessionId) ?? []), msg])
+          for (const listener of [...subscribers]) listener({ type: 'queue_added', sessionId })
+          return msg
+        }),
+        getQueueState: vi.fn((sessionId: string) => queues.get(sessionId) ?? []),
+        hasQueuedMessages: vi.fn((sessionId: string) => (queues.get(sessionId) ?? []).length > 0),
+        cancelQueuedMessage: vi.fn((sessionId: string, queueId: string) => {
+          queues.set(
+            sessionId,
+            (queues.get(sessionId) ?? []).filter((m) => m['queueId'] !== queueId),
+          )
+          return true
+        }),
+        setRunning: vi.fn((sessionId: string, isRunning: boolean) => {
+          const s = sessions.get(sessionId)
+          if (s) s.isRunning = isRunning
+          return s
+        }),
+        addMessage: vi.fn((sessionId: string, message: Record<string, unknown>) => ({
+          id: `msg-${sessionId}`,
+          timestamp: '2024-01-01T00:00:00.000Z',
+          ...message,
+        })),
+      })
+
+      // Disable auto-title generation so the turn stays on the assertion path.
+      getRuntimeConfigMock.mockReturnValue({ disableAutoSessionTitle: true })
+
+      const harness = await createHarness({ sessionManager })
+
+      // The turn streams a reply, then completes.
+      runChatTurnMock.mockImplementation(({ onMessage }: any) => {
+        onMessage({ type: 'chat.delta', payload: { messageId: 'a1', content: 'Hello ' } })
+        onMessage({ type: 'chat.delta', payload: { messageId: 'a1', content: 'back' } })
+        onMessage({ type: 'chat.done', payload: { messageId: 'a1', reason: 'complete' } })
+        return Promise.resolve()
+      })
+
+      const processor = new QueueProcessor({
+        sessionManager: sessionManager as never,
+        providerManager: {} as never,
+        getLLMClient: () => ({ getModel: () => 'qwen3-32b', getBackend: () => 'vllm' }) as never,
+        getActiveProvider: undefined,
+        broadcastForSession: harness.wss.broadcastForSession,
+      })
+      processor.start()
+
+      // session-1 is the focused pane; session-2 is only a background pane.
+      harness.send({ id: 'sl-1', type: 'session.load', payload: { sessionId: 'session-1' } })
+      await harness.nextMessage((m) => m.id === 'sl-1')
+      harness.send({ id: 'sl-2', type: 'session.load', payload: { sessionId: 'session-2', focus: false } })
+      await harness.nextMessage((m) => m.id === 'sl-2')
+
+      // Inject into the NON-focused session, exactly like the MCP tool / REST route.
+      sessionManager.queueMessage('session-2', 'asap', 'Ping from another session', undefined, undefined)
+
+      // 1. The injected user prompt reaches the browser.
+      expect(await harness.nextMessage((m) => m.type === 'chat.message')).toMatchObject({
+        sessionId: 'session-2',
+        payload: { message: { role: 'user', content: 'Ping from another session' } },
+      })
+
+      // 2. The streamed answer reaches it too...
+      expect(await harness.nextMessage((m) => m.type === 'chat.delta')).toMatchObject({
+        sessionId: 'session-2',
+        payload: { content: 'Hello ' },
+      })
+      expect(await harness.nextMessage((m) => m.type === 'chat.delta')).toMatchObject({
+        sessionId: 'session-2',
+        payload: { content: 'back' },
+      })
+
+      // 3. ...including the terminal event, so the pane stops showing "running".
+      expect(await harness.nextMessage((m) => m.type === 'chat.done')).toMatchObject({
+        sessionId: 'session-2',
+        payload: { messageId: 'a1' },
+      })
+
+      processor.stop()
+      await harness.close()
+    })
+
+    it('subscribes a background pane without stealing the focused session', async () => {
+      const harness = await createHarness({ sessionManager: makeTwoSessionManager() })
+
+      harness.send({ id: 'sl-1', type: 'session.load', payload: { sessionId: 'session-1' } })
+      await harness.nextMessage((m) => m.id === 'sl-1')
+      // Drain the focused load's git status so the next assertion is unambiguous.
+      await harness.nextMessage((m) => m.type === 'git.status')
+
+      harness.send({
+        id: 'sl-2-bg',
+        type: 'session.load',
+        payload: { sessionId: 'session-2', focus: false },
+      })
+
+      // The handler emits git.status BEFORE the ack, so a background load that
+      // did steal the current session would surface a git.status first. Getting
+      // the ack first proves the focused session still owns workdir/git.
+      expect(await harness.nextMessage((m) => m.type === 'git.status' || m.id === 'sl-2-bg')).toMatchObject({
+        type: 'ack',
+        payload: { sessionId: 'session-2' },
+      })
+
+      // A background pane is nonetheless subscribed for events.
+      harness.wss.broadcastForSession('session-2', delta('bg') as never)
+      expect(await harness.nextMessage((m) => m.type === 'chat.delta')).toMatchObject({
+        sessionId: 'session-2',
+        payload: { content: 'bg' },
+      })
+
+      await harness.close()
+    })
+
+    it('session.unload stops delivery for that session only', async () => {
+      const harness = await createHarness({ sessionManager: makeTwoSessionManager() })
+
+      harness.send({ id: 'sl-1', type: 'session.load', payload: { sessionId: 'session-1' } })
+      await harness.nextMessage((m) => m.id === 'sl-1')
+      harness.send({ id: 'sl-2', type: 'session.load', payload: { sessionId: 'session-2' } })
+      await harness.nextMessage((m) => m.id === 'sl-2')
+
+      harness.send({ id: 'su-2', type: 'session.unload', payload: { sessionId: 'session-2' } })
+      await harness.nextMessage((m) => m.id === 'su-2')
+
+      harness.wss.broadcastForSession('session-2', delta('dropped') as never)
+      harness.wss.broadcastForSession('session-1', delta('kept') as never)
+
+      // The first delta to arrive must be session-1's: session-2 is unsubscribed.
+      expect(await harness.nextMessage((m) => m.type === 'chat.delta')).toMatchObject({
+        sessionId: 'session-1',
+        payload: { content: 'kept' },
+      })
+
+      await harness.close()
+    })
   })
 
   it.skip('tags direct session-scoped messages with their originating session after switching sessions', async () => {

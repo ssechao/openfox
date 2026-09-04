@@ -20,6 +20,19 @@ export function useDisplaySettings() {
     collapseLargeToolCalls: useSetting(SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS, 'false').value === 'true',
     deferCodeHighlightWhileStreaming:
       useSetting(SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING, 'false').value === 'true',
-    feedVirtualization: useSetting(SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION, 'false').value === 'true',
+    // Tri-state: 'auto' (default) virtualizes feeds longer than the threshold,
+    // 'on' forces it, 'off' disables it. Legacy 'true'/'false' values map to
+    // 'on'/'off' so existing opt-outs keep working.
+    feedVirtualizationMode: normalizeFeedVirtualizationMode(
+      useSetting(SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION, 'auto').value,
+    ),
   }
+}
+
+export type FeedVirtualizationMode = 'auto' | 'on' | 'off'
+
+export function normalizeFeedVirtualizationMode(value: string): FeedVirtualizationMode {
+  if (value === 'on' || value === 'true') return 'on'
+  if (value === 'off' || value === 'false') return 'off'
+  return 'auto'
 }

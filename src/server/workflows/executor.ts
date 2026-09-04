@@ -31,6 +31,7 @@ import { executeShellCommand } from './shell.js'
 import { serverT } from '../i18n.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
+import { createTurnEventSink } from '../events/turn-event-sink.js'
 
 // ============================================================================
 // Template Variables
@@ -614,7 +615,7 @@ export async function executeWorkflow(
 
         const turnMetrics = new TurnMetrics()
         const es = getEventStore()
-        const append = (event: import('../events/types.js').TurnEvent) => es.append(sessionId, event)
+        const append = createTurnEventSink(es, sessionId)
 
         let stepDoneCalled = false
 

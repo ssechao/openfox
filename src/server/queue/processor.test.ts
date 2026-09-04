@@ -67,6 +67,7 @@ describe('QueueProcessor', () => {
     queueItems = []
     latestExecution = null
 
+    let cachedSessionClient: { sessionId: string; key: string; client: ReturnType<() => any> } | undefined
     mockSessionManager = {
       subscribe: vi.fn(() => () => {}),
       getSession: vi.fn(() => sessionState),
@@ -86,6 +87,20 @@ describe('QueueProcessor', () => {
         model: sessionState.providerModel ?? null,
         ...(sessionState.providerReasoningEffort ? { reasoningEffort: sessionState.providerReasoningEffort } : {}),
       })),
+      getOrCreateSessionLLMClient: vi.fn(
+        (sessionId: string, providerId: string, model: string, effort: string | undefined, create: () => any) => {
+          const key = `${providerId}:${model}:${effort ?? ''}`
+          if (cachedSessionClient?.sessionId === sessionId && cachedSessionClient.key === key) {
+            return cachedSessionClient.client
+          }
+          const client = create()
+          if (client) cachedSessionClient = { sessionId, key, client }
+          return client
+        },
+      ),
+      clearSessionLLMClient: vi.fn((sessionId: string) => {
+        if (cachedSessionClient?.sessionId === sessionId) cachedSessionClient = undefined
+      }),
       getContextState: vi.fn(() => ({
         currentTokens: 100,
         maxTokens: 1000,
@@ -233,13 +248,9 @@ describe('QueueProcessor', () => {
 
       const sessionClient = { getModel: () => 'session-model', getBackend: () => 'vllm' }
       const switchedClient = { getModel: () => 'switched-model', getBackend: () => 'vllm' }
-      // runTurn resolves the primary session client first (eager), then the test
-      // re-resolves once before and once after the simulated provider switch.
-      const getLLMClientForProviderMock = vi
-        .fn()
-        .mockReturnValueOnce(sessionClient)
-        .mockReturnValueOnce(sessionClient)
-        .mockReturnValueOnce(switchedClient)
+      // The eager resolution and subsequent same-selection lookup share one
+      // session client; the provider factory is called again only on switch.
+      const getLLMClientForProviderMock = vi.fn().mockReturnValueOnce(sessionClient).mockReturnValueOnce(switchedClient)
 
       sessionState = {
         id: 'sess-1',
@@ -270,10 +281,12 @@ describe('QueueProcessor', () => {
 
       // First resolution builds a client for the session's provider
       expect(params.getSessionLLMClient()).toBe(sessionClient)
+      expect(getLLMClientForProviderMock).toHaveBeenCalledTimes(1)
 
       // Simulate the user switching providers mid-turn: resolution picks it up
       sessionState = { ...sessionState, providerId: 'provider-switched', providerModel: 'new-model' }
       expect(params.getSessionLLMClient()).toBe(switchedClient)
+      expect(getLLMClientForProviderMock).toHaveBeenCalledTimes(2)
       qp.stop()
     })
 

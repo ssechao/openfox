@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Config } from '../config.js'
 import type {
   LLMClient,
@@ -5,9 +6,10 @@ import type {
   LLMCompletionResponse,
   LLMStreamEvent,
   ReasoningEffort,
+  LLMToolDefinition,
 } from './types.js'
 import type { ToolCall } from '../../shared/types.js'
-import type { ContentBlock, ChatCompletionChunk } from './openai-types.js'
+import type { ContentBlock, ChatCompletionChunk, ChatCompletionMessageParam } from './openai-types.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
 import { getModelProfile, type ModelProfile } from './profiles.js'
@@ -22,13 +24,21 @@ import {
 } from './client-pure.js'
 import { resolveApiProtocol } from './responses-routing.js'
 import { OpenAIHttpClient } from './http-client.js'
-import { OpenAIResponsesHttpClient } from './responses-native.js'
+import { OpenAIResponsesHttpClient, type ResponsesChainParams } from './responses-native.js'
 import { OllamaHttpClient } from './ollama-native.js'
 
 /**
  * Extract text and thinking content from structured content blocks
  * (used by Mistral and other APIs that return content as an array of blocks).
  */
+/**
+ * A 4xx that specifically refuses server-side conversation storage (typically a
+ * zero-data-retention org). Distinct from a generic bad request: it must NOT
+ * fail the turn — chaining is disabled and the request retried without it.
+ */
+export const RESPONSES_STORE_REJECTION =
+  /(zero data retention|\bzdr\b|previous_response_id|['"`]?store['"`]?\s*(is|must|not|cannot|unsupported))/i
+
 function extractContentFromBlocks(blocks: ContentBlock[]): { text: string; thinking: string } {
   let text = ''
   let thinking = ''
@@ -56,6 +66,9 @@ export interface LLMClientWithModel extends LLMClient {
   usesResponsesApi?(): boolean
   /** The reasoning effort this client was created with (if any). */
   getReasoningEffort?(): string | undefined
+  /** Invalidate the Responses-API conversation chain for a key (e.g. after compaction,
+   *  a system-prompt/tool change, or an error that made the last response id unusable). */
+  resetResponsesChain?(key: string): void
 }
 
 export function createLLMClient(
@@ -96,15 +109,21 @@ export function createLLMClient(
   const thinkingField = config.llm.thinkingField
   const sendReasoningInMessages = config.llm.sendReasoningInMessages
   const idleTimeout = config.llm.idleTimeout ?? 120_000
+  const apiProtocolOverride = config.llm.apiProtocol
 
   /**
-   * The API protocol the active model speaks on the current backend — derived
-   * from the model profile (gpt-5 family → responses on openai) plus the
-   * OpenCode Go curated table. Re-evaluated on every use so setModel /
-   * setBackend switches take effect.
+   * The API protocol the active model speaks on the current backend — an explicit
+   * provider override wins, then the model profile (gpt-5 family → responses on
+   * openai) plus the OpenCode Go curated table. Re-evaluated on every use so
+   * setModel / setBackend switches take effect.
    */
   const currentApiProtocol = (): 'chat-completions' | 'responses' =>
-    resolveApiProtocol({ model, backend, profileApiProtocol: profile.apiProtocol })
+    resolveApiProtocol({
+      model,
+      backend,
+      profileApiProtocol: profile.apiProtocol,
+      explicitApiProtocol: apiProtocolOverride === 'auto' ? undefined : apiProtocolOverride,
+    })
 
   function buildExtraParams(resolvedEffort: ReasoningEffort | undefined) {
     return {
@@ -115,12 +134,174 @@ export function createLLMClient(
     }
   }
 
+  // Responses-API conversation continuity: per chain key (session) we track how
+  // many non-system messages the server already knows (storedCount) and the last
+  // validated response id. The next turn sends only the delta (the new suffix)
+  // with previous_response_id instead of the full history. The conversation is
+  // append-only, so a count is sufficient; any desync (history shrank, prompt or
+  // tools changed) resets the chain to a fresh first request.
+  interface ResponsesChainState {
+    previousResponseId?: string
+    storedCount: number
+    /** How many non-system messages we sent when this chain was established. */
+    sentCount: number
+    /** Digest of exactly those messages — detects in-place history edits. */
+    sentDigest: string
+    promptFingerprint?: string
+  }
+  const responsesChains = new Map<string, ResponsesChainState>()
+
+  // Zero-data-retention orgs and providers reject `store: true`. The first such
+  // rejection turns server-side chaining off for this client, so the retry goes
+  // out as a plain full-history request instead of hard-failing the turn.
+  let responsesStoreSupported = true
+
+  function promptFingerprint(systemPrompt: string, tools?: LLMToolDefinition[]): string {
+    const toolsDigest = createHash('sha256')
+      .update(JSON.stringify(tools ?? []))
+      .digest('hex')
+    return `${model}::${currentApiProtocol()}::${systemPrompt}::${toolsDigest}`
+  }
+
+  function binaryFingerprint(value: string): string {
+    const separator = value.indexOf(',')
+    const prefix = separator >= 0 ? value.slice(0, separator + 1) : ''
+    const body = separator >= 0 ? value.slice(separator + 1) : value
+    return `${prefix}${body.length}:${createHash('sha256').update(body).digest('hex')}`
+  }
+
+  function historyDigest(messages: ChatCompletionMessageParam[]): string {
+    const summary = messages.map((message) => ({
+      role: message.role,
+      toolCallId: message.tool_call_id ?? null,
+      content: Array.isArray(message.content)
+        ? message.content.map((part) => {
+            if (part.type === 'text') return { type: part.type, text: part.text }
+            if (part.type === 'image_url') {
+              const url = part.image_url.url
+              return {
+                type: part.type,
+                imageUrl: url.startsWith('data:') ? binaryFingerprint(url) : url,
+              }
+            }
+            return {
+              type: part.type,
+              format: part.input_audio.format,
+              data: binaryFingerprint(part.input_audio.data),
+            }
+          })
+        : message.content,
+      toolCalls:
+        message.tool_calls?.map((call) => ({
+          id: call.id,
+          type: call.type,
+          name: call.function.name,
+          arguments: call.function.arguments,
+        })) ?? [],
+      reasoning: message.reasoning ?? null,
+      reasoningContent: message.reasoning_content ?? null,
+      thinking: message.thinking ?? null,
+    }))
+    return createHash('sha256').update(JSON.stringify(summary)).digest('hex')
+  }
+
+  interface ChainPlan {
+    key?: string
+    opts?: ResponsesChainParams
+    fingerprint: string
+    count: number
+    digest: string
+  }
+
+  /**
+   * Decide what continuity options (if any) this request carries. Shared by
+   * complete() and stream() so both paths can never drift apart.
+   */
+  function planResponsesChain(
+    request: {
+      messages: Array<{ role: string; content?: string }>
+      tools?: LLMToolDefinition[]
+      responsesChainKey?: string
+    },
+    messages: ChatCompletionMessageParam[],
+  ): ChainPlan {
+    const nonSystem = messages.filter((m) => m.role !== 'system' && m.role !== 'developer')
+    const systemPrompt = request.messages.find((m) => m.role === 'system')?.content ?? ''
+    const base = {
+      fingerprint: promptFingerprint(systemPrompt, request.tools),
+      count: nonSystem.length,
+      digest: historyDigest(nonSystem),
+    }
+    const key = request.responsesChainKey
+    if (!key) return base
+
+    if (currentApiProtocol() !== 'responses') {
+      // A Chat-Completions turn advances the conversation the Responses server
+      // does not see, so the stored response id no longer matches the local
+      // history — drop it, otherwise switching back would resurrect it.
+      responsesChains.delete(key)
+      return { ...base, key }
+    }
+    if (!responsesStoreSupported) return { ...base, key }
+
+    const chain = responsesChains.get(key)
+    const previousResponseId = chain?.previousResponseId
+    if (
+      chain &&
+      previousResponseId !== undefined &&
+      chain.promptFingerprint === base.fingerprint &&
+      base.count >= chain.storedCount &&
+      // The prefix the server holds must still match ours: an edit/retry that
+      // rewrites earlier turns without shrinking the history would otherwise
+      // silently keep the stale server-side context.
+      chain.sentDigest === historyDigest(nonSystem.slice(0, chain.sentCount))
+    ) {
+      return {
+        ...base,
+        key,
+        opts: { store: true, previousResponseId, deltaMessages: nonSystem.slice(chain.storedCount) },
+      }
+    }
+    return { ...base, key, opts: { store: true } }
+  }
+
+  /** Advance the chain — only a completed response can be continued from. */
+  function advanceResponsesChain(plan: ChainPlan, responseId: string | undefined, completed: boolean): void {
+    if (!plan.key || currentApiProtocol() !== 'responses') return
+    if (completed && responseId && responsesStoreSupported) {
+      responsesChains.set(plan.key, {
+        previousResponseId: responseId,
+        storedCount: plan.count + 1,
+        sentCount: plan.count,
+        sentDigest: plan.digest,
+        promptFingerprint: plan.fingerprint,
+      })
+    } else {
+      responsesChains.delete(plan.key)
+    }
+  }
+
+  /** A rejected request invalidates the chain; a store rejection disables it. */
+  function noteResponsesChainError(plan: ChainPlan, error: unknown): void {
+    if (!plan.key) return
+    const message = error instanceof Error ? error.message : String(error)
+    if (RESPONSES_STORE_REJECTION.test(message)) {
+      logger.warn('Responses API rejected server-side conversation storage, falling back to full history', { model })
+      responsesStoreSupported = false
+    }
+    responsesChains.delete(plan.key)
+  }
+
   return {
     getModel() {
       return model
     },
 
     usesResponsesApi: () => currentApiProtocol() === 'responses',
+
+    resetResponsesChain(key: string) {
+      responsesChains.delete(key)
+    },
 
     getProfile() {
       return profile
@@ -158,6 +339,7 @@ export function createLLMClient(
         reasoningEffort: request.reasoningEffort ?? reasoningEffort,
       })
 
+      let chainPlan: ChainPlan = { fingerprint: '', count: 0, digest: '' }
       try {
         const resolvedEffort = request.skipClientReasoningEffort
           ? undefined
@@ -170,10 +352,14 @@ export function createLLMClient(
           capabilities,
           ...buildExtraParams(resolvedEffort),
         })
+
+        chainPlan = planResponsesChain(request, createParams.messages as ChatCompletionMessageParam[])
+
         const httpResponse = await httpFor(backend).createChatCompletion(
           createParams,
           {
             signal: request.signal,
+            ...(chainPlan.opts ? { chain: chainPlan.opts } : {}),
           },
           request.returnRaw,
         )
@@ -210,7 +396,7 @@ export function createLLMClient(
           return { id: tc.id, name: tc.function.name, arguments: args, ...(parseError ? { parseError } : {}) }
         })
 
-        return {
+        const completion: LLMCompletionResponse = {
           id: httpResponse.id,
           content,
           ...(thinkingContent ? { thinkingContent } : {}),
@@ -221,9 +407,16 @@ export function createLLMClient(
             completionTokens: httpResponse.usage?.completion_tokens ?? 0,
             totalTokens: httpResponse.usage?.total_tokens ?? 0,
           },
+          ...(httpResponse.completed ? { completed: true } : {}),
           ...(httpResponse.raw ? { raw: httpResponse.raw } : {}),
         }
+
+        // Advance the Responses-API chain only on a completed response.
+        advanceResponsesChain(chainPlan, httpResponse.id, Boolean(httpResponse.completed))
+
+        return completion
       } catch (error: unknown) {
+        noteResponsesChainError(chainPlan, error)
         logger.error('LLM complete error', { error: String(error) })
         throw new LLMError(error instanceof Error ? error.message : 'Unknown LLM error', {
           originalError: error instanceof Error ? error : undefined,
@@ -244,6 +437,7 @@ export function createLLMClient(
         idleTimeout,
       })
 
+      let chainPlan: ChainPlan = { fingerprint: '', count: 0, digest: '' }
       try {
         const createParams = await buildStreamingCreateParams({
           model,
@@ -254,6 +448,12 @@ export function createLLMClient(
         })
 
         const { params: streamingParams } = createParams
+
+        // Responses-API conversation continuity: when a chain key is provided and the
+        // protocol is `responses`, send only the delta (new non-system messages) with
+        // previous_response_id instead of the full history. The server stores the
+        // conversation, so the next turn only needs the new suffix.
+        chainPlan = planResponsesChain(request, streamingParams.messages as ChatCompletionMessageParam[])
 
         // Idle timeout tracking. Set up BEFORE the stream, because the stream has to be given a
         // signal the timeout can pull: aborting a controller nothing listens to only sets a flag,
@@ -281,6 +481,7 @@ export function createLLMClient(
 
         const stream = httpFor(backend).createChatCompletionStream(streamingParams, {
           signal: streamSignal,
+          ...(chainPlan.opts ? { chain: chainPlan.opts } : {}),
         })
 
         let fullContent = ''
@@ -289,6 +490,7 @@ export function createLLMClient(
         let finishReason: LLMCompletionResponse['finishReason'] = 'stop'
         let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
         let responseId = ''
+        let streamCompleted = false
 
         // Clear timer immediately if external abort fires (e.g. pattern match)
         const onAbort = () => clearInterval(idleTimer)
@@ -320,6 +522,9 @@ export function createLLMClient(
             }
 
             responseId = chunk.id
+            if (chunk.completed === true) {
+              streamCompleted = true
+            }
 
             if (chunk.usage) {
               usage = {
@@ -437,9 +642,17 @@ export function createLLMClient(
             ...(parsedToolCalls.length > 0 ? { toolCalls: parsedToolCalls } : {}),
             finishReason,
             usage,
+            ...(streamCompleted ? { completed: true } : {}),
           },
         }
+
+        // Advance the Responses-API chain only on a completed response. A failed or
+        // interrupted response must NOT advance previous_response_id. The server has
+        // now seen the full local history at request time plus the new assistant
+        // response (+1), so the next turn sends only the suffix beyond that.
+        advanceResponsesChain(chainPlan, responseId, streamCompleted)
       } catch (error) {
+        noteResponsesChainError(chainPlan, error)
         logger.error('LLM stream error', { error: String(error) })
         yield {
           type: 'error',

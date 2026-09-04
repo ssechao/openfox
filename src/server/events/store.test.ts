@@ -1661,6 +1661,18 @@ describe('EventStore - Event Cleanup', () => {
       expect(second).not.toBe(first)
     })
 
+    it('keeps the cached snapshot when appending an event after it', () => {
+      store.append('session-1', { type: 'turn.snapshot', data: snapshotData('planner', 1) })
+      const first = store.getLatestSnapshot('session-1')
+
+      store.append('session-1', {
+        type: 'message.delta',
+        data: { messageId: 'msg-1', content: 'streamed text' },
+      })
+
+      expect(store.getLatestSnapshot('session-1')).toBe(first)
+    })
+
     it('does not bake the first caller limit into the cached prompts', () => {
       const messages = Array.from({ length: 8 }, (_, i) => ({
         id: `m${i}`,

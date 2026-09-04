@@ -475,6 +475,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         ...(provider.sendReasoningInMessages !== undefined
           ? { sendReasoningInMessages: provider.sendReasoningInMessages }
           : {}),
+        ...(provider.apiProtocol ? { apiProtocol: provider.apiProtocol } : {}),
         ...(modelThinking.reasoningEffort &&
           !send.suppressEffort && { reasoningEffort: modelThinking.reasoningEffort }),
       },

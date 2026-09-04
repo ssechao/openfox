@@ -104,9 +104,10 @@ vi.mock('../../lib/api', () => ({ authFetch: vi.fn() }))
 describe('ChatFeedItems default (virtualization off)', () => {
   beforeEach(() => {
     clearCache()
+    settingResource.write('off', SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION)
   })
 
-  it('mounts every item with no placeholders or sentinel by default', () => {
+  it('mounts every item with no placeholders or sentinel when virtualization is off', () => {
     const items = Array.from({ length: 70 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
 
     const container = document.createElement('div')
@@ -125,7 +126,7 @@ describe('ChatFeedItems default (virtualization off)', () => {
 })
 
 describe('ChatFeedItems containment styling', () => {
-  it('applies no content-visibility containment to mounted items when virtualization is off', () => {
+  it('applies contain:layout to every wrapper and content-visibility to non-streaming wrappers when virtualization is off', () => {
     clearCache()
     const items = [msg('a', 'user', 'Alpha'), msg('b', 'assistant', 'Beta')]
 
@@ -136,11 +137,34 @@ describe('ChatFeedItems containment styling', () => {
     flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
 
     const wrappers = container.querySelectorAll<HTMLElement>('[data-item-index]:not([data-placeholder])')
-    expect(wrappers.length).toBeGreaterThan(0)
+    expect(wrappers.length).toBe(2)
+    // Every wrapper isolates its reflow with contain:layout.
     for (const wrapper of wrappers) {
-      expect(wrapper.style.getPropertyValue('content-visibility')).toBe('')
-      expect(wrapper.style.getPropertyValue('contain-intrinsic-size')).toBe('')
+      expect(wrapper.style.getPropertyValue('contain')).toBe('layout')
     }
+    for (const wrapper of wrappers) {
+      expect(wrapper.style.getPropertyValue('content-visibility')).toBe('auto')
+      expect(wrapper.style.getPropertyValue('contain-intrinsic-size')).toBe('auto 200px')
+    }
+  })
+
+  it('excludes every streaming item from content-visibility containment', () => {
+    clearCache()
+    const streaming = msg('streaming', 'assistant', 'Growing')
+    if (streaming.type === 'message') streaming.message.isStreaming = true
+    const items = [msg('before', 'user', 'Before'), streaming, msg('after', 'user', 'After')]
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    const wrappers = container.querySelectorAll<HTMLElement>('[data-item-index]:not([data-placeholder])')
+    expect(wrappers[0]!.style.getPropertyValue('content-visibility')).toBe('auto')
+    expect(wrappers[1]!.style.getPropertyValue('content-visibility')).toBe('')
+    expect(wrappers[1]!.style.getPropertyValue('contain')).toBe('layout')
+    expect(wrappers[2]!.style.getPropertyValue('content-visibility')).toBe('auto')
   })
 
   it('applies content-visibility containment to mounted items when virtualization is on', () => {
@@ -155,11 +179,120 @@ describe('ChatFeedItems containment styling', () => {
     flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
 
     const wrappers = container.querySelectorAll<HTMLElement>('[data-item-index]:not([data-placeholder])')
-    expect(wrappers.length).toBeGreaterThan(0)
+    expect(wrappers.length).toBe(30)
     for (const wrapper of wrappers) {
+      expect(wrapper.style.getPropertyValue('contain')).toBe('layout')
       expect(wrapper.style.getPropertyValue('content-visibility')).toBe('auto')
       expect(wrapper.style.getPropertyValue('contain-intrinsic-size')).toBe('auto 200px')
     }
+    // Placeholders keep a fixed reserved height so the scroll position is
+    // stable while older items are unmounted.
+    const placeholders = container.querySelectorAll<HTMLElement>('[data-placeholder]')
+    expect(placeholders.length).toBe(4)
+    for (const placeholder of placeholders) {
+      expect(placeholder.style.getPropertyValue('content-visibility')).toBe('auto')
+      expect(placeholder.style.getPropertyValue('contain-intrinsic-size')).toBe('160px')
+    }
+  })
+})
+
+describe('ChatFeedItems auto virtualization', () => {
+  beforeEach(() => {
+    clearCache()
+    MockIntersectionObserver.instances = []
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('virtualizes automatically in auto mode when the feed exceeds the threshold', () => {
+    const items = Array.from({ length: 51 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    // 51 > 50: only the 30 most recent are mounted, the rest are placeholders
+    expect(container.querySelectorAll('.feed-item')).toHaveLength(30)
+    expect(container.querySelectorAll('[data-placeholder]')).toHaveLength(21)
+    expect(container.querySelector('[data-testid="feed-sentinel"]')).toBeTruthy()
+  })
+
+  it('does not virtualize in auto mode at the threshold boundary', () => {
+    const items = Array.from({ length: 50 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    // 50 is not > 50: everything is mounted
+    expect(container.querySelectorAll('.feed-item')).toHaveLength(50)
+    expect(container.querySelectorAll('[data-placeholder]')).toHaveLength(0)
+    expect(container.querySelector('[data-testid="feed-sentinel"]')).toBeNull()
+  })
+
+  it('virtualizes in auto mode for short feeds when forced on', () => {
+    settingResource.write('on', SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION)
+    const items = Array.from({ length: 10 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    // Forced on: the window is clamped to the available items, no placeholders
+    expect(container.querySelectorAll('.feed-item')).toHaveLength(10)
+    expect(container.querySelectorAll('[data-placeholder]')).toHaveLength(0)
+  })
+
+  it('never virtualizes when set to off, even on long feeds', () => {
+    settingResource.write('off', SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION)
+    const items = Array.from({ length: 80 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    expect(container.querySelectorAll('.feed-item')).toHaveLength(80)
+    expect(container.querySelectorAll('[data-placeholder]')).toHaveLength(0)
+    expect(container.querySelector('[data-testid="feed-sentinel"]')).toBeNull()
+  })
+
+  it('maps the legacy true value to forced on', () => {
+    settingResource.write('true', SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION)
+    const items = Array.from({ length: 60 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    expect(container.querySelectorAll('.feed-item')).toHaveLength(30)
+    expect(container.querySelectorAll('[data-placeholder]')).toHaveLength(30)
+  })
+
+  it('maps the legacy false value to off', () => {
+    settingResource.write('false', SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION)
+    const items = Array.from({ length: 60 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    expect(container.querySelectorAll('.feed-item')).toHaveLength(60)
+    expect(container.querySelectorAll('[data-placeholder]')).toHaveLength(0)
   })
 })
 

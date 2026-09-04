@@ -5,7 +5,7 @@ import type {
   ChatCompletionChunk,
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
-import { ChatHttpClient, DONE, type ChatRequest } from './http-shared.js'
+import { ChatHttpClient, DONE, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
 import './proxy.js'
 
 export interface HttpClientOptions {
@@ -25,6 +25,7 @@ export class OpenAIHttpClient extends ChatHttpClient {
 
   protected buildRequest(
     params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
+    _chain?: ResponsesChainParams,
   ): ChatRequest {
     return {
       url: `${this.baseURL}/chat/completions`,

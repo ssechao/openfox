@@ -89,6 +89,8 @@ export interface ChatCompletionResponse {
     completion_tokens: number
     total_tokens: number
   }
+  /** True when the underlying Responses API response reached `completed` status. */
+  completed?: boolean
 }
 
 export interface ChatCompletionChunk {
@@ -112,4 +114,7 @@ export interface ChatCompletionChunk {
     completion_tokens: number
     total_tokens: number
   }
+  /** True when the underlying Responses API response reached `completed` status
+   *  (a failed/interrupted response leaves this false). */
+  completed?: boolean
 }

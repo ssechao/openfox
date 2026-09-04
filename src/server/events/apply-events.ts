@@ -110,6 +110,8 @@ export function updateMessageThinking(msg: { thinkingContent?: string }, content
 
 export function updateMessageDone(
   msg: {
+    content?: string
+    thinkingContent?: string
     isStreaming?: boolean
     stats?: unknown
     segments?: unknown[]
@@ -120,6 +122,8 @@ export function updateMessageDone(
   data: Extract<TurnEvent, { type: 'message.done' }>['data'],
 ): void {
   msg.isStreaming = false
+  if (data.content !== undefined) msg.content = data.content
+  if (data.thinkingContent !== undefined) msg.thinkingContent = data.thinkingContent
   if (data.stats) msg.stats = data.stats
   if (data.segments) msg.segments = data.segments
   if (data.partial) msg.partial = true
@@ -195,6 +199,15 @@ export function applyEvents<
         const data = event.data as Extract<TurnEvent, { type: 'message.thinking' }>['data']
         const msg = messages.get(data.messageId)
         if (msg) updateMessageThinking(msg, data.content)
+        break
+      }
+      case 'message.checkpoint': {
+        const data = event.data as Extract<TurnEvent, { type: 'message.checkpoint' }>['data']
+        const msg = messages.get(data.messageId)
+        if (msg) {
+          msg.content = data.content
+          if (data.thinkingContent !== undefined) msg.thinkingContent = data.thinkingContent
+        }
         break
       }
       case 'message.done': {

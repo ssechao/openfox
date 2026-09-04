@@ -31,6 +31,32 @@ vi.mock('../../../lib/fonts', async (importOriginal) => ({
   resolveDefaultFamily: () => 'JetBrains Mono',
 }))
 
+describe('DisplayTab feed virtualization', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Object.keys(mockSettings).forEach((k) => delete mockSettings[k])
+    setLocale('en')
+  })
+
+  it('renders the three virtualization options and persists the choice', async () => {
+    const user = userEvent.setup()
+    render(<DisplayTab />)
+    const select = screen.getByLabelText('Virtualize long feeds') as HTMLSelectElement
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['auto', 'on', 'off'])
+    expect(select.value).toBe('auto')
+
+    await user.selectOptions(select, 'off')
+    expect(mockSetSetting).toHaveBeenCalledWith('display.feedVirtualization', 'off')
+  })
+
+  it('normalizes a legacy true value to on', () => {
+    mockSettings['display.feedVirtualization'] = 'true'
+    render(<DisplayTab />)
+    const select = screen.getByLabelText('Virtualize long feeds') as HTMLSelectElement
+    expect(select.value).toBe('on')
+  })
+})
+
 describe('DisplayTab Language setting', () => {
   beforeEach(() => {
     vi.clearAllMocks()

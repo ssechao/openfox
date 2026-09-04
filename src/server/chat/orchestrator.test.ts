@@ -177,6 +177,15 @@ function createEventStore() {
   >()
 
   return {
+    upsertMessageCheckpoint: vi.fn(),
+    deleteMessageCheckpoint: vi.fn(),
+    publish: vi.fn((sessionId: string, event: { type: string; data: unknown }) => ({
+      seq: 0,
+      sessionId,
+      timestamp: Date.now(),
+      type: event.type,
+      data: event.data,
+    })),
     append: vi.fn((sessionId: string, event: { type: string; data: unknown }) => {
       const existing = eventsBySession.get(sessionId) ?? []
       const stored = {
@@ -1833,7 +1842,8 @@ describe('chat orchestrator', () => {
       streamLLMPureMock.mockReturnValue({ kind: 'stream' })
       consumeStreamGeneratorMock.mockImplementation(async (_gen: unknown, onEvent: any) => {
         // The assistant message.start is deferred until the first streamed event
-        onEvent({ type: 'message.delta', data: { messageId: 'assistant-1', content: 'Hi' } })
+        const messageId = streamLLMPureMock.mock.calls.at(-1)?.[0].messageId
+        onEvent({ type: 'message.delta', data: { messageId, content: 'Hi' } })
         return {
           content: 'Hi',
           toolCalls: [],
@@ -1871,6 +1881,12 @@ describe('chat orchestrator', () => {
 
       expect(assistantStart).toBeDefined()
       expect((assistantStart![1].data as any).contextWindowId).toBe('window-123')
+      expect(eventStore.append.mock.calls.some(([, event]) => event.type === 'message.delta')).toBe(false)
+      expect(eventStore.publish.mock.calls.some(([, event]) => event.type === 'message.delta')).toBe(true)
+      const assistantDone = eventStore.append.mock.calls.find(
+        ([, event]) => event.type === 'message.done' && (event.data as any).content === 'Hi',
+      )
+      expect(assistantDone?.[1].data).toMatchObject({ content: 'Hi' })
     })
   })
 

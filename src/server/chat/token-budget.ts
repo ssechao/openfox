@@ -19,3 +19,30 @@ export function isContextLengthError(message: string | undefined): boolean {
   if (!message) return false
   return CONTEXT_LENGTH_ERROR_PATTERN.test(message)
 }
+
+/**
+ * Whether an LLM error is a NON-transient HTTP status (400/404/409) — i.e.
+ * retrying the identical request cannot succeed. The error text is the
+ * `HTTP <status>: <body>` string surfaced by the HTTP client. Transient errors
+ * (network failures, 429 rate limits, 5xx) are NOT matched and keep the
+ * existing backoff retry policy.
+ *
+ * 401/403 are deliberately EXCLUDED: OAuth-style auth adapters legitimately
+ * return them on an expired token, and it is the retry that lets the refreshed
+ * credentials through.
+ */
+const NON_TRANSIENT_HTTP_PATTERN = /HTTP (?:400|404|409)(?!\d)/
+
+/**
+ * A 400 that only refuses server-side conversation storage is recoverable: the
+ * LLM client disables chaining on it and the retry goes out as a plain
+ * full-history request. Mirrors RESPONSES_STORE_REJECTION in llm/client.ts.
+ */
+const RECOVERABLE_STORE_REJECTION =
+  /(zero data retention|\bzdr\b|previous_response_id|['"`]?store['"`]?\s*(is|must|not|cannot|unsupported))/i
+
+export function isNonTransientHttpError(message: string | undefined): boolean {
+  if (!message) return false
+  if (RECOVERABLE_STORE_REJECTION.test(message)) return false
+  return NON_TRANSIENT_HTTP_PATTERN.test(message)
+}

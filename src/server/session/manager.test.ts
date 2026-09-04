@@ -871,6 +871,8 @@ describe('SessionManager', () => {
   describe('createClientForAgent', () => {
     beforeEach(() => {
       vi.clearAllMocks()
+      mockProviderManager.createClient.mockReset()
+      mockProviderManager.createClient.mockReturnValue(mockDedicatedClient)
     })
 
     it('returns global client when no override set', () => {
@@ -886,6 +888,37 @@ describe('SessionManager', () => {
       const client = manager.createClientForAgent(session.id, 'planner')
       expect(client).toBe(mockDedicatedClient)
       expect(mockProviderManager.createClient).toHaveBeenCalledWith('test-provider', 'dedicated-model', undefined)
+    })
+
+    it('reuses the dedicated client for repeated rounds of the same agent selection', () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const firstClient = { ...mockDedicatedClient, getModel: vi.fn(() => 'dedicated-model') }
+      const accidentalReplacement = { ...mockDedicatedClient, getModel: vi.fn(() => 'dedicated-model') }
+      mockProviderManager.createClient.mockReturnValueOnce(firstClient).mockReturnValueOnce(accidentalReplacement)
+      setAgentModelOverride('planner', { providerId: 'test-provider', model: 'dedicated-model' })
+
+      expect(manager.createClientForAgent(session.id, 'planner')).toBe(firstClient)
+      expect(manager.createClientForAgent(session.id, 'planner')).toBe(firstClient)
+      expect(mockProviderManager.createClient).toHaveBeenCalledTimes(1)
+    })
+
+    it('replaces rather than resurrects an agent client after A to B to A', () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const clientA1 = { ...mockDedicatedClient, getModel: vi.fn(() => 'model-a') }
+      const clientB = { ...mockDedicatedClient, getModel: vi.fn(() => 'model-b') }
+      const clientA2 = { ...mockDedicatedClient, getModel: vi.fn(() => 'model-a') }
+      mockProviderManager.createClient
+        .mockReturnValueOnce(clientA1)
+        .mockReturnValueOnce(clientB)
+        .mockReturnValueOnce(clientA2)
+
+      setAgentModelOverride('planner', { providerId: 'test-provider', model: 'model-a' })
+      expect(manager.createClientForAgent(session.id, 'planner')).toBe(clientA1)
+      setAgentModelOverride('planner', { providerId: 'test-provider', model: 'model-b' })
+      expect(manager.createClientForAgent(session.id, 'planner')).toBe(clientB)
+      setAgentModelOverride('planner', { providerId: 'test-provider', model: 'model-a' })
+      expect(manager.createClientForAgent(session.id, 'planner')).toBe(clientA2)
+      expect(mockProviderManager.createClient).toHaveBeenCalledTimes(3)
     })
 
     it('falls back to global client when provider not found', () => {
@@ -925,6 +958,128 @@ describe('SessionManager', () => {
       setAgentModelOverride('verifier', { providerId: 'my-provider', model: 'my-model', reasoningEffort: 'low' })
       manager.createClientForAgent(session.id, 'verifier')
       expect(mockProviderManager.createClient).toHaveBeenCalledWith('my-provider', 'my-model', 'max')
+    })
+  })
+
+  describe('session LLM client continuity', () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      mockProviderManager.getProviders.mockReturnValue([
+        {
+          id: 'provider-a',
+          url: 'http://provider-a.test/v1',
+          backend: 'openai',
+          apiProtocol: 'responses',
+          models: [{ id: 'model-a', contextWindow: 1_000_000 }],
+        },
+      ] as any)
+    })
+
+    it('shares one client for an unchanged session selection', () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const client = { ...mockDedicatedClient, getModel: vi.fn(() => 'model-a') }
+      const create = vi.fn(() => client as any)
+
+      expect(manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', create)).toBe(client)
+      expect(manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', create)).toBe(client)
+      expect(create).toHaveBeenCalledTimes(1)
+    })
+
+    it('replaces rather than resurrects a client after A to B to A', () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const clientA1 = { ...mockDedicatedClient, getModel: vi.fn(() => 'model-a') }
+      const clientB = { ...mockDedicatedClient, getModel: vi.fn(() => 'model-b') }
+      const clientA2 = { ...mockDedicatedClient, getModel: vi.fn(() => 'model-a') }
+      const createA1 = vi.fn(() => clientA1 as any)
+      const createB = vi.fn(() => clientB as any)
+      const createA2 = vi.fn(() => clientA2 as any)
+
+      expect(manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', createA1)).toBe(clientA1)
+      expect(manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-b', 'high', createB)).toBe(clientB)
+      expect(manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', createA2)).toBe(clientA2)
+      expect(createA2).toHaveBeenCalledTimes(1)
+    })
+
+    it('invalidates the client when its provider transport configuration changes', () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const clientBefore = { ...mockDedicatedClient }
+      const clientAfter = { ...mockDedicatedClient }
+
+      expect(
+        manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => clientBefore as any),
+      ).toBe(clientBefore)
+      mockProviderManager.getProviders.mockReturnValue([
+        {
+          id: 'provider-a',
+          url: 'http://provider-a.test/v2',
+          backend: 'openai',
+          apiProtocol: 'responses',
+          models: [{ id: 'model-a', contextWindow: 1_000_000 }],
+        },
+      ] as any)
+      expect(
+        manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => clientAfter as any),
+      ).toBe(clientAfter)
+    })
+
+    it('survives a catalog refresh that does not touch the requested model', () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const client = { ...mockDedicatedClient }
+      const providerWith = (models: Array<{ id: string; contextWindow: number }>) =>
+        [{ id: 'provider-a', url: 'http://provider-a.test/v1', backend: 'openai', models }] as any
+
+      mockProviderManager.getProviders.mockReturnValue(providerWith([{ id: 'model-a', contextWindow: 1_000_000 }]))
+      expect(
+        manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => client as any),
+      ).toBe(client)
+
+      // refreshProviderModels rewrites models[] wholesale. Another model showing
+      // up must not evict this client — the client carries the Responses
+      // conversation, so evicting it would silently drop continuity.
+      mockProviderManager.getProviders.mockReturnValue(
+        providerWith([
+          { id: 'model-a', contextWindow: 1_000_000 },
+          { id: 'model-newly-discovered', contextWindow: 128_000 },
+        ]),
+      )
+      expect(manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => ({}) as any)).toBe(
+        client,
+      )
+    })
+
+    it("still invalidates when the requested model's own configuration changes", () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const before = { ...mockDedicatedClient }
+      const after = { ...mockDedicatedClient }
+      const providerWith = (models: unknown[]) =>
+        [{ id: 'provider-a', url: 'http://provider-a.test/v1', backend: 'openai', models }] as any
+
+      mockProviderManager.getProviders.mockReturnValue(providerWith([{ id: 'model-a', contextWindow: 1_000_000 }]))
+      expect(
+        manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => before as any),
+      ).toBe(before)
+
+      // The entry actually used to build the client changed (apiModelId), so the
+      // cached client no longer matches what a fresh one would be.
+      mockProviderManager.getProviders.mockReturnValue(
+        providerWith([{ id: 'model-a', contextWindow: 1_000_000, apiModelId: 'model-a-turbo' }]),
+      )
+      expect(manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => after as any)).toBe(
+        after,
+      )
+    })
+
+    it('clears the cached client when its session is deleted', () => {
+      const session = manager.createSession(projectId, 'Test Session')
+      const first = { ...mockDedicatedClient }
+      const second = { ...mockDedicatedClient }
+      manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => first as any)
+
+      manager.deleteSession(session.id)
+
+      expect(
+        manager.getOrCreateSessionLLMClient(session.id, 'provider-a', 'model-a', 'high', () => second as any),
+      ).toBe(second)
     })
   })
 

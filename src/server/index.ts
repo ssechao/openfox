@@ -747,7 +747,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Session endpoints (REST)
 
   app.get('/api/sessions', async (req, res) => {
-    const { getRecentUserPromptsForSession } = await import('./events/index.js')
     const { getPendingConfirmationsBySession } = await import('./tools/path-security.js')
 
     const projectId = req.query['projectId'] as string | undefined
@@ -774,11 +773,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       sessions = sessionManager.listSessions()
     }
 
-    const sessionsWithPrompts = sessions.map((session) => ({
-      ...session,
-      recentUserPrompts: getRecentUserPromptsForSession(session.id, 10),
-    }))
-
     // Collect pending confirmations for returned sessions
     const allPending = getPendingConfirmationsBySession()
     const pendingConfirmationsBySession: Record<
@@ -798,7 +792,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }
     }
 
-    res.json({ sessions: sessionsWithPrompts, hasMore, pendingConfirmationsBySession })
+    res.json({ sessions, hasMore, pendingConfirmationsBySession })
   })
 
   /**
@@ -2301,6 +2295,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models: modelConfigs,
       authAdapter,
       transportAdapter,
+      apiProtocol,
     } = req.body as {
       name: string
       url: string
@@ -2313,6 +2308,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models?: Record<string, unknown>[]
       authAdapter?: string
       transportAdapter?: string
+      apiProtocol?: 'auto' | 'responses' | 'chat-completions'
     }
 
     if (!name || !url || !backend) {
@@ -2344,6 +2340,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         ...(sendReasoningInMessages !== undefined ? { sendReasoningInMessages } : {}),
         ...(authAdapter ? { authAdapter } : {}),
         ...(transportAdapter ? { transportAdapter } : {}),
+        ...(apiProtocol ? { apiProtocol } : {}),
         models: providerModels,
         isActive: true,
       })
@@ -2634,6 +2631,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models: modelConfigs,
       authAdapter,
       transportAdapter,
+      apiProtocol,
     } = req.body as {
       name?: string
       url?: string
@@ -2645,6 +2643,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models?: Record<string, unknown>[]
       authAdapter?: string | null
       transportAdapter?: string | null
+      apiProtocol?: 'auto' | 'responses' | 'chat-completions' | null
     }
     try {
       const { loadGlobalConfig, saveGlobalConfig, updateProvider } = await import('../cli/config.js')
@@ -2663,6 +2662,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       if (sendReasoningInMessages !== undefined) updates['sendReasoningInMessages'] = sendReasoningInMessages
       if (authAdapter !== undefined) updates['authAdapter'] = authAdapter || undefined
       if (transportAdapter !== undefined) updates['transportAdapter'] = transportAdapter || undefined
+      if (apiProtocol !== undefined) updates['apiProtocol'] = apiProtocol || undefined
       if (modelConfigs !== undefined) {
         updates['models'] = buildModelConfigs(modelConfigs as ModelConfigInput[])
       }

@@ -379,7 +379,8 @@ export function listSessions(): SessionSummary[] {
       s.title,
       s.provider_id,
       s.provider_model,
-      s.message_count
+      s.message_count,
+      s.recent_user_prompts
     FROM sessions s
     ORDER BY s.is_favorite DESC, s.updated_at DESC
   `,
@@ -431,7 +432,8 @@ function listSessionsPaged(
       s.title,
       s.provider_id,
       s.provider_model,
-      s.message_count
+      s.message_count,
+      s.recent_user_prompts
     FROM sessions s
     ${where}
     ORDER BY s.is_favorite DESC, s.updated_at DESC
@@ -559,7 +561,29 @@ function mapSessionBase(row: SessionRow | SessionSummaryRow): {
   }
 }
 
+function parseRecentUserPrompts(
+  value: string | null | undefined,
+): import('../../shared/types.js').RecentUserPrompt[] | undefined {
+  if (value === undefined) return undefined
+  if (value === null || value === '') return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (prompt): prompt is import('../../shared/types.js').RecentUserPrompt =>
+        typeof prompt === 'object' &&
+        prompt !== null &&
+        typeof prompt.id === 'string' &&
+        typeof prompt.content === 'string' &&
+        typeof prompt.timestamp === 'string',
+    )
+  } catch {
+    return []
+  }
+}
+
 function mapSessionSummaryRow(row: SessionSummaryRow): SessionSummary {
+  const recentUserPrompts = parseRecentUserPrompts(row.recent_user_prompts)
   return {
     ...mapSessionBase(row),
     ...(row.title ? { title: row.title } : {}),
@@ -567,6 +591,7 @@ function mapSessionSummaryRow(row: SessionSummaryRow): SessionSummary {
     criteriaCompleted: 0,
     messageCount: row.message_count,
     isFavorite: Boolean(row.is_favorite),
+    ...(recentUserPrompts !== undefined && { recentUserPrompts }),
   }
 }
 
@@ -625,6 +650,7 @@ interface SessionSummaryRow {
   provider_id: string | null
   provider_model: string | null
   message_count: number
+  recent_user_prompts?: string | null
 }
 
 // ============================================================================

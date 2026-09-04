@@ -30,6 +30,11 @@ let wsUnsubscribe: (() => void) | null = null
 
 const loadingSessionIds = new Set<string>()
 const loadedSessionIds = new Set<string>()
+// Sessions this connection is subscribed to server-side (one `session.load`
+// each). The server routes chat events per subscription, so a cached pane that
+// is not in here has been missing live updates and must be refetched, not just
+// re-focused. Cleared on disconnect alongside loadedSessionIds.
+const subscribedSessionIds = new Set<string>()
 const listingSessionsForProject = new Map<string, Promise<void>>()
 let fullSessionListPromise: Promise<void> | null = null
 
@@ -214,7 +219,10 @@ export const useSessionStore = create<SessionState>((set, get) => {
     if (!force && loadingSessionIds.has(sessionId)) {
       return
     }
-    if (!force && loadedSessionIds.has(sessionId)) {
+    // A cached pane can only be re-focused cheaply while it is still
+    // subscribed: otherwise it missed the events it should have received and
+    // its state is stale, so fall through to the full REST reload.
+    if (!force && loadedSessionIds.has(sessionId) && subscribedSessionIds.has(sessionId)) {
       if (focus) {
         set((s) => {
           const p = s.panes[sessionId] ?? (s.currentSession?.id === sessionId ? paneFromFlat(s) : null)
@@ -225,6 +233,9 @@ export const useSessionStore = create<SessionState>((set, get) => {
             unreadSessionIds: s.unreadSessionIds.filter((id) => id !== sessionId),
           }
         })
+        // Re-assert which session is current server-side: workdir, git polling
+        // and project scoping follow the focused pane.
+        wsClient.send('session.load', { sessionId, focus: true })
       }
       return
     }
@@ -323,7 +334,11 @@ export const useSessionStore = create<SessionState>((set, get) => {
         }
       })
 
-      wsClient.send('session.load', { sessionId })
+      // Subscribe for live events. `focus` decides whether this pane also
+      // becomes the connection's current session (workdir/git/project scope) —
+      // a background split pane must not steal it from the focused one.
+      wsClient.send('session.load', { sessionId, focus })
+      subscribedSessionIds.add(sessionId)
 
       try {
         const bpRes = await bpFetch
@@ -428,6 +443,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
           }
         } else if (newStatus === 'disconnected' || newStatus === 'reconnecting') {
           loadedSessionIds.clear()
+          // Server-side subscriptions die with the socket.
+          subscribedSessionIds.clear()
         }
       })
 
@@ -465,6 +482,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }
       isSubscribed = false
       loadedSessionIds.clear()
+      subscribedSessionIds.clear()
       set({ connectionStatus: 'disconnected' })
       get().connect()
     },
@@ -477,6 +495,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }
       isSubscribed = false
       loadedSessionIds.clear()
+      subscribedSessionIds.clear()
       set({ connectionStatus: 'disconnected', showPasswordModal: false })
     },
 
@@ -575,7 +594,19 @@ export const useSessionStore = create<SessionState>((set, get) => {
     closePane: (sessionId) => {
       cancelStreamingFlush(sessionId)
       releaseStreamingBuffer(sessionId)
+      const wasFocused = effectiveFocusedId(get()) === sessionId
       set((s) => dropPane(s, sessionId))
+      // Stop the server from streaming a pane nothing renders anymore.
+      wsClient.send('session.unload', { sessionId })
+      subscribedSessionIds.delete(sessionId)
+      // Closing the current pane leaves the connection with no current session,
+      // so workdir-scoped features (git status, project scoping) would go dead.
+      // dropPane already promoted a remaining pane — tell the server about it.
+      const nextFocused = effectiveFocusedId(get())
+      if (wasFocused && nextFocused) {
+        wsClient.send('session.load', { sessionId: nextFocused, focus: true })
+        subscribedSessionIds.add(nextFocused)
+      }
       persistSplit()
     },
 

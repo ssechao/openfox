@@ -46,6 +46,10 @@ export interface LLMCompletionRequest {
   }
   /** When true, include the raw API response body in the result */
   returnRaw?: boolean
+  /** Key scoping the Responses-API conversation chain (e.g. session id). When set
+   *  and the protocol is `responses`, the client maintains `previous_response_id`
+   *  continuity for this key and sends only the delta of new messages. */
+  responsesChainKey?: string
   /** When true, the client-level reasoningEffort (from thinkingLevel) is NOT applied.
    *  Used by non-thinking callers (e.g. title generation) that want to opt out. */
   skipClientReasoningEffort?: boolean
@@ -63,6 +67,9 @@ export interface LLMCompletionResponse {
     completionTokens: number
     totalTokens: number
   }
+  /** True when the underlying Responses API response reached `completed` status
+   *  (a failed/interrupted response leaves this false). */
+  completed?: boolean
   /** Raw API response body, only set when returnRaw was requested */
   raw?: string
 }

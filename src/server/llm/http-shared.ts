@@ -3,12 +3,28 @@ import type {
   ChatCompletionCreateParamsStreaming,
   ChatCompletionResponse,
   ChatCompletionChunk,
+  ChatCompletionMessageParam,
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
 
+/**
+ * Responses-API conversation chain parameters. Declared here — the lowest-level
+ * module every chat client already imports — so the OpenAI, Responses and
+ * Ollama clients all share one definition instead of re-declaring it inline.
+ */
+export interface ResponsesChainParams {
+  /** Ask the provider to retain the conversation server-side. */
+  store?: boolean
+  /** Continue from this response instead of resending the history. */
+  previousResponseId?: string
+  /** The new suffix to send when continuing a chain. */
+  deltaMessages?: ChatCompletionMessageParam[]
+}
+
 export interface RequestOptions {
   signal?: AbortSignal | null | undefined
+  chain?: ResponsesChainParams
 }
 
 export interface ChatRequest {
@@ -28,6 +44,7 @@ export const DONE = Symbol('done')
 export abstract class ChatHttpClient {
   protected abstract buildRequest(
     params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
+    chain?: RequestOptions['chain'],
   ): ChatRequest
 
   protected abstract parseNonStreaming(data: unknown): ChatCompletionResponse
@@ -42,7 +59,7 @@ export abstract class ChatHttpClient {
     params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
     options?: RequestOptions,
   ): Promise<Response> {
-    const { url, headers, body } = this.buildRequest(params)
+    const { url, headers, body } = this.buildRequest(params, options?.chain)
     logger.debug('HTTP request to LLM', { url, bodyKeys: Object.keys(params) })
     return postJson(url, headers, body, options)
   }

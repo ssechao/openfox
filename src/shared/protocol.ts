@@ -23,6 +23,7 @@ import type {
 export type ClientMessageType =
   // Session management
   | 'session.load' // Load session and subscribe to events (WS subscription mechanism)
+  | 'session.unload' // Unsubscribe from a session's events (pane closed)
   // Context management
   | 'context.compact' // Manually trigger context compaction
   | 'context.checkDynamic' // Check if dynamic context has changed and emit context.state if so
@@ -52,6 +53,9 @@ export interface ClientMessage<T = unknown> {
 export interface SessionLoadPayload {
   sessionId: string
   lastEventSeq?: number // Resume from this sequence number (for reconnection)
+  /** When false, subscribe to the session's events without making it the
+   *  connection's current session (background split pane). Defaults to true. */
+  focus?: boolean
 }
 
 // Ask user payload

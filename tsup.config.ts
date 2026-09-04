@@ -16,7 +16,7 @@ export default defineConfig({
   },
   format: ['esm'],
   dts: true,
-  clean: true,
+  clean: ['!web/**'],
   sourcemap: true,
   external: ['better-sqlite3', 'vscode-jsonrpc', 'vscode-languageserver-protocol', 'ws', 'node-pty', 'undici'],
   noExternal: ['@clack/prompts', '@clack/core', 'sisteransi'],

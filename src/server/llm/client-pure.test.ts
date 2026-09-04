@@ -8,6 +8,29 @@ import {
 } from './client-pure.js'
 
 describe('llm client pure helpers', () => {
+  it('keeps image_url content parts intact on the Chat-Completions path (not converted to input_image)', async () => {
+    const converted = await convertMessages(
+      [
+        {
+          role: 'user',
+          content: 'look at this',
+          attachments: [
+            { id: 'a1', filename: 'shot.png', mimeType: 'image/png', size: 3, data: 'data:image/png;base64,QUJD' },
+          ],
+        },
+      ],
+      true,
+    )
+    const content = converted[0]!.content as Array<Record<string, unknown>>
+    // The Chat-Completions wire shape is preserved verbatim: image_url + { url }.
+    expect(content).toEqual([
+      { type: 'text', text: 'look at this' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJD' } },
+    ])
+    expect(JSON.stringify(converted)).toContain('"type":"image_url"')
+    expect(JSON.stringify(converted)).not.toContain('"type":"input_image"')
+  })
+
   it('converts messages and filters empty assistant placeholders', async () => {
     expect(
       await convertMessages(

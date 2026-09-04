@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.stubGlobal('requestAnimationFrame', (cb: () => void) => setTimeout(cb, 0))
 vi.stubGlobal('cancelAnimationFrame', (id: number) => clearTimeout(id))
@@ -1520,6 +1520,90 @@ describe('useSessionStore session isolation', () => {
     const state = useSessionStore.getState()
     expect(state.messages).toEqual([])
     expect(state.messages.find((m) => m.isStreaming)).toBeUndefined()
+  })
+
+  describe('websocket session subscriptions', () => {
+    // These tests stub fetch for the whole test (loadSession fires two
+    // requests), so the shared default implementation must be put back or it
+    // leaks into every later test in this file.
+    afterEach(() => {
+      fetchMock.mockImplementation((() =>
+        Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true }), status: 200 })) as never)
+    })
+
+    const sessionPayload = (id: string) => ({
+      ok: true,
+      json: async () => ({
+        session: {
+          id,
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          criteria: [],
+          summary: null,
+          messages: [],
+        },
+        messages: [],
+        contextState: {
+          currentTokens: 10,
+          maxTokens: 200000,
+          compactionCount: 0,
+          dangerZone: false,
+          canCompact: false,
+        },
+        queueState: [],
+        pendingQuestions: [],
+      }),
+    })
+
+    const loadCallsFor = (sessionId: string) =>
+      (wsSendMock.mock.calls as unknown as Array<[string, { sessionId?: string } | undefined]>).filter(
+        ([type, payload]) => type === 'session.load' && payload?.sessionId === sessionId,
+      )
+
+    it('re-sends session.load when re-focusing an already loaded session', async () => {
+      const useSessionStore = await loadSessionStore()
+
+      fetchMock.mockResolvedValue(sessionPayload('session-1') as never)
+      await useSessionStore.getState().loadSession('session-1')
+      expect(loadCallsFor('session-1')).toHaveLength(1)
+
+      wsSendMock.mockClear()
+
+      // Cached re-focus: the server routes events per subscribed session, so
+      // the subscription must be re-asserted or the pane goes silent until F5.
+      await useSessionStore.getState().loadSession('session-1')
+
+      expect(loadCallsFor('session-1')).toHaveLength(1)
+    })
+
+    it('loads a background pane without focusing it server-side', async () => {
+      const useSessionStore = await loadSessionStore()
+
+      fetchMock.mockResolvedValue(sessionPayload('session-1') as never)
+      await useSessionStore.getState().loadSession('session-1')
+
+      fetchMock.mockResolvedValue(sessionPayload('session-2') as never)
+      await useSessionStore.getState().openPane('session-2', { focus: false })
+
+      // The background pane subscribes but must not steal the current session.
+      expect(loadCallsFor('session-2')[0]?.[1]).toMatchObject({ sessionId: 'session-2', focus: false })
+      expect(useSessionStore.getState().focusedSessionId).toBe('session-1')
+    })
+
+    it('unsubscribes on closePane', async () => {
+      const useSessionStore = await loadSessionStore()
+
+      fetchMock.mockResolvedValue(sessionPayload('session-1') as never)
+      await useSessionStore.getState().loadSession('session-1')
+
+      wsSendMock.mockClear()
+      useSessionStore.getState().closePane('session-1')
+
+      expect(wsSendMock).toHaveBeenCalledWith('session.unload', { sessionId: 'session-1' })
+    })
   })
 
   it('prevents concurrent createSession calls when pendingSessionCreate is already true', async () => {

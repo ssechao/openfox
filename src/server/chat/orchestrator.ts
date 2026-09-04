@@ -46,6 +46,7 @@ import { getGlobalConfigDir } from '../../cli/paths.js'
 import { logger } from '../utils/logger.js'
 import type { RetryPatternConfig } from './auto-patterns.js'
 import { getConversationMessages, processEventsForConversation } from './conversation-history.js'
+import { createTurnEventSink } from '../events/turn-event-sink.js'
 
 // Re-export for runner orchestrator
 export {
@@ -175,10 +176,10 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
   // Mark session as running (cleared in finally)
   sessionManager.setRunning(sessionId, true)
 
-  // Create append closure — the only write path to EventStore from the loop
+  const writeEvent = createTurnEventSink(eventStore, sessionId)
   const append = (event: import('../events/types.js').TurnEvent) => {
     try {
-      eventStore.append(sessionId, event)
+      writeEvent(event)
     } catch {
       // Session may have been deleted (e.g. during abort) — skip
     }

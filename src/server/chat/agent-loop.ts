@@ -43,7 +43,7 @@ import {
   createChatStatsMessage,
 } from '../ws/protocol.js'
 import { executeTools, type ToolBatchContext } from './execute-tools.js'
-import { estimateToolResultTokens, isContextLengthError } from './token-budget.js'
+import { estimateToolResultTokens, isContextLengthError, isNonTransientHttpError } from './token-budget.js'
 import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
@@ -205,6 +205,15 @@ const CONTINUE_PROMPT = 'Continue your previous response. Do NOT repeat what you
 const CONTINUE_AFTER_STREAM_ERROR_PROMPT =
   'The LLM stream was interrupted mid-response. Continue exactly where you left off — do not repeat what was already written.'
 
+/**
+ * Key identifying a Responses-API conversation chain. Built in exactly one
+ * place: the request site and the compaction reset MUST agree, or the reset
+ * silently no-ops and the next turn continues from a stale previous_response_id.
+ */
+export function responsesChainKeyFor(sessionId: string, subAgentType?: string): string {
+  return `${sessionId}:${subAgentType ?? 'top'}`
+}
+
 export async function runTopLevelAgentLoop(
   config: TopLevelLoopConfig,
   turnMetrics: TurnMetrics,
@@ -212,6 +221,7 @@ export async function runTopLevelAgentLoop(
   const { mode, sessionManager, sessionId, llmClient, signal, onMessage, statsIdentity } = config
   const append = config.append
   const agentType = config.subAgentMetadata ? ('sub-agent' as const) : undefined
+  const chainKey = responsesChainKeyFor(sessionId, config.subAgentMetadata?.subAgentType)
   // Fresh per attempt when a resolver is provided (provider switch mid-turn).
   const resolveClient = () => config.getLLMClient?.() ?? llmClient
 
@@ -389,6 +399,7 @@ export async function runTopLevelAgentLoop(
         toolChoice: 'auto',
         signal,
         subAgentAliases,
+        responsesChainKey: chainKey,
         ...(config.retryPatterns ? { retryPatterns: config.retryPatterns } : {}),
         ...(modelSettings && { modelSettings }),
       })
@@ -432,6 +443,18 @@ export async function runTopLevelAgentLoop(
         const currentMax = modelSettings?.maxTokens ?? currentMaxTokensOverride ?? profileDefaultMaxTokens
         currentMaxTokensOverride = Math.max(256, Math.floor(currentMax / 2))
         continue
+      }
+
+      // Non-transient HTTP errors (400/401/403/404/409) cannot succeed on retry —
+      // retrying the identical request just re-hits the same 4xx. Fail fast.
+      // (Context-length 400s are handled above; transient 429/5xx/network errors
+      // are intentionally NOT matched and keep the backoff retry policy.)
+      if (isNonTransientHttpError(attemptResult.error)) {
+        if (!config.subAgentMetadata) {
+          recordLLMFailure(sessionId)
+          config.onMessage?.(createChatLLMRetryFailedMessage(attemptResult.error, 1))
+        }
+        return { failed: { error: attemptResult.error } }
       }
 
       // Backoff decision — the shared LLMRetryPolicy (same defaults as workflows).
@@ -761,6 +784,11 @@ ${COMPACTION_PROMPT}`,
           error: error instanceof Error ? error.message : String(error),
         })
       }
+
+      // Compaction rewrites the context, so the stored Responses-API conversation no
+      // longer matches the local history — invalidate the chain so the next request
+      // re-primes from the (post-compaction) history as a first request.
+      resolveClient().resetResponsesChain?.(chainKey)
 
       const closedWindowId = getCurrentContextWindowId(sessionId) ?? ''
       const newWindowId = crypto.randomUUID()

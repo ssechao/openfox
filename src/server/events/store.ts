@@ -14,7 +14,7 @@
  * - Snapshots enable efficient replay (skip to snapshot, replay from there)
  */
 
-import type Database from 'better-sqlite3'
+import Database from 'better-sqlite3'
 import { existsSync, statSync, unlinkSync } from 'node:fs'
 import type { TurnEvent, StoredEvent, SessionSnapshot, SnapshotMessage } from './types.js'
 import { logger } from '../utils/logger.js'
@@ -162,6 +162,8 @@ export class EventStore {
   // any realistic caller limit so the cached result is not clipped to whatever
   // limit the first caller happened to request.
   private static readonly PROMPTS_QUERY_LIMIT = 100
+  private static readonly RECENT_PROMPTS_MAX_ENTRIES = 20
+  private static readonly RECENT_PROMPT_MAX_LENGTH = 2000
 
   constructor(db: Database.Database) {
     this.db = db
@@ -193,6 +195,12 @@ export class EventStore {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_events_session_type 
       ON events(session_id, event_type)
+    `)
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_events_latest_snapshot
+      ON events(session_id, seq DESC)
+      WHERE event_type = 'turn.snapshot'
     `)
 
     this.db.exec(`
@@ -239,7 +247,8 @@ export class EventStore {
       )
       .run(sessionId, seq, timestamp, event.type, payload)
 
-    this.invalidateSessionCache(sessionId)
+    this.updateRecentUserPrompts(sessionId, event, timestamp)
+    this.invalidateSessionCache(sessionId, event)
 
     const stored: StoredEvent = {
       seq,
@@ -252,6 +261,82 @@ export class EventStore {
     this.notifySubscribers(sessionId, stored)
 
     return stored
+  }
+
+  publish(sessionId: string, event: TurnEvent): StoredEvent {
+    const stored: StoredEvent = {
+      seq: this.getLatestSeq(sessionId) ?? 0,
+      timestamp: Date.now(),
+      sessionId,
+      type: event.type,
+      data: event.data,
+    }
+    this.notifySubscribers(sessionId, stored)
+    return stored
+  }
+
+  upsertMessageCheckpoint(sessionId: string, data: Extract<TurnEvent, { type: 'message.checkpoint' }>['data']): void {
+    const payload = JSON.stringify(data)
+    const timestamp = Date.now()
+    const existing = this.db
+      .prepare(
+        `SELECT id FROM events
+         WHERE session_id = ? AND event_type = 'message.checkpoint'
+           AND json_extract(payload, '$.messageId') = ?
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(sessionId, data.messageId) as { id: number } | undefined
+
+    if (existing) {
+      this.db.prepare('UPDATE events SET timestamp = ?, payload = ? WHERE id = ?').run(timestamp, payload, existing.id)
+      return
+    }
+
+    this.db
+      .prepare(
+        `INSERT INTO events (session_id, seq, timestamp, event_type, payload)
+         VALUES (?, ?, ?, 'message.checkpoint', ?)`,
+      )
+      .run(sessionId, this.getNextSeq(sessionId), timestamp, payload)
+  }
+
+  deleteMessageCheckpoint(sessionId: string, messageId: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM events
+         WHERE session_id = ? AND event_type = 'message.checkpoint'
+           AND json_extract(payload, '$.messageId') = ?`,
+      )
+      .run(sessionId, messageId)
+  }
+
+  recoverMessageCheckpoints(): number {
+    const rows = this.db
+      .prepare(`SELECT id, session_id, payload FROM events WHERE event_type = 'message.checkpoint' ORDER BY id`)
+      .all() as Array<{ id: number; session_id: string; payload: string }>
+
+    let recovered = 0
+    const recover = this.db.transaction(() => {
+      for (const row of rows) {
+        try {
+          const data = JSON.parse(row.payload) as Extract<TurnEvent, { type: 'message.checkpoint' }>['data']
+          this.append(row.session_id, {
+            type: 'message.done',
+            data: {
+              messageId: data.messageId,
+              content: data.content,
+              ...(data.thinkingContent !== undefined && { thinkingContent: data.thinkingContent }),
+              partial: true,
+            },
+          })
+          recovered += 1
+        } finally {
+          this.db.prepare('DELETE FROM events WHERE id = ?').run(row.id)
+        }
+      }
+    })
+    recover()
+    return recovered
   }
 
   /**
@@ -288,7 +373,11 @@ export class EventStore {
 
     transaction()
 
-    this.invalidateSessionCache(sessionId)
+    for (const stored of results) {
+      const event = stored as TurnEvent
+      this.updateRecentUserPrompts(sessionId, event, stored.timestamp)
+      this.invalidateSessionCache(sessionId, event)
+    }
 
     // Notify after transaction commits
     for (const stored of results) {
@@ -322,6 +411,7 @@ export class EventStore {
 
     const stored: StoredEvent[] = events.map((event) => ({ ...event, sessionId }))
     for (const event of stored) {
+      this.updateRecentUserPrompts(sessionId, event as TurnEvent, event.timestamp)
       this.notifySubscribers(sessionId, event)
     }
     return stored
@@ -457,13 +547,98 @@ export class EventStore {
     }
   }
 
-  private invalidateSessionCache(sessionId: string): void {
-    const entry = this.snapshotCache.get(sessionId)
-    if (entry) {
-      this.snapshotCacheBytes -= entry.bytes
-      this.snapshotCache.delete(sessionId)
+  private readRecentUserPrompts(
+    sessionId: string,
+  ): Array<{ id: string; content: string; timestamp: string }> | undefined {
+    try {
+      const row = this.db.prepare('SELECT recent_user_prompts FROM sessions WHERE id = ?').get(sessionId) as
+        { recent_user_prompts: string | null } | undefined
+      if (!row) return undefined
+      if (!row.recent_user_prompts) return []
+      const parsed = JSON.parse(row.recent_user_prompts) as unknown
+      if (!Array.isArray(parsed)) return []
+      return parsed
+        .filter(
+          (prompt): prompt is { id: string; content: string; timestamp: string } =>
+            typeof prompt === 'object' &&
+            prompt !== null &&
+            typeof prompt.id === 'string' &&
+            typeof prompt.content === 'string' &&
+            typeof prompt.timestamp === 'string',
+        )
+        .slice(0, EventStore.RECENT_PROMPTS_MAX_ENTRIES)
+    } catch {
+      return undefined
     }
-    this.promptsCache.delete(sessionId)
+  }
+
+  private writeRecentUserPrompts(
+    sessionId: string,
+    prompts: Array<{ id: string; content: string; timestamp: string }>,
+  ): void {
+    try {
+      this.db
+        .prepare('UPDATE sessions SET recent_user_prompts = ? WHERE id = ?')
+        .run(JSON.stringify(prompts.slice(0, EventStore.RECENT_PROMPTS_MAX_ENTRIES)), sessionId)
+    } catch {
+      return
+    }
+  }
+
+  private updateRecentUserPrompts(sessionId: string, event: TurnEvent, timestamp: number): void {
+    const isRealUserMessage = (message: {
+      role: string
+      isSystemGenerated?: boolean
+      messageKind?: string
+      subAgentType?: string
+    }) => message.role === 'user' && !message.isSystemGenerated && !message.messageKind && !message.subAgentType
+
+    if (event.type === 'message.start' && isRealUserMessage(event.data)) {
+      const current = this.readRecentUserPrompts(sessionId)
+      if (current === undefined) return
+      this.writeRecentUserPrompts(sessionId, [
+        {
+          id: event.data.messageId,
+          content: (event.data.content ?? '').slice(0, EventStore.RECENT_PROMPT_MAX_LENGTH),
+          timestamp: new Date(timestamp).toISOString(),
+        },
+        ...current.filter((prompt) => prompt.id !== event.data.messageId),
+      ])
+      return
+    }
+
+    if (event.type === 'turn.snapshot') {
+      const prompts = event.data.messages
+        .filter(isRealUserMessage)
+        .map((message) => ({
+          id: message.id,
+          content: message.content.slice(0, EventStore.RECENT_PROMPT_MAX_LENGTH),
+          timestamp: new Date(message.timestamp).toISOString(),
+        }))
+        .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+      this.writeRecentUserPrompts(sessionId, prompts)
+    }
+  }
+
+  private invalidateSessionCache(sessionId: string, event?: TurnEvent): void {
+    if (event === undefined || event.type === 'turn.snapshot') {
+      const entry = this.snapshotCache.get(sessionId)
+      if (entry) {
+        this.snapshotCacheBytes -= entry.bytes
+        this.snapshotCache.delete(sessionId)
+      }
+    }
+    if (
+      event === undefined ||
+      event.type === 'turn.snapshot' ||
+      (event.type === 'message.start' &&
+        event.data.role === 'user' &&
+        !event.data.isSystemGenerated &&
+        !event.data.messageKind &&
+        !event.data.subAgentType)
+    ) {
+      this.promptsCache.delete(sessionId)
+    }
   }
 
   private clearSnapshotCache(): void {
@@ -482,6 +657,12 @@ export class EventStore {
     const cached = this.promptsCache.get(sessionId)
     if (cached) {
       return cached.slice(0, limit)
+    }
+
+    const storedPrompts = this.readRecentUserPrompts(sessionId)
+    if (storedPrompts !== undefined) {
+      this.promptsCache.set(sessionId, storedPrompts)
+      return storedPrompts.slice(0, limit)
     }
 
     const isRealUserMessage = (msg: {
@@ -1179,15 +1360,17 @@ export class EventStore {
    * Read a maintenance flag from the settings table, tolerating databases
    * without that table (e.g. minimal test fixtures).
    */
-  private getMaintenanceFlag(): string | null {
+  private getSettingViaDb(key: string): string | null {
     try {
-      const row = this.db
-        .prepare(`SELECT value FROM settings WHERE key = ?`)
-        .get(SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED) as { value: string } | undefined
+      const row = this.db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined
       return row?.value ?? null
     } catch {
       return null
     }
+  }
+
+  private getMaintenanceFlag(): string | null {
+    return this.getSettingViaDb(SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED)
   }
 
   /**
@@ -1206,6 +1389,67 @@ export class EventStore {
     } catch {
       // Settings table may not exist in minimal test fixtures
     }
+  }
+
+  async migrateTransientEvents(options?: { backupPath?: string }): Promise<{
+    skipped: boolean
+    backupPath: string | null
+    integrity: string
+    deletedEvents: number
+    vacuumed: boolean
+  }> {
+    const flag = this.getSettingViaDb(SETTINGS_KEYS.MAINTENANCE_TRANSIENT_EVENTS_MIGRATED)
+    if (flag === 'true') {
+      return { skipped: true, backupPath: null, integrity: 'ok', deletedEvents: 0, vacuumed: false }
+    }
+
+    const dbName = this.db.name
+    let backupPath = options?.backupPath ?? null
+    let integrity = String(this.db.pragma('integrity_check', { simple: true }))
+    if (integrity !== 'ok') {
+      throw new Error(`Database integrity check failed: ${integrity}`)
+    }
+
+    if (dbName && dbName !== ':memory:') {
+      const createdBackup = backupPath === null
+      backupPath ??= `${dbName}.pre-transient-prune-${Date.now()}.bak`
+      if (createdBackup) {
+        await this.db.backup(backupPath)
+      }
+      const backup = new Database(backupPath, { readonly: true })
+      try {
+        integrity = String(backup.pragma('integrity_check', { simple: true }))
+      } finally {
+        backup.close()
+      }
+      if (integrity !== 'ok') {
+        if (createdBackup) unlinkSync(backupPath)
+        throw new Error(`Backup integrity check failed: ${integrity}`)
+      }
+    }
+
+    const result = this.db
+      .prepare(
+        `DELETE FROM events
+         WHERE event_type IN ('message.delta', 'message.thinking', 'message.checkpoint', 'tool.preparing', 'tool.output')
+           AND seq < (
+             SELECT MAX(snapshot.seq)
+             FROM events snapshot
+             WHERE snapshot.session_id = events.session_id
+               AND snapshot.event_type = 'turn.snapshot'
+           )`,
+      )
+      .run()
+
+    const deletedEvents = result.changes as number
+    const vacuumed = deletedEvents > 0
+    if (vacuumed) {
+      this.db.exec('VACUUM')
+    }
+    this.clearSnapshotCache()
+    this.setSettingViaDb(SETTINGS_KEYS.MAINTENANCE_TRANSIENT_EVENTS_MIGRATED, 'true')
+
+    return { skipped: false, backupPath, integrity, deletedEvents, vacuumed }
   }
 
   /**
@@ -1232,6 +1476,11 @@ let eventStoreInstance: EventStore | null = null
 
 export function initEventStore(db: Database.Database): EventStore {
   eventStoreInstance = new EventStore(db)
+
+  const recoveredMessages = eventStoreInstance.recoverMessageCheckpoints()
+  if (recoveredMessages > 0) {
+    logger.info('Recovered interrupted message checkpoints', { count: recoveredMessages })
+  }
 
   // Reset stale running states from previous server runs.
   // Sessions cannot actually be running when server starts - any session

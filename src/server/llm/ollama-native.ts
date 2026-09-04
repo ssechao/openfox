@@ -22,7 +22,7 @@ import type {
   ChatCompletionMessageParam,
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
-import { ChatHttpClient, DONE, type ChatRequest } from './http-shared.js'
+import { ChatHttpClient, DONE, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
 import './proxy.js'
 
 export interface OllamaClientOptions {
@@ -272,6 +272,7 @@ export class OllamaHttpClient extends ChatHttpClient {
 
   protected buildRequest(
     params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
+    _chain?: ResponsesChainParams,
   ): ChatRequest {
     return {
       url: `${this.baseURL}/api/chat`,

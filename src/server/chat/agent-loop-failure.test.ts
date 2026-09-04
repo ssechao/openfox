@@ -414,4 +414,87 @@ describe('agent loop LLM failure handling', () => {
     const done = append.mock.calls.map((c: any[]) => c[0]).filter((e: any) => e?.type === 'message.done')
     expect(done).toHaveLength(1)
   })
+
+  it('does NOT retry a non-transient HTTP 400 (single attempt, fails fast)', async () => {
+    ;(consumeStreamGenerator as any).mockResolvedValue(
+      erroredResult('HTTP 400: {"error":{"message":"Unsupported message content type: image_url"}}'),
+    )
+
+    const append = vi.fn()
+    const onMessage = vi.fn()
+    const result = await runTopLevelAgentLoop(
+      makeConfig({ append, onMessage, llmRetryPolicy: FAST_POLICY }),
+      mockTurnMetrics,
+    )
+
+    // Exactly ONE LLM attempt — no backoff retry of the same 400.
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+    expect(result.failed?.error).toContain('HTTP 400')
+    // The definitive failure is relayed (not a retry pill).
+    const failedMsg = onMessage.mock.calls.map((c: any[]) => c[0]).find((m: any) => m?.type === 'chat.llm_retry_failed')
+    expect(failedMsg).toBeDefined()
+    const retryPill = onMessage.mock.calls.map((c: any[]) => c[0]).find((m: any) => m?.type === 'chat.llm_retry')
+    expect(retryPill).toBeUndefined()
+  })
+
+  it('does NOT retry other non-transient HTTP statuses (404/409)', async () => {
+    for (const status of ['404', '409']) {
+      vi.clearAllMocks()
+      ;(consumeStreamGenerator as any).mockResolvedValue(erroredResult(`HTTP ${status}: denied`))
+      const result = await runTopLevelAgentLoop(makeConfig({ llmRetryPolicy: FAST_POLICY }), mockTurnMetrics)
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+      expect(result.failed?.error).toContain(`HTTP ${status}`)
+    }
+  })
+
+  it('still retries 401/403 so an auth adapter can refresh an expired token', async () => {
+    for (const status of ['401', '403']) {
+      vi.clearAllMocks()
+      ;(consumeStreamGenerator as any)
+        .mockImplementationOnce(async () => erroredResult(`HTTP ${status}: token expired`))
+        .mockImplementationOnce(async (_gen: any, onEvent: any) => {
+          onEvent({ type: 'message.delta', data: { messageId: 'assistant-2', content: 'ok' } })
+          return successResult('ok')
+        })
+
+      const result = await runTopLevelAgentLoop(makeConfig({ llmRetryPolicy: FAST_POLICY }), mockTurnMetrics)
+      expect(result.failed).toBeUndefined()
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    }
+  })
+
+  it('does NOT fail fast on a 400 that only refuses server-side conversation storage', async () => {
+    // The LLM client disables chaining on this error, so the retry — full
+    // history, store:false — is exactly what recovers the turn.
+    for (const body of ['store is not supported for zero data retention', 'previous_response_id is not allowed']) {
+      vi.clearAllMocks()
+      ;(consumeStreamGenerator as any)
+        .mockImplementationOnce(async () => erroredResult(`HTTP 400: ${body}`))
+        .mockImplementationOnce(async (_gen: any, onEvent: any) => {
+          onEvent({ type: 'message.delta', data: { messageId: 'assistant-2', content: 'ok' } })
+          return successResult('ok')
+        })
+
+      const result = await runTopLevelAgentLoop(makeConfig({ llmRetryPolicy: FAST_POLICY }), mockTurnMetrics)
+      expect(result.failed).toBeUndefined()
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    }
+  })
+
+  it('still retries transient errors (429 / 5xx / network) per the existing policy', async () => {
+    for (const error of ['HTTP 429: rate limited', 'HTTP 503: upstream unavailable', 'fetch failed']) {
+      vi.clearAllMocks()
+      ;(consumeStreamGenerator as any)
+        .mockImplementationOnce(async () => erroredResult(error))
+        .mockImplementationOnce(async (_gen: any, onEvent: any) => {
+          onEvent({ type: 'message.delta', data: { messageId: 'assistant-2', content: 'ok' } })
+          return successResult('ok')
+        })
+
+      const result = await runTopLevelAgentLoop(makeConfig({ llmRetryPolicy: FAST_POLICY }), mockTurnMetrics)
+      expect(result.failed).toBeUndefined()
+      // The transient error was retried (two attempts) and then succeeded.
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    }
+  })
 })

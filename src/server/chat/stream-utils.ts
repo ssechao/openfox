@@ -8,8 +8,9 @@ function buildStreamRequestObject(params: {
   reasoningEffort?: ReasoningEffort | undefined
   signal?: AbortSignal | undefined
   modelSettings?: LLMCompletionRequest['modelSettings']
+  responsesChainKey?: string | undefined
 }): LLMCompletionRequest {
-  const { messages, tools, toolChoice, reasoningEffort, signal, modelSettings } = params
+  const { messages, tools, toolChoice, reasoningEffort, signal, modelSettings, responsesChainKey } = params
   return {
     messages,
     ...(tools && { tools }),
@@ -17,6 +18,7 @@ function buildStreamRequestObject(params: {
     ...(reasoningEffort && { reasoningEffort }),
     ...(signal && { signal }),
     ...(modelSettings && { modelSettings }),
+    ...(responsesChainKey && { responsesChainKey }),
   }
 }
 

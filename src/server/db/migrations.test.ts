@@ -213,6 +213,38 @@ describe('db migrations', () => {
     db.close()
   })
 
+  it('adds and backfills recent_user_prompts without retaining full prompt bodies', () => {
+    createOldSchemaDatabase(dbPath)
+    const legacyDb = new Database(dbPath)
+    legacyDb.prepare(`INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, ?, ?, ?, ?)`).run(
+      'test-session',
+      1,
+      1000,
+      'turn.snapshot',
+      JSON.stringify({
+        messages: [
+          { id: 'm1', role: 'user', content: 'x'.repeat(3000), timestamp: 1000 },
+          { id: 'm2', role: 'user', content: 'ignored', timestamp: 2000, isSystemGenerated: true },
+        ],
+      }),
+    )
+    legacyDb.close()
+
+    const config = loadConfig()
+    config.database.path = dbPath
+    initDatabase(config)
+
+    const db = new Database(dbPath)
+    const columns = db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[]
+    expect(columns.map((column) => column.name)).toContain('recent_user_prompts')
+    const row = db.prepare('SELECT recent_user_prompts FROM sessions WHERE id = ?').get('test-session') as {
+      recent_user_prompts: string
+    }
+    const prompts = JSON.parse(row.recent_user_prompts) as Array<{ id: string; content: string }>
+    expect(prompts).toEqual([{ id: 'm1', content: 'x'.repeat(2000), timestamp: new Date(1000).toISOString() }])
+    db.close()
+  })
+
   it('adds provider_reasoning_effort column on upgrade from old schema', () => {
     createOldSchemaDatabase(dbPath)
 
@@ -304,6 +336,23 @@ describe('db migrations', () => {
 
     expect(columnNames).toContain('sub_group')
 
+    db.close()
+  })
+
+  it('creates the partial latest-snapshot index', () => {
+    const config = loadConfig()
+    config.database.path = dbPath
+    initDatabase(config)
+
+    const db = new Database(dbPath)
+    const indexes = db.prepare(`PRAGMA index_list(events)`).all() as Array<{ name: string; partial: number }>
+    expect(indexes).toContainEqual(expect.objectContaining({ name: 'idx_events_latest_snapshot', partial: 1 }))
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT * FROM events WHERE session_id = ? AND event_type = 'turn.snapshot' ORDER BY seq DESC LIMIT 1`,
+      )
+      .all('session-1') as Array<{ detail: string }>
+    expect(plan.some((row) => row.detail.includes('idx_events_latest_snapshot'))).toBe(true)
     db.close()
   })
 

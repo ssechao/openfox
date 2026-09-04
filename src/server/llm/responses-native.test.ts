@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { buildResponsesRequest, parseResponsesResponse, type ResponsesRequestBody } from './responses-native.js'
 import type { ChatCompletionCreateParamsStreaming } from './openai-types.js'
 
+const DATA_IMG = 'data:image/png;base64,QUJD'
+const HTTP_IMG = 'https://example.com/pic.png'
+
 function streamParams(
   overrides: Partial<ChatCompletionCreateParamsStreaming> = {},
 ): ChatCompletionCreateParamsStreaming {
@@ -101,6 +104,103 @@ describe('buildResponsesRequest', () => {
   })
 })
 
+describe('buildResponsesRequest — image content-part conversion', () => {
+  it('converts a Chat image content part to input_image (data URL)', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'look' },
+              { type: 'image_url', image_url: { url: DATA_IMG } },
+            ],
+          },
+        ],
+      }),
+    )
+    expect(body.input).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'look' },
+          { type: 'input_image', image_url: DATA_IMG },
+        ],
+      },
+    ])
+    // No Chat-Completions image_url part survives in the wire payload.
+    expect(JSON.stringify(body)).not.toContain('"type":"image_url"')
+  })
+
+  it('preserves http(s) image URLs', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'image_url', image_url: { url: HTTP_IMG } }],
+          },
+        ],
+      }),
+    )
+    expect((body.input[0] as { content: unknown[] }).content).toEqual([{ type: 'input_image', image_url: HTTP_IMG }])
+  })
+
+  it('keeps text + image block ordering', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'first' },
+              { type: 'image_url', image_url: { url: DATA_IMG } },
+              { type: 'text', text: 'second' },
+            ],
+          },
+        ],
+      }),
+    )
+    expect((body.input[0] as { content: unknown[] }).content).toEqual([
+      { type: 'input_text', text: 'first' },
+      { type: 'input_image', image_url: DATA_IMG },
+      { type: 'input_text', text: 'second' },
+    ])
+  })
+
+  it('throws a clear error on a malformed image part without leaking the content', () => {
+    expect(() =>
+      buildResponsesRequest(
+        streamParams({
+          messages: [
+            {
+              role: 'user',
+              // @ts-expect-error intentionally malformed
+              content: [{ type: 'image_url', image_url: { url: 12345 } }],
+            },
+          ],
+        }),
+      ),
+    ).toThrow('image_url.url must be a non-empty string')
+  })
+
+  it('throws a clear error when image_url is missing', () => {
+    expect(() =>
+      buildResponsesRequest(
+        streamParams({
+          messages: [
+            {
+              role: 'user',
+              // @ts-expect-error intentionally malformed
+              content: [{ type: 'image_url' }],
+            },
+          ],
+        }),
+      ),
+    ).toThrow('image_url.url must be a non-empty string')
+  })
+})
+
 describe('parseResponsesResponse', () => {
   it('maps output items to message content and tool calls', () => {
     const response = parseResponsesResponse({
@@ -133,6 +233,7 @@ describe('parseResponsesResponse', () => {
         },
       ],
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      completed: true,
     })
   })
 

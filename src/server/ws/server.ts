@@ -317,7 +317,12 @@ const abortedSessions = new Set<string>()
 
 interface ClientConnection {
   ws: WebSocket
+  /** The connection's current session: owns workdir, git polling and project
+   *  scoping. Distinct from `subscribedSessionIds` — a split view holds several
+   *  live panes but only one of them is "current". */
   activeSessionId: string | null
+  /** Every session this connection receives events for (all open panes). */
+  subscribedSessionIds: Set<string>
   activeWorkdir: string | null
   globalSubscription: (() => void) | null
   sendQueue: Array<{ data: string; seq: number }>
@@ -369,22 +374,18 @@ export function createWebSocketServer(
   const clients = new Map<WebSocket, ClientConnection>()
   moduleClients = clients
 
-  // Per-session LLM client cache: sessionId -> { cacheKey, client }
-  const sessionLLMClients = new Map<string, { key: string; client: LLMClientWithModel }>()
-
   function getSessionLLMClient(sessionId: string): LLMClientWithModel {
     const effective = sessionManager.resolveEffectiveProviderModel(sessionId)
-    if (!effective.providerId || !effective.model || !providerManager) {
+    if (!providerManager) {
+      return getLLMClient()
+    }
+    if (!effective.providerId || !effective.model) {
+      sessionManager.clearSessionLLMClient(sessionId)
       return getLLMClient()
     }
 
     const resolvedModel = providerManager.resolveModel(effective.providerId, effective.model)
     const effectiveModel = resolvedModel ?? effective.model
-    const cacheKey = `${effective.providerId}:${effectiveModel}:${effective.reasoningEffort ?? ''}`
-    const cached = sessionLLMClients.get(sessionId)
-    if (cached && cached.key === cacheKey) {
-      return cached.client
-    }
 
     // Look up the provider to get URL, apiKey, backend
     const provider = providerManager.getProviders().find((p) => p.id === effective.providerId)
@@ -400,13 +401,19 @@ export function createWebSocketServer(
         sessionManager.setSessionProvider(sessionId, null, null, false, null)
         sessionManager.setSessionProviderActive(sessionId, true)
       }
-      sessionLLMClients.delete(sessionId)
+      sessionManager.clearSessionLLMClient(sessionId)
       return getLLMClient()
     }
 
     // Let ProviderManager create the session client so provider-specific
     // transports (for example External Provider custom) and auth context are preserved.
-    const client = providerManager.createClient(effective.providerId, effectiveModel, effective.reasoningEffort)
+    const client = sessionManager.getOrCreateSessionLLMClient(
+      sessionId,
+      effective.providerId,
+      effectiveModel,
+      effective.reasoningEffort,
+      () => providerManager.createClient(effective.providerId!, effectiveModel, effective.reasoningEffort),
+    )
     if (!client) {
       logger.warn('Could not create session provider client, falling back to global', {
         sessionId,
@@ -435,10 +442,6 @@ export function createWebSocketServer(
         effective.reasoningEffort,
       )
     }
-    sessionLLMClients.set(sessionId, {
-      key: `${effective.providerId}:${concreteModel}:${effective.reasoningEffort ?? ''}`,
-      client,
-    })
     return client
   }
 
@@ -461,7 +464,9 @@ export function createWebSocketServer(
   }
 
   const isSubscribedToSession = (client: ClientConnection, sessionId: string) => {
-    return client.activeSessionId === sessionId
+    // Every open pane is subscribed, not just the current one: a message
+    // injected into a background session must still stream to the browser.
+    return client.subscribedSessionIds.has(sessionId)
   }
 
   // Ordered send queue implementation for FIFO message delivery
@@ -756,6 +761,7 @@ export function createWebSocketServer(
     clients.set(ws, {
       ws,
       activeSessionId: null,
+      subscribedSessionIds: new Set<string>(),
       activeWorkdir: null,
       globalSubscription: null,
       sendQueue: [],
@@ -992,18 +998,24 @@ async function handleClientMessage(
         return
       }
 
-      // Tab model: set active session for event routing
-      client.activeSessionId = session.id
-      const effectiveWorkdir = sessionManager.getEffectiveWorkdir(session.id)
-      client.activeWorkdir = effectiveWorkdir
+      // Subscribe for event routing. Split view keeps several panes live, so
+      // this is additive; only a focused load also makes the session current.
+      client.subscribedSessionIds.add(session.id)
 
-      // Send initial git status immediately
-      if (effectiveWorkdir) {
-        const branch = await moduleGitBranch(effectiveWorkdir)
-        const { files } = await moduleGitDiff(effectiveWorkdir)
-        const msg = createGitStatusMessage(branch, files)
-        send(msg)
-        if (branch) moduleStartGitPolling(effectiveWorkdir)
+      const focus = message.payload.focus !== false
+      if (focus) {
+        client.activeSessionId = session.id
+        const effectiveWorkdir = sessionManager.getEffectiveWorkdir(session.id)
+        client.activeWorkdir = effectiveWorkdir
+
+        // Send initial git status immediately
+        if (effectiveWorkdir) {
+          const branch = await moduleGitBranch(effectiveWorkdir)
+          const { files } = await moduleGitDiff(effectiveWorkdir)
+          const msg = createGitStatusMessage(branch, files)
+          send(msg)
+          if (branch) moduleStartGitPolling(effectiveWorkdir)
+        }
       }
 
       ensureEventStoreSubscription(session.id)
@@ -1049,6 +1061,37 @@ async function handleClientMessage(
           // Non-critical — banners and MCP state just won't be sent
         }
       })()
+      break
+    }
+
+    case 'session.unload': {
+      if (!isSessionLoadPayload(message.payload)) {
+        send(
+          createErrorMessage(
+            'INVALID_PAYLOAD',
+            serverT({ en: 'Invalid session.unload payload', fr: 'Payload de session.unload invalide' }),
+            message.id,
+          ),
+        )
+        return
+      }
+
+      // A closed pane stops receiving events. The current session is only
+      // cleared when it is the one being closed; the client then re-focuses a
+      // remaining pane with a fresh session.load, which re-arms workdir + git.
+      const { sessionId } = message.payload
+      client.subscribedSessionIds.delete(sessionId)
+      if (client.activeSessionId === sessionId) {
+        const releasedWorkdir = client.activeWorkdir
+        client.activeSessionId = null
+        client.activeWorkdir = null
+        // Do not leave an orphan poll loop behind for a workdir nobody watches.
+        const stillWatched = [...(moduleClients?.values() ?? [])].some((c) => c.activeWorkdir === releasedWorkdir)
+        if (releasedWorkdir && !stillWatched) {
+          moduleStopGitPolling(releasedWorkdir)
+        }
+      }
+      send({ type: 'ack', payload: { sessionId }, id: message.id })
       break
     }
 

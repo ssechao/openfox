@@ -172,6 +172,22 @@ function OnboardingPage() {
   )
 }
 
+// Owns the visualViewport state (keyboard / mobile URL-bar changes) so its
+// per-frame updates only re-render this wrapper, not the whole App tree. The
+// children element reference is stable (App did not re-render), so React bails
+// out of re-rendering the feed subtree when only the viewport metrics change.
+function MainLayout({ isMobile, children }: { isMobile: boolean; children: React.ReactNode }) {
+  const viewport = useVisualViewport()
+  return (
+    <div
+      className="flex flex-col"
+      style={{ height: isMobile ? `calc(${viewport.offsetTop}px + ${viewport.height}px)` : '100vh' }}
+    >
+      {children}
+    </div>
+  )
+}
+
 function App() {
   const { connectionStatus } = useWebSocket()
   const fetchConfig = useConfigStore((state) => state.fetchConfig)
@@ -352,14 +368,73 @@ function App() {
   const [rightMobileOpen, setRightMobileOpen] = useState(false)
 
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
-  const viewport = useVisualViewport()
+  const viewportWidthRef = useRef(viewportWidth)
   const isMobile = viewportWidth < 768
 
+  const leftWidth = useSidebarStore((state) => state.leftWidth)
+  const rightWidth = useSidebarStore((state) => state.rightWidth)
+
+  const visibility = useMemo(
+    () =>
+      computeSidebarVisibility({
+        availableWidth: viewportWidthRef.current,
+        leftWidth,
+        rightWidth,
+        feedMinWidth: FEED_MIN_WIDTH,
+        preferred: { left: leftSidebarOpen, right: rightSidebarOpen },
+        overlayOpen: { left: leftOverlayOpen, right: rightOverlayOpen },
+      }),
+    [viewportWidth, leftWidth, rightWidth, leftSidebarOpen, rightSidebarOpen, leftOverlayOpen, rightOverlayOpen],
+  )
+
+  // Re-render React only when a layout breakpoint is actually crossed. The
+  // feed content does not depend on the exact pixel width, so between
+  // breakpoints the browser reflows natively and React stays out of the way.
+  // Re-rendering the whole tree (PlanPanel → MessageList → ChatInput) on every
+  // pixel of a window drag is what made resizing feel like 1fps.
+  const resizeBreakpointRef = useRef(isMobile ? 'mobile' : visibility.left + '|' + visibility.right)
   useEffect(() => {
-    const onResize = () => setViewportWidth(window.innerWidth)
+    const computeBreakpoint = (width: number): string => {
+      if (width < 768) return 'mobile'
+      const { left, right } = computeSidebarVisibility({
+        availableWidth: width,
+        leftWidth: useSidebarStore.getState().leftWidth,
+        rightWidth: useSidebarStore.getState().rightWidth,
+        feedMinWidth: FEED_MIN_WIDTH,
+        preferred: {
+          left: leftSidebarOpen,
+          right: rightSidebarOpen,
+        },
+        overlayOpen: { left: leftOverlayOpen, right: rightOverlayOpen },
+      })
+      return left + '|' + right
+    }
+    resizeBreakpointRef.current = isMobile ? 'mobile' : visibility.left + '|' + visibility.right
+    let raf = 0
+    const onResize = () => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const width = window.innerWidth
+        viewportWidthRef.current = width
+        if (computeBreakpoint(width) !== resizeBreakpointRef.current) {
+          setViewportWidth(width)
+        }
+      })
+    }
     window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
+    return () => {
+      window.removeEventListener('resize', onResize)
+      cancelAnimationFrame(raf)
+    }
+  }, [
+    isMobile,
+    visibility.left,
+    visibility.right,
+    leftSidebarOpen,
+    rightSidebarOpen,
+    leftOverlayOpen,
+    rightOverlayOpen,
+  ])
 
   const [location] = useLocation()
   const isProjectPage = /^\/p\/[^/]+$/.test(location)
@@ -400,22 +475,6 @@ function App() {
       cancelled = true
     }
   }, [isSplit])
-
-  const leftWidth = useSidebarStore((state) => state.leftWidth)
-  const rightWidth = useSidebarStore((state) => state.rightWidth)
-
-  const visibility = useMemo(
-    () =>
-      computeSidebarVisibility({
-        availableWidth: viewportWidth,
-        leftWidth,
-        rightWidth,
-        feedMinWidth: FEED_MIN_WIDTH,
-        preferred: { left: leftSidebarOpen, right: rightSidebarOpen },
-        overlayOpen: { left: leftOverlayOpen, right: rightOverlayOpen },
-      }),
-    [viewportWidth, leftWidth, rightWidth, leftSidebarOpen, rightSidebarOpen, leftOverlayOpen, rightOverlayOpen],
-  )
 
   const effectiveLeftOpen = isMobile ? leftMobileOpen : isProjectPage ? true : visibility.left !== 'closed'
   const effectiveRightOpen = isMobile ? rightMobileOpen : visibility.right !== 'closed'
@@ -505,10 +564,7 @@ function App() {
         onSubmit={submitPassword}
         onCancel={cancelPassword}
       />
-      <div
-        className="flex flex-col"
-        style={{ height: isMobile ? `calc(${viewport.offsetTop}px + ${viewport.height}px)` : '100vh' }}
-      >
+      <MainLayout isMobile={isMobile}>
         <PageTitle />
         <Header onMenuClick={handleLeftToggle} onCriteriaToggle={handleRightToggle} />
 
@@ -545,7 +601,7 @@ function App() {
             </Route>
           </Switch>
         </div>
-      </div>
+      </MainLayout>
       <UpdateBanner />
       <ChangelogModal
         isOpen={showChangelog}

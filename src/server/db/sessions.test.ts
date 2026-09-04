@@ -223,6 +223,30 @@ describe('db sessions', () => {
     expect(sessions.map((s) => s.title)).toContain('Session B')
   })
 
+  it('lists recent prompts without parsing a large snapshot', () => {
+    const session = createSession(projectAId, rootA, 'Session A')
+    const prompts = [{ id: 'm1', content: 'Fix cache invalidation', timestamp: '2026-09-04T20:00:00.000Z' }]
+    getDatabase()
+      .prepare('UPDATE sessions SET recent_user_prompts = ? WHERE id = ?')
+      .run(JSON.stringify(prompts), session.id)
+    getDatabase()
+      .prepare('INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, ?, ?, ?, ?)')
+      .run(
+        session.id,
+        1,
+        Date.now(),
+        'turn.snapshot',
+        JSON.stringify({ messages: [], padding: 'x'.repeat(10_000_000) }),
+      )
+
+    const startedAt = performance.now()
+    const result = listSessions()
+    const elapsed = performance.now() - startedAt
+
+    expect(result[0]?.recentUserPrompts).toEqual(prompts)
+    expect(elapsed).toBeLessThan(200)
+  })
+
   it('lists sessions by project using project_id only', () => {
     const sessionA = createSession(projectAId, rootA, 'Session A')
     const sessionANested = createSession(projectAId, join(rootA, 'nested'), 'Nested Session A')

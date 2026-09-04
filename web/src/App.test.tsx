@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 import { createRoot } from 'react-dom/client'
 import { act } from 'react'
+import { useSidebarStore } from './stores/sidebar'
 
 // Mock ws module to avoid window reference
 vi.mock('./lib/ws', () => ({
@@ -195,6 +196,27 @@ vi.mock('./components/PasswordModal', () => ({
     isOpen ? <div data-testid="password-modal">{isRetry ? 'Invalid Password' : 'Password Required'}</div> : null,
 }))
 
+// The App coalesces window resize events through requestAnimationFrame. Stub
+// it so tests can flush the scheduled width update deterministically.
+const rafCallbacks = new Map<number, FrameRequestCallback>()
+let nextRafId = 1
+vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+  const id = nextRafId++
+  rafCallbacks.set(id, cb)
+  return id
+})
+vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+  rafCallbacks.delete(id)
+})
+
+function flushResizeRafs() {
+  const cbs = [...rafCallbacks.values()]
+  rafCallbacks.clear()
+  act(() => {
+    for (const cb of cbs) cb(0)
+  })
+}
+
 async function renderAppAsync(): Promise<HTMLElement> {
   const App = (await import('./App')).default
   const container = document.createElement('div')
@@ -218,6 +240,7 @@ async function renderAppAt(width: number): Promise<HTMLElement> {
 }
 
 beforeEach(() => {
+  useSidebarStore.setState({ leftWidth: 300, rightWidth: 320 })
   sessionState.connectionStatus = 'connected'
   sessionState.showPasswordModal = false
   sessionState.passwordModalRetry = false
@@ -315,6 +338,7 @@ describe('App - responsive sidebar visibility', () => {
       setViewportWidth(1400)
       window.dispatchEvent(new Event('resize'))
     })
+    flushResizeRafs()
     expect(layoutProps.sidebar.isOpen).toBe(true)
     expect(layoutProps.sidebar.overlay).toBe(false)
 
@@ -323,6 +347,7 @@ describe('App - responsive sidebar visibility', () => {
       setViewportWidth(900)
       window.dispatchEvent(new Event('resize'))
     })
+    flushResizeRafs()
     expect(layoutProps.sidebar.isOpen).toBe(false)
   })
 
@@ -335,6 +360,7 @@ describe('App - responsive sidebar visibility', () => {
       setViewportWidth(700)
       window.dispatchEvent(new Event('resize'))
     })
+    flushResizeRafs()
     expect(layoutProps.sidebar.isOpen).toBe(false)
   })
 
@@ -345,5 +371,42 @@ describe('App - responsive sidebar visibility', () => {
     expect(layoutProps.sidebar.overlay).toBe(true)
     expect(layoutProps.rightSidebar.open).toBe(false)
     expect(layoutProps.rightSidebar.overlay).toBe(true)
+  })
+
+  it('coalesces rapid resize events into a single update per frame', async () => {
+    await renderAppAt(1400)
+    expect(layoutProps.sidebar.isOpen).toBe(true)
+
+    // A window drag fires many resize events within a frame.
+    act(() => {
+      setViewportWidth(900)
+      window.dispatchEvent(new Event('resize'))
+      setViewportWidth(850)
+      window.dispatchEvent(new Event('resize'))
+      setViewportWidth(800)
+      window.dispatchEvent(new Event('resize'))
+    })
+    // Before the frame is flushed, the layout still reflects the old width.
+    expect(layoutProps.sidebar.isOpen).toBe(true)
+
+    // The single scheduled frame applies the latest width.
+    flushResizeRafs()
+    expect(layoutProps.sidebar.isOpen).toBe(false)
+  })
+
+  it('uses the live viewport width when a sidebar width changes between breakpoints', async () => {
+    await renderAppAt(1400)
+    expect(layoutProps.sidebar.isOpen).toBe(true)
+
+    act(() => {
+      setViewportWidth(1000)
+      window.dispatchEvent(new Event('resize'))
+    })
+    flushResizeRafs()
+    expect(layoutProps.sidebar.isOpen).toBe(true)
+
+    act(() => useSidebarStore.setState({ leftWidth: 400 }))
+
+    expect(layoutProps.sidebar.isOpen).toBe(false)
   })
 })
