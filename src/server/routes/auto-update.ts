@@ -7,7 +7,19 @@ import { serverT } from '../i18n.js'
 
 export interface AutoUpdateRoutesOptions {
   requireAuth?: (req: Request) => Promise<boolean>
+  /** Running version. Defaults to VERSION; injectable so the fork guard is
+   *  testable without depending on what the build stamped into the package. */
+  version?: string
 }
+
+/**
+ * A fork build carries a `-fork` prerelease tag (see scripts/increment-fork-version.ts).
+ * Upstream auto-update would npm-install the published upstream package over it,
+ * silently replacing the fork with code that does not contain its changes — so
+ * both the check and the update are refused for those builds. Any other version
+ * keeps the normal upstream update path.
+ */
+const FORK_BUILD_PATTERN = /-fork(?:\.|$)/i
 
 let updateInProgress = false
 
@@ -147,11 +159,16 @@ async function getLatestDevelopVersion(): Promise<string> {
 
 export function createAutoUpdateRoutes(options: AutoUpdateRoutesOptions = {}): Router {
   const router = Router()
+  const current = options.version ?? VERSION
+  const updatesDisabled = FORK_BUILD_PATTERN.test(current)
 
   router.get('/check', async (req, res) => {
     const isService = isRunningAsService()
     const isDev = isDevMode()
-    const current = VERSION
+    if (updatesDisabled) {
+      res.json({ current, latest: current, isUpdateAvailable: false, isService, updatesDisabled: true })
+      return
+    }
     const forceRefresh = req.query['force'] === 'true'
 
     // Check cache first (unless force refresh)
@@ -210,6 +227,19 @@ export function createAutoUpdateRoutes(options: AutoUpdateRoutesOptions = {}): R
   router.post('/', async (req, res) => {
     if (!(await requireAuth(req, res, options))) return
 
+    const isService = isRunningAsService()
+    if (updatesDisabled) {
+      res.status(409).json({
+        success: false,
+        error: serverT({
+          en: 'Upstream updates are disabled for fork builds',
+          fr: 'Les mises à jour upstream sont désactivées pour les builds fork',
+        }),
+        isService,
+      })
+      return
+    }
+
     if (updateInProgress) {
       res
         .status(409)
@@ -220,7 +250,6 @@ export function createAutoUpdateRoutes(options: AutoUpdateRoutesOptions = {}): R
     updateInProgress = true
 
     try {
-      const isService = isRunningAsService()
       // Single command string through the shell: resolves openfox on PATH on
       // every platform (was hardcoded `bash -c`, broken on Windows).
       const child = spawn('openfox update', {
@@ -251,7 +280,7 @@ export function createAutoUpdateRoutes(options: AutoUpdateRoutesOptions = {}): R
 
       if (exitCode === 0) {
         const versionMatch = stdout.match(/Updated: ([\d.]+)/)
-        const version = versionMatch?.[1] ?? VERSION
+        const version = versionMatch?.[1] ?? current
         res.json({ success: true, version, isService })
       } else {
         const error =

@@ -140,6 +140,102 @@ describe('Auto Update Routes', () => {
   })
 })
 
+describe('Auto Update Routes (fork build)', () => {
+  let server: ReturnType<express.Express['listen']>
+  let baseUrl: string
+
+  beforeEach(async () => {
+    mockSpawn.mockReset()
+    // A working spawn on purpose: without it an unguarded route would crash on
+    // `undefined.stdout` and the test would go red on a TypeError instead of on
+    // the behaviour under test. Here an unguarded route answers normally, so the
+    // only thing that can fail is the fork guard itself.
+    mockSpawn.mockImplementation((cmd: unknown, args: unknown) => {
+      if (cmd === 'npm view openfox version' || (cmd === 'npm' && Array.isArray(args) && args[0] === 'view')) {
+        return makeMockChild({ stdout: '9.9.9\n' })
+      }
+      return makeMockChild({ stdout: 'Updated: 9.9.9\n' })
+    })
+    const app = express()
+    app.use(express.json())
+    app.use('/api/auto-update', createAutoUpdateRoutes({ version: '2.0.137-fork.0' }))
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => {
+        baseUrl = `http://localhost:${(server.address() as { port: number }).port}`
+        resolve()
+      })
+    })
+  })
+
+  afterEach(() => {
+    server.close()
+    resetUpdateInProgress()
+    resetVersionCache()
+  })
+
+  it('disables upstream checks without spawning a process', async () => {
+    const response = await fetch(`${baseUrl}/api/auto-update/check?force=true`)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      current: '2.0.137-fork.0',
+      latest: '2.0.137-fork.0',
+      isUpdateAvailable: false,
+      isService: false,
+      updatesDisabled: true,
+    })
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+
+  it('refuses upstream updates without spawning a process', async () => {
+    const response = await fetch(`${baseUrl}/api/auto-update`, { method: 'POST' })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({
+      success: false,
+      error: 'Upstream updates are disabled for fork builds',
+      isService: false,
+    })
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+
+  it('guards every -fork shape, and only those', async () => {
+    const forkShapes = ['2.0.137-fork', '2.0.137-fork.0', '2.0.137-fork.12', '2.0.137-FORK.3']
+    for (const version of forkShapes) {
+      const app = express()
+      app.use('/api/auto-update', createAutoUpdateRoutes({ version }))
+      const local = app.listen(0)
+      await new Promise<void>((resolve) => local.on('listening', () => resolve()))
+      const url = `http://localhost:${(local.address() as { port: number }).port}/api/auto-update/check?force=true`
+      const body = (await (await fetch(url)).json()) as { updatesDisabled?: boolean }
+      local.close()
+      resetVersionCache()
+      expect(body.updatesDisabled, `${version} must be guarded`).toBe(true)
+    }
+  })
+
+  it('leaves a plain upstream build free to update', async () => {
+    const app = express()
+    app.use(express.json())
+    app.use('/api/auto-update', createAutoUpdateRoutes({ version: '2.0.137' }))
+    const local = app.listen(0)
+    await new Promise<void>((resolve) => local.on('listening', () => resolve()))
+    const base = `http://localhost:${(local.address() as { port: number }).port}`
+
+    const check = (await (await fetch(`${base}/api/auto-update/check?force=true`)).json()) as {
+      latest: string
+      isUpdateAvailable: boolean
+      updatesDisabled?: boolean
+    }
+    expect(check.updatesDisabled).toBeUndefined()
+    expect(check.latest).toBe('9.9.9')
+    expect(check.isUpdateAvailable).toBe(true)
+
+    const update = await fetch(`${base}/api/auto-update`, { method: 'POST' })
+    expect(update.status).toBe(200)
+    expect(mockSpawn).toHaveBeenCalled()
+    local.close()
+  })
+})
+
 describe('Auto Update Routes (auth required)', () => {
   let app: express.Express
   let server: ReturnType<typeof app.listen>
