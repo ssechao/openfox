@@ -3,6 +3,7 @@ import { execSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { gitSpawnEnv } from '../src/server/git/env.js'
 
 let serverProcess: ChildProcess | null = null
 const SERVER_PORT = 10869
@@ -76,11 +77,11 @@ test.describe('Git Status Watcher', () => {
     await writeFile(join(workdir, 'src', 'index.ts'), '// Initial content\n')
     await writeFile(join(workdir, 'README.md'), '# Test\n')
 
-    execSync('git init', { cwd: workdir, stdio: 'ignore' })
-    execSync('git config user.email "test@test.com"', { cwd: workdir, stdio: 'ignore' })
-    execSync('git config user.name "Test"', { cwd: workdir, stdio: 'ignore' })
-    execSync('git add -A', { cwd: workdir, stdio: 'ignore' })
-    execSync('git commit -m "initial"', { cwd: workdir, stdio: 'ignore' })
+    execSync('git init', { cwd: workdir, stdio: 'ignore', env: gitSpawnEnv() })
+    execSync('git config user.email "test@test.com"', { cwd: workdir, stdio: 'ignore', env: gitSpawnEnv() })
+    execSync('git config user.name "Test"', { cwd: workdir, stdio: 'ignore', env: gitSpawnEnv() })
+    execSync('git add -A', { cwd: workdir, stdio: 'ignore', env: gitSpawnEnv() })
+    execSync('git commit -m "initial"', { cwd: workdir, stdio: 'ignore', env: gitSpawnEnv() })
 
     const projectData = (await api('/api/projects', {
       method: 'POST',
