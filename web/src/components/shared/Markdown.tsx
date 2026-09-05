@@ -43,6 +43,19 @@ export function setMarkdownCacheMaxBytesForTest(bytes = MARKDOWN_CACHE_MAX_BYTES
   markdownCacheMaxBytes = bytes
 }
 
+// Exposed for tests: entry counter for the streaming contract — a growing
+// stream must not leave one immutable entry behind per delta.
+export function getMarkdownCacheSizeForTest(): number {
+  return markdownRenderCache.size
+}
+
+// Exposed for tests: the cache is module-global, so counting entries only
+// means something from a known empty state.
+export function resetMarkdownCacheForTest(): void {
+  markdownRenderCache.clear()
+  markdownCacheBytes = 0
+}
+
 function cacheMarkdown(key: string, node: React.ReactNode): React.ReactNode {
   markdownRenderCache.set(key, node)
   markdownCacheBytes += key.length

@@ -201,7 +201,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         {elements.map((element, i) => {
           switch (element.type) {
             case 'thinking':
-              return <ThinkingBlock key={i} content={element.content} />
+              return <ThinkingBlock key={i} content={element.content} isStreaming={message.isStreaming} />
 
             case 'text':
               return (
