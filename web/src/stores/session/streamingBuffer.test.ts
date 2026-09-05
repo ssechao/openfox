@@ -313,3 +313,103 @@ describe('streaming flush throttling', () => {
     expect(flushFn).toHaveBeenCalledTimes(2)
   })
 })
+
+// Finding E (remediation plan): a raw delta feeds a private accumulator. It
+// must not publish Zustand state, clone the panes map, or wake subscribers.
+describe('zustand commit accounting during streaming', () => {
+  async function bootStreamingSession() {
+    const useSessionStore = await loadSessionStore()
+    useSessionStore.setState({
+      currentSession: {
+        id: 'session-1',
+        projectId: 'project-1',
+        workdir: '/tmp/project-1',
+        mode: 'builder',
+        phase: 'build',
+        isRunning: true,
+        criteria: [],
+        summary: null,
+      } as any,
+    })
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-1',
+          role: 'assistant',
+          content: '',
+          timestamp: '2024-01-01T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: true,
+        },
+      },
+    } as never)
+    return useSessionStore
+  }
+
+  const sendDelta = (store: Awaited<ReturnType<typeof bootStreamingSession>>, content: string) =>
+    store.getState().handleServerMessage({
+      type: 'chat.delta',
+      sessionId: 'session-1',
+      payload: { messageId: 'msg-1', content },
+    } as never)
+
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('publishes one state update per flush, not one per raw delta', async () => {
+    const useSessionStore = await bootStreamingSession()
+
+    let commits = 0
+    const unsubscribe = useSessionStore.subscribe(() => {
+      commits++
+    })
+
+    for (let i = 0; i < 50; i++) sendDelta(useSessionStore, `d${i} `)
+    expect(commits).toBe(0)
+
+    vi.runAllTimers()
+    expect(commits).toBe(1)
+
+    const expected = Array.from({ length: 50 }, (_, i) => `d${i} `).join('')
+    expect(useSessionStore.getState().messages.find((m) => m.id === 'msg-1')?.content).toBe(expected)
+
+    unsubscribe()
+  })
+
+  it('keeps state and panes identity across a raw delta', async () => {
+    const useSessionStore = await bootStreamingSession()
+
+    const before = useSessionStore.getState()
+    sendDelta(useSessionStore, 'chunk')
+
+    const after = useSessionStore.getState()
+    expect(after).toBe(before)
+    expect(after.panes).toBe(before.panes)
+    expect(after.messages).toBe(before.messages)
+  })
+
+  it('forces the pending content out on a terminal event', async () => {
+    const useSessionStore = await bootStreamingSession()
+
+    sendDelta(useSessionStore, 'tail content')
+    expect(useSessionStore.getState().messages.find((m) => m.id === 'msg-1')?.content).toBe('')
+
+    // Terminal broadcast — no timer runs in between.
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message_updated',
+      sessionId: 'session-1',
+      payload: { messageId: 'msg-1', updates: { isStreaming: false } },
+    } as never)
+
+    const msg = useSessionStore.getState().messages.find((m) => m.id === 'msg-1')
+    expect(msg?.content).toBe('tail content')
+    expect(msg?.isStreaming).toBe(false)
+  })
+})
