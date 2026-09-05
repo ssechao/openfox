@@ -113,6 +113,59 @@ describe('hasBackgroundAmpersand', () => {
   it('rejects & before shell comment (cmd & # comment)', () => {
     expect(hasBackgroundAmpersand('cmd & # comment')).toBe(true)
   })
+
+  // Finding A (remediation plan): heredoc bodies are data, not shell syntax.
+  it('allows &self and &mut inside a heredoc body (unquoted delimiter)', () => {
+    expect(
+      hasBackgroundAmpersand(
+        [
+          'cat <<EOF',
+          'impl Widget {',
+          '    fn borrow(&self) -> bool { true }',
+          '    fn mutate(&mut self) { self.flag = true; }',
+          '}',
+          'EOF',
+          'echo done',
+        ].join('\n'),
+      ),
+    ).toBe(false)
+  })
+
+  it('allows ampersands in a heredoc body with a quoted delimiter', () => {
+    expect(hasBackgroundAmpersand(["cat <<'SCRIPT'", 'let mask = 0b1100 & 0b1010', 'SCRIPT'].join('\n'))).toBe(false)
+  })
+
+  it('accepts a command whose only ampersands are heredoc data', () => {
+    expect(hasBackgroundAmpersand(['cat <<EOF', '&self &mut value', 'EOF'].join('\n'))).toBe(false)
+  })
+
+  it('treats an unterminated heredoc body as data', () => {
+    expect(hasBackgroundAmpersand('cat <<EOF\n&self\nmore')).toBe(false)
+  })
+
+  it('handles << dash (tab-stripped) heredoc terminators', () => {
+    expect(hasBackgroundAmpersand(['cat <<-TAB', '\t& data', '\tTAB', 'echo ok'].join('\n'))).toBe(false)
+  })
+
+  it('parses multiple heredocs declared on one line', () => {
+    expect(hasBackgroundAmpersand(["diff <(cat <<A) <(cat <<'B')", 'a & b', 'A', 'x&y', 'B'].join('\n'))).toBe(false)
+  })
+
+  it('resumes normal parsing after a heredoc terminator', () => {
+    expect(hasBackgroundAmpersand(['cat <<EOF', 'data & more', 'EOF', 'sleep 10 &'].join('\n'))).toBe(true)
+  })
+
+  it('allows a quoted URL query string containing & as data', () => {
+    expect(hasBackgroundAmpersand('curl "https://api.example.com/v1?x=1&y=2"')).toBe(false)
+  })
+
+  it('rejects sleep 10 &', () => {
+    expect(hasBackgroundAmpersand('sleep 10 &')).toBe(true)
+  })
+
+  it('rejects command & disown', () => {
+    expect(hasBackgroundAmpersand('command & disown')).toBe(true)
+  })
 })
 
 describe('runCommandTool truncation with ANSI codes', () => {
