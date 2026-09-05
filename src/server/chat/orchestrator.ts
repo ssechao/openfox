@@ -38,6 +38,7 @@ import {
   getToolFingerprint,
 } from './dynamic-context.js'
 import { runTopLevelAgentLoop } from './agent-loop.js'
+import { createStreamLifecycleTracker } from './terminal-cleanup.js'
 import { loadAllAgentsDefault, findAgentById, resolveDefaultAgentId, getSubAgents } from '../agents/registry.js'
 import { getAllInstructions } from '../context/instructions.js'
 import { getEnabledSkillMetadata } from '../skills/registry.js'
@@ -176,7 +177,9 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
   sessionManager.setRunning(sessionId, true)
 
   // Create append closure — the only write path to EventStore from the loop
+  const streamTracker = createStreamLifecycleTracker()
   const append = (event: import('../events/types.js').TurnEvent) => {
+    streamTracker.observe(event)
     try {
       eventStore.append(sessionId, event)
     } catch {
@@ -286,6 +289,17 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
     )
     eventStore.append(sessionId, createChatDoneEvent(errorMsgId, 'error'))
   } finally {
+    // Every terminal path lands here: normal completion, backend error, invalid
+    // tool call, abort, unexpected EOF, callback exception. A message left
+    // streaming would keep the turn displayed as active with no producer.
+    try {
+      const closed = streamTracker.finalize(append, options.onMessage)
+      if (closed.length > 0) {
+        logger.warn('Closed streaming messages left open by a terminal path', { sessionId, messageIds: closed })
+      }
+    } catch (error) {
+      logger.error('Failed to close streaming messages', { sessionId, error: String(error) })
+    }
     try {
       eventStore.append(sessionId, { type: 'running.changed', data: { isRunning: false } })
     } catch {

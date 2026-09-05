@@ -22,6 +22,7 @@ import { TERMINAL_DONE, TERMINAL_BLOCKED } from './types.js'
 import { getEventStore, getCurrentContextWindowId } from '../events/index.js'
 import { createChatMessageMessage } from '../ws/protocol.js'
 import { runAgentTurn, TurnMetrics, createMessageStartEvent } from '../chat/orchestrator.js'
+import { createStreamLifecycleTracker } from '../chat/terminal-cleanup.js'
 import { executeSubAgent } from '../sub-agents/manager.js'
 import { loadAllAgentsDefault, findAgentById, resolveDefaultAgentId } from '../agents/registry.js'
 import { getToolRegistryForAgent } from '../tools/index.js'
@@ -614,7 +615,11 @@ export async function executeWorkflow(
 
         const turnMetrics = new TurnMetrics()
         const es = getEventStore()
-        const append = (event: import('../events/types.js').TurnEvent) => es.append(sessionId, event)
+        const streamTracker = createStreamLifecycleTracker()
+        const append = (event: import('../events/types.js').TurnEvent) => {
+          streamTracker.observe(event)
+          return es.append(sessionId, event)
+        }
 
         let stepDoneCalled = false
 
@@ -661,6 +666,10 @@ export async function executeWorkflow(
             throw error
           }
           return blockOnLLMFailure(error.message)
+        } finally {
+          // Blocked step, abort, or internal failure: never leave the step's
+          // assistant message streaming with no producer behind it.
+          streamTracker.finalize(append, onMessage)
         }
 
         // Soft LLM failure (retry window exhausted in streamLLMPure) — block

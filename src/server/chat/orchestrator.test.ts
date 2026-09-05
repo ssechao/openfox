@@ -169,6 +169,7 @@ vi.mock('../agents/registry.js', () => {
 import { PathAccessDeniedError } from '../tools/path-security.js'
 import { getEnabledSkillMetadata } from '../skills/registry.js'
 import { TurnMetrics, runAgentTurn, runChatTurn } from './orchestrator.js'
+import { applyEvents } from '../events/apply-events.js'
 
 function createEventStore() {
   const eventsBySession = new Map<
@@ -1918,5 +1919,141 @@ describe('chat orchestrator', () => {
 
     expect(getEnabledSkillMetadata).toHaveBeenCalledWith('/tmp/openfox-test', '/original/project')
     expect(getEnabledSkillMetadata).not.toHaveBeenCalledWith('/tmp/openfox-test', '/workspaces/openfox/review-branch')
+  })
+
+  // Finding C (remediation plan): every terminal path must leave the turn
+  // closed — no message stays `isStreaming` once the producer is gone.
+  describe('terminal cleanup of streaming messages', () => {
+    function prepare() {
+      const eventStore = createEventStore()
+      getEventStoreMock.mockReturnValue(eventStore)
+      getAllInstructionsMock.mockResolvedValue({ content: 'Plan carefully', files: [] })
+      getToolRegistryForModeMock.mockReturnValue({ tools: [], definitions: [], execute: vi.fn() })
+      streamLLMPureMock.mockReturnValue({ kind: 'stream' })
+      return eventStore
+    }
+
+    function plannerSessionManager() {
+      return createSessionManager({
+        current: {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: true,
+          criteria: [],
+          executionState: { currentTokenCount: 0, compactionCount: 0 },
+          messages: [{ id: 'user-1', role: 'user', content: 'Do the plan' }],
+        },
+      })
+    }
+
+    const appendedEvents = (eventStore: ReturnType<typeof createEventStore>) =>
+      eventStore.append.mock.calls.map(([, event]) => event as { type: string; data: Record<string, unknown> })
+
+    const assistantMessageId = (eventStore: ReturnType<typeof createEventStore>): string => {
+      const start = appendedEvents(eventStore).find((e) => e.type === 'message.start' && e.data['role'] === 'assistant')
+      expect(start).toBeDefined()
+      return start!.data['messageId'] as string
+    }
+
+    const doneEventsFor = (eventStore: ReturnType<typeof createEventStore>, messageId: string) =>
+      appendedEvents(eventStore).filter((e) => e.type === 'message.done' && e.data['messageId'] === messageId)
+
+    const streamThenFail = (error: Error) => {
+      consumeStreamGeneratorMock.mockImplementation(async (_gen: unknown, onEvent: (event: unknown) => void) => {
+        onEvent({ type: 'message.thinking', data: { messageId: 'ignored', content: 'half a thought' } })
+        throw error
+      })
+    }
+
+    it('closes a streaming assistant message when the backend throws mid-stream', async () => {
+      const eventStore = prepare()
+      streamThenFail(new Error('backend exploded'))
+      const onMessage = vi.fn()
+
+      await runChatTurn({
+        sessionManager: plannerSessionManager() as never,
+        sessionId: 'session-1',
+        llmClient: { getModel: () => 'qwen3-32b' } as never,
+        onMessage,
+      })
+
+      const messageId = assistantMessageId(eventStore)
+      expect(doneEventsFor(eventStore, messageId)).toHaveLength(1)
+
+      const types = appendedEvents(eventStore).map((e) => e.type)
+      expect(types).toContain('chat.error')
+      expect(types.at(-1)).toBe('running.changed')
+
+      // Replayed (persisted) state: nothing is left streaming.
+      const messages = applyEvents<{
+        id: string
+        role: string
+        content: string
+        timestamp: number
+        isStreaming?: boolean
+      }>([], eventStore.getEvents('session-1') as never, { timestampAsNumber: true })
+      expect(messages.find((m) => m.id === messageId)?.isStreaming).toBe(false)
+
+      // The live client converges on the same terminal state.
+      expect(onMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'chat.message_updated',
+          payload: expect.objectContaining({
+            messageId,
+            updates: expect.objectContaining({ isStreaming: false }),
+          }),
+        }),
+      )
+    })
+
+    it('closes a streaming assistant message when the turn is aborted', async () => {
+      const eventStore = prepare()
+      streamThenFail(new Error('Aborted'))
+
+      await runChatTurn({
+        sessionManager: plannerSessionManager() as never,
+        sessionId: 'session-1',
+        llmClient: { getModel: () => 'qwen3-32b' } as never,
+      })
+
+      const messageId = assistantMessageId(eventStore)
+      expect(doneEventsFor(eventStore, messageId)).toHaveLength(1)
+
+      const types = appendedEvents(eventStore).map((e) => e.type)
+      expect(types).not.toContain('chat.error')
+      expect(types.at(-1)).toBe('running.changed')
+    })
+
+    it('does not emit a second terminal event when the turn completed normally', async () => {
+      const eventStore = prepare()
+      consumeStreamGeneratorMock.mockImplementation(async (_gen: unknown, onEvent: (event: unknown) => void) => {
+        onEvent({ type: 'message.thinking', data: { messageId: 'ignored', content: 'thinking' } })
+        return {
+          content: 'Planned response',
+          toolCalls: [],
+          segments: [{ type: 'text', content: 'Planned response' }],
+          usage: { promptTokens: 30, completionTokens: 10 },
+          timing: { ttft: 1, completionTime: 2, tps: 5, prefillTps: 30 },
+          aborted: false,
+        }
+      })
+
+      await runChatTurn({
+        sessionManager: plannerSessionManager() as never,
+        sessionId: 'session-1',
+        llmClient: { getModel: () => 'qwen3-32b' } as never,
+      })
+
+      const messageId = assistantMessageId(eventStore)
+      expect(doneEventsFor(eventStore, messageId)).toHaveLength(1)
+      expect(
+        appendedEvents(eventStore)
+          .map((e) => e.type)
+          .at(-1),
+      ).toBe('running.changed')
+    })
   })
 })
