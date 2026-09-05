@@ -20,6 +20,7 @@ import {
   isStepTransitionSatisfied,
 } from './executor.js'
 import type { TemplateContext } from './executor.js'
+import { gitSpawnEnv } from '../git/env.js'
 
 // ============================================================================
 // Helpers
@@ -438,11 +439,11 @@ describe('formatModifiedFiles', () => {
   it('returns (none) when no files are modified', async () => {
     const tmp = mkdtempSync(join(tmpdir(), 'openfox-test-'))
     try {
-      execSync('git init', { cwd: tmp, stdio: 'pipe' })
-      execSync('git config user.email test@test.com', { cwd: tmp, stdio: 'pipe' })
-      execSync('git config user.name test', { cwd: tmp, stdio: 'pipe' })
+      execSync('git init', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
+      execSync('git config user.email test@test.com', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
+      execSync('git config user.name test', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
       writeFileSync(join(tmp, 'README.md'), '# hello')
-      execSync('git add . && git commit -m init', { cwd: tmp, stdio: 'pipe' })
+      execSync('git add . && git commit -m init', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
       expect(await formatModifiedFiles(tmp)).toBe('(none)')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
@@ -452,11 +453,11 @@ describe('formatModifiedFiles', () => {
   it('lists modified and untracked files', async () => {
     const tmp = mkdtempSync(join(tmpdir(), 'openfox-test-'))
     try {
-      execSync('git init', { cwd: tmp, stdio: 'pipe' })
-      execSync('git config user.email test@test.com', { cwd: tmp, stdio: 'pipe' })
-      execSync('git config user.name test', { cwd: tmp, stdio: 'pipe' })
+      execSync('git init', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
+      execSync('git config user.email test@test.com', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
+      execSync('git config user.name test', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
       writeFileSync(join(tmp, 'existing.ts'), 'original')
-      execSync('git add . && git commit -m init', { cwd: tmp, stdio: 'pipe' })
+      execSync('git add . && git commit -m init', { cwd: tmp, stdio: 'pipe', env: gitSpawnEnv() })
       writeFileSync(join(tmp, 'existing.ts'), 'modified')
       writeFileSync(join(tmp, 'new.ts'), 'untracked')
       const result = await formatModifiedFiles(tmp)
