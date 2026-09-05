@@ -168,8 +168,17 @@ describe('parseResponsesResponse', () => {
     expect(response.choices[0]?.finish_reason).toBe('length')
   })
 
-  it('maps failed status to the content_filter finish reason', () => {
-    const response = parseResponsesResponse({ id: 'resp_4', status: 'failed', output: [] })
-    expect(response.choices[0]?.finish_reason).toBe('content_filter')
+  it.each([
+    ['failed', 'backend failed'],
+    ['cancelled', 'Responses API request was cancelled'],
+  ])('rejects a non-streaming %s response', (status, expectedMessage) => {
+    expect(() =>
+      parseResponsesResponse({
+        id: 'resp_4',
+        status,
+        output: [],
+        ...(status === 'failed' ? { error: { message: 'backend failed' } } : {}),
+      }),
+    ).toThrow(expectedMessage)
   })
 })

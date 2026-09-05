@@ -43,7 +43,7 @@ import {
   createChatStatsMessage,
 } from '../ws/protocol.js'
 import { executeTools, type ToolBatchContext } from './execute-tools.js'
-import { estimateToolResultTokens, isContextLengthError } from './token-budget.js'
+import { estimateToolResultTokens, isContextLengthError, isNonRetryableLLMError } from './token-budget.js'
 import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
@@ -404,22 +404,26 @@ export async function runTopLevelAgentLoop(
       }
 
       // ---- LLM failure ----
-      // Case 2: content was streamed → finalize the partial bubble and append
-      // ONE visible continuation prompt; the retry rebuilds context from the
-      // store (which already includes the partial + continuation).
+      const failWithoutRetry = !isContextLengthError(attemptResult.error) && isNonRetryableLLMError(attemptResult.error)
+      // Case 2: content was streamed → finalize the partial bubble. When the
+      // failure is retryable, append ONE visible continuation prompt so the
+      // retry rebuilds context from the partial response. A deterministic
+      // failure stops here without injecting a prompt that will never be sent.
       if (assistantMessageStarted && !continuationAppended) {
         append(createMessageDoneEvent(assistantMsgId, { partial: true }))
         onMessage?.(createChatMessageUpdatedMessage(assistantMsgId, { isStreaming: false, partial: true }))
-        const continueMsgId = crypto.randomUUID()
-        append(
-          createMessageStartEvent(continueMsgId, 'user', CONTINUE_AFTER_STREAM_ERROR_PROMPT, {
-            ...(currentWindowMessageOptions ?? {}),
-            isSystemGenerated: true,
-            messageKind: 'correction',
-          }),
-        )
-        append({ type: 'message.done', data: { messageId: continueMsgId } })
-        continuationAppended = true
+        if (!failWithoutRetry) {
+          const continueMsgId = crypto.randomUUID()
+          append(
+            createMessageStartEvent(continueMsgId, 'user', CONTINUE_AFTER_STREAM_ERROR_PROMPT, {
+              ...(currentWindowMessageOptions ?? {}),
+              isSystemGenerated: true,
+              messageKind: 'correction',
+            }),
+          )
+          append({ type: 'message.done', data: { messageId: continueMsgId } })
+          continuationAppended = true
+        }
       }
 
       if (signal?.aborted) throw new Error('Aborted')
@@ -432,6 +436,18 @@ export async function runTopLevelAgentLoop(
         const currentMax = modelSettings?.maxTokens ?? currentMaxTokensOverride ?? profileDefaultMaxTokens
         currentMaxTokensOverride = Math.max(256, Math.floor(currentMax / 2))
         continue
+      }
+
+      // Deterministic request failures cannot succeed on an automatic retry —
+      // a Responses backend that completed without answer text or a tool call
+      // is the first such case. Fail immediately instead of burning the retry
+      // window (transient 429/5xx/network errors keep the backoff policy).
+      if (failWithoutRetry) {
+        if (!config.subAgentMetadata) {
+          recordLLMFailure(sessionId)
+          config.onMessage?.(createChatLLMRetryFailedMessage(attemptResult.error, 1))
+        }
+        return { failed: { error: attemptResult.error } }
       }
 
       // Backoff decision — the shared LLMRetryPolicy (same defaults as workflows).

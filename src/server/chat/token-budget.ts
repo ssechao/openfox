@@ -19,3 +19,11 @@ export function isContextLengthError(message: string | undefined): boolean {
   if (!message) return false
   return CONTEXT_LENGTH_ERROR_PATTERN.test(message)
 }
+
+const NON_RETRYABLE_RESPONSES_ERROR_PATTERN = /\bno_actionable_output\b/
+
+/** Whether retrying the same LLM request cannot make progress. */
+export function isNonRetryableLLMError(message: string | undefined): boolean {
+  if (!message) return false
+  return NON_RETRYABLE_RESPONSES_ERROR_PATTERN.test(message)
+}
