@@ -554,7 +554,11 @@ export function createLLMClient(
         let finishReason: LLMCompletionResponse['finishReason'] = 'stop'
         let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
         let responseId = ''
+        // Did the response reach `completed`? Only then can the chain advance.
         let streamCompleted = false
+        // Did ANY terminal event arrive? A stream ending without one is damaged
+        // and must fail loudly instead of yielding a fake done turn.
+        let sawTerminalResponse = false
 
         // Clear timer immediately if external abort fires (e.g. pattern match)
         const onAbort = () => clearInterval(idleTimer)
@@ -603,6 +607,7 @@ export function createLLMClient(
 
             if (choice.finish_reason) {
               finishReason = mapFinishReason(choice.finish_reason)
+              sawTerminalResponse = true
             }
 
             const delta = choice.delta as ChatCompletionChunk['choices'][0]['delta']
@@ -670,6 +675,10 @@ export function createLLMClient(
         } finally {
           clearInterval(idleTimer)
           request.signal?.removeEventListener('abort', onAbort)
+        }
+
+        if (currentApiProtocol() === 'responses' && !sawTerminalResponse) {
+          throw new LLMError('Responses API stream ended without a terminal response event')
         }
 
         const finalContent = fullContent.trim()

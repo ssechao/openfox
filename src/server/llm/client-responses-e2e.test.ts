@@ -207,4 +207,107 @@ describe('createLLMClient end-to-end against a Responses API mock', () => {
     }
     expect(controller.signal.aborted).toBe(true)
   })
+
+  it('fails a stream that closes without a successful terminal event', async () => {
+    const { client } = await boot([
+      {
+        type: 'response.created',
+        response_id: 'resp_truncated',
+        response: { id: 'resp_truncated', status: 'in_progress' },
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        response_id: 'resp_truncated',
+        delta: 'Still thinking',
+      },
+    ])
+
+    const events: Array<Record<string, unknown>> = []
+    for await (const event of client.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+      events.push(event as Record<string, unknown>)
+    }
+
+    expect(events.some((e) => e['type'] === 'done')).toBe(false)
+    expect(events.find((e) => e['type'] === 'error')?.['error']).toBe(
+      'Responses API stream ended without a terminal response event',
+    )
+  })
+
+  it('preserves a max-output incomplete terminal as a length result', async () => {
+    const { client } = await boot([
+      {
+        type: 'response.created',
+        response_id: 'resp_incomplete',
+        response: { id: 'resp_incomplete', status: 'in_progress' },
+      },
+      {
+        type: 'response.incomplete',
+        response_id: 'resp_incomplete',
+        response: {
+          id: 'resp_incomplete',
+          status: 'incomplete',
+          incomplete_details: { reason: 'max_output_tokens' },
+        },
+      },
+    ])
+
+    const events: Array<Record<string, unknown>> = []
+    for await (const event of client.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+      events.push(event as Record<string, unknown>)
+    }
+
+    const last = events[events.length - 1]
+    expect(last?.['type']).toBe('done')
+    const done = last as { response: { id: string; finishReason: string } }
+    expect(done.response.id).toBe('resp_incomplete')
+    expect(done.response.finishReason).toBe('length')
+  })
+
+  it('surfaces a cancelled response as an error instead of a done turn', async () => {
+    const { client } = await boot([
+      {
+        type: 'response.created',
+        response_id: 'resp_cancelled',
+        response: { id: 'resp_cancelled', status: 'in_progress' },
+      },
+      {
+        type: 'response.cancelled',
+        response_id: 'resp_cancelled',
+        response: { id: 'resp_cancelled', status: 'cancelled' },
+      },
+    ])
+
+    const events: Array<Record<string, unknown>> = []
+    for await (const event of client.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+      events.push(event as Record<string, unknown>)
+    }
+
+    expect(events.some((e) => e['type'] === 'done')).toBe(false)
+    expect(events.find((e) => e['type'] === 'error')?.['error']).toBe('Responses API request was cancelled')
+  })
+
+  it('preserves a Responses failure code so callers can classify deterministic failures', async () => {
+    const { client } = await boot([
+      { type: 'response.created', response_id: 'resp_empty', response: { id: 'resp_empty', status: 'in_progress' } },
+      {
+        type: 'response.failed',
+        response_id: 'resp_empty',
+        response: {
+          id: 'resp_empty',
+          status: 'failed',
+          error: { code: 'no_actionable_output', message: 'The backend returned no answer or tool call.' },
+        },
+      },
+    ])
+
+    const events: Array<Record<string, unknown>> = []
+    for await (const event of client.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+      events.push(event as Record<string, unknown>)
+    }
+
+    expect(events.some((e) => e['type'] === 'done')).toBe(false)
+    expect(events.find((e) => e['type'] === 'error')?.['error']).toBe(
+      'no_actionable_output: The backend returned no answer or tool call.',
+    )
+  })
 })

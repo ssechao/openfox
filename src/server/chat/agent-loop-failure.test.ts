@@ -268,6 +268,27 @@ describe('agent loop LLM failure handling', () => {
     expect(assistantStarts(append)).toHaveLength(3)
   })
 
+  it('does NOT retry a Responses no_actionable_output failure', async () => {
+    ;(consumeStreamGenerator as any).mockImplementation(async (_gen: any, onEvent: any) => {
+      onEvent({ type: 'message.thinking', data: { messageId: 'assistant-empty', content: 'I will load the tools.' } })
+      return erroredResult('no_actionable_output: The backend returned no answer or tool call.')
+    })
+
+    const append = vi.fn()
+    const onMessage = vi.fn()
+    const result = await runTopLevelAgentLoop(
+      makeConfig({ append, onMessage, llmRetryPolicy: FAST_POLICY }),
+      mockTurnMetrics,
+    )
+
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+    expect(result.failed?.error).toContain('no_actionable_output')
+    expect(onMessage.mock.calls.some((call: any[]) => (call[0] as { type?: string })?.type === 'chat.llm_retry')).toBe(
+      false,
+    )
+    expect(continuationMessages(append)).toHaveLength(0)
+  })
+
   it('relays the backoff pill via onMessage (retry now affordance)', async () => {
     ;(consumeStreamGenerator as any)
       .mockResolvedValueOnce(erroredResult('boom'))

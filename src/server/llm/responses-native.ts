@@ -198,7 +198,7 @@ interface ResponsesApiResponse {
   id?: string
   status?: string
   incomplete_details?: { reason?: string } | null
-  error?: { message?: string } | null
+  error?: { code?: string; message?: string } | null
   output?: ResponsesOutputItem[]
   usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number }
 }
@@ -218,7 +218,20 @@ function mapResponseStatus(
   }
 }
 
+function responseFailureMessage(response: ResponsesApiResponse | undefined, fallback: string): string {
+  const message = response?.error?.message ?? fallback
+  const code = response?.error?.code
+  return code ? `${code}: ${message}` : message
+}
+
 export function parseResponsesResponse(data: ResponsesApiResponse): ChatCompletionResponse {
+  if (data.status === 'failed') {
+    throw new LLMError(responseFailureMessage(data, 'Responses API request failed'))
+  }
+  if (data.status === 'cancelled') {
+    throw new LLMError('Responses API request was cancelled')
+  }
+
   let content = ''
   let reasoning = ''
   const toolCalls: ChatCompletionResponse['choices'][0]['message']['tool_calls'] = []
@@ -328,16 +341,25 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
       return finalChunk(responseId, response)
     }
 
-    case 'response.failed': {
-      const message = response?.error?.message ?? 'Responses API request failed'
-      logger.warn('Responses API stream failed', { message })
+    case 'response.incomplete': {
+      const response = event['response'] as ResponsesApiResponse | undefined
       return finalChunk(responseId, response)
+    }
+
+    case 'response.failed': {
+      const message = responseFailureMessage(response, 'Responses API request failed')
+      logger.warn('Responses API stream failed', { message })
+      throw new LLMError(message)
+    }
+
+    case 'response.cancelled': {
+      throw new LLMError('Responses API request was cancelled')
     }
 
     case 'error': {
       const message = (event['message'] as string | undefined) ?? 'Responses API stream error'
       logger.warn('Responses API stream error event', { message })
-      return null
+      throw new LLMError(message)
     }
 
     default:
