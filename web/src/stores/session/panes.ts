@@ -120,6 +120,11 @@ export function updatePane(
     }
   }
   const next = updater(pane)
+  // A no-op updater must not publish state. Raw stream deltas only append to a
+  // private buffer and return the pane untouched: cloning the state and the
+  // panes map here would wake every subscriber hundreds of times per turn for
+  // content that has not been committed yet.
+  if (next === pane) return state
   const base = { ...state, panes: { ...state.panes, [sessionId]: next } }
   return focused ? { ...base, ...mirror(next) } : base
 }

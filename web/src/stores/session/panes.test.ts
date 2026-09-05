@@ -122,6 +122,17 @@ describe('pane helpers', () => {
     expect(next.currentSession?.id).toBe('s1')
   })
 
+  it('updatePane returns the same state when the updater changes nothing', () => {
+    const state = makeState({
+      currentSession: session('s1'),
+      panes: { s1: emptyPane() },
+      openSessionIds: ['s1'],
+    })
+    const next = updatePane(state, 's1', (pane) => pane)
+    expect(next).toBe(state)
+    expect(next.panes).toBe(state.panes)
+  })
+
   it('updatePane ignores sessions that are neither focused nor open', () => {
     const state = makeState({ currentSession: session('s1') })
     const next = updatePane(state, 's3', (pane) => ({ ...pane, messages: [{ id: 'z' }] as never }))
