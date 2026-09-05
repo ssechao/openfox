@@ -61,22 +61,149 @@ async function checkRtkAvailability(): Promise<boolean> {
   return rtkAvailable
 }
 
+interface PendingHeredoc {
+  delimiter: string
+  stripTabs: boolean
+}
+
 export function hasBackgroundAmpersand(command: string): boolean {
-  // Strip content inside quotes — & inside quotes is literal, not a background operator
-  let processed = command.replace(/'[^']*'/g, ' ').replace(/"[^"]*"/g, ' ')
+  // A background operator is an unquoted, unescaped `&` at the shell level that
+  // is not part of `&&` (logical AND), `|&` (stderr pipe) or `&>`/`>&`
+  // (redirection). Heredoc bodies (`<<`, `<<-`, quoted or unquoted delimiters)
+  // are data: normal scanning resumes after the terminator line.
+  const n = command.length
+  let i = 0
+  let atWordStart = true
+  let bodyActive = false
+  const pending: PendingHeredoc[] = []
 
-  // Strip escaped characters — \& is a literal ampersand
-  processed = processed.replace(/\\./g, '  ')
+  while (i < n) {
+    if (bodyActive) {
+      const current = pending[0]!
+      const lineEnd = command.indexOf('\n', i)
+      if (lineEnd === -1) {
+        return false // EOF inside an unterminated heredoc: the rest is body data
+      }
+      let line = command.slice(i, lineEnd)
+      if (line.endsWith('\r')) line = line.slice(0, -1)
+      if ((current.stripTabs ? line.replace(/^\t+/, '') : line) === current.delimiter) {
+        pending.shift()
+        if (pending.length === 0) bodyActive = false
+      }
+      i = lineEnd + 1
+      atWordStart = true
+      continue
+    }
 
-  // Replace multi-character operators that contain & but aren't background operators
-  processed = processed.replace(/&&/g, '  ') // logical AND
-  processed = processed.replace(/\|&/g, '   ') // stderr pipe
-  processed = processed.replace(/&>/g, '  ') // redirect both stdout+stderr
-  processed = processed.replace(/>&\d/g, '   ') // fd redirect (e.g. 2>&1)
-  processed = processed.replace(/>&/g, '  ') // other >& redirect forms
+    const ch = command.charAt(i)
 
-  // Any remaining & is a background operator
-  return processed.includes('&')
+    if (ch === '\n' || ch === ' ' || ch === '\t' || ch === '\r') {
+      i += 1
+      if (ch === '\n' && pending.length > 0) bodyActive = true
+      atWordStart = true
+      continue
+    }
+    if (ch === '#' && atWordStart) {
+      const lineEnd = command.indexOf('\n', i)
+      i = lineEnd === -1 ? n : lineEnd + 1
+      atWordStart = true
+      continue
+    }
+    if (ch === "'") {
+      const close = command.indexOf("'", i + 1)
+      i = close === -1 ? n : close + 1
+      atWordStart = false
+      continue
+    }
+    if (ch === '"') {
+      i += 1
+      atWordStart = false
+      while (i < n) {
+        const c = command.charAt(i)
+        if (c === '\\') {
+          i += 2
+          continue
+        }
+        if (c === '"') {
+          i += 1
+          break
+        }
+        i += 1
+      }
+      continue
+    }
+    if (ch === '\\') {
+      i += 2
+      atWordStart = false
+      continue
+    }
+    if (ch === '&') {
+      const next = command.charAt(i + 1)
+      if (next === '&' || next === '>') {
+        i += 2
+        atWordStart = true
+        continue
+      }
+      return true
+    }
+    if (ch === '|' && command.charAt(i + 1) === '&') {
+      i += 2
+      atWordStart = true
+      continue
+    }
+    if (ch === '>' && command.charAt(i + 1) === '&') {
+      i += 2
+      atWordStart = true
+      continue
+    }
+    if (ch === '<') {
+      if (command.charAt(i + 1) === '<') {
+        let j = i + 2
+        if (command.charAt(j) === '<') {
+          i += 3 // here-string: not a heredoc, resume normal scanning
+          atWordStart = false
+          continue
+        }
+        let stripTabs = false
+        if (command.charAt(j) === '-') {
+          stripTabs = true
+          j += 1
+        }
+        const quote = command.charAt(j)
+        let delimiter = ''
+        if (quote === "'" || quote === '"') {
+          j += 1
+          const close = command.indexOf(quote, j)
+          delimiter = command.slice(j, close === -1 ? n : close)
+          j = close === -1 ? n : close + 1
+        } else {
+          while (j < n && /[A-Za-z0-9_]/.test(command.charAt(j))) {
+            delimiter += command.charAt(j)
+            j += 1
+          }
+        }
+        if (delimiter !== '') {
+          pending.push({ delimiter, stripTabs })
+        }
+        i = j
+        atWordStart = false
+        continue
+      }
+      i += 1
+      atWordStart = true
+      continue
+    }
+    if (ch === ';' || ch === '(' || ch === ')' || ch === '{' || ch === '}' || ch === '>') {
+      i += 1
+      atWordStart = true
+      continue
+    }
+
+    i += 1
+    atWordStart = false
+  }
+
+  return false
 }
 
 interface RunCommandArgs {
