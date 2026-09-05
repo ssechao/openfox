@@ -46,3 +46,11 @@ export function isNonTransientHttpError(message: string | undefined): boolean {
   if (RECOVERABLE_STORE_REJECTION.test(message)) return false
   return NON_TRANSIENT_HTTP_PATTERN.test(message)
 }
+
+const NON_RETRYABLE_RESPONSES_ERROR_PATTERN = /\bno_actionable_output\b/
+
+/** Whether retrying the same LLM request cannot make progress. */
+export function isNonRetryableLLMError(message: string | undefined): boolean {
+  if (!message) return false
+  return isNonTransientHttpError(message) || NON_RETRYABLE_RESPONSES_ERROR_PATTERN.test(message)
+}

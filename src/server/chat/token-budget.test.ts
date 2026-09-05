@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   estimateToolResultTokens,
   isContextLengthError,
+  isNonRetryableLLMError,
   CHARS_PER_TOKEN,
   TOOL_MESSAGE_OVERHEAD_TOKENS,
 } from './token-budget.js'
@@ -56,5 +57,13 @@ describe('isContextLengthError', () => {
     expect(isContextLengthError('HTTP 500: internal server error')).toBe(false)
     expect(isContextLengthError(undefined)).toBe(false)
     expect(isContextLengthError('')).toBe(false)
+  })
+})
+
+describe('isNonRetryableLLMError', () => {
+  it('classifies no_actionable_output as deterministic while preserving transient retries', () => {
+    expect(isNonRetryableLLMError('no_actionable_output: The backend returned no answer or tool call.')).toBe(true)
+    expect(isNonRetryableLLMError('HTTP 503: backend unavailable')).toBe(false)
+    expect(isNonRetryableLLMError('HTTP 429: rate limited')).toBe(false)
   })
 })

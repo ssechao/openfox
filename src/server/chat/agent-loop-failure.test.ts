@@ -447,6 +447,27 @@ describe('agent loop LLM failure handling', () => {
     }
   })
 
+  it('does NOT retry a Responses no_actionable_output failure', async () => {
+    ;(consumeStreamGenerator as any).mockImplementation(async (_gen: unknown, onEvent: (event: unknown) => void) => {
+      onEvent({ type: 'message.thinking', data: { messageId: 'assistant-empty', content: 'I will load the tools.' } })
+      return erroredResult('no_actionable_output: The backend returned no answer or tool call.')
+    })
+
+    const append = vi.fn()
+    const onMessage = vi.fn()
+    const result = await runTopLevelAgentLoop(
+      makeConfig({ append, onMessage, llmRetryPolicy: FAST_POLICY }),
+      mockTurnMetrics,
+    )
+
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+    expect(result.failed?.error).toContain('no_actionable_output')
+    expect(
+      onMessage.mock.calls.some((call: unknown[]) => (call[0] as { type?: string })?.type === 'chat.llm_retry'),
+    ).toBe(false)
+    expect(continuationMessages(append)).toHaveLength(0)
+  })
+
   it('still retries 401/403 so an auth adapter can refresh an expired token', async () => {
     for (const status of ['401', '403']) {
       vi.clearAllMocks()

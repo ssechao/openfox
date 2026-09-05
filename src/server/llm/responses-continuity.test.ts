@@ -81,6 +81,37 @@ function failedEvents(id: string): unknown[] {
   ]
 }
 
+function cancelledEvents(id: string): unknown[] {
+  return [
+    { type: 'response.created', response: { id, status: 'in_progress' } },
+    { type: 'response.cancelled', response: { id, status: 'cancelled' } },
+  ]
+}
+
+function noActionableOutputEvents(id: string): unknown[] {
+  return [
+    { type: 'response.created', response: { id, status: 'in_progress' } },
+    {
+      type: 'response.failed',
+      response: {
+        id,
+        status: 'failed',
+        error: { code: 'no_actionable_output', message: 'The backend returned no answer or tool call.' },
+      },
+    },
+  ]
+}
+
+function incompleteEvents(id: string): unknown[] {
+  return [
+    { type: 'response.created', response: { id, status: 'in_progress' } },
+    {
+      type: 'response.incomplete',
+      response: { id, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } },
+    },
+  ]
+}
+
 const SYSTEM = 'You are a helpful assistant.'
 const TOOLS = [{ type: 'function', function: { name: 'read_file', description: 'read', parameters: {} } }]
 
@@ -187,7 +218,7 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
       responsesChainKey: 'session-f',
     })
     // Second request: chain valid (resp_1) → previous_response_id:resp_1.
-    await consume(client, {
+    const failed = await consume(client, {
       messages: [
         { role: 'system', content: SYSTEM },
         { role: 'user', content: 'first' },
@@ -197,6 +228,7 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
       tools: TOOLS,
       responsesChainKey: 'session-f',
     })
+    expect(failed).toEqual({ type: 'error', error: 'boom' })
     // Third request: the previous response FAILED, so the chain must have been
     // reset → this is a first request again (no previous_response_id).
     await consume(client, {
@@ -221,6 +253,79 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
     // After the failed response, the chain is invalidated: r3 re-primes.
     expect(r3.body['previous_response_id']).toBeUndefined()
     expect(r3.body['store']).toBe(true)
+  })
+
+  it('a stream that closes without a successful terminal event fails instead of producing a normal done turn', async () => {
+    const mock = await startResponsesMock([
+      [
+        { type: 'response.created', response: { id: 'resp_truncated', status: 'in_progress' } },
+        { type: 'response.reasoning_summary_text.delta', response_id: 'resp_truncated', delta: 'Still thinking' },
+      ],
+    ])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+
+    const result = await consume(client, {
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: 'first' },
+      ],
+      tools: TOOLS,
+      responsesChainKey: 'session-truncated',
+    })
+
+    expect(result).toEqual({
+      type: 'error',
+      error: 'Responses API stream ended without a terminal response event',
+    })
+  })
+
+  it('preserves a max-output incomplete terminal as a length result', async () => {
+    const mock = await startResponsesMock([incompleteEvents('resp_incomplete')])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+
+    const result = await consume(client, {
+      messages: [{ role: 'user', content: 'first' }],
+      responsesChainKey: 'session-incomplete',
+    })
+
+    expect(result).toMatchObject({
+      type: 'done',
+      response: { id: 'resp_incomplete', finishReason: 'length' },
+    })
+  })
+
+  it('a cancelled response surfaces an error instead of producing a normal done turn', async () => {
+    const mock = await startResponsesMock([cancelledEvents('resp_cancelled')])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+
+    const result = await consume(client, {
+      messages: [{ role: 'user', content: 'first' }],
+      responsesChainKey: 'session-cancelled',
+    })
+
+    expect(result).toEqual({
+      type: 'error',
+      error: 'Responses API request was cancelled',
+    })
+  })
+
+  it('preserves a Responses failure code so callers can classify deterministic failures', async () => {
+    const mock = await startResponsesMock([noActionableOutputEvents('resp_empty')])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+
+    const result = await consume(client, {
+      messages: [{ role: 'user', content: 'first' }],
+      responsesChainKey: 'session-empty',
+    })
+
+    expect(result).toEqual({
+      type: 'error',
+      error: 'no_actionable_output: The backend returned no answer or tool call.',
+    })
   })
 
   it('tool-call cycle: tool output continues the same chain and preserves call_id', async () => {
