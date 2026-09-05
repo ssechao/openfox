@@ -191,6 +191,35 @@ describe('executeTools', () => {
     expect(result.toolMessages[0]?.content).toContain('Failed to parse')
   })
 
+  // Finding B (remediation plan): a large valid tool call reaches the tool
+  // layer intact and is dispatched exactly once — no retry, no re-entry.
+  it('dispatches a >15 KiB tool call exactly once with byte-identical arguments', async () => {
+    const append = vi.fn()
+    const content = 'fn main() { let s = "he said \\"hi\\" & bye — λ 🦀"; }\n'.repeat(400)
+    expect(content.length).toBeGreaterThan(15 * 1024)
+
+    const seen: Array<Record<string, unknown>> = []
+    const execute = vi.fn().mockImplementation(async (_name: string, args: Record<string, unknown>) => {
+      seen.push(args)
+      return { success: true, output: 'written', durationMs: 1, truncated: false }
+    })
+
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'write_file', arguments: { path: 'src/widget.rs', content } }]
+
+    const result = await executeTools(
+      'msg-1',
+      toolCalls,
+      { ...makeCtx(), toolRegistry: { tools: [], execute, definitions: [] } as any },
+      append,
+    )
+
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!['content']).toBe(content)
+    expect(result.toolMessages).toHaveLength(1)
+    expect(append.mock.calls.filter((args: unknown[]) => (args[0] as TurnEvent).type === 'tool.result')).toHaveLength(1)
+  })
+
   it('throws Aborted when signal is aborted before tool calls are emitted', async () => {
     const append = vi.fn()
     const controller = new AbortController()

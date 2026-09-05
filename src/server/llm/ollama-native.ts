@@ -21,8 +21,7 @@ import type {
   ChatCompletionMessageToolCall,
   ChatCompletionMessageParam,
 } from './openai-types.js'
-import { logger } from '../utils/logger.js'
-import { ChatHttpClient, DONE, type ChatRequest } from './http-shared.js'
+import { ChatHttpClient, DONE, parseStreamJson, type ChatRequest } from './http-shared.js'
 import './proxy.js'
 
 export interface OllamaClientOptions {
@@ -340,11 +339,6 @@ export class OllamaHttpClient extends ChatHttpClient {
   }
 
   protected parseStreamLine(trimmed: string): ChatCompletionChunk | typeof DONE | null {
-    try {
-      return parseOllamaChatChunk(JSON.parse(trimmed) as OllamaChatResponse)
-    } catch (error) {
-      logger.warn('Failed to parse Ollama stream chunk', { data: trimmed, error })
-      return null
-    }
+    return parseOllamaChatChunk(parseStreamJson<OllamaChatResponse>(trimmed, 'Ollama'))
   }
 }
