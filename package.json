@@ -34,6 +34,7 @@
     "dev": "cross-env OPENFOX_DEV=true tsx watch src/cli/dev.ts --no-browser",
     "dev:web": "vite --config web/vite.config.ts",
     "build": "npm run build:server && npm run build:web",
+    "prebuild:server": "tsx scripts/increment-fork-version.ts",
     "build:server": "tsup && node scripts/copy-assets.mjs",
     "build:web": "cd web && vite build --outDir ../dist/web",
     "start": "node dist/cli/index.js",
