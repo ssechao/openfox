@@ -6,6 +6,29 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 describe('hasBackgroundAmpersand', () => {
+  it.each([
+    'cat << EOF\n&self\nEOF\n',
+    "cat <<'EOF' # comment\n&mut value\nEOF\n",
+    'cat <<END-MARKER\n&self\nEND-MARKER\n',
+    "cat <<E'OF'\n&self\nEOF\n",
+    'cat <<\\EOF\n&self\nEOF\n',
+    "cat <<'EOF'\n$(sleep 10 &)\nEOF\n",
+  ])('accepts heredoc data with shell word delimiter syntax: %s', (command) => {
+    expect(hasBackgroundAmpersand(command)).toBe(false)
+  })
+
+  it.each([
+    'cat <<END-MARKER\ntext\nEND-MARKER\nsleep 10 &',
+    "cat <<E'OF'\ntext\nEOF\nsleep 10 &",
+    'cat <<EOF\n$(sleep 10 &)\nEOF\n',
+    'echo "$(sleep 10 &)"',
+    'echo "`sleep 10 &`"',
+    'cat <<\\\nEOF\ntext\nEOF\nsleep 10 &',
+    "cat <<$'EOF'\ntext\nEOF\nsleep 10 &",
+  ])('rejects executable background operators, including substitutions: %s', (command) => {
+    expect(hasBackgroundAmpersand(command)).toBe(true)
+  })
+
   it('detects trailing & as background operator', () => {
     expect(hasBackgroundAmpersand('npm run dev &')).toBe(true)
   })

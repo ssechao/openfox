@@ -64,9 +64,42 @@ async function checkRtkAvailability(): Promise<boolean> {
 interface PendingHeredoc {
   delimiter: string
   stripTabs: boolean
+  expand: boolean
 }
 
-export function hasBackgroundAmpersand(command: string): boolean {
+// Return the end of a safe command substitution; ambiguity fails closed.
+function scanCommandSubstitution(command: string, start: number, nesting: number): number {
+  const backtick = command[start] === '`'
+  const bodyStart = start + (backtick ? 1 : 2)
+  let quote = ''
+  let parentheses = 1
+  for (let i = bodyStart; i < command.length; i++) {
+    const ch = command[i]!
+    if (ch === '\\' && quote !== "'") {
+      i++
+      continue
+    }
+    if (backtick && ch === '`') {
+      return hasBackgroundAmpersand(command.slice(bodyStart, i), nesting + 1) ? -1 : i
+    }
+    if (quote) {
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch
+      continue
+    }
+    if (ch === '(') parentheses++
+    if (ch === ')' && --parentheses === 0) {
+      return hasBackgroundAmpersand(command.slice(bodyStart, i), nesting + 1) ? -1 : i
+    }
+  }
+  return -1
+}
+
+export function hasBackgroundAmpersand(command: string, nesting = 0): boolean {
+  if (nesting > 32) return true
   // A background operator is an unquoted, unescaped `&` at the shell level that
   // is not part of `&&` (logical AND), `|&` (stderr pipe) or `&>`/`>&`
   // (redirection). Heredoc bodies (`<<`, `<<-`, quoted or unquoted delimiters)
@@ -80,17 +113,34 @@ export function hasBackgroundAmpersand(command: string): boolean {
   while (i < n) {
     if (bodyActive) {
       const current = pending[0]!
-      const lineEnd = command.indexOf('\n', i)
-      if (lineEnd === -1) {
-        return false // EOF inside an unterminated heredoc: the rest is body data
+      const bodyStart = i
+      let bodyEnd = n
+      while (i < n) {
+        const newline = command.indexOf('\n', i)
+        const end = newline === -1 ? n : newline
+        const line = command.slice(i, end)
+        if ((current.stripTabs ? line.replace(/^\t+/, '') : line) === current.delimiter) {
+          bodyEnd = i
+          i = end + 1
+          pending.shift()
+          bodyActive = pending.length > 0
+          break
+        }
+        i = end + 1
       }
-      let line = command.slice(i, lineEnd)
-      if (line.endsWith('\r')) line = line.slice(0, -1)
-      if ((current.stripTabs ? line.replace(/^\t+/, '') : line) === current.delimiter) {
-        pending.shift()
-        if (pending.length === 0) bodyActive = false
+      if (current.expand) {
+        const body = command.slice(bodyStart, bodyEnd)
+        for (let j = 0; j < body.length; j++) {
+          if (body[j] === '\\') {
+            j++
+            continue
+          }
+          if (body[j] === '`' || (body[j] === '$' && body[j + 1] === '(')) {
+            j = scanCommandSubstitution(body, j, nesting)
+            if (j === -1) return true
+          }
+        }
       }
-      i = lineEnd + 1
       atWordStart = true
       continue
     }
@@ -106,6 +156,7 @@ export function hasBackgroundAmpersand(command: string): boolean {
     if (ch === '#' && atWordStart) {
       const lineEnd = command.indexOf('\n', i)
       i = lineEnd === -1 ? n : lineEnd + 1
+      if (lineEnd !== -1 && pending.length > 0) bodyActive = true
       atWordStart = true
       continue
     }
@@ -124,6 +175,12 @@ export function hasBackgroundAmpersand(command: string): boolean {
           i += 2
           continue
         }
+        if (c === '`' || (c === '$' && command[i + 1] === '(')) {
+          i = scanCommandSubstitution(command, i, nesting)
+          if (i === -1) return true
+          i++
+          continue
+        }
         if (c === '"') {
           i += 1
           break
@@ -134,6 +191,13 @@ export function hasBackgroundAmpersand(command: string): boolean {
     }
     if (ch === '\\') {
       i += 2
+      atWordStart = false
+      continue
+    }
+    if (ch === '`' || (ch === '$' && command[i + 1] === '(')) {
+      i = scanCommandSubstitution(command, i, nesting)
+      if (i === -1) return true
+      i++
       atWordStart = false
       continue
     }
@@ -169,21 +233,39 @@ export function hasBackgroundAmpersand(command: string): boolean {
           stripTabs = true
           j += 1
         }
-        const quote = command.charAt(j)
+        while (command[j] === ' ' || command[j] === '\t') j++
         let delimiter = ''
-        if (quote === "'" || quote === '"') {
-          j += 1
-          const close = command.indexOf(quote, j)
-          delimiter = command.slice(j, close === -1 ? n : close)
-          j = close === -1 ? n : close + 1
-        } else {
-          while (j < n && /[A-Za-z0-9_]/.test(command.charAt(j))) {
-            delimiter += command.charAt(j)
-            j += 1
+        let quoted = false
+        let hasDelimiter = false
+        while (j < n && !/[\s;&|<>()]/.test(command[j]!)) {
+          hasDelimiter = true
+          const quote = command[j]
+          // ANSI-C/localized delimiter quoting requires shell expansion; do
+          // not guess a terminator and accidentally hide subsequent commands.
+          if (quote === '$' && (command[j + 1] === "'" || command[j + 1] === '"')) return true
+          if (quote === "'" || quote === '"') {
+            quoted = true
+            j++
+            while (j < n && command[j] !== quote) {
+              if (quote === '"' && command[j] === '\\' && /[$`"\\\n]/.test(command[j + 1] ?? '')) j++
+              delimiter += command[j++] ?? ''
+            }
+            if (command[j] !== quote) return true
+            j++
+          } else if (quote === '\\') {
+            j++
+            if (command[j] === '\n') {
+              j++
+              continue
+            }
+            quoted = true
+            delimiter += command[j++] ?? ''
+          } else {
+            delimiter += command[j++]
           }
         }
-        if (delimiter !== '') {
-          pending.push({ delimiter, stripTabs })
+        if (hasDelimiter) {
+          pending.push({ delimiter, stripTabs, expand: !quoted })
         }
         i = j
         atWordStart = false
