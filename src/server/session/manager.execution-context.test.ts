@@ -194,9 +194,16 @@ vi.mock('../chat/stream-pure.js', () => ({
         `streamLLMPure called ${idx + 1} times, only ${orchestratorStreamResults.length} results prepared`,
       )
     }
-    return result
+    return (async function* () {
+      return result
+    })()
   }),
-  consumeStreamGenerator: vi.fn(async <T>(gen: T | Promise<T>) => gen),
+  consumeStreamGenerator: vi.fn(async <T>(gen: AsyncGenerator<unknown, T>) => {
+    while (true) {
+      const next = await gen.next()
+      if (next.done) return next.value
+    }
+  }),
   TurnMetrics: class {
     addToolTime = vi.fn()
     addLLMCall = vi.fn()

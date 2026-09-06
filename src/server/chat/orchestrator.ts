@@ -183,11 +183,15 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
   const writeEvent = createTurnEventSink(eventStore, sessionId)
   const streamTracker = createStreamLifecycleTracker()
   const append = (event: import('../events/types.js').TurnEvent) => {
-    streamTracker.observe(event)
     try {
       writeEvent(event)
-    } catch {
-      // Session may have been deleted (e.g. during abort) — skip
+      // Observed only once the write succeeded: a message the store never
+      // accepted must not be remembered as open.
+      streamTracker.observe(event)
+    } catch (error) {
+      // Session may have been deleted (e.g. during abort) — skip. Anything else
+      // is a real storage failure and must not be swallowed.
+      if (sessionManager.getSession(sessionId) !== null) throw error
     }
   }
 

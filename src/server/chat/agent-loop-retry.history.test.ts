@@ -14,6 +14,18 @@ import type { LLMStreamEvent, LLMCompletionResponse } from '../llm/types.js'
 import { EventStore } from '../events/store.js'
 import type { TurnMetrics } from './stream-pure.js'
 import type { TopLevelLoopConfig } from './agent-loop.js'
+import { createServer } from 'node:http'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { AddressInfo } from 'node:net'
+import type { ToolContext } from '../tools/types.js'
+import { createLLMClient } from '../llm/client.js'
+import { applyEvents } from '../events/apply-events.js'
+import { buildContextMessagesFromStoredEvents } from '../events/folding.js'
+import { runCommandTool } from '../tools/shell.js'
+import { createStreamLifecycleTracker } from './terminal-cleanup.js'
+import type { SnapshotMessage } from '../events/types.js'
 
 vi.mock('../events/index.js', () => ({
   getCurrentContextWindowId: vi.fn(() => undefined),
@@ -33,6 +45,7 @@ vi.mock('../runtime-config.js', () => ({
     mode: 'test',
     workdir: '/test',
     context: { compactionThreshold: 800000 },
+    agent: { toolTimeout: 10000 },
     llm: {
       baseUrl: 'http://localhost:11434',
       model: 'test-model',
@@ -139,6 +152,8 @@ describe('agent loop retry history (real EventStore)', () => {
       setCurrentContextSize: vi.fn(),
       getCachedPrompt: vi.fn().mockReturnValue(undefined),
       setCachedPrompt: vi.fn(),
+      getLspManager: vi.fn(),
+      drainAsapMessages: vi.fn(() => []),
     }
     mockTurnMetrics = {
       addToolTime: vi.fn(),
@@ -170,6 +185,199 @@ describe('agent loop retry history (real EventStore)', () => {
       ...overrides,
     }
   }
+
+  it('aborts and closes the producer when a persistence callback throws during a flush', async () => {
+    let requestSignal: AbortSignal | undefined
+    let release = () => {}
+    let closed = false
+    const client = createSequencedClient([])
+    const stream = async function* (request: { signal?: AbortSignal }): AsyncGenerator<LLMStreamEvent> {
+      requestSignal = request.signal
+      try {
+        yield { type: 'thinking_delta', content: 'partial thinking' }
+        await new Promise<void>((resolve) => {
+          release = resolve
+          request.signal?.addEventListener('abort', resolve.bind(null, undefined), { once: true })
+        })
+      } finally {
+        closed = true
+      }
+    }
+    try {
+      await expect(
+        runTopLevelAgentLoop(
+          makeConfig({
+            llmClient: { ...client, stream } as never,
+            append: (event) => {
+              if (event.type === 'message.thinking') throw new Error('persistence callback failed')
+              store.append('session-1', event)
+            },
+          }),
+          mockTurnMetrics,
+        ),
+      ).rejects.toThrow('persistence callback failed')
+      expect(requestSignal?.aborted).toBe(true)
+      expect(closed).toBe(true)
+    } finally {
+      release()
+    }
+  })
+
+  // Real HTTP -> parser -> stream consumer -> SQLite -> tool dispatch -> next
+  // request. Only model responses and the first controlled tool error are scripted.
+  async function runFixture(bodies: string[], execute = vi.fn()) {
+    const requests: Array<{ messages: Array<{ role: string; content: string }> }> = []
+    const server = createServer((req, res) => {
+      let body = ''
+      req.on('data', (chunk) => {
+        body += String(chunk)
+      })
+      req.on('end', () => {
+        requests.push(JSON.parse(body))
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.end(bodies[requests.length - 1] ?? frame({}, 'stop'))
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const client = createLLMClient({
+        llm: {
+          baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+          model: 'qwen3-32b',
+          backend: 'vllm',
+          timeout: 10000,
+          idleTimeout: 10000,
+        },
+        context: { maxTokens: 128000, compactionThreshold: 0.85, compactionTarget: 0.6 },
+      } as never)
+      const tracker = createStreamLifecycleTracker()
+      const append: TopLevelLoopConfig['append'] = (event) => {
+        store.append('session-1', event)
+        tracker.observe(event)
+      }
+      append({ type: 'running.changed', data: { isRunning: true } })
+      let outcome
+      try {
+        outcome = await runTopLevelAgentLoop(
+          makeConfig({
+            llmClient: client,
+            append,
+            llmRetryPolicy: { ...FAST_POLICY, maxAttempts: 1 },
+            getToolRegistry: () => ({ tools: [], definitions: [], execute }),
+            getConversationMessages: async () =>
+              buildContextMessagesFromStoredEvents(store.getEvents('session-1')) as never,
+            assembleRequest: async (input) => ({ systemPrompt: 'local fixture', messages: input.messages, tools: [] }),
+          }),
+          mockTurnMetrics,
+        )
+      } finally {
+        tracker.finalize(append)
+        append({ type: 'running.changed', data: { isRunning: false } })
+      }
+      return {
+        requests,
+        outcome,
+        messages: applyEvents<SnapshotMessage>([], store.getEvents('session-1'), { timestampAsNumber: true }),
+      }
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }
+
+  function frame(delta: Record<string, unknown>, finishReason: string | null = null): string {
+    return `data: ${JSON.stringify({ id: 'fixture', choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\n`
+  }
+
+  function toolFrames(name: string, args: string): string {
+    const parts = [frame({ tool_calls: [{ index: 0, id: `call-${name}`, function: { name, arguments: '' } }] })]
+    for (let i = 0; i < args.length; i += 89) {
+      parts.push(frame({ tool_calls: [{ index: 0, function: { arguments: args.slice(i, i + 89) } }] }))
+    }
+    return parts.join('') + frame({}, 'tool_calls')
+  }
+
+  it('completes a long thinking/tool failure/recovery session with intact arguments and resumable state', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'openfox-long-session-'))
+    try {
+      mockSessionManager.getEffectiveWorkdir.mockReturnValue(workdir)
+      mockSessionManager.getProjectWorkdir.mockReturnValue(workdir)
+      for (let i = 0; i < 673; i++) {
+        store.append('session-1', {
+          type: 'message.start',
+          data: { messageId: `history-${i}`, role: 'user', content: `History ${i}` },
+        })
+      }
+      const thinking = '**Inspect** Rust references &self and &mut.\n'.repeat(1600)
+      const content = 'fn borrow(&self) { let text = "quoted \\"value\\""; }\n'.repeat(400)
+      const args = { path: 'widget.rs', content }
+      expect(Buffer.byteLength(JSON.stringify(args))).toBeGreaterThan(15 * 1024)
+      const command = `cat <<'RUST' > widget.rs\n${content}RUST\n`
+      const execute = vi.fn(async (name: string, arguments_: Record<string, unknown>, context: ToolContext) => {
+        if (name === 'write_file') {
+          expect(arguments_).toEqual(args)
+          return { success: false, error: 'controlled fixture failure', durationMs: 0, truncated: false }
+        }
+        return runCommandTool.execute(arguments_, context)
+      })
+      const first = Array.from({ length: 4000 }, (_, i) =>
+        frame({ reasoning_content: thinking.slice(i * 17, (i + 1) * 17) }),
+      ).join('')
+      const firstThinking = thinking.slice(0, 68000)
+      const completion = await runFixture(
+        [
+          first + toolFrames('write_file', JSON.stringify(args)),
+          toolFrames('run_command', JSON.stringify({ command })),
+          frame({ content: 'Recovered successfully' }, 'stop'),
+        ],
+        execute,
+      )
+      expect(completion.outcome?.failed).toBeUndefined()
+      expect(completion.requests).toHaveLength(3)
+      expect(execute).toHaveBeenCalledTimes(2)
+      expect(
+        completion.requests[1]?.messages.some(
+          (message) => message.role === 'tool' && message.content.includes('controlled fixture failure'),
+        ),
+      ).toBe(true)
+      expect(await readFile(join(workdir, 'widget.rs'), 'utf8')).toBe(content)
+      expect(completion.messages.filter((message) => message.isStreaming)).toHaveLength(0)
+      expect(completion.messages.find((message) => message.thinkingContent)?.thinkingContent).toBe(firstThinking)
+      const deltaRows = store.getEvents('session-1').filter((event) => event.type === 'message.thinking')
+      expect(deltaRows.length).toBeLessThan(40)
+      const resumed = await runFixture([frame({ content: 'Resumed normally' }, 'stop')])
+      expect(resumed.requests).toHaveLength(1)
+      expect(resumed.messages.at(-1)).toMatchObject({ content: 'Resumed normally', isStreaming: false })
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+
+  it('terminates repeated malformed tool calls without executing a tool and persists the failure', async () => {
+    const execute = vi.fn()
+    const malformed = toolFrames('write_file', '{"content":"unterminated')
+    const fixture = await runFixture(
+      Array.from({ length: 5 }, () => malformed),
+      execute,
+    )
+    expect(execute).not.toHaveBeenCalled()
+    expect(fixture.requests).toHaveLength(3)
+    expect(fixture.outcome?.failed?.error).toMatch(/malformed/i)
+    expect(store.getEvents('session-1').some((event) => event.type === 'chat.error')).toBe(true)
+    expect(fixture.messages.some((message) => message.isStreaming)).toBe(false)
+  })
+
+  it('persists an abrupt EOF failure after thinking and can resume on the next turn', async () => {
+    const execute = vi.fn()
+    const failed = await runFixture([frame({ reasoning_content: 'unfinished thought' })], execute)
+    expect(execute).not.toHaveBeenCalled()
+    expect(failed.requests).toHaveLength(1)
+    expect(failed.outcome?.failed?.error).toMatch(/terminal/i)
+    expect(store.getEvents('session-1').some((event) => event.type === 'chat.error')).toBe(true)
+    expect(failed.messages.some((message) => message.isStreaming)).toBe(false)
+    const resumed = await runFixture([frame({ content: 'Resume after EOF' }, 'stop')])
+    expect(resumed.messages.at(-1)).toMatchObject({ content: 'Resume after EOF', isStreaming: false })
+  })
 
   it('case 1 — failed-before-content retry writes nothing, success writes the exact expected events', async () => {
     const client = createSequencedClient(

@@ -221,6 +221,7 @@ function createSessionManager(state: Record<string, any>) {
   }
   return {
     requireSession: vi.fn(() => structuredClone(state['current'])),
+    getSession: vi.fn(() => structuredClone(state['current'])),
     getCurrentWindowMessages: vi.fn(() => state['current'].messages ?? []),
     getContextState: vi.fn(() => ({ ...contextState })),
     getCurrentModelContext: vi.fn(() => 200000),
@@ -1984,46 +1985,50 @@ describe('chat orchestrator', () => {
       })
     }
 
-    it('closes a streaming assistant message when the backend throws mid-stream', async () => {
-      const eventStore = prepare()
-      streamThenFail(new Error('backend exploded'))
-      const onMessage = vi.fn()
+    it.each(['backend exploded', 'stream disconnected', 'idle timeout', 'turn timeout'])(
+      'closes a streaming assistant message on %s',
+      async (failure) => {
+        const eventStore = prepare()
+        streamThenFail(new Error(failure))
+        const onMessage = vi.fn()
 
-      await runChatTurn({
-        sessionManager: plannerSessionManager() as never,
-        sessionId: 'session-1',
-        llmClient: { getModel: () => 'qwen3-32b' } as never,
-        onMessage,
-      })
+        await runChatTurn({
+          sessionManager: plannerSessionManager() as never,
+          sessionId: 'session-1',
+          llmClient: { getModel: () => 'qwen3-32b' } as never,
+          onMessage,
+        })
 
-      const messageId = assistantMessageId(eventStore)
-      expect(doneEventsFor(eventStore, messageId)).toHaveLength(1)
+        const messageId = assistantMessageId(eventStore)
+        expect(doneEventsFor(eventStore, messageId)).toHaveLength(1)
 
-      const types = appendedEvents(eventStore).map((e) => e.type)
-      expect(types).toContain('chat.error')
-      expect(types.at(-1)).toBe('running.changed')
+        const types = appendedEvents(eventStore).map((e) => e.type)
+        expect(types).toContain('chat.error')
+        expect(types.at(-1)).toBe('running.changed')
+        expect(appendedEvents(eventStore).at(-1)?.data).toEqual({ isRunning: false })
 
-      // Replayed (persisted) state: nothing is left streaming.
-      const messages = applyEvents<{
-        id: string
-        role: string
-        content: string
-        timestamp: number
-        isStreaming?: boolean
-      }>([], eventStore.getEvents('session-1') as never, { timestampAsNumber: true })
-      expect(messages.find((m) => m.id === messageId)?.isStreaming).toBe(false)
+        // Replayed (persisted) state: nothing is left streaming.
+        const messages = applyEvents<{
+          id: string
+          role: string
+          content: string
+          timestamp: number
+          isStreaming?: boolean
+        }>([], eventStore.getEvents('session-1') as never, { timestampAsNumber: true })
+        expect(messages.find((m) => m.id === messageId)?.isStreaming).toBe(false)
 
-      // The live client converges on the same terminal state.
-      expect(onMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'chat.message_updated',
-          payload: expect.objectContaining({
-            messageId,
-            updates: expect.objectContaining({ isStreaming: false }),
+        // The live client converges on the same terminal state.
+        expect(onMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'chat.message_updated',
+            payload: expect.objectContaining({
+              messageId,
+              updates: expect.objectContaining({ isStreaming: false }),
+            }),
           }),
-        }),
-      )
-    })
+        )
+      },
+    )
 
     it('closes a streaming assistant message when the turn is aborted', async () => {
       const eventStore = prepare()
@@ -2041,6 +2046,36 @@ describe('chat orchestrator', () => {
       const types = appendedEvents(eventStore).map((e) => e.type)
       expect(types).not.toContain('chat.error')
       expect(types.at(-1)).toBe('running.changed')
+    })
+
+    it('stops consumption and records an error when a delta cannot be persisted', async () => {
+      const eventStore = prepare()
+      // A streaming fragment is never inserted as its own row — the sink
+      // checkpoints the in-flight message instead, so that is the write which
+      // can fail. The invariant under test is unchanged: a storage failure on
+      // the turn's write path must surface, not be swallowed.
+      eventStore.upsertMessageCheckpoint.mockImplementation(() => {
+        throw new Error('storage unavailable')
+      })
+      consumeStreamGeneratorMock.mockImplementation(async (_gen: unknown, onEvent: (event: unknown) => void) => {
+        onEvent({ type: 'message.thinking', data: { messageId: 'ignored', content: 'partial' } })
+        return {
+          content: 'not persisted',
+          toolCalls: [],
+          segments: [],
+          aborted: false,
+          usage: { promptTokens: 0, completionTokens: 0 },
+          timing: { ttft: 0, completionTime: 0, tps: 0, prefillTps: 0 },
+        }
+      })
+      await runChatTurn({
+        sessionManager: plannerSessionManager() as never,
+        sessionId: 'session-1',
+        llmClient: { getModel: () => 'qwen3-32b' } as never,
+      })
+      expect(appendedEvents(eventStore).find((event) => event.type === 'chat.error')?.data['error']).toBe(
+        'storage unavailable',
+      )
     })
 
     it('does not emit a second terminal event when the turn completed normally', async () => {

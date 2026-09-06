@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { EventStore, initEventStore } from './store.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
 import type { TurnEvent, StoredEvent, SessionSnapshot } from './types.js'
+import { applyEvents } from './apply-events.js'
 
 describe('EventStore', () => {
   let db: Database.Database
@@ -810,6 +811,62 @@ describe('EventStore', () => {
 })
 
 describe('initEventStore', () => {
+  it('closes an interrupted assistant message on startup without losing its thinking', () => {
+    const db = new Database(':memory:')
+    try {
+      db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, is_running INTEGER DEFAULT 0)')
+      db.prepare('INSERT INTO sessions (id, is_running) VALUES (?, 1)').run('interrupted-session')
+      const store = new EventStore(db)
+      store.append('interrupted-session', { type: 'running.changed', data: { isRunning: true } })
+      store.append('interrupted-session', {
+        type: 'message.start',
+        data: { messageId: 'interrupted-message', role: 'assistant' },
+      })
+      store.append('interrupted-session', {
+        type: 'message.thinking',
+        data: { messageId: 'interrupted-message', content: 'Thinking before interruption' },
+      })
+
+      const restarted = initEventStore(db)
+      const events = restarted.getEvents('interrupted-session')
+      expect(events.filter((event) => event.type === 'message.done')).toEqual([
+        expect.objectContaining({ data: { messageId: 'interrupted-message', partial: true } }),
+      ])
+      expect(events.find((event) => event.type === 'message.thinking')?.data).toEqual({
+        messageId: 'interrupted-message',
+        content: 'Thinking before interruption',
+      })
+      expect(events.at(-1)?.data).toEqual({ isRunning: false })
+      expect(events.find((event) => event.type === 'chat.error')?.data).toEqual(
+        expect.objectContaining({ recoverable: true }),
+      )
+      const replay = applyEvents([], events, { timestampAsNumber: true })
+      expect(replay[0]).toMatchObject({
+        isStreaming: false,
+        partial: true,
+        thinkingContent: 'Thinking before interruption',
+      })
+      initEventStore(db)
+      expect(restarted.getEvents('interrupted-session')).toEqual(events)
+      restarted.append('interrupted-session', { type: 'running.changed', data: { isRunning: true } })
+      restarted.append('interrupted-session', {
+        type: 'message.start',
+        data: { messageId: 'resumed', role: 'assistant' },
+      })
+      restarted.append('interrupted-session', {
+        type: 'message.delta',
+        data: { messageId: 'resumed', content: 'Resumed' },
+      })
+      restarted.append('interrupted-session', { type: 'message.done', data: { messageId: 'resumed' } })
+      restarted.append('interrupted-session', { type: 'running.changed', data: { isRunning: false } })
+      expect(
+        applyEvents([], restarted.getEvents('interrupted-session'), { timestampAsNumber: true }).at(-1),
+      ).toMatchObject({ content: 'Resumed', isStreaming: false })
+    } finally {
+      db.close()
+    }
+  })
+
   it('should reset stale running sessions on startup', () => {
     // This simulates a server crash/restart scenario:
     // 1. Server was running, session was in running state

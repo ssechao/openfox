@@ -196,7 +196,7 @@ describe('streaming tool-call argument integrity', () => {
 
   it('reports truncated tool arguments as an explicit parse error without repairing the JSON', async () => {
     const partial = '{"path":"src/widget.rs","content":"fn main() { let s = &mut'
-    const body = [OPEN_FRAME, ...chunkString(partial, 7).map(argsFrame)].join('')
+    const body = [OPEN_FRAME, ...chunkString(partial, 7).map(argsFrame), FINISH_FRAME, DONE_FRAME].join('')
 
     const events = await collect(body)
 
@@ -206,5 +206,17 @@ describe('streaming tool-call argument integrity', () => {
     // No guessing: the raw bytes are kept verbatim and no arguments are invented.
     expect(response.toolCalls![0]!.rawArguments).toBe(partial)
     expect(response.toolCalls![0]!.arguments).toEqual({})
+  })
+
+  it('reports EOF after partial thinking as a failure, not a completed response', async () => {
+    const events = await collect(
+      frame({
+        id: 'resp-1',
+        choices: [{ index: 0, delta: { reasoning_content: 'partial thought' } }],
+      }),
+    )
+    expect(events.some((event) => event['type'] === 'thinking_delta')).toBe(true)
+    expect(events.some((event) => event['type'] === 'done')).toBe(false)
+    expect(events.find((event) => event['type'] === 'error')?.['error']).toMatch(/terminal/i)
   })
 })
