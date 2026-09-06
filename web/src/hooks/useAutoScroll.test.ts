@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, afterEach, vi } from 'vitest'
 import { act } from 'react'
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { useAutoScroll, scrollbarGestureToEnable, DRAG_MAGNET_GAP_PX } from './useAutoScroll'
 import type { Session } from '@shared/types.js'
 
@@ -18,17 +18,21 @@ function makeScroller() {
   const metrics: Metrics = { ...BASE }
   const el = document.createElement('div')
   let scrollTop = metrics.scrollHeight - metrics.offsetHeight
+  // Layout writes are the unit Finding F measures: one write is one forced
+  // reflow of the feed.
+  const layoutWrites = { count: 0 }
   Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => metrics.scrollHeight })
   Object.defineProperty(el, 'offsetHeight', { configurable: true, get: () => metrics.offsetHeight })
   Object.defineProperty(el, 'scrollTop', {
     configurable: true,
     get: () => scrollTop,
     set: (v: number) => {
+      layoutWrites.count++
       scrollTop = Math.min(Math.max(v, 0), metrics.scrollHeight - metrics.offsetHeight)
     },
   })
   document.body.appendChild(el)
-  return { el, metrics }
+  return { el, metrics, layoutWrites }
 }
 
 const flushRaf = () =>
@@ -410,5 +414,67 @@ describe('useAutoScroll', () => {
     act(() => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })))
     await flushRaf()
     expect(result.current.isAutoScrollActive).toBe(false)
+  })
+})
+
+// Finding F (remediation plan): layout work must be event-driven and bounded
+// per frame, not polled and not proportional to the number of mutation batches.
+describe('useAutoScroll layout work', () => {
+  function mount() {
+    const scroller = makeScroller()
+    const hook = renderHook(() => useAutoScroll({ current: scroller.el }, null, () => scroller.el))
+    cleanups.push(() => {
+      hook.unmount()
+      scroller.el.remove()
+    })
+    return scroller
+  }
+
+  it('performs no layout work while the feed is idle', async () => {
+    const { el, layoutWrites } = mount()
+    el.appendChild(document.createTextNode('settled'))
+    await flushRaf()
+    layoutWrites.count = 0
+
+    // Five seconds of an idle, untouched feed.
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 3200))
+    })
+
+    expect(layoutWrites.count).toBe(0)
+  })
+
+  it('coalesces several mutation batches in the same frame into one layout write', async () => {
+    const { el, layoutWrites } = mount()
+    await flushRaf()
+    layoutWrites.count = 0
+
+    // Each await yields a microtask checkpoint, so the observer fires once per
+    // append instead of once for the whole batch.
+    await act(async () => {
+      for (let i = 0; i < 20; i++) {
+        el.appendChild(document.createTextNode(`chunk ${i}`))
+        await Promise.resolve()
+      }
+    })
+    await flushRaf()
+
+    expect(layoutWrites.count).toBeLessThanOrEqual(2)
+  })
+
+  it('still follows the feed when content grows', async () => {
+    const { el, metrics, layoutWrites } = mount()
+    await flushRaf()
+    layoutWrites.count = 0
+
+    metrics.scrollHeight = 4000
+    await act(async () => {
+      el.appendChild(document.createTextNode('a long streamed answer'))
+      await Promise.resolve()
+    })
+
+    // Polled rather than timed: the follow must happen, whenever the frame runs.
+    await waitFor(() => expect(layoutWrites.count).toBeGreaterThan(0))
+    expect(el.scrollTop).toBe(metrics.scrollHeight - metrics.offsetHeight)
   })
 })
