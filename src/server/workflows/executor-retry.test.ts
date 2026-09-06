@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { WorkflowDefinition } from './types.js'
 import type { OrchestratorOptions } from '../runner/types.js'
 import { LLMError } from '../utils/errors.js'
+import type { TurnEvent } from '../events/types.js'
 
 // ============================================================================
 // Hoisted shared spies — available in both vi.mock factories and test bodies
@@ -201,7 +202,9 @@ describe('workflow agent step LLM failure', () => {
   })
 
   it('blocks the workflow when runAgentTurn throws an LLMError', async () => {
-    mockRunAgentTurn.mockImplementation(async () => {
+    mockRunAgentTurn.mockImplementation(async (_options, _metrics, _agent, append: (event: TurnEvent) => void) => {
+      append({ type: 'message.start', data: { messageId: 'interrupted-step', role: 'assistant' } })
+      append({ type: 'message.thinking', data: { messageId: 'interrupted-step', content: 'unfinished step' } })
       throw new LLMError('LLM stream idle timeout')
     })
 
@@ -214,6 +217,14 @@ describe('workflow agent step LLM failure', () => {
     expect((result.finalAction as { reason: string }).reason).toContain('LLM stream idle timeout')
     expect(mockRunAgentTurn).toHaveBeenCalledTimes(1)
     expect((options.sessionManager as any).blockWorkflow).toHaveBeenCalled()
+    expect(mockAppend).toHaveBeenCalledWith('test-session', {
+      type: 'message.done',
+      data: { messageId: 'interrupted-step', partial: true },
+    })
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'chat.message_updated',
+      payload: { messageId: 'interrupted-step', updates: { isStreaming: false, partial: true } },
+    })
   })
 
   it('does not roll back when the agent simply forgets step_done()', async () => {

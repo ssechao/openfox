@@ -179,11 +179,12 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
   // Create append closure — the only write path to EventStore from the loop
   const streamTracker = createStreamLifecycleTracker()
   const append = (event: import('../events/types.js').TurnEvent) => {
-    streamTracker.observe(event)
     try {
       eventStore.append(sessionId, event)
-    } catch {
+      streamTracker.observe(event)
+    } catch (error) {
       // Session may have been deleted (e.g. during abort) — skip
+      if (sessionManager.getSession(sessionId) !== null) throw error
     }
   }
 

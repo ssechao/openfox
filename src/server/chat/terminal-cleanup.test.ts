@@ -101,4 +101,20 @@ describe('createStreamLifecycleTracker', () => {
     expect(tracker.finalize(sink.append, sink.onMessage)).toEqual(['msg-1', 'msg-2'])
     expect(sink.events.map((e) => (e.data as { messageId: string }).messageId)).toEqual(['msg-1', 'msg-2'])
   })
+
+  it('persists all closures even if a client callback throws, without duplicating them on retry', () => {
+    const tracker = createStreamLifecycleTracker()
+    const sink = collector()
+    tracker.observe(startAssistant('msg-1'))
+    tracker.observe(startAssistant('msg-2'))
+    const notify = vi.fn(() => {
+      throw new Error('client disconnected')
+    })
+    expect(() => tracker.finalize(sink.append, notify)).toThrow('client disconnected')
+    expect(sink.events).toEqual([doneWithPartial('msg-1'), doneWithPartial('msg-2')])
+    expect(tracker.finalize(sink.append)).toEqual([])
+    expect(sink.events).toHaveLength(2)
+  })
 })
+
+const doneWithPartial = (messageId: string): TurnEvent => ({ type: 'message.done', data: { messageId, partial: true } })

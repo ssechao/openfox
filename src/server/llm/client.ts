@@ -405,8 +405,9 @@ export function createLLMClient(
           request.signal?.removeEventListener('abort', onAbort)
         }
 
-        if (currentApiProtocol() === 'responses' && !sawTerminalResponse) {
-          throw new LLMError('Responses API stream ended without a terminal response event')
+        if (!sawTerminalResponse) {
+          const source = currentApiProtocol() === 'responses' ? 'Responses API' : 'LLM'
+          throw new LLMError(`${source} stream ended without a terminal response event`)
         }
 
         const finalContent = fullContent.trim()

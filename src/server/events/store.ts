@@ -20,6 +20,8 @@ import type { TurnEvent, StoredEvent, SessionSnapshot, SnapshotMessage } from '.
 import { logger } from '../utils/logger.js'
 import { foldSessionState, buildSnapshot, trimSnapshotStreamingOutput } from './folding.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
+import { applyEvents } from './apply-events.js'
+import { serverT } from '../i18n.js'
 
 // Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
 // auto-pruned on the next migration invocation (startup auto-run or manual
@@ -1327,27 +1329,34 @@ function resetStaleRunningSessions(eventStore: EventStore, db: Database.Database
   let resetCount = 0
 
   for (const { id: sessionId } of sessions) {
-    // Get the last running.changed event for this session
-    const lastRunningEvent = db
-      .prepare(
-        `
-      SELECT payload FROM events 
-      WHERE session_id = ? AND event_type = 'running.changed'
-      ORDER BY seq DESC LIMIT 1
-    `,
-      )
-      .get(sessionId) as { payload: string } | undefined
-
-    if (lastRunningEvent) {
-      const data = JSON.parse(lastRunningEvent.payload) as { isRunning: boolean }
-      if (data.isRunning === true) {
-        // This session was left in running state - emit false to reset
-        eventStore.append(sessionId, {
-          type: 'running.changed',
-          data: { isRunning: false },
+    const { snapshot, events } = eventStore.getEventsSinceSnapshot(sessionId)
+    let isRunning = snapshot?.isRunning ?? false
+    for (const event of events) {
+      if (event.type === 'running.changed') isRunning = (event.data as { isRunning: boolean }).isRunning
+    }
+    const messages = applyEvents<SnapshotMessage>(snapshot?.messages ?? [], events, { timestampAsNumber: true })
+    const interrupted = messages.filter((message) => message.role === 'assistant' && message.isStreaming)
+    if (isRunning || interrupted.length > 0) {
+      const recovery: TurnEvent[] = interrupted.map((message) => ({
+        type: 'message.done',
+        data: { messageId: message.id, partial: true },
+      }))
+      if (interrupted.length > 0) {
+        recovery.push({
+          type: 'chat.error',
+          data: {
+            error: serverT({
+              en: 'The previous response was interrupted by a server restart. You can resume this session.',
+              fr: 'La réponse précédente a été interrompue par un redémarrage du serveur. Vous pouvez reprendre cette session.',
+            }),
+            recoverable: true,
+          },
         })
-        resetCount++
       }
+      recovery.push({ type: 'running.changed', data: { isRunning: false } })
+      // The terminal representation must survive another crash atomically.
+      eventStore.appendBatch(sessionId, recovery)
+      resetCount++
     }
   }
 

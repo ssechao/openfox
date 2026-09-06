@@ -52,6 +52,7 @@ import { logger } from '../utils/logger.js'
 import type { LLMRetryPolicy } from '../runner/types.js'
 import { DEFAULT_LLM_RETRY_POLICY } from '../runner/types.js'
 import { serverT } from '../i18n.js'
+import { coalesceStreamEvents } from './coalesce-stream.js'
 
 function emitPartialDoneEvents(
   _sessionId: string,
@@ -200,6 +201,7 @@ export interface TopLevelLoopConfig {
 
 const MAX_TRUNCATION_RETRIES = 3
 const MAX_CONTEXT_LENGTH_RETRIES = 3
+const MAX_MALFORMED_TOOL_ATTEMPTS = 3
 const OUTPUT_RESERVE_TOKENS = 2048
 const CONTINUE_PROMPT = 'Continue your previous response. Do NOT repeat what you already wrote.'
 const CONTINUE_AFTER_STREAM_ERROR_PROMPT =
@@ -218,6 +220,7 @@ export async function runTopLevelAgentLoop(
   const retryLimiter: RetryLimiter = createRetryLimiter(config.maxRetriesPerTurn ?? 10)
   let truncationRetryCount = 0
   let contextRetryCount = 0
+  let malformedToolAttempts = 0
   let pendingToolResultTokens = 0
   let returnValueContent: string | undefined
   let returnValueResult: string | undefined
@@ -225,6 +228,14 @@ export async function runTopLevelAgentLoop(
   let lastPatternMatch: { pattern: string; field: string; matchedContent: string } | undefined
   let compacting = config.initialCompacting ?? false
   let returnValueNudgeCount = 0
+  const failLLM = (error: string, attempts: number) => {
+    append({ type: 'chat.error', data: { error, recoverable: true } })
+    if (!config.subAgentMetadata) {
+      recordLLMFailure(sessionId)
+      onMessage?.(createChatLLMRetryFailedMessage(error, attempts))
+    }
+    return { failed: { error } }
+  }
 
   for (;;) {
     if (signal?.aborted) throw new Error('Aborted')
@@ -380,6 +391,7 @@ export async function runTopLevelAgentLoop(
       const allAgents = await loadAllAgentsDefault(sessionManager.getProjectWorkdir(sessionId))
       const subAgentAliases = new Set(getSubAgents(allAgents).map((a) => a.metadata.id))
 
+      const attemptAbort = new AbortController()
       const streamGen = streamLLMPure({
         messageId: assistantMsgId,
         systemPrompt: assembledRequest.systemPrompt,
@@ -387,16 +399,27 @@ export async function runTopLevelAgentLoop(
         messages: assembledRequest.messages,
         tools: assembledRequest.tools,
         toolChoice: 'auto',
-        signal,
+        signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
         subAgentAliases,
         ...(config.retryPatterns ? { retryPatterns: config.retryPatterns } : {}),
         ...(modelSettings && { modelSettings }),
       })
 
-      const attemptResult = await consumeStreamGenerator(streamGen, (event) => {
-        ensureAssistantMessage()
-        append(event)
-      })
+      const bufferedStream = coalesceStreamEvents(streamGen)
+      let attemptResult
+      try {
+        attemptResult = await consumeStreamGenerator(bufferedStream, (event) => {
+          ensureAssistantMessage()
+          append(event)
+        })
+      } catch (error) {
+        // A callback can fail while the coalescer has an outstanding read.
+        // Abort that read before closing the iterator, otherwise return() waits
+        // indefinitely behind it and the producer outlives the turn.
+        attemptAbort.abort()
+        await bufferedStream.return(undefined as never)
+        throw error
+      }
 
       if (!attemptResult.error) {
         result = attemptResult
@@ -443,11 +466,7 @@ export async function runTopLevelAgentLoop(
       // is the first such case. Fail immediately instead of burning the retry
       // window (transient 429/5xx/network errors keep the backoff policy).
       if (failWithoutRetry) {
-        if (!config.subAgentMetadata) {
-          recordLLMFailure(sessionId)
-          config.onMessage?.(createChatLLMRetryFailedMessage(attemptResult.error, 1))
-        }
-        return { failed: { error: attemptResult.error } }
+        return failLLM(attemptResult.error, 1)
       }
 
       // Backoff decision — the shared LLMRetryPolicy (same defaults as workflows).
@@ -457,11 +476,7 @@ export async function runTopLevelAgentLoop(
       }
       const decision = evaluateLLMRetry(requestFailures, requestFirstFailureAt, Date.now(), retryPolicy)
       if (!decision.retry) {
-        if (!config.subAgentMetadata) {
-          recordLLMFailure(sessionId)
-          config.onMessage?.(createChatLLMRetryFailedMessage(attemptResult.error, requestFailures))
-        }
-        return { failed: { error: attemptResult.error } }
+        return failLLM(attemptResult.error, requestFailures)
       }
       if (!config.subAgentMetadata) {
         config.onMessage?.(createChatLLMRetryMessage(decision.attempt, decision.delayMs, attemptResult.error))
@@ -691,6 +706,17 @@ ${COMPACTION_PROMPT}`,
         batchContext.agentTimeout = getRuntimeConfig().agent.toolTimeout
         const batchResult = await executeTools(assistantMsgId, result.toolCalls, batchContext, append)
         pendingToolResultTokens = estimateToolResultTokens(batchResult.toolMessages)
+        // Invalid JSON must never become an unbounded model/tool recovery loop.
+        // Keep the failed tool results in history, allowing two correction turns.
+        malformedToolAttempts = result.toolCalls.some((call) => call.parseError) ? malformedToolAttempts + 1 : 0
+        if (malformedToolAttempts >= MAX_MALFORMED_TOOL_ATTEMPTS) {
+          const error = serverT({
+            en: 'Stopped after three consecutive responses with malformed tool arguments. You can resume this session.',
+            fr: 'Arrêt après trois réponses consécutives avec des arguments d’outil invalides. Vous pouvez reprendre cette session.',
+          })
+          append(createChatDoneEvent(assistantMsgId, 'error', undefined, agentType))
+          return failLLM(error, malformedToolAttempts)
+        }
         if (batchResult.stepDoneCalled) {
           emitDoneAndBreak(
             assistantMsgId,

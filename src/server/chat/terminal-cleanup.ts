@@ -48,9 +48,13 @@ export function createStreamLifecycleTracker(): StreamLifecycleTracker {
         // `partial: true` is the truth here: the producer disappeared before the
         // message was complete. Nothing is invented and nothing is hidden.
         append(createMessageDoneEvent(messageId, { partial: true }))
+        open.delete(messageId)
+      }
+      // Persist every closure before notifying clients: one disconnected
+      // subscriber must not leave the other messages open on disk.
+      for (const messageId of closed) {
         onMessage?.(createChatMessageUpdatedMessage(messageId, { isStreaming: false, partial: true }))
       }
-      open.clear()
       return closed
     },
   }

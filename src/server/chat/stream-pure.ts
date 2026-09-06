@@ -384,6 +384,9 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
     } else {
       throw error
     }
+  } finally {
+    patternAbortController.abort()
+    await stream.return(null)
   }
 
   // Pattern match took precedence over normal result
