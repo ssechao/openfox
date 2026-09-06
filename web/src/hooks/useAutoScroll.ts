@@ -163,15 +163,27 @@ export const useAutoScroll = (
       }
     }
 
-    const observer = new MutationObserver(() => {
+    // One follow per frame at most. The observer fires once per microtask
+    // checkpoint, so a single streamed update can produce dozens of batches;
+    // scheduling an animation frame for each one turns every batch into its own
+    // forced reflow.
+    let pendingFollow: number | null = null
+    const scheduleFollow = () => {
       if (!is_active.current) return
-      requestAnimationFrame(scroll_to_bottom)
-    })
+      if (pendingFollow !== null) return
+      pendingFollow = requestAnimationFrame(() => {
+        pendingFollow = null
+        scroll_to_bottom()
+      })
+    }
 
-    const interval = setInterval(() => {
-      if (!is_active.current) return
-      scroll_to_bottom()
-    }, 1000)
+    const observer = new MutationObserver(scheduleFollow)
+
+    // Content can also grow without mutating the observed subtree: images and
+    // fonts finishing load, CSS transitions settling. A resize observer keeps
+    // that case event-driven instead of polling the layout every second for the
+    // lifetime of every pane, sub-agent box and command output view.
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(scheduleFollow) : null
 
     scroller.addEventListener('wheel', onWheel, { passive: true })
     scroller.addEventListener('touchstart', onTouchStart, { passive: true })
@@ -184,6 +196,11 @@ export const useAutoScroll = (
       subtree: true,
       characterData: true,
     })
+    if (resizeObserver) {
+      resizeObserver.observe(scroller)
+      const content = scroller.firstElementChild
+      if (content) resizeObserver.observe(content)
+    }
 
     return () => {
       scroller.removeEventListener('wheel', onWheel)
@@ -192,7 +209,8 @@ export const useAutoScroll = (
       scroller.removeEventListener('scroll', onScroll)
       scroller.removeEventListener('keydown', onKeyDown)
       observer.disconnect()
-      clearInterval(interval)
+      resizeObserver?.disconnect()
+      if (pendingFollow !== null) cancelAnimationFrame(pendingFollow)
     }
   }, [session?.id, getEffectiveScroller, scroll_to_bottom, setActive, disableAutoscroll])
 

@@ -2,6 +2,15 @@
 import { render, waitFor, cleanup } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
+
+const { ansiToReactSpy } = vi.hoisted(() => ({ ansiToReactSpy: vi.fn() }))
+
+vi.mock('../../lib/ansiParser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/ansiParser')>()
+  ansiToReactSpy.mockImplementation(actual.ansiToReact)
+  return { ...actual, ansiToReact: ansiToReactSpy }
+})
+
 import { RunCommandView } from './RunCommandView'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -216,6 +225,46 @@ describe('RunCommandView auto-scroll', () => {
         vi.advanceTimersByTime(670)
       })
       expect(getScrollTop()).toBe(146)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// Finding F (remediation plan): command output must be processed incrementally.
+// A running command re-renders 10x per second on its elapsed-time timer.
+describe('RunCommandView output parsing', () => {
+  const STARTED_AT = 1_700_000_000_000
+
+  const pendingView = (output: string[]) => (
+    <RunCommandView
+      command="cargo build"
+      timeout={10_000}
+      status="pending"
+      startedAt={STARTED_AT}
+      streamingOutput={output.map((content) => ({ stream: 'stdout' as const, content }))}
+    />
+  )
+
+  it('parses each output chunk once instead of re-parsing the backlog on every render', () => {
+    vi.useFakeTimers()
+    try {
+      const chunks = Array.from({ length: 100 }, (_, i) => `compiling crate ${i}\n`)
+      ansiToReactSpy.mockClear()
+      const { rerender } = render(pendingView(chunks))
+      expect(ansiToReactSpy.mock.calls.length).toBeGreaterThanOrEqual(100)
+
+      // The elapsed-time timer re-renders the view without new output.
+      ansiToReactSpy.mockClear()
+      act(() => {
+        vi.advanceTimersByTime(350)
+      })
+      expect(ansiToReactSpy).not.toHaveBeenCalled()
+
+      // One new chunk costs one parse, not one per backlog entry.
+      ansiToReactSpy.mockClear()
+      rerender(pendingView([...chunks, 'compiling crate 100\n']))
+      expect(ansiToReactSpy.mock.calls.length).toBe(1)
     } finally {
       vi.useRealTimers()
     }

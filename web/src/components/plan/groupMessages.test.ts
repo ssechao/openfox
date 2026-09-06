@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect } from 'vitest'
-import { groupMessages } from './groupMessages'
+import { groupMessages, getGroupScanCountForTest, resetGroupScanCountForTest } from './groupMessages'
 import type { Message } from '@shared/types.js'
 import type { DisplayItem } from './groupMessages'
 
@@ -325,5 +325,31 @@ describe('groupMessages identity preservation', () => {
       subAgentType: 'code_reviewer',
       messages: [b2],
     })
+  })
+})
+
+// Finding F (remediation plan): grouping runs on every streaming flush over the
+// whole history, so one pass per call is the contract.
+describe('groupMessages scan cost', () => {
+  it('walks each message once even when sub-agent groups interleave', () => {
+    const messages: Message[] = []
+    for (let i = 0; i < 100; i++) {
+      messages.push(
+        createMessage(`sub-${i}`, 'assistant', 'sub work', {
+          subAgentId: `agent-${i}`,
+          subAgentType: 'explorer',
+          contextWindowId: 'w1',
+        }),
+      )
+      messages.push(createMessage(`main-${i}`, 'assistant', 'main work', { contextWindowId: 'w1' }))
+    }
+
+    resetGroupScanCountForTest()
+    const items = groupMessages(messages)
+
+    expect(getGroupScanCountForTest()).toBe(messages.length)
+    expect(items).toHaveLength(messages.length)
+    expect(items[0]).toMatchObject({ type: 'subagent', subAgentId: 'agent-0' })
+    expect(items[2]).toMatchObject({ type: 'subagent', subAgentId: 'agent-1' })
   })
 })

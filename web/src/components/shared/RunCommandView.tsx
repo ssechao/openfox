@@ -2,7 +2,7 @@ import { ScrollArea } from './ScrollArea'
 import type { OverlayScrollbarsComponentRef } from 'overlayscrollbars-react'
 import { useAutoScroll } from '../../hooks/useAutoScroll'
 import { useViewport } from '../../hooks/useViewport'
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { ansiToReact } from '../../lib/ansiParser'
 import { useT } from '../../hooks/useT'
 
@@ -10,6 +10,15 @@ interface StreamingChunk {
   stream: 'stdout' | 'stderr'
   content: string
 }
+
+/**
+ * One already-parsed output chunk. A running command re-renders ten times per
+ * second on its elapsed-time timer; without this boundary every render
+ * re-parses the whole backlog of ANSI output.
+ */
+const AnsiChunk = memo(function AnsiChunk({ content, stream }: StreamingChunk) {
+  return <span className={stream === 'stderr' ? 'text-accent-warning' : ''}>{ansiToReact(content)}</span>
+})
 
 interface RunCommandViewProps {
   command: string
@@ -69,8 +78,12 @@ export const RunCommandView = memo(function RunCommandView({
   const timeoutSec = timeout / 1000
   const elapsedSec = status === 'pending' ? elapsed / 1000 : (durationMs ?? 0) / 1000
 
-  // Combine streaming chunks into displayable output
-  const displayOutput = status === 'pending' ? (streamingOutput?.map((c) => c.content).join('') ?? '') : (result ?? '')
+  // While pending the chunks are rendered one by one, so the whole backlog is
+  // never joined into a single string just to decide whether there is output.
+  const isPending = status === 'pending'
+  const finalOutput = isPending ? '' : (result ?? '')
+  const hasOutput = isPending ? (streamingOutput?.length ?? 0) > 0 : finalOutput.length > 0
+  const finalBody = useMemo(() => (finalOutput ? ansiToReact(finalOutput) : null), [finalOutput])
 
   return (
     <div className="space-y-2">
@@ -106,7 +119,7 @@ export const RunCommandView = memo(function RunCommandView({
       )}
 
       {/* Output display */}
-      {(displayOutput || status === 'pending') && (
+      {(hasOutput || isPending) && (
         <ScrollArea
           ref={scrollRef}
           onScrollbarGesture={handleScrollbarGesture}
@@ -115,15 +128,11 @@ export const RunCommandView = memo(function RunCommandView({
           }`}
           style={{ overflowX: 'hidden', whiteSpace: 'normal' }}
         >
-          {status === 'pending' && streamingOutput
-            ? // Render streaming chunks with ANSI color parsing
-              streamingOutput.map((chunk, i) => (
-                <span key={i} className={chunk.stream === 'stderr' ? 'text-accent-warning' : ''}>
-                  {ansiToReact(chunk.content)}
-                </span>
-              ))
-            : // Render final output with ANSI color parsing
-              ansiToReact(displayOutput)}
+          {isPending && streamingOutput
+            ? // Streaming chunks: each one is parsed once and memoized.
+              streamingOutput.map((chunk, i) => <AnsiChunk key={i} content={chunk.content} stream={chunk.stream} />)
+            : // Final output, parsed once per result.
+              finalBody}
         </ScrollArea>
       )}
 
