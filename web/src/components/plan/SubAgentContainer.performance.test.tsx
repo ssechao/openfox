@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import '@testing-library/jest-dom/vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, fireEvent } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Message } from '@shared/types.js'
 
@@ -52,7 +52,7 @@ function referenceMessages(): Message[] {
 afterEach(cleanup)
 
 describe('SubAgentContainer long-session rendering', () => {
-  it('mounts full message history regardless of collapse state', () => {
+  it('bounds initial mounts while keeping the complete history accessible', () => {
     render(
       <SubAgentContainer
         messages={referenceMessages()}
@@ -62,8 +62,13 @@ describe('SubAgentContainer long-session rendering', () => {
       />,
     )
 
+    expect(screen.getAllByTestId('subagent-message')).toHaveLength(30)
+    expect(screen.queryByText('Sub-agent output 1')).toBeNull()
+    expect(screen.getByText(`Sub-agent output ${REFERENCE_LLM_CALLS}`)).toBeInTheDocument()
+    while (screen.queryByRole('button', { name: /earlier|anciens/i })) {
+      fireEvent.click(screen.getByRole('button', { name: /earlier|anciens/i }))
+    }
     expect(screen.getAllByTestId('subagent-message')).toHaveLength(REFERENCE_LLM_CALLS)
     expect(screen.getByText('Sub-agent output 1')).toBeInTheDocument()
-    expect(screen.getByText(`Sub-agent output ${REFERENCE_LLM_CALLS}`)).toBeInTheDocument()
   })
 })
