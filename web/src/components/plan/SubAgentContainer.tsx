@@ -1,4 +1,4 @@
-import { memo, useRef, useState, useCallback } from 'react'
+import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect } from 'react'
 import type { Message, ContextState } from '@shared/types.js'
 import { AssistantMessage } from './AssistantMessage'
 import { ChatMessage } from './ChatMessage'
@@ -80,6 +80,29 @@ export const SubAgentContainer = memo(function SubAgentContainer({
   const getViewport = useViewport(scrollRef)
 
   const { isAutoScrollActive, setAutoScroll, handleScrollbarGesture } = useAutoScroll(scrollRef, null, getViewport)
+  const displayMessages = messages.filter((message) => message.role !== 'tool')
+  const [startIndex, setStartIndex] = useState(() => Math.max(0, displayMessages.length - 30))
+  const previousViewport = useRef<{ height: number; top: number } | null>(null)
+
+  useEffect(() => {
+    if (isAutoScrollActive) setStartIndex(Math.max(0, displayMessages.length - 30))
+  }, [displayMessages.length, isAutoScrollActive])
+
+  useLayoutEffect(() => {
+    const viewport = getViewport()
+    const previous = previousViewport.current
+    if (viewport && previous) viewport.scrollTop = previous.top + viewport.scrollHeight - previous.height
+    previousViewport.current = null
+  }, [startIndex, getViewport])
+
+  const showEarlier = () => {
+    // Preserve the user's anchor when prepending history; following must stay
+    // detached until they explicitly re-enable it or return to the bottom.
+    setAutoScroll(false)
+    const viewport = getViewport()
+    if (viewport) previousViewport.current = { height: viewport.scrollHeight, top: viewport.scrollTop }
+    setStartIndex((index) => Math.max(0, index - 20))
+  }
 
   const handleToggleExpand = useCallback(() => {
     const willExpand = !expanded
@@ -96,8 +119,6 @@ export const SubAgentContainer = memo(function SubAgentContainer({
   const label = agentInfo?.name ?? (LABELS[subAgentType] ? t(LABELS[subAgentType]) : subAgentType)
   const color = getAgentColor(agents, subAgentType)
   const hStyle = headerStyle(color)
-
-  const displayMessages = messages.filter((m) => m.role !== 'tool')
 
   return (
     <div ref={containerRef} className="feed-item border border-border rounded overflow-hidden bg-secondary">
@@ -143,7 +164,12 @@ export const SubAgentContainer = memo(function SubAgentContainer({
         className={`${expanded ? 'max-h-[calc(100vh-10rem)]' : 'max-h-80'} p-2 transition-[max-height] duration-200`}
         onScrollbarGesture={handleScrollbarGesture}
       >
-        {displayMessages.map((message) => {
+        {startIndex > 0 && (
+          <button type="button" className="text-xs text-text-muted hover:text-text-primary mb-2" onClick={showEarlier}>
+            {t({ en: 'Show earlier messages', fr: 'Afficher les messages plus anciens' })}
+          </button>
+        )}
+        {displayMessages.slice(startIndex).map((message) => {
           if (message.role === 'assistant') {
             return (
               <AssistantMessage

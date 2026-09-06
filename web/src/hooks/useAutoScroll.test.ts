@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-import { describe, expect, it, afterEach, vi } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
-import { renderHook, waitFor } from '@testing-library/react'
+import { renderHook } from '@testing-library/react'
 import { useAutoScroll, scrollbarGestureToEnable, DRAG_MAGNET_GAP_PX } from './useAutoScroll'
 import type { Session } from '@shared/types.js'
 
@@ -420,6 +420,51 @@ describe('useAutoScroll', () => {
 // Finding F (remediation plan): layout work must be event-driven and bounded
 // per frame, not polled and not proportional to the number of mutation batches.
 describe('useAutoScroll layout work', () => {
+  const frames = new Map<number, FrameRequestCallback>()
+  const mutations: Array<() => void> = []
+  let frameId = 0
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    frames.clear()
+    mutations.length = 0
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.set(++frameId, callback)
+      return frameId
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
+    vi.stubGlobal(
+      'MutationObserver',
+      class {
+        constructor(callback: () => void) {
+          mutations.push(callback)
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    )
+  })
+
+  afterEach(() => {
+    while (cleanups.length) cleanups.pop()?.()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  const flushFrame = () =>
+    act(() => {
+      const callbacks = [...frames.values()]
+      frames.clear()
+      for (const callback of callbacks) callback(0)
+    })
+
   function mount() {
     const scroller = makeScroller()
     const hook = renderHook(() => useAutoScroll({ current: scroller.el }, null, () => scroller.el))
@@ -430,51 +475,26 @@ describe('useAutoScroll layout work', () => {
     return scroller
   }
 
-  it('performs no layout work while the feed is idle', async () => {
-    const { el, layoutWrites } = mount()
-    el.appendChild(document.createTextNode('settled'))
-    await flushRaf()
-    layoutWrites.count = 0
-
-    // Five seconds of an idle, untouched feed.
-    await act(async () => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 3200))
-    })
-
+  it('performs no layout work while the feed is idle', () => {
+    const { layoutWrites } = mount()
+    act(() => vi.advanceTimersByTime(3200))
+    flushFrame()
     expect(layoutWrites.count).toBe(0)
   })
 
-  it('coalesces several mutation batches in the same frame into one layout write', async () => {
-    const { el, layoutWrites } = mount()
-    await flushRaf()
-    layoutWrites.count = 0
-
-    // Each await yields a microtask checkpoint, so the observer fires once per
-    // append instead of once for the whole batch.
-    await act(async () => {
-      for (let i = 0; i < 20; i++) {
-        el.appendChild(document.createTextNode(`chunk ${i}`))
-        await Promise.resolve()
-      }
-    })
-    await flushRaf()
-
-    expect(layoutWrites.count).toBeLessThanOrEqual(2)
+  it('coalesces several mutation batches in the same frame into one layout write', () => {
+    const { layoutWrites } = mount()
+    for (let i = 0; i < 20; i++) mutations.forEach((callback) => callback())
+    flushFrame()
+    expect(layoutWrites.count).toBe(1)
   })
 
-  it('still follows the feed when content grows', async () => {
+  it('still follows the feed when content grows', () => {
     const { el, metrics, layoutWrites } = mount()
-    await flushRaf()
-    layoutWrites.count = 0
-
     metrics.scrollHeight = 4000
-    await act(async () => {
-      el.appendChild(document.createTextNode('a long streamed answer'))
-      await Promise.resolve()
-    })
-
-    // Polled rather than timed: the follow must happen, whenever the frame runs.
-    await waitFor(() => expect(layoutWrites.count).toBeGreaterThan(0))
+    mutations.forEach((callback) => callback())
+    flushFrame()
+    expect(layoutWrites.count).toBe(1)
     expect(el.scrollTop).toBe(metrics.scrollHeight - metrics.offsetHeight)
   })
 })

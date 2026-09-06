@@ -317,6 +317,71 @@ describe('streaming flush throttling', () => {
 // Finding E (remediation plan): a raw delta feeds a private accumulator. It
 // must not publish Zustand state, clone the panes map, or wake subscribers.
 describe('zustand commit accounting during streaming', () => {
+  it('keeps a 674-message thinking fixture bounded across 4000 deltas and terminal publication', async () => {
+    const store = await bootStreamingSession()
+    const { createElement } = await import('react')
+    const { renderToString } = await import('react-dom/server')
+    const { ThinkingBlock } = await import('../../components/shared/ThinkingBlock')
+    const { getMarkdownCacheSizeForTest, resetMarkdownCacheForTest } = await import('../../components/shared/Markdown')
+    for (let i = 0; i < 673; i++) {
+      store.getState().handleServerMessage({
+        type: 'chat.message',
+        sessionId: 'session-1',
+        payload: {
+          message: { id: `history-${i}`, role: 'user', content: `History ${i}`, timestamp: new Date(0).toISOString() },
+        },
+      } as never)
+    }
+    expect(store.getState().messages).toHaveLength(674)
+    resetMarkdownCacheForTest()
+    let commits = 0
+    const unsubscribe = store.subscribe(() => {
+      commits++
+    })
+    try {
+      for (let batch = 0; batch < 4; batch++) {
+        for (let i = 0; i < 1000; i++) {
+          store.getState().handleServerMessage({
+            type: 'chat.thinking',
+            sessionId: 'session-1',
+            payload: {
+              messageId: 'msg-1',
+              content: '**think** &self\n',
+            },
+          } as never)
+        }
+        expect(commits).toBe(batch)
+        vi.runAllTimers()
+        expect(commits).toBe(batch + 1)
+        const message = store.getState().messages.find((message) => message.id === 'msg-1')!
+        expect(message.thinkingContent).toBe('**think** &self\n'.repeat((batch + 1) * 1000))
+        renderToString(createElement(ThinkingBlock, { content: message.thinkingContent!, isStreaming: true }))
+        expect(getMarkdownCacheSizeForTest()).toBe(0)
+      }
+      store.getState().handleServerMessage({
+        type: 'chat.message_updated',
+        sessionId: 'session-1',
+        payload: {
+          messageId: 'msg-1',
+          updates: { isStreaming: false },
+        },
+      } as never)
+      store.getState().handleServerMessage({
+        type: 'session.running',
+        sessionId: 'session-1',
+        payload: { isRunning: false },
+      } as never)
+      const message = store.getState().messages.find((message) => message.id === 'msg-1')!
+      expect(message.isStreaming).toBe(false)
+      expect(store.getState().currentSession?.isRunning).toBe(false)
+      renderToString(createElement(ThinkingBlock, { content: message.thinkingContent! }))
+      expect(getMarkdownCacheSizeForTest()).toBe(1)
+    } finally {
+      unsubscribe()
+      resetMarkdownCacheForTest()
+    }
+  })
+
   async function bootStreamingSession() {
     const useSessionStore = await loadSessionStore()
     useSessionStore.setState({
