@@ -25,6 +25,18 @@ export type DisplayItem =
  * This function preserves object identity for unchanged display items when given
  * a previousItems array, allowing React's memo() to skip unnecessary re-renders.
  */
+// Exposed for tests: grouping runs on every streaming flush over the whole
+// history, so the number of messages it walks per call is the thing to bound.
+let scannedMessages = 0
+
+export function getGroupScanCountForTest(): number {
+  return scannedMessages
+}
+
+export function resetGroupScanCountForTest(): void {
+  scannedMessages = 0
+}
+
 export function groupMessages(messages: Message[], previousItems: DisplayItem[] = []): DisplayItem[] {
   // Create identity maps from previous items
   const previousItemsByMessageId = new Map<string, DisplayItem>()
@@ -49,25 +61,11 @@ export function groupMessages(messages: Message[], previousItems: DisplayItem[] 
   const flushWindowBuckets = () => {
     if (!windowBuckets || windowBuckets.size === 0) return
 
-    // Track first occurrence index of each subAgentId within this window
-    // to emit groups in chronological order
-    const firstOccurrence = new Map<string, number>()
-    let idx = 0
-    for (const msg of messages) {
-      if (msg.role === 'tool') continue
-      if (msg.contextWindowId !== lastContextWindowId) continue
-      if (msg.subAgentId && !firstOccurrence.has(msg.subAgentId)) {
-        firstOccurrence.set(msg.subAgentId, idx)
-      }
-      idx++
-    }
-
-    // Sort buckets by first occurrence and emit
-    const sorted = [...windowBuckets.entries()].sort(
-      (a, b) => (firstOccurrence.get(a[0]) ?? 0) - (firstOccurrence.get(b[0]) ?? 0),
-    )
-
-    for (const [subAgentId, bucket] of sorted) {
+    // Buckets are created when a sub-agent's first message of the window is
+    // reached, so map insertion order already is first-occurrence order. The
+    // previous re-scan of the whole history on every flush made grouping
+    // quadratic in the number of messages for interleaved sub-agent runs.
+    for (const [subAgentId, bucket] of windowBuckets) {
       const previousItem = previousItemsBySubAgentId.get(subAgentId)
       const messagesMatch =
         previousItem?.type === 'subagent' &&
@@ -91,6 +89,7 @@ export function groupMessages(messages: Message[], previousItems: DisplayItem[] 
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!
+    scannedMessages++
     if (msg.role === 'tool') continue
 
     // Detect context window boundary
