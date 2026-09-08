@@ -22,7 +22,9 @@ describe('Auto-Compaction Trigger', () => {
   let testDir: TestProject
 
   beforeAll(async () => {
-    server = await createTestServer({ maxContext: 100 })
+    // The 5K hard headroom rule still triggers after the first response,
+    // while leaving space for an actual summary (a 100-token window cannot).
+    server = await createTestServer({ maxContext: 5000 })
   })
 
   afterAll(async () => {
@@ -55,7 +57,7 @@ describe('Auto-Compaction Trigger', () => {
       3000,
     )
 
-    expect(client.getContextState()?.maxTokens).toBe(100)
+    expect(client.getContextState()?.maxTokens).toBe(5000)
     expect(client.getContextState()?.currentTokens).toBeGreaterThanOrEqual(100)
 
     client.clearEvents()

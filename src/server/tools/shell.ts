@@ -237,7 +237,9 @@ export function hasBackgroundAmpersand(command: string, nesting = 0): boolean {
         let delimiter = ''
         let quoted = false
         let hasDelimiter = false
-        while (j < n && !/[\s;&|<>()]/.test(command[j]!)) {
+        // Shell word separators are space, tab and LF, not CR. A trailing
+        // CR belongs to the delimiter just as it belongs to its closing line.
+        while (j < n && !/[ \t\n;&|<>()]/.test(command[j]!)) {
           hasDelimiter = true
           const quote = command[j]
           // ANSI-C/localized delimiter quoting requires shell expansion; do

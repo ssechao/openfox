@@ -47,7 +47,6 @@ import { estimateToolResultTokens, isContextLengthError, isNonRetryableLLMError 
 import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
-import { COMPACTION_PROMPT } from './prompts.js'
 import { logger } from '../utils/logger.js'
 import type { LLMRetryPolicy } from '../runner/types.js'
 import { DEFAULT_LLM_RETRY_POLICY } from '../runner/types.js'
@@ -203,6 +202,8 @@ const MAX_TRUNCATION_RETRIES = 3
 const MAX_CONTEXT_LENGTH_RETRIES = 3
 const MAX_MALFORMED_TOOL_ATTEMPTS = 3
 const OUTPUT_RESERVE_TOKENS = 2048
+const COMPACTION_OUTPUT_TOKENS = 8192
+const MIN_COMPACTION_OUTPUT_TOKENS = 1024
 const CONTINUE_PROMPT = 'Continue your previous response. Do NOT repeat what you already wrote.'
 const CONTINUE_AFTER_STREAM_ERROR_PROMPT =
   'The LLM stream was interrupted mid-response. Continue exactly where you left off — do not repeat what was already written.'
@@ -214,6 +215,7 @@ export async function runTopLevelAgentLoop(
   const { mode, sessionManager, sessionId, llmClient, signal, onMessage, statsIdentity } = config
   const append = config.append
   const agentType = config.subAgentMetadata ? ('sub-agent' as const) : undefined
+  const responsesChainKey = `${sessionId}:${config.subAgentMetadata?.subAgentId ?? 'top'}`
   // Fresh per attempt when a resolver is provided (provider switch mid-turn).
   const resolveClient = () => config.getLLMClient?.() ?? llmClient
 
@@ -227,6 +229,7 @@ export async function runTopLevelAgentLoop(
   let currentMaxTokensOverride: number | undefined
   let lastPatternMatch: { pattern: string; field: string; matchedContent: string } | undefined
   let compacting = config.initialCompacting ?? false
+  let compactAfterTools = false
   let returnValueNudgeCount = 0
   const failLLM = (error: string, attempts: number) => {
     append({ type: 'chat.error', data: { error, recoverable: true } })
@@ -344,8 +347,8 @@ export async function runTopLevelAgentLoop(
         workdir: session.workdir,
         messages: requestMessages,
         injectedFiles,
-        promptTools: toolRegistry.definitions,
-        toolChoice: 'auto',
+        promptTools: compacting ? [] : toolRegistry.definitions,
+        toolChoice: compacting ? 'none' : 'auto',
         ...(instructionContent ? { customInstructions: instructionContent } : {}),
         ...(skills.length > 0 ? { skills } : {}),
       })
@@ -386,6 +389,22 @@ export async function runTopLevelAgentLoop(
         modelSettings = { ...modelSettings, maxTokens: Math.min(requestedMaxTokens, availableForOutput) }
       }
 
+      // Summarization has its own budget: inheriting a 256-token ordinary-turn
+      // cap produces truncated summaries and repeated full-context requests.
+      // Never retry compaction by shrinking its budget below a useful summary.
+      if (compacting) {
+        if (availableForOutput < MIN_COMPACTION_OUTPUT_TOKENS) {
+          return failLLM(
+            serverT({
+              en: 'Not enough context headroom to summarize safely. History was preserved; compact earlier or reduce the input.',
+              fr: 'Marge de contexte insuffisante pour résumer correctement. Historique conservé ; compactez plus tôt ou réduisez les entrées.',
+            }),
+            0,
+          )
+        }
+        modelSettings = { ...modelSettings, maxTokens: Math.min(COMPACTION_OUTPUT_TOKENS, availableForOutput) }
+      }
+
       // Build set of sub-agent IDs so streamLLMPure can show the correct
       // tool name in preparing events instead of hallucinated aliases.
       const allAgents = await loadAllAgentsDefault(sessionManager.getProjectWorkdir(sessionId))
@@ -397,10 +416,12 @@ export async function runTopLevelAgentLoop(
         systemPrompt: assembledRequest.systemPrompt,
         llmClient: attemptClient,
         messages: assembledRequest.messages,
-        tools: assembledRequest.tools,
-        toolChoice: 'auto',
+        tools: compacting ? [] : assembledRequest.tools,
+        toolChoice: compacting ? 'none' : 'auto',
+        ...(compacting && /^(claude-|gpt-)/i.test(attemptClient.getModel()) ? { reasoningEffort: 'low' as const } : {}),
         signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
         subAgentAliases,
+        responsesChainKey,
         ...(config.retryPatterns ? { retryPatterns: config.retryPatterns } : {}),
         ...(modelSettings && { modelSettings }),
       })
@@ -427,7 +448,8 @@ export async function runTopLevelAgentLoop(
       }
 
       // ---- LLM failure ----
-      const failWithoutRetry = !isContextLengthError(attemptResult.error) && isNonRetryableLLMError(attemptResult.error)
+      const failWithoutRetry =
+        compacting || (!isContextLengthError(attemptResult.error) && isNonRetryableLLMError(attemptResult.error))
       // Case 2: content was streamed → finalize the partial bubble. When the
       // failure is retryable, append ONE visible continuation prompt so the
       // retry rebuilds context from the partial response. A deterministic
@@ -454,7 +476,7 @@ export async function runTopLevelAgentLoop(
       // Context overflow: the prompt (including tool results) plus the requested
       // maxTokens exceeds the model's window. The error is deterministic, so
       // retry immediately with a reduced maxTokens instead of waiting out backoff.
-      if (isContextLengthError(attemptResult.error) && contextRetryCount < MAX_CONTEXT_LENGTH_RETRIES) {
+      if (!compacting && isContextLengthError(attemptResult.error) && contextRetryCount < MAX_CONTEXT_LENGTH_RETRIES) {
         contextRetryCount += 1
         const currentMax = modelSettings?.maxTokens ?? currentMaxTokensOverride ?? profileDefaultMaxTokens
         currentMaxTokensOverride = Math.max(256, Math.floor(currentMax / 2))
@@ -485,6 +507,26 @@ export async function runTopLevelAgentLoop(
       if (waitResult === 'aborted') throw new Error('Aborted')
       // Loop: rebuild the request — case 1 uses the same context, case 2 picks
       // up the persisted partial + continuation.
+    }
+
+    // A partial, reasoning-only or tool-emitting summary is not a replacement
+    // for history. Fail once without executing tools or resetting the chain.
+    if (
+      compacting &&
+      (result.aborted ||
+        result.patternMatch ||
+        result.finishReason !== 'stop' ||
+        result.toolCalls.length > 0 ||
+        !result.content?.trim())
+    ) {
+      if (assistantMessageStarted) append(createMessageDoneEvent(assistantMsgId, { partial: true }))
+      return failLLM(
+        serverT({
+          en: 'Compaction did not produce a complete text summary. History was preserved; no automatic retry.',
+          fr: 'La compaction n’a pas produit de résumé textuel complet. Historique conservé ; aucune relance automatique.',
+        }),
+        1,
+      )
     }
 
     // Success — clear any recorded failure so a later chat.retry is rejected.
@@ -594,9 +636,15 @@ export async function runTopLevelAgentLoop(
             runtimeConfig.context.compactionThreshold,
         )
       ) {
-        appendCompactionPrompt(sessionId, append)
-        compacting = true
-        continue
+        if (result.toolCalls.length > 0) {
+          // Preserve the accepted tool call/result pair before switching to a
+          // tool-free summary request. Never silently discard pending work.
+          compactAfterTools = true
+        } else {
+          appendCompactionPrompt(sessionId, append)
+          compacting = true
+          continue
+        }
       }
     }
 
@@ -654,27 +702,6 @@ export async function runTopLevelAgentLoop(
     }
 
     if (result.toolCalls.length > 0) {
-      if (compacting) {
-        const rejectionMsgId = crypto.randomUUID()
-        append(
-          createMessageStartEvent(
-            rejectionMsgId,
-            'user',
-            `Tool calls are not possible at this stage. STOP and produce a summary for compaction purposes NOW:
-
-${COMPACTION_PROMPT}`,
-            {
-              ...(currentWindowMessageOptions ?? {}),
-              isSystemGenerated: true,
-              messageKind: 'correction',
-            },
-          ),
-        )
-        append({ type: 'message.done', data: { messageId: rejectionMsgId } })
-        retryLimiter.reset()
-        continue
-      }
-
       append(
         createMessageDoneEvent(assistantMsgId, {
           segments: result.segments,
@@ -769,28 +796,19 @@ ${COMPACTION_PROMPT}`,
         void drainQueue(sessionManager, sessionId, append, onMessage)
       }
 
+      if (compactAfterTools) {
+        const { appendCompactionPrompt } = await import('../context/compactor.js')
+        appendCompactionPrompt(sessionId, append)
+        compacting = true
+        compactAfterTools = false
+      }
+
       retryLimiter.reset()
       continue
     }
 
     if (compacting) {
-      const summary = result.content?.trim() || result.thinkingContent?.trim() || ''
-      if (!summary) {
-        append({
-          type: 'chat.error',
-          data: {
-            error: serverT({
-              en: 'Compaction produced empty summary, continuing with full context',
-              fr: 'La compaction a produit un résumé vide, poursuite avec le contexte complet',
-            }),
-            recoverable: true,
-          },
-        })
-        logger.warn('Compaction produced empty summary, continuing', { sessionId })
-        compacting = false
-        if (config.initialCompacting) break
-        continue
-      }
+      const summary = result.content.trim()
 
       // The new context window starts fresh — apply the current system prompt
       // + tools so they are canonical and never stale there. Best-effort: a
@@ -805,6 +823,7 @@ ${COMPACTION_PROMPT}`,
       }
 
       const closedWindowId = getCurrentContextWindowId(sessionId) ?? ''
+      resolveClient().resetResponsesChain?.(responsesChainKey)
       const newWindowId = crypto.randomUUID()
       const tokenCountAtClose = result.usage.promptTokens
 

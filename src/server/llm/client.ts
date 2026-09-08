@@ -56,6 +56,7 @@ export interface LLMClientWithModel extends LLMClient {
   usesResponsesApi?(): boolean
   /** The reasoning effort this client was created with (if any). */
   getReasoningEffort?(): string | undefined
+  resetResponsesChain?(key: string): void
 }
 
 export function createLLMClient(
@@ -83,8 +84,8 @@ export function createLLMClient(
     apiKey: config.llm.apiKey ?? 'not-needed',
   })
   const httpFor = (b: Backend) => {
-    if (b === 'ollama') return ollamaHttpClient
     if (currentApiProtocol() === 'responses') return responsesHttpClient
+    if (b === 'ollama' && (!config.llm.apiProtocol || config.llm.apiProtocol === 'auto')) return ollamaHttpClient
     return httpClient
   }
 
@@ -104,7 +105,12 @@ export function createLLMClient(
    * setBackend switches take effect.
    */
   const currentApiProtocol = (): 'chat-completions' | 'responses' =>
-    resolveApiProtocol({ model, backend, profileApiProtocol: profile.apiProtocol })
+    resolveApiProtocol({
+      model,
+      backend,
+      profileApiProtocol: profile.apiProtocol,
+      explicitApiProtocol: config.llm.apiProtocol === 'auto' ? undefined : config.llm.apiProtocol,
+    })
 
   function buildExtraParams(resolvedEffort: ReasoningEffort | undefined) {
     return {
@@ -121,6 +127,7 @@ export function createLLMClient(
     },
 
     usesResponsesApi: () => currentApiProtocol() === 'responses',
+    resetResponsesChain: (key) => responsesHttpClient.resetChain(key),
 
     getProfile() {
       return profile
@@ -131,12 +138,14 @@ export function createLLMClient(
     },
 
     setBackend(newBackend: Backend) {
+      if (newBackend !== backend) responsesHttpClient.resetChain()
       logger.debug('Setting LLM backend', { from: backend, to: newBackend })
       backend = newBackend
       capabilities = getBackendCapabilities(newBackend)
     },
 
     setModel(newModel: string) {
+      if (newModel !== model) responsesHttpClient.resetChain()
       const newProfile = getModelProfile(newModel)
       logger.debug('Switching model', {
         from: model,
@@ -174,6 +183,7 @@ export function createLLMClient(
           createParams,
           {
             signal: request.signal,
+            responsesChainKey: request.responsesChainKey,
           },
           request.returnRaw,
         )
@@ -281,6 +291,7 @@ export function createLLMClient(
 
         const stream = httpFor(backend).createChatCompletionStream(streamingParams, {
           signal: streamSignal,
+          responsesChainKey: request.responsesChainKey,
         })
 
         let fullContent = ''

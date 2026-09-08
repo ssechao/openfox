@@ -377,6 +377,7 @@ describe('chat orchestrator', () => {
         usage: { promptTokens: 190000, completionTokens: 100 },
         timing: { ttft: 1, completionTime: 1, tps: 100, prefillTps: 190000 },
         aborted: false,
+        finishReason: 'stop',
       })
       .mockResolvedValueOnce({
         content: 'Planned response',
@@ -385,6 +386,7 @@ describe('chat orchestrator', () => {
         usage: { promptTokens: 20000, completionTokens: 10 },
         timing: { ttft: 1, completionTime: 1, tps: 10, prefillTps: 20000 },
         aborted: false,
+        finishReason: 'stop',
       })
 
     const sessionManager = createSessionManager({
@@ -1770,6 +1772,7 @@ describe('chat orchestrator', () => {
           usage: { promptTokens: 190000, completionTokens: 100 },
           timing: { ttft: 1, completionTime: 1, tps: 100, prefillTps: 190000 },
           aborted: false,
+          finishReason: 'stop',
         })
         .mockResolvedValueOnce({
           content: 'Compacted summary',
@@ -1778,6 +1781,7 @@ describe('chat orchestrator', () => {
           usage: { promptTokens: 500, completionTokens: 50 },
           timing: { ttft: 1, completionTime: 1, tps: 50, prefillTps: 500 },
           aborted: false,
+          finishReason: 'stop',
         })
         .mockResolvedValueOnce({
           content: 'Built',

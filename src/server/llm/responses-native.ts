@@ -19,7 +19,7 @@
  *   Responses API has no "off", absence is the default)
  * - assistant tool_calls in history → `function_call` input items, and tool
  *   role messages → `function_call_output` items (keyed by `call_id`)
- * - `store: false` keeps every request stateless (ZDR-friendly)
+ * - unscoped requests stay stateless; scoped conversations use previous_response_id
  */
 
 import type {
@@ -32,7 +32,17 @@ import type {
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
-import { ChatHttpClient, DONE, parseStreamJson, type ChatRequest } from './http-shared.js'
+import { createHash } from 'node:crypto'
+import {
+  ChatHttpClient,
+  DONE,
+  parseStreamJson,
+  postJson,
+  parseCompletionResponse,
+  readResponseLines,
+  type ChatRequest,
+  type RequestOptions,
+} from './http-shared.js'
 
 export interface ResponsesClientOptions {
   baseURL: string
@@ -52,11 +62,45 @@ export interface ResponsesRequestBody {
   max_output_tokens?: number
   stream?: boolean
   store?: boolean
+  previous_response_id?: string
   reasoning?: { effort?: string }
   [key: string]: unknown
 }
 
 type ResponsesInputItem = Record<string, unknown>
+
+function inputDigest(input: ResponsesInputItem[]): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(
+        input.map((item) => {
+          if (item['type'] !== 'function_call' || typeof item['arguments'] !== 'string') return item
+          // Local tool arguments are parsed then serialized; formatting-only changes
+          // must not break continuity. Invalid JSON remains unchanged, never repaired.
+          try {
+            return { ...item, arguments: JSON.parse(item['arguments']) }
+          } catch {
+            return item
+          }
+        }),
+      ),
+    )
+    .digest('hex')
+}
+
+function convertContent(content: ChatCompletionMessageParam['content']): unknown {
+  if (!Array.isArray(content)) return content ?? ''
+  return content.map((part) => {
+    if (part.type === 'text') return { type: 'input_text', text: part.text }
+    if (part.type === 'image_url') {
+      if (typeof part.image_url?.url !== 'string' || !part.image_url.url) {
+        throw new LLMError('Invalid image content part: image_url.url must be a non-empty string')
+      }
+      return { type: 'input_image', image_url: part.image_url.url }
+    }
+    return part
+  })
+}
 
 function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInputItem | null {
   if (message.role === 'system' || message.role === 'developer') return null
@@ -69,7 +113,9 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
     // Assistant messages carrying tool calls become function_call items; the
     // textual part (usually empty in agent loops) is emitted before them.
     const items: ResponsesInputItem[] = []
-    if (message.content) items.push({ role: 'assistant', content: message.content })
+    if (typeof message.content === 'string' ? message.content.trim() : message.content?.length) {
+      items.push({ role: 'assistant', content: convertContent(message.content) })
+    }
     for (const toolCall of message.tool_calls) {
       items.push({
         type: 'function_call',
@@ -81,7 +127,7 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
     return items.length === 1 ? items[0]! : { __multi: items }
   }
 
-  return { role: message.role, content: message.content ?? '' }
+  return { role: message.role, content: convertContent(message.content) }
 }
 
 function flattenInput(items: Array<ResponsesInputItem>): Array<ResponsesInputItem> {
@@ -248,7 +294,8 @@ type StreamToolCall = NonNullable<ChatCompletionChunk['choices'][0]['delta']['to
  */
 export function parseResponsesEvent(event: Record<string, unknown>): ChatCompletionChunk | typeof DONE | null {
   const type = event['type']
-  const responseId = typeof event['response_id'] === 'string' ? event['response_id'] : 'resp'
+  const response = event['response'] as ResponsesApiResponse | undefined
+  const responseId = response?.id ?? (typeof event['response_id'] === 'string' ? event['response_id'] : 'resp')
 
   switch (type) {
     case 'response.output_text.delta':
@@ -265,7 +312,7 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
       if (item?.type === 'function_call') {
         const callId = item.call_id ?? item.id
         const toolCall: StreamToolCall = {
-          index: 0,
+          index: typeof event['output_index'] === 'number' ? event['output_index'] : 0,
           ...(callId ? { id: callId } : {}),
           function: { name: item.name ?? '', arguments: item.arguments ?? '' },
         }
@@ -275,7 +322,10 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
     }
 
     case 'response.function_call_arguments.delta': {
-      const toolCall: StreamToolCall = { index: 0, function: { arguments: String(event['delta'] ?? '') } }
+      const toolCall: StreamToolCall = {
+        index: typeof event['output_index'] === 'number' ? event['output_index'] : 0,
+        function: { arguments: String(event['delta'] ?? '') },
+      }
       return chunk(responseId, { tool_calls: [toolCall] })
     }
 
@@ -356,6 +406,137 @@ function finalChunk(id: string, response?: ResponsesApiResponse): ChatCompletion
 export class OpenAIResponsesHttpClient extends ChatHttpClient {
   private baseURL: string
   private apiKey: string
+  private chains = new Map<string, { fingerprint: string; count: number; digest: string; id?: string }>()
+  private storeSupported = true
+
+  resetChain(key?: string): void {
+    if (key === undefined) this.chains.clear()
+    else this.chains.delete(key)
+  }
+
+  private async startRequest(
+    params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
+    options?: RequestOptions,
+  ) {
+    const body = buildResponsesRequest(params)
+    const fullInput = body.input
+    const key = options?.responsesChainKey
+    const hash = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('hex')
+    const { input: _input, stream: _stream, ...settings } = body
+    const fingerprint = hash(settings)
+    const previous = key ? this.chains.get(key) : undefined
+    // A pending entry is also a generation token: reset/switch or overlapping
+    // requests cannot let a late completion revive an obsolete chain.
+    const ticket = { fingerprint, count: 0, digest: '' }
+    let accepted = false
+    const discard = () => {
+      if (key && !accepted && this.chains.get(key) === ticket) this.chains.delete(key)
+    }
+    if (key && this.storeSupported) {
+      body.store = true
+      if (
+        previous?.id &&
+        previous.fingerprint === fingerprint &&
+        fullInput.length >= previous.count &&
+        inputDigest(fullInput.slice(0, previous.count)) === previous.digest
+      ) {
+        body.previous_response_id = previous.id
+        body.input = fullInput.slice(previous.count)
+      }
+      this.chains.delete(key)
+      this.chains.set(key, ticket)
+      if (this.chains.size > 256) this.chains.delete(this.chains.keys().next().value!)
+    }
+    try {
+      const request = this.buildRequest(params, body)
+      const response = await postJson(request.url, request.headers, request.body, options)
+      const accept = (data: ResponsesApiResponse) => {
+        if (
+          !key ||
+          !this.storeSupported ||
+          this.chains.get(key) !== ticket ||
+          data.status !== 'completed' ||
+          !data.id ||
+          options?.signal?.aborted
+        )
+          return
+        const parsed = parseResponsesResponse(data).choices[0]!.message
+        // Use the same input translation for local assistant history, excluding
+        // provider-only reasoning items. Count input items, not response events.
+        const output =
+          parsed.content || parsed.tool_calls?.length
+            ? buildResponsesRequest({
+                ...params,
+                messages: [
+                  {
+                    role: 'assistant',
+                    content: typeof parsed.content === 'string' ? parsed.content : '',
+                    ...(parsed.tool_calls ? { tool_calls: parsed.tool_calls } : {}),
+                  },
+                ],
+              }).input
+            : []
+        const expected = [...fullInput, ...output]
+        this.chains.set(key, { fingerprint, count: expected.length, digest: inputDigest(expected), id: data.id })
+        accepted = true
+      }
+      return { response, accept, discard }
+    } catch (error) {
+      discard()
+      if (
+        /HTTP 4\d\d/.test(String(error)) &&
+        /zero data retention|\bzdr\b|store.*(?:unsupported|not supported)/i.test(String(error))
+      ) {
+        this.storeSupported = false
+        this.chains.clear()
+      }
+      throw error
+    }
+  }
+
+  override async createChatCompletion(
+    params: ChatCompletionCreateParamsNonStreaming,
+    options?: RequestOptions,
+    returnRaw?: boolean,
+  ): Promise<ChatCompletionResponse & { raw?: string }> {
+    const request = await this.startRequest(params, options)
+    try {
+      return await parseCompletionResponse(
+        request.response,
+        (data) => {
+          const parsed = this.parseNonStreaming(data)
+          request.accept(data as ResponsesApiResponse)
+          return parsed
+        },
+        returnRaw,
+      )
+    } finally {
+      request.discard()
+    }
+  }
+
+  override async *createChatCompletionStream(
+    params: ChatCompletionCreateParamsStreaming,
+    options?: RequestOptions,
+  ): AsyncGenerator<ChatCompletionChunk> {
+    const request = await this.startRequest(params, options)
+    try {
+      let completed: ResponsesApiResponse | undefined
+      for await (const line of readResponseLines(request.response)) {
+        if (!line.startsWith('data: ')) continue
+        if (line.slice(6) === '[DONE]') break
+        const event = parseStreamJson<Record<string, unknown>>(line.slice(6), 'Responses API')
+        const parsed = parseResponsesEvent(event)
+        if (event['type'] === 'response.completed' && event['response']) {
+          completed = event['response'] as ResponsesApiResponse
+        }
+        if (parsed && parsed !== DONE) yield parsed
+      }
+      if (completed) request.accept(completed)
+    } finally {
+      request.discard()
+    }
+  }
 
   constructor(options: ResponsesClientOptions) {
     super()
@@ -365,6 +546,7 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
 
   protected buildRequest(
     params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
+    body = buildResponsesRequest(params),
   ): ChatRequest {
     return {
       url: `${this.baseURL}/responses`,
@@ -372,7 +554,7 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify(buildResponsesRequest(params)),
+      body: JSON.stringify(body),
     }
   }
 

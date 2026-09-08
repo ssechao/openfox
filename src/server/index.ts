@@ -2302,6 +2302,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models: modelConfigs,
       authAdapter,
       transportAdapter,
+      apiProtocol,
     } = req.body as {
       name: string
       url: string
@@ -2314,6 +2315,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models?: Record<string, unknown>[]
       authAdapter?: string
       transportAdapter?: string
+      apiProtocol?: 'auto' | 'responses' | 'chat-completions'
     }
 
     if (!name || !url || !backend) {
@@ -2345,6 +2347,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         ...(sendReasoningInMessages !== undefined ? { sendReasoningInMessages } : {}),
         ...(authAdapter ? { authAdapter } : {}),
         ...(transportAdapter ? { transportAdapter } : {}),
+        ...(apiProtocol ? { apiProtocol } : {}),
         models: providerModels,
         isActive: true,
       })
@@ -2644,6 +2647,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models: modelConfigs,
       authAdapter,
       transportAdapter,
+      apiProtocol,
     } = req.body as {
       name?: string
       url?: string
@@ -2655,6 +2659,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models?: Record<string, unknown>[]
       authAdapter?: string | null
       transportAdapter?: string | null
+      apiProtocol?: 'auto' | 'responses' | 'chat-completions' | null
     }
     try {
       const { loadGlobalConfig, saveGlobalConfig, updateProvider } = await import('../cli/config.js')
@@ -2673,6 +2678,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       if (sendReasoningInMessages !== undefined) updates['sendReasoningInMessages'] = sendReasoningInMessages
       if (authAdapter !== undefined) updates['authAdapter'] = authAdapter || undefined
       if (transportAdapter !== undefined) updates['transportAdapter'] = transportAdapter || undefined
+      if (apiProtocol !== undefined) updates['apiProtocol'] = apiProtocol || undefined
       if (modelConfigs !== undefined) {
         updates['models'] = buildModelConfigs(modelConfigs as ModelConfigInput[])
       }
@@ -3541,8 +3547,20 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     if (effective.providerId && effective.model) {
       const resolvedModel = providerManager.resolveModel(effective.providerId, effective.model)
       llmClient =
-        getLLMClientForProvider(effective.providerId, resolvedModel ?? effective.model, effective.reasoningEffort) ??
-        getLLMClient()
+        sessionManager.getOrCreateSessionLLMClient(
+          sessionId,
+          effective.providerId,
+          resolvedModel ?? effective.model,
+          effective.reasoningEffort,
+          () =>
+            getLLMClientForProvider(
+              effective.providerId!,
+              resolvedModel ?? effective.model!,
+              effective.reasoningEffort,
+            ),
+        ) ?? getLLMClient()
+    } else {
+      sessionManager.clearSessionLLMClient(sessionId)
     }
     const provider = providerManager.getActiveProvider()
     const controller = new AbortController()

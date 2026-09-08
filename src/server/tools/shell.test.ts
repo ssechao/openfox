@@ -4,8 +4,47 @@ import type { ToolContext } from './types.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnShellProcess } from '../utils/shell.js'
+import { getPlatformShell } from '../utils/platform.js'
 
 describe('hasBackgroundAmpersand', () => {
+  describe.skipIf(process.platform === 'win32')('heredoc line endings against the execution shell', () => {
+    for (const quoted of [false, true]) {
+      for (const declarationEol of ['\n', '\r\n']) {
+        for (const terminatorEol of ['\n', '\r\n']) {
+          for (const bodyEol of ['\n', '\r\n']) {
+            it(`preserves shell semantics: ${JSON.stringify({ quoted, declarationEol, terminatorEol, bodyEol })}`, async () => {
+              const body = `literal &self and &mut\rinside${bodyEol}`
+              // No long-lived process: the builtin printf runs in the background
+              // and wait reaps it. Escapes distinguish execution from heredoc data.
+              const background = "printf '\\102\\107' & wait # end" + declarationEol
+              const command = `cat <<${quoted ? "'EOF'" : 'EOF'}${declarationEol}${body}EOF${terminatorEol}${background}`
+              const closes = declarationEol === terminatorEol
+              const output = await new Promise<string>((resolve, reject) => {
+                const child = spawnShellProcess(command, process.cwd())
+                let stdout = ''
+                let stderr = ''
+                child.stdout?.on('data', (chunk: Buffer) => {
+                  stdout += chunk.toString()
+                })
+                child.stderr?.on('data', (chunk: Buffer) => {
+                  stderr += chunk.toString()
+                })
+                child.once('error', reject)
+                child.once('close', (code) => {
+                  if (code !== 0) reject(new Error(`${getPlatformShell().command}: ${stderr}`))
+                  else resolve(stdout)
+                })
+              })
+              expect(output).toBe(closes ? body + 'BG' : body + 'EOF' + terminatorEol + background)
+              expect(hasBackgroundAmpersand(command)).toBe(closes)
+            })
+          }
+        }
+      }
+    }
+  })
+
   it.each([
     'cat << EOF\n&self\nEOF\n',
     "cat <<'EOF' # comment\n&mut value\nEOF\n",

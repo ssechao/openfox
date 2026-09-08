@@ -485,6 +485,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         baseUrl: ensureVersionPrefix(provider.url),
         model: send.modelId,
         backend: resolveBackend(provider),
+        apiProtocol: provider.apiProtocol ?? 'auto',
         ...(provider.apiKey && { apiKey: provider.apiKey }),
         ...(thinkingField ? { thinkingField } : {}),
         ...(provider.sendReasoningInMessages !== undefined

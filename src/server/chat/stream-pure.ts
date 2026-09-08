@@ -61,6 +61,7 @@ export interface PureStreamOptions {
    *  When a preparing event matches, the name is shown as "call_sub_agent"
    *  instead of the hallucinated name. */
   subAgentAliases?: Set<string>
+  responsesChainKey?: string
 }
 
 export interface PureStreamResult {
@@ -219,6 +220,7 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
     reasoningEffort,
     signal: combinedSignal,
     modelSettings: options.modelSettings,
+    responsesChainKey: options.responsesChainKey,
   })
 
   // Track tool call indices we've emitted preparing events for

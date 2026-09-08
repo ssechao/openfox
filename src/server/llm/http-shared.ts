@@ -9,6 +9,8 @@ import { LLMError } from '../utils/errors.js'
 
 export interface RequestOptions {
   signal?: AbortSignal | null | undefined
+  /** Internal Responses conversation scope, not an HTTP header or body field. */
+  responsesChainKey?: string | undefined
 }
 
 export interface ChatRequest {

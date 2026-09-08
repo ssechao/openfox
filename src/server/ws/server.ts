@@ -369,22 +369,15 @@ export function createWebSocketServer(
   const clients = new Map<WebSocket, ClientConnection>()
   moduleClients = clients
 
-  // Per-session LLM client cache: sessionId -> { cacheKey, client }
-  const sessionLLMClients = new Map<string, { key: string; client: LLMClientWithModel }>()
-
   function getSessionLLMClient(sessionId: string): LLMClientWithModel {
     const effective = sessionManager.resolveEffectiveProviderModel(sessionId)
     if (!effective.providerId || !effective.model || !providerManager) {
+      sessionManager.clearSessionLLMClient(sessionId)
       return getLLMClient()
     }
 
     const resolvedModel = providerManager.resolveModel(effective.providerId, effective.model)
     const effectiveModel = resolvedModel ?? effective.model
-    const cacheKey = `${effective.providerId}:${effectiveModel}:${effective.reasoningEffort ?? ''}`
-    const cached = sessionLLMClients.get(sessionId)
-    if (cached && cached.key === cacheKey) {
-      return cached.client
-    }
 
     // Look up the provider to get URL, apiKey, backend
     const provider = providerManager.getProviders().find((p) => p.id === effective.providerId)
@@ -400,13 +393,19 @@ export function createWebSocketServer(
         sessionManager.setSessionProvider(sessionId, null, null, false, null)
         sessionManager.setSessionProviderActive(sessionId, true)
       }
-      sessionLLMClients.delete(sessionId)
+      sessionManager.clearSessionLLMClient(sessionId)
       return getLLMClient()
     }
 
     // Let ProviderManager create the session client so provider-specific
     // transports (for example External Provider custom) and auth context are preserved.
-    const client = providerManager.createClient(effective.providerId, effectiveModel, effective.reasoningEffort)
+    const client = sessionManager.getOrCreateSessionLLMClient(
+      sessionId,
+      effective.providerId,
+      effectiveModel,
+      effective.reasoningEffort,
+      () => providerManager.createClient(effective.providerId!, effectiveModel, effective.reasoningEffort),
+    )
     if (!client) {
       logger.warn('Could not create session provider client, falling back to global', {
         sessionId,
@@ -435,10 +434,6 @@ export function createWebSocketServer(
         effective.reasoningEffort,
       )
     }
-    sessionLLMClients.set(sessionId, {
-      key: `${effective.providerId}:${concreteModel}:${effective.reasoningEffort ?? ''}`,
-      client,
-    })
     return client
   }
 

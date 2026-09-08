@@ -62,6 +62,7 @@ const providerSchema = z
     authAdapter: z.string().optional(),
     transportAdapter: z.string().optional(),
     credentialRef: z.string().optional(),
+    apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional(),
   })
   .transform((provider): Provider => ({
     id: provider.id,
@@ -81,6 +82,7 @@ const providerSchema = z
     ...(provider.authAdapter ? { authAdapter: provider.authAdapter } : {}),
     ...(provider.transportAdapter ? { transportAdapter: provider.transportAdapter } : {}),
     ...(provider.credentialRef ? { credentialRef: provider.credentialRef } : {}),
+    ...(provider.apiProtocol ? { apiProtocol: provider.apiProtocol } : {}),
   }))
 
 const serverSchema = z.object({

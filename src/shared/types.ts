@@ -717,6 +717,8 @@ export interface Provider {
   thinkingField?: string
   /** When false, strips reasoning/thinking content from outgoing assistant messages */
   sendReasoningInMessages?: boolean
+  /** Provider protocol override; auto keeps backend/model routing. */
+  apiProtocol?: 'auto' | 'responses' | 'chat-completions'
 }
 
 export interface Config {
@@ -737,6 +739,7 @@ export interface Config {
     sendReasoningInMessages?: boolean
     /** Vision model for image description fallback when primary model lacks vision support */
     visionModel?: string
+    apiProtocol?: 'auto' | 'responses' | 'chat-completions'
   }
   context: {
     maxTokens: number
