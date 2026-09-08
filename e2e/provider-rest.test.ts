@@ -50,6 +50,35 @@ describe('Provider Configuration REST API', () => {
   })
 
   describe('POST /api/sessions/:id/provider', () => {
+    it('persists the protocol override through provider POST, PUT and reload', async () => {
+      const created = await fetch(`${server.url}/api/providers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Protocol fixture',
+          url: 'http://127.0.0.1:9/v1',
+          backend: 'unknown',
+          apiProtocol: 'responses',
+          models: [],
+        }),
+      })
+      expect(created.status).toBe(201)
+      const { provider } = (await created.json()) as { provider: { id: string; apiProtocol?: string } }
+      expect(provider.apiProtocol).toBe('responses')
+      for (const apiProtocol of ['chat-completions', 'auto', null]) {
+        const updated = await fetch(`${server.url}/api/providers/${provider.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiProtocol }),
+        })
+        expect(updated.status).toBe(200)
+        const config = await loadGlobalConfig('test', server.globalConfigPath)
+        expect(config.providers.find((candidate) => candidate.id === provider.id)?.apiProtocol).toBe(
+          apiProtocol ?? undefined,
+        )
+      }
+    })
+
     it('sets session provider and model', async () => {
       // Get available providers first
       const providersRes = await fetch(`${server.url}/api/providers`)

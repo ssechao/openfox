@@ -1,0 +1,67 @@
+diff --git a/src/server/tools/shell.test.ts b/src/server/tools/shell.test.ts
+index 5929e146..7c39e17d 100644
+--- a/src/server/tools/shell.test.ts
++++ b/src/server/tools/shell.test.ts
+@@ -4,8 +4,47 @@ import type { ToolContext } from './types.js'
+ import { mkdtemp, rm } from 'node:fs/promises'
+ import { tmpdir } from 'node:os'
+ import { join } from 'node:path'
++import { spawnShellProcess } from '../utils/shell.js'
++import { getPlatformShell } from '../utils/platform.js'
+ 
+ describe('hasBackgroundAmpersand', () => {
++  describe.skipIf(process.platform === 'win32')('heredoc line endings against the execution shell', () => {
++    for (const quoted of [false, true]) {
++      for (const declarationEol of ['\n', '\r\n']) {
++        for (const terminatorEol of ['\n', '\r\n']) {
++          for (const bodyEol of ['\n', '\r\n']) {
++            it(`preserves shell semantics: ${JSON.stringify({ quoted, declarationEol, terminatorEol, bodyEol })}`, async () => {
++              const body = `literal &self and &mut\rinside${bodyEol}`
++              // No long-lived process: the builtin printf runs in the background
++              // and wait reaps it. Escapes distinguish execution from heredoc data.
++              const background = "printf '\\102\\107' & wait # end" + declarationEol
++              const command = `cat <<${quoted ? "'EOF'" : 'EOF'}${declarationEol}${body}EOF${terminatorEol}${background}`
++              const closes = declarationEol === terminatorEol
++              const output = await new Promise<string>((resolve, reject) => {
++                const child = spawnShellProcess(command, process.cwd())
++                let stdout = ''
++                let stderr = ''
++                child.stdout?.on('data', (chunk: Buffer) => {
++                  stdout += chunk.toString()
++                })
++                child.stderr?.on('data', (chunk: Buffer) => {
++                  stderr += chunk.toString()
++                })
++                child.once('error', reject)
++                child.once('close', (code) => {
++                  if (code !== 0) reject(new Error(`${getPlatformShell().command}: ${stderr}`))
++                  else resolve(stdout)
++                })
++              })
++              expect(output).toBe(closes ? body + 'BG' : body + 'EOF' + terminatorEol + background)
++              expect(hasBackgroundAmpersand(command)).toBe(closes)
++            })
++          }
++        }
++      }
++    }
++  })
++
+   it.each([
+     'cat << EOF\n&self\nEOF\n',
+     "cat <<'EOF' # comment\n&mut value\nEOF\n",
+diff --git a/src/server/tools/shell.ts b/src/server/tools/shell.ts
+index 7493cbe8..e458d26c 100644
+--- a/src/server/tools/shell.ts
++++ b/src/server/tools/shell.ts
+@@ -237,7 +237,9 @@ export function hasBackgroundAmpersand(command: string, nesting = 0): boolean {
+         let delimiter = ''
+         let quoted = false
+         let hasDelimiter = false
+-        while (j < n && !/[\s;&|<>()]/.test(command[j]!)) {
++        // Shell word separators are space, tab and LF, not CR. A trailing
++        // CR belongs to the delimiter just as it belongs to its closing line.
++        while (j < n && !/[ \t\n;&|<>()]/.test(command[j]!)) {
+           hasDelimiter = true
+           const quote = command[j]
+           // ANSI-C/localized delimiter quoting requires shell expansion; do

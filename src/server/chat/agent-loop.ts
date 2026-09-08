@@ -214,6 +214,7 @@ export async function runTopLevelAgentLoop(
   const { mode, sessionManager, sessionId, llmClient, signal, onMessage, statsIdentity } = config
   const append = config.append
   const agentType = config.subAgentMetadata ? ('sub-agent' as const) : undefined
+  const responsesChainKey = `${sessionId}:${config.subAgentMetadata?.subAgentId ?? 'top'}`
   // Fresh per attempt when a resolver is provided (provider switch mid-turn).
   const resolveClient = () => config.getLLMClient?.() ?? llmClient
 
@@ -401,6 +402,7 @@ export async function runTopLevelAgentLoop(
         toolChoice: 'auto',
         signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
         subAgentAliases,
+        responsesChainKey,
         ...(config.retryPatterns ? { retryPatterns: config.retryPatterns } : {}),
         ...(modelSettings && { modelSettings }),
       })
@@ -805,6 +807,7 @@ ${COMPACTION_PROMPT}`,
       }
 
       const closedWindowId = getCurrentContextWindowId(sessionId) ?? ''
+      resolveClient().resetResponsesChain?.(responsesChainKey)
       const newWindowId = crypto.randomUUID()
       const tokenCountAtClose = result.usage.promptTokens
 

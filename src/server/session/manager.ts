@@ -71,7 +71,8 @@ import { logger } from '../utils/logger.js'
 import { EventEmitter, type Unsubscribe } from '../utils/async.js'
 import { getLspManager as getOrCreateLspManager, shutdownLspManager, type LspManager } from '../lsp/index.js'
 import { devServerManager } from '../dev-server/manager.js'
-import { resolveLLMClientForAgent, getAgentModelOverride } from '../agents/model-overrides.js'
+import { getAgentModelOverride } from '../agents/model-overrides.js'
+import { createHash } from 'node:crypto'
 import { parseDefaultModelSelection } from '../provider-manager.js'
 import { getEventStore } from '../events/store.js'
 import {
@@ -144,6 +145,37 @@ To land changes from this workspace when the user asks to commit and push:
 // ============================================================================
 
 export class SessionManager {
+  // One current selection per session, shared by WS, queue and agent overrides.
+  // Replacing (rather than caching by model) prevents A -> B -> A resurrection.
+  private sessionLLMClients = new Map<string, { key: string; client: import('../llm/client.js').LLMClientWithModel }>()
+
+  getOrCreateSessionLLMClient(
+    sessionId: string,
+    providerId: string,
+    model: string,
+    reasoningEffort: string | undefined,
+    create: () => import('../llm/client.js').LLMClientWithModel | undefined,
+  ): import('../llm/client.js').LLMClientWithModel | undefined {
+    const provider = this.providerManager.getProviders().find((candidate) => candidate.id === providerId)
+    const definition = { ...(provider ?? { id: providerId }) } as Record<string, unknown>
+    delete definition['status']
+    delete definition['isActive']
+    delete definition['models']
+    const modelConfig = provider?.models.find((candidate) => candidate.id === model)
+    const key = createHash('sha256')
+      .update(JSON.stringify({ provider: definition, model, modelConfig, reasoningEffort }))
+      .digest('hex')
+    const cached = this.sessionLLMClients.get(sessionId)
+    if (cached?.key === key) return cached.client
+    const client = create()
+    if (client) this.sessionLLMClients.set(sessionId, { key, client })
+    else this.sessionLLMClients.delete(sessionId)
+    return client
+  }
+
+  clearSessionLLMClient(sessionId: string): void {
+    this.sessionLLMClients.delete(sessionId)
+  }
   private events = new EventEmitter<SessionEvents>()
   private activeSessionId: string | null = null
   private providerManager: import('../provider-manager.js').ProviderManager
@@ -186,15 +218,20 @@ export class SessionManager {
     preferredFallback?: import('../llm/client.js').LLMClientWithModel,
   ): import('../llm/client.js').LLMClientWithModel {
     const fallback = preferredFallback ?? this.providerManager.getLLMClient()
-    const pinnedEffort = dbGetSession(sessionId)?.providerPinnedEffort ?? undefined
-    const resolved = resolveLLMClientForAgent(agentId, fallback, this.providerManager, pinnedEffort)
-    if (resolved.warning) {
+    const override = getAgentModelOverride(agentId)
+    if (!override) return fallback
+    const effort = dbGetSession(sessionId)?.providerPinnedEffort ?? override.reasoningEffort
+    const client = this.getOrCreateSessionLLMClient(sessionId, override.providerId, override.model, effort, () =>
+      this.providerManager.createClient(override.providerId, override.model, effort),
+    )
+    if (!client) {
       logger.warn('Agent model override unavailable, falling back', {
         agentId,
-        warning: resolved.warning,
+        providerId: override.providerId,
+        model: override.model,
       })
     }
-    return resolved.client
+    return client ?? fallback
   }
 
   /**
@@ -728,6 +765,7 @@ export class SessionManager {
 
     // Clean up warmup state
     this.warmedUpSessions.delete(id)
+    this.clearSessionLLMClient(id)
     this.announcedPromptHashStore.delete(id)
     this.announcedToolFingerprintStore.delete(id)
     this.unknownProviderWarned.delete(id)

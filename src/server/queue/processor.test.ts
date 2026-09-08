@@ -70,6 +70,8 @@ describe('QueueProcessor', () => {
     mockSessionManager = {
       subscribe: vi.fn(() => () => {}),
       getSession: vi.fn(() => sessionState),
+      clearSessionLLMClient: vi.fn(),
+      getOrCreateSessionLLMClient: vi.fn((_session, _provider, _model, _effort, create: () => unknown) => create()),
       hasQueuedMessages: vi.fn(() => queueItems.length > 0),
       setRunning: vi.fn((_id: string, running: boolean) => {
         sessionState = { ...sessionState, isRunning: running }

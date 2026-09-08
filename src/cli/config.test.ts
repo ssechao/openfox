@@ -33,6 +33,23 @@ describe('config', () => {
   })
 
   describe('loadGlobalConfig', () => {
+    it.each(['auto', 'responses', 'chat-completions'])(
+      'preserves Provider.apiProtocol=%s through a save/reload',
+      async (apiProtocol) => {
+        // All config paths in this file are redirected to TEST_DIR.
+        await writeFile(
+          join(TEST_DIR, 'development', 'config.json'),
+          JSON.stringify({
+            providers: [{ id: 'protocol-provider', apiProtocol }],
+          }),
+        )
+        const loaded = await loadGlobalConfig('development')
+        expect(loaded.providers[0]?.apiProtocol).toBe(apiProtocol)
+        await saveGlobalConfig('development', loaded)
+        expect((await loadGlobalConfig('development')).providers[0]?.apiProtocol).toBe(apiProtocol)
+      },
+    )
+
     it('returns empty providers for fresh install', async () => {
       const loaded = await loadGlobalConfig('production')
 

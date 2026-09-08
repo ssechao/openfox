@@ -458,57 +458,65 @@ describe('runTopLevelAgentLoop compaction', () => {
     }
   }
 
-  it('applies the fresh cached context when a new context window is created', async () => {
-    mockSessionManager = {
-      requireSession: vi.fn().mockReturnValue({
-        workdir: '/test',
-        projectId: 'test-project',
-        executionState: null,
-        criteria: [],
-        isRunning: false,
-      }),
-      getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
-      getProjectWorkdir: vi.fn().mockReturnValue('/test'),
-      getContextState: vi.fn().mockReturnValue({
-        currentTokens: 0,
-        maxTokens: 200000,
-        compactionCount: 0,
-        dangerZone: false,
-        canCompact: false,
-        dynamicContextChanged: false,
-      }),
-      getCurrentModelContext: vi.fn().mockReturnValue(200000),
-      getCurrentModelSettings: vi.fn().mockReturnValue({}),
-      getModelCompactionThreshold: vi.fn().mockReturnValue(undefined),
-      setCurrentContextSize: vi.fn(),
-      getDynamicContextChanged: vi.fn().mockReturnValue(false),
-      setDynamicContextChanged: vi.fn(),
-      getCachedPrompt: vi.fn().mockReturnValue(undefined),
-      setCachedPrompt: vi.fn(),
-      getLspManager: vi.fn(),
-      drainAsapMessages: vi.fn().mockReturnValue([]),
-      getCurrentWindowMessages: vi.fn().mockReturnValue([]),
-      updateMessage: vi.fn(),
-    } as any
+  it.each([undefined, 'parallel-1', 'parallel-2'])(
+    'applies fresh context and resets the exact Responses scope after compaction (%s)',
+    async (subAgentId) => {
+      mockSessionManager = {
+        requireSession: vi.fn().mockReturnValue({
+          workdir: '/test',
+          projectId: 'test-project',
+          executionState: null,
+          criteria: [],
+          isRunning: false,
+        }),
+        getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
+        getProjectWorkdir: vi.fn().mockReturnValue('/test'),
+        getContextState: vi.fn().mockReturnValue({
+          currentTokens: 0,
+          maxTokens: 200000,
+          compactionCount: 0,
+          dangerZone: false,
+          canCompact: false,
+          dynamicContextChanged: false,
+        }),
+        getCurrentModelContext: vi.fn().mockReturnValue(200000),
+        getCurrentModelSettings: vi.fn().mockReturnValue({}),
+        getModelCompactionThreshold: vi.fn().mockReturnValue(undefined),
+        setCurrentContextSize: vi.fn(),
+        getDynamicContextChanged: vi.fn().mockReturnValue(false),
+        setDynamicContextChanged: vi.fn(),
+        getCachedPrompt: vi.fn().mockReturnValue(undefined),
+        setCachedPrompt: vi.fn(),
+        getLspManager: vi.fn(),
+        drainAsapMessages: vi.fn().mockReturnValue([]),
+        getCurrentWindowMessages: vi.fn().mockReturnValue([]),
+        updateMessage: vi.fn(),
+      } as any
 
-    const appendMock = vi.fn()
-    const rebuildCachedContext = vi.fn().mockResolvedValue(undefined)
+      const appendMock = vi.fn()
+      const rebuildCachedContext = vi.fn().mockResolvedValue(undefined)
+      mockLLMClient.resetResponsesChain = vi.fn()
 
-    await runTopLevelAgentLoop(
-      makeConfig({
-        append: appendMock,
-        initialCompacting: true,
-        rebuildCachedContext,
-      }),
-      mockTurnMetrics,
-    )
+      await runTopLevelAgentLoop(
+        makeConfig({
+          append: appendMock,
+          initialCompacting: true,
+          rebuildCachedContext,
+          ...(subAgentId ? { subAgentMetadata: { subAgentId, subAgentType: 'explorer' } } : {}),
+        }),
+        mockTurnMetrics,
+      )
 
-    const compactedEvents = appendMock.mock.calls
-      .map(([event]) => event)
-      .filter((event: any) => event?.type === 'context.compacted')
-    expect(compactedEvents).toHaveLength(1)
-    expect(rebuildCachedContext).toHaveBeenCalledTimes(1)
-  })
+      const compactedEvents = appendMock.mock.calls
+        .map(([event]) => event)
+        .filter((event: any) => event?.type === 'context.compacted')
+      expect(compactedEvents).toHaveLength(1)
+      expect(rebuildCachedContext).toHaveBeenCalledTimes(1)
+      const scope = vi.mocked(streamLLMPure).mock.calls.at(-1)?.[0].responsesChainKey
+      expect(scope).toBe(`test-session:${subAgentId ?? 'top'}`)
+      expect(mockLLMClient.resetResponsesChain).toHaveBeenCalledWith(scope)
+    },
+  )
 })
 
 // ============================================================================

@@ -1,0 +1,1393 @@
+diff --git a/e2e/provider-rest.test.ts b/e2e/provider-rest.test.ts
+index 9f686659..e2de85d2 100644
+--- a/e2e/provider-rest.test.ts
++++ b/e2e/provider-rest.test.ts
+@@ -50,6 +50,35 @@ describe('Provider Configuration REST API', () => {
+   })
+ 
+   describe('POST /api/sessions/:id/provider', () => {
++    it('persists the protocol override through provider POST, PUT and reload', async () => {
++      const created = await fetch(`${server.url}/api/providers`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({
++          name: 'Protocol fixture',
++          url: 'http://127.0.0.1:9/v1',
++          backend: 'unknown',
++          apiProtocol: 'responses',
++          models: [],
++        }),
++      })
++      expect(created.status).toBe(201)
++      const { provider } = (await created.json()) as { provider: { id: string; apiProtocol?: string } }
++      expect(provider.apiProtocol).toBe('responses')
++      for (const apiProtocol of ['chat-completions', 'auto', null]) {
++        const updated = await fetch(`${server.url}/api/providers/${provider.id}`, {
++          method: 'PUT',
++          headers: { 'Content-Type': 'application/json' },
++          body: JSON.stringify({ apiProtocol }),
++        })
++        expect(updated.status).toBe(200)
++        const config = await loadGlobalConfig('test', server.globalConfigPath)
++        expect(config.providers.find((candidate) => candidate.id === provider.id)?.apiProtocol).toBe(
++          apiProtocol ?? undefined,
++        )
++      }
++    })
++
+     it('sets session provider and model', async () => {
+       // Get available providers first
+       const providersRes = await fetch(`${server.url}/api/providers`)
+diff --git a/src/cli/config.test.ts b/src/cli/config.test.ts
+index 2b0e9777..9d6ad1a7 100644
+--- a/src/cli/config.test.ts
++++ b/src/cli/config.test.ts
+@@ -33,6 +33,23 @@ describe('config', () => {
+   })
+ 
+   describe('loadGlobalConfig', () => {
++    it.each(['auto', 'responses', 'chat-completions'])(
++      'preserves Provider.apiProtocol=%s through a save/reload',
++      async (apiProtocol) => {
++        // All config paths in this file are redirected to TEST_DIR.
++        await writeFile(
++          join(TEST_DIR, 'development', 'config.json'),
++          JSON.stringify({
++            providers: [{ id: 'protocol-provider', apiProtocol }],
++          }),
++        )
++        const loaded = await loadGlobalConfig('development')
++        expect(loaded.providers[0]?.apiProtocol).toBe(apiProtocol)
++        await saveGlobalConfig('development', loaded)
++        expect((await loadGlobalConfig('development')).providers[0]?.apiProtocol).toBe(apiProtocol)
++      },
++    )
++
+     it('returns empty providers for fresh install', async () => {
+       const loaded = await loadGlobalConfig('production')
+ 
+diff --git a/src/cli/config.ts b/src/cli/config.ts
+index 518a94a8..8e2ca3a0 100644
+--- a/src/cli/config.ts
++++ b/src/cli/config.ts
+@@ -62,6 +62,7 @@ const providerSchema = z
+     authAdapter: z.string().optional(),
+     transportAdapter: z.string().optional(),
+     credentialRef: z.string().optional(),
++    apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional(),
+   })
+   .transform((provider): Provider => ({
+     id: provider.id,
+@@ -81,6 +82,7 @@ const providerSchema = z
+     ...(provider.authAdapter ? { authAdapter: provider.authAdapter } : {}),
+     ...(provider.transportAdapter ? { transportAdapter: provider.transportAdapter } : {}),
+     ...(provider.credentialRef ? { credentialRef: provider.credentialRef } : {}),
++    ...(provider.apiProtocol ? { apiProtocol: provider.apiProtocol } : {}),
+   }))
+ 
+ const serverSchema = z.object({
+diff --git a/src/server/chat/agent-loop-retry.history.test.ts b/src/server/chat/agent-loop-retry.history.test.ts
+index b4671368..bfc43298 100644
+--- a/src/server/chat/agent-loop-retry.history.test.ts
++++ b/src/server/chat/agent-loop-retry.history.test.ts
+@@ -225,8 +225,8 @@ describe('agent loop retry history (real EventStore)', () => {
+ 
+   // Real HTTP -> parser -> stream consumer -> SQLite -> tool dispatch -> next
+   // request. Only model responses and the first controlled tool error are scripted.
+-  async function runFixture(bodies: string[], execute = vi.fn()) {
+-    const requests: Array<{ messages: Array<{ role: string; content: string }> }> = []
++  async function runFixture(bodies: string[], execute = vi.fn(), apiProtocol?: 'responses') {
++    const requests: Array<{ messages: Array<{ role: string; content: string }>; [key: string]: unknown }> = []
+     const server = createServer((req, res) => {
+       let body = ''
+       req.on('data', (chunk) => {
+@@ -247,6 +247,7 @@ describe('agent loop retry history (real EventStore)', () => {
+           backend: 'vllm',
+           timeout: 10000,
+           idleTimeout: 10000,
++          ...(apiProtocol ? { apiProtocol } : {}),
+         },
+         context: { maxTokens: 128000, compactionThreshold: 0.85, compactionTarget: 0.6 },
+       } as never)
+@@ -297,6 +298,51 @@ describe('agent loop retry history (real EventStore)', () => {
+     return parts.join('') + frame({}, 'tool_calls')
+   }
+ 
++  it('continues a Responses tool round using only its result through the real agent pipeline', async () => {
++    const call = {
++      type: 'function_call',
++      id: 'fc_1',
++      call_id: 'call-1',
++      name: 'read_file',
++      arguments: '{"path":"a.ts"}',
++    }
++    const encode = (events: unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')
++    const execute = vi.fn(async () => ({ success: true, output: 'file A', durationMs: 0, truncated: false }))
++    const fixture = await runFixture(
++      [
++        encode([
++          { type: 'response.output_item.added', output_index: 1, item: { ...call, arguments: '' } },
++          { type: 'response.function_call_arguments.delta', output_index: 1, delta: call.arguments },
++          { type: 'response.completed', response: { id: 'resp_tools', status: 'completed', output: [call] } },
++        ]),
++        encode([
++          { type: 'response.output_text.delta', delta: 'read successfully' },
++          {
++            type: 'response.completed',
++            response: {
++              id: 'resp_final',
++              status: 'completed',
++              output: [
++                { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'read successfully' }] },
++              ],
++            },
++          },
++        ]),
++      ],
++      execute,
++      'responses',
++    )
++    expect(fixture.outcome?.failed).toBeUndefined()
++    expect(execute).toHaveBeenCalledTimes(1)
++    expect(fixture.requests).toHaveLength(2)
++    expect(fixture.requests[1]?.['previous_response_id']).toBe('resp_tools')
++    expect(fixture.requests[1]?.['input']).toEqual([
++      { type: 'function_call_output', call_id: 'call-1', output: 'file A' },
++    ])
++    expect(fixture.requests[1]?.['instructions']).toBe(fixture.requests[0]?.['instructions'])
++    expect(fixture.messages.at(-1)).toMatchObject({ content: 'read successfully', isStreaming: false })
++  })
++
+   it('completes a long thinking/tool failure/recovery session with intact arguments and resumable state', async () => {
+     const workdir = await mkdtemp(join(tmpdir(), 'openfox-long-session-'))
+     try {
+diff --git a/src/server/chat/agent-loop.test.ts b/src/server/chat/agent-loop.test.ts
+index 2fd71ec1..d8c782d3 100644
+--- a/src/server/chat/agent-loop.test.ts
++++ b/src/server/chat/agent-loop.test.ts
+@@ -458,57 +458,65 @@ describe('runTopLevelAgentLoop compaction', () => {
+     }
+   }
+ 
+-  it('applies the fresh cached context when a new context window is created', async () => {
+-    mockSessionManager = {
+-      requireSession: vi.fn().mockReturnValue({
+-        workdir: '/test',
+-        projectId: 'test-project',
+-        executionState: null,
+-        criteria: [],
+-        isRunning: false,
+-      }),
+-      getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
+-      getProjectWorkdir: vi.fn().mockReturnValue('/test'),
+-      getContextState: vi.fn().mockReturnValue({
+-        currentTokens: 0,
+-        maxTokens: 200000,
+-        compactionCount: 0,
+-        dangerZone: false,
+-        canCompact: false,
+-        dynamicContextChanged: false,
+-      }),
+-      getCurrentModelContext: vi.fn().mockReturnValue(200000),
+-      getCurrentModelSettings: vi.fn().mockReturnValue({}),
+-      getModelCompactionThreshold: vi.fn().mockReturnValue(undefined),
+-      setCurrentContextSize: vi.fn(),
+-      getDynamicContextChanged: vi.fn().mockReturnValue(false),
+-      setDynamicContextChanged: vi.fn(),
+-      getCachedPrompt: vi.fn().mockReturnValue(undefined),
+-      setCachedPrompt: vi.fn(),
+-      getLspManager: vi.fn(),
+-      drainAsapMessages: vi.fn().mockReturnValue([]),
+-      getCurrentWindowMessages: vi.fn().mockReturnValue([]),
+-      updateMessage: vi.fn(),
+-    } as any
+-
+-    const appendMock = vi.fn()
+-    const rebuildCachedContext = vi.fn().mockResolvedValue(undefined)
+-
+-    await runTopLevelAgentLoop(
+-      makeConfig({
+-        append: appendMock,
+-        initialCompacting: true,
+-        rebuildCachedContext,
+-      }),
+-      mockTurnMetrics,
+-    )
+-
+-    const compactedEvents = appendMock.mock.calls
+-      .map(([event]) => event)
+-      .filter((event: any) => event?.type === 'context.compacted')
+-    expect(compactedEvents).toHaveLength(1)
+-    expect(rebuildCachedContext).toHaveBeenCalledTimes(1)
+-  })
++  it.each([undefined, 'parallel-1', 'parallel-2'])(
++    'applies fresh context and resets the exact Responses scope after compaction (%s)',
++    async (subAgentId) => {
++      mockSessionManager = {
++        requireSession: vi.fn().mockReturnValue({
++          workdir: '/test',
++          projectId: 'test-project',
++          executionState: null,
++          criteria: [],
++          isRunning: false,
++        }),
++        getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
++        getProjectWorkdir: vi.fn().mockReturnValue('/test'),
++        getContextState: vi.fn().mockReturnValue({
++          currentTokens: 0,
++          maxTokens: 200000,
++          compactionCount: 0,
++          dangerZone: false,
++          canCompact: false,
++          dynamicContextChanged: false,
++        }),
++        getCurrentModelContext: vi.fn().mockReturnValue(200000),
++        getCurrentModelSettings: vi.fn().mockReturnValue({}),
++        getModelCompactionThreshold: vi.fn().mockReturnValue(undefined),
++        setCurrentContextSize: vi.fn(),
++        getDynamicContextChanged: vi.fn().mockReturnValue(false),
++        setDynamicContextChanged: vi.fn(),
++        getCachedPrompt: vi.fn().mockReturnValue(undefined),
++        setCachedPrompt: vi.fn(),
++        getLspManager: vi.fn(),
++        drainAsapMessages: vi.fn().mockReturnValue([]),
++        getCurrentWindowMessages: vi.fn().mockReturnValue([]),
++        updateMessage: vi.fn(),
++      } as any
++
++      const appendMock = vi.fn()
++      const rebuildCachedContext = vi.fn().mockResolvedValue(undefined)
++      mockLLMClient.resetResponsesChain = vi.fn()
++
++      await runTopLevelAgentLoop(
++        makeConfig({
++          append: appendMock,
++          initialCompacting: true,
++          rebuildCachedContext,
++          ...(subAgentId ? { subAgentMetadata: { subAgentId, subAgentType: 'explorer' } } : {}),
++        }),
++        mockTurnMetrics,
++      )
++
++      const compactedEvents = appendMock.mock.calls
++        .map(([event]) => event)
++        .filter((event: any) => event?.type === 'context.compacted')
++      expect(compactedEvents).toHaveLength(1)
++      expect(rebuildCachedContext).toHaveBeenCalledTimes(1)
++      const scope = vi.mocked(streamLLMPure).mock.calls.at(-1)?.[0].responsesChainKey
++      expect(scope).toBe(`test-session:${subAgentId ?? 'top'}`)
++      expect(mockLLMClient.resetResponsesChain).toHaveBeenCalledWith(scope)
++    },
++  )
+ })
+ 
+ // ============================================================================
+diff --git a/src/server/chat/agent-loop.ts b/src/server/chat/agent-loop.ts
+index 8b6c2dab..abfafd9d 100644
+--- a/src/server/chat/agent-loop.ts
++++ b/src/server/chat/agent-loop.ts
+@@ -214,6 +214,7 @@ export async function runTopLevelAgentLoop(
+   const { mode, sessionManager, sessionId, llmClient, signal, onMessage, statsIdentity } = config
+   const append = config.append
+   const agentType = config.subAgentMetadata ? ('sub-agent' as const) : undefined
++  const responsesChainKey = `${sessionId}:${config.subAgentMetadata?.subAgentId ?? 'top'}`
+   // Fresh per attempt when a resolver is provided (provider switch mid-turn).
+   const resolveClient = () => config.getLLMClient?.() ?? llmClient
+ 
+@@ -401,6 +402,7 @@ export async function runTopLevelAgentLoop(
+         toolChoice: 'auto',
+         signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
+         subAgentAliases,
++        responsesChainKey,
+         ...(config.retryPatterns ? { retryPatterns: config.retryPatterns } : {}),
+         ...(modelSettings && { modelSettings }),
+       })
+@@ -805,6 +807,7 @@ ${COMPACTION_PROMPT}`,
+       }
+ 
+       const closedWindowId = getCurrentContextWindowId(sessionId) ?? ''
++      resolveClient().resetResponsesChain?.(responsesChainKey)
+       const newWindowId = crypto.randomUUID()
+       const tokenCountAtClose = result.usage.promptTokens
+ 
+diff --git a/src/server/chat/stream-pure.ts b/src/server/chat/stream-pure.ts
+index 7fee8a46..bd1aa3f9 100644
+--- a/src/server/chat/stream-pure.ts
++++ b/src/server/chat/stream-pure.ts
+@@ -61,6 +61,7 @@ export interface PureStreamOptions {
+    *  When a preparing event matches, the name is shown as "call_sub_agent"
+    *  instead of the hallucinated name. */
+   subAgentAliases?: Set<string>
++  responsesChainKey?: string
+ }
+ 
+ export interface PureStreamResult {
+@@ -219,6 +220,7 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
+     reasoningEffort,
+     signal: combinedSignal,
+     modelSettings: options.modelSettings,
++    responsesChainKey: options.responsesChainKey,
+   })
+ 
+   // Track tool call indices we've emitted preparing events for
+diff --git a/src/server/chat/stream-utils.ts b/src/server/chat/stream-utils.ts
+index dbcc4b71..7d2bef79 100644
+--- a/src/server/chat/stream-utils.ts
++++ b/src/server/chat/stream-utils.ts
+@@ -8,6 +8,7 @@ function buildStreamRequestObject(params: {
+   reasoningEffort?: ReasoningEffort | undefined
+   signal?: AbortSignal | undefined
+   modelSettings?: LLMCompletionRequest['modelSettings']
++  responsesChainKey?: string | undefined
+ }): LLMCompletionRequest {
+   const { messages, tools, toolChoice, reasoningEffort, signal, modelSettings } = params
+   return {
+@@ -17,6 +18,7 @@ function buildStreamRequestObject(params: {
+     ...(reasoningEffort && { reasoningEffort }),
+     ...(signal && { signal }),
+     ...(modelSettings && { modelSettings }),
++    ...(params.responsesChainKey ? { responsesChainKey: params.responsesChainKey } : {}),
+   }
+ }
+ 
+diff --git a/src/server/index.ts b/src/server/index.ts
+index 4bb164dc..72c320da 100644
+--- a/src/server/index.ts
++++ b/src/server/index.ts
+@@ -2302,6 +2302,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle>
+       models: modelConfigs,
+       authAdapter,
+       transportAdapter,
++      apiProtocol,
+     } = req.body as {
+       name: string
+       url: string
+@@ -2314,6 +2315,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle>
+       models?: Record<string, unknown>[]
+       authAdapter?: string
+       transportAdapter?: string
++      apiProtocol?: 'auto' | 'responses' | 'chat-completions'
+     }
+ 
+     if (!name || !url || !backend) {
+@@ -2345,6 +2347,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle>
+         ...(sendReasoningInMessages !== undefined ? { sendReasoningInMessages } : {}),
+         ...(authAdapter ? { authAdapter } : {}),
+         ...(transportAdapter ? { transportAdapter } : {}),
++        ...(apiProtocol ? { apiProtocol } : {}),
+         models: providerModels,
+         isActive: true,
+       })
+@@ -2644,6 +2647,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle>
+       models: modelConfigs,
+       authAdapter,
+       transportAdapter,
++      apiProtocol,
+     } = req.body as {
+       name?: string
+       url?: string
+@@ -2655,6 +2659,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle>
+       models?: Record<string, unknown>[]
+       authAdapter?: string | null
+       transportAdapter?: string | null
++      apiProtocol?: 'auto' | 'responses' | 'chat-completions' | null
+     }
+     try {
+       const { loadGlobalConfig, saveGlobalConfig, updateProvider } = await import('../cli/config.js')
+@@ -2673,6 +2678,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle>
+       if (sendReasoningInMessages !== undefined) updates['sendReasoningInMessages'] = sendReasoningInMessages
+       if (authAdapter !== undefined) updates['authAdapter'] = authAdapter || undefined
+       if (transportAdapter !== undefined) updates['transportAdapter'] = transportAdapter || undefined
++      if (apiProtocol !== undefined) updates['apiProtocol'] = apiProtocol || undefined
+       if (modelConfigs !== undefined) {
+         updates['models'] = buildModelConfigs(modelConfigs as ModelConfigInput[])
+       }
+@@ -3541,8 +3547,20 @@ export async function createServerHandle(config: Config): Promise<ServerHandle>
+     if (effective.providerId && effective.model) {
+       const resolvedModel = providerManager.resolveModel(effective.providerId, effective.model)
+       llmClient =
+-        getLLMClientForProvider(effective.providerId, resolvedModel ?? effective.model, effective.reasoningEffort) ??
+-        getLLMClient()
++        sessionManager.getOrCreateSessionLLMClient(
++          sessionId,
++          effective.providerId,
++          resolvedModel ?? effective.model,
++          effective.reasoningEffort,
++          () =>
++            getLLMClientForProvider(
++              effective.providerId!,
++              resolvedModel ?? effective.model!,
++              effective.reasoningEffort,
++            ),
++        ) ?? getLLMClient()
++    } else {
++      sessionManager.clearSessionLLMClient(sessionId)
+     }
+     const provider = providerManager.getActiveProvider()
+     const controller = new AbortController()
+diff --git a/src/server/llm/client.ts b/src/server/llm/client.ts
+index 07e68a7c..995d9f03 100644
+--- a/src/server/llm/client.ts
++++ b/src/server/llm/client.ts
+@@ -56,6 +56,7 @@ export interface LLMClientWithModel extends LLMClient {
+   usesResponsesApi?(): boolean
+   /** The reasoning effort this client was created with (if any). */
+   getReasoningEffort?(): string | undefined
++  resetResponsesChain?(key: string): void
+ }
+ 
+ export function createLLMClient(
+@@ -83,8 +84,8 @@ export function createLLMClient(
+     apiKey: config.llm.apiKey ?? 'not-needed',
+   })
+   const httpFor = (b: Backend) => {
+-    if (b === 'ollama') return ollamaHttpClient
+     if (currentApiProtocol() === 'responses') return responsesHttpClient
++    if (b === 'ollama' && (!config.llm.apiProtocol || config.llm.apiProtocol === 'auto')) return ollamaHttpClient
+     return httpClient
+   }
+ 
+@@ -104,7 +105,12 @@ export function createLLMClient(
+    * setBackend switches take effect.
+    */
+   const currentApiProtocol = (): 'chat-completions' | 'responses' =>
+-    resolveApiProtocol({ model, backend, profileApiProtocol: profile.apiProtocol })
++    resolveApiProtocol({
++      model,
++      backend,
++      profileApiProtocol: profile.apiProtocol,
++      explicitApiProtocol: config.llm.apiProtocol === 'auto' ? undefined : config.llm.apiProtocol,
++    })
+ 
+   function buildExtraParams(resolvedEffort: ReasoningEffort | undefined) {
+     return {
+@@ -121,6 +127,7 @@ export function createLLMClient(
+     },
+ 
+     usesResponsesApi: () => currentApiProtocol() === 'responses',
++    resetResponsesChain: (key) => responsesHttpClient.resetChain(key),
+ 
+     getProfile() {
+       return profile
+@@ -131,12 +138,14 @@ export function createLLMClient(
+     },
+ 
+     setBackend(newBackend: Backend) {
++      if (newBackend !== backend) responsesHttpClient.resetChain()
+       logger.debug('Setting LLM backend', { from: backend, to: newBackend })
+       backend = newBackend
+       capabilities = getBackendCapabilities(newBackend)
+     },
+ 
+     setModel(newModel: string) {
++      if (newModel !== model) responsesHttpClient.resetChain()
+       const newProfile = getModelProfile(newModel)
+       logger.debug('Switching model', {
+         from: model,
+@@ -174,6 +183,7 @@ export function createLLMClient(
+           createParams,
+           {
+             signal: request.signal,
++            responsesChainKey: request.responsesChainKey,
+           },
+           request.returnRaw,
+         )
+@@ -281,6 +291,7 @@ export function createLLMClient(
+ 
+         const stream = httpFor(backend).createChatCompletionStream(streamingParams, {
+           signal: streamSignal,
++          responsesChainKey: request.responsesChainKey,
+         })
+ 
+         let fullContent = ''
+diff --git a/src/server/llm/http-shared.ts b/src/server/llm/http-shared.ts
+index 9b426ff8..30ee897f 100644
+--- a/src/server/llm/http-shared.ts
++++ b/src/server/llm/http-shared.ts
+@@ -9,6 +9,8 @@ import { LLMError } from '../utils/errors.js'
+ 
+ export interface RequestOptions {
+   signal?: AbortSignal | null | undefined
++  /** Internal Responses conversation scope, not an HTTP header or body field. */
++  responsesChainKey?: string | undefined
+ }
+ 
+ export interface ChatRequest {
+diff --git a/src/server/llm/responses-native.ts b/src/server/llm/responses-native.ts
+--- a/src/server/llm/responses-native.ts
++++ b/src/server/llm/responses-native.ts
+@@ -19,7 +19,7 @@
+  *   Responses API has no "off", absence is the default)
+  * - assistant tool_calls in history → `function_call` input items, and tool
+  *   role messages → `function_call_output` items (keyed by `call_id`)
+- * - `store: false` keeps every request stateless (ZDR-friendly)
++ * - unscoped requests stay stateless; scoped conversations use previous_response_id
+  */
+ 
+ import type {
+@@ -32,7 +32,17 @@ import type {
+ } from './openai-types.js'
+ import { logger } from '../utils/logger.js'
+ import { LLMError } from '../utils/errors.js'
+-import { ChatHttpClient, DONE, parseStreamJson, type ChatRequest } from './http-shared.js'
++import { createHash } from 'node:crypto'
++import {
++  ChatHttpClient,
++  DONE,
++  parseStreamJson,
++  postJson,
++  parseCompletionResponse,
++  readResponseLines,
++  type ChatRequest,
++  type RequestOptions,
++} from './http-shared.js'
+ 
+ export interface ResponsesClientOptions {
+   baseURL: string
+@@ -52,12 +62,46 @@ export interface ResponsesRequestBody {
+   max_output_tokens?: number
+   stream?: boolean
+   store?: boolean
++  previous_response_id?: string
+   reasoning?: { effort?: string }
+   [key: string]: unknown
+ }
+ 
+ type ResponsesInputItem = Record<string, unknown>
+ 
++function inputDigest(input: ResponsesInputItem[]): string {
++  return createHash('sha256')
++    .update(
++      JSON.stringify(
++        input.map((item) => {
++          if (item['type'] !== 'function_call' || typeof item['arguments'] !== 'string') return item
++          // Local tool arguments are parsed then serialized; formatting-only changes
++          // must not break continuity. Invalid JSON remains unchanged, never repaired.
++          try {
++            return { ...item, arguments: JSON.parse(item['arguments']) }
++          } catch {
++            return item
++          }
++        }),
++      ),
++    )
++    .digest('hex')
++}
++
++function convertContent(content: ChatCompletionMessageParam['content']): unknown {
++  if (!Array.isArray(content)) return content ?? ''
++  return content.map((part) => {
++    if (part.type === 'text') return { type: 'input_text', text: part.text }
++    if (part.type === 'image_url') {
++      if (typeof part.image_url?.url !== 'string' || !part.image_url.url) {
++        throw new LLMError('Invalid image content part: image_url.url must be a non-empty string')
++      }
++      return { type: 'input_image', image_url: part.image_url.url }
++    }
++    return part
++  })
++}
++
+ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInputItem | null {
+   if (message.role === 'system' || message.role === 'developer') return null
+ 
+@@ -69,7 +113,9 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
+     // Assistant messages carrying tool calls become function_call items; the
+     // textual part (usually empty in agent loops) is emitted before them.
+     const items: ResponsesInputItem[] = []
+-    if (message.content) items.push({ role: 'assistant', content: message.content })
++    if (typeof message.content === 'string' ? message.content.trim() : message.content?.length) {
++      items.push({ role: 'assistant', content: convertContent(message.content) })
++    }
+     for (const toolCall of message.tool_calls) {
+       items.push({
+         type: 'function_call',
+@@ -81,7 +127,7 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
+     return items.length === 1 ? items[0]! : { __multi: items }
+   }
+ 
+-  return { role: message.role, content: message.content ?? '' }
++  return { role: message.role, content: convertContent(message.content) }
+ }
+ 
+ function flattenInput(items: Array<ResponsesInputItem>): Array<ResponsesInputItem> {
+@@ -248,7 +294,8 @@ type StreamToolCall = NonNullable<ChatCompletionChunk['choices'][0]['delta']['to
+  */
+ export function parseResponsesEvent(event: Record<string, unknown>): ChatCompletionChunk | typeof DONE | null {
+   const type = event['type']
+-  const responseId = typeof event['response_id'] === 'string' ? event['response_id'] : 'resp'
++  const response = event['response'] as ResponsesApiResponse | undefined
++  const responseId = response?.id ?? (typeof event['response_id'] === 'string' ? event['response_id'] : 'resp')
+ 
+   switch (type) {
+     case 'response.output_text.delta':
+@@ -359,6 +406,137 @@ function finalChunk(id: string, response?: ResponsesApiResponse): ChatCompletion
+ export class OpenAIResponsesHttpClient extends ChatHttpClient {
+   private baseURL: string
+   private apiKey: string
++  private chains = new Map<string, { fingerprint: string; count: number; digest: string; id?: string }>()
++  private storeSupported = true
++
++  resetChain(key?: string): void {
++    if (key === undefined) this.chains.clear()
++    else this.chains.delete(key)
++  }
++
++  private async startRequest(
++    params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
++    options?: RequestOptions,
++  ) {
++    const body = buildResponsesRequest(params)
++    const fullInput = body.input
++    const key = options?.responsesChainKey
++    const hash = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('hex')
++    const { input: _input, stream: _stream, ...settings } = body
++    const fingerprint = hash(settings)
++    const previous = key ? this.chains.get(key) : undefined
++    // A pending entry is also a generation token: reset/switch or overlapping
++    // requests cannot let a late completion revive an obsolete chain.
++    const ticket = { fingerprint, count: 0, digest: '' }
++    let accepted = false
++    const discard = () => {
++      if (key && !accepted && this.chains.get(key) === ticket) this.chains.delete(key)
++    }
++    if (key && this.storeSupported) {
++      body.store = true
++      if (
++        previous?.id &&
++        previous.fingerprint === fingerprint &&
++        fullInput.length >= previous.count &&
++        inputDigest(fullInput.slice(0, previous.count)) === previous.digest
++      ) {
++        body.previous_response_id = previous.id
++        body.input = fullInput.slice(previous.count)
++      }
++      this.chains.delete(key)
++      this.chains.set(key, ticket)
++      if (this.chains.size > 256) this.chains.delete(this.chains.keys().next().value!)
++    }
++    try {
++      const request = this.buildRequest(params, body)
++      const response = await postJson(request.url, request.headers, request.body, options)
++      const accept = (data: ResponsesApiResponse) => {
++        if (
++          !key ||
++          !this.storeSupported ||
++          this.chains.get(key) !== ticket ||
++          data.status !== 'completed' ||
++          !data.id ||
++          options?.signal?.aborted
++        )
++          return
++        const parsed = parseResponsesResponse(data).choices[0]!.message
++        // Use the same input translation for local assistant history, excluding
++        // provider-only reasoning items. Count input items, not response events.
++        const output =
++          parsed.content || parsed.tool_calls?.length
++            ? buildResponsesRequest({
++                ...params,
++                messages: [
++                  {
++                    role: 'assistant',
++                    content: typeof parsed.content === 'string' ? parsed.content : '',
++                    ...(parsed.tool_calls ? { tool_calls: parsed.tool_calls } : {}),
++                  },
++                ],
++              }).input
++            : []
++        const expected = [...fullInput, ...output]
++        this.chains.set(key, { fingerprint, count: expected.length, digest: inputDigest(expected), id: data.id })
++        accepted = true
++      }
++      return { response, accept, discard }
++    } catch (error) {
++      discard()
++      if (
++        /HTTP 4\d\d/.test(String(error)) &&
++        /zero data retention|\bzdr\b|store.*(?:unsupported|not supported)/i.test(String(error))
++      ) {
++        this.storeSupported = false
++        this.chains.clear()
++      }
++      throw error
++    }
++  }
++
++  override async createChatCompletion(
++    params: ChatCompletionCreateParamsNonStreaming,
++    options?: RequestOptions,
++    returnRaw?: boolean,
++  ): Promise<ChatCompletionResponse & { raw?: string }> {
++    const request = await this.startRequest(params, options)
++    try {
++      return await parseCompletionResponse(
++        request.response,
++        (data) => {
++          const parsed = this.parseNonStreaming(data)
++          request.accept(data as ResponsesApiResponse)
++          return parsed
++        },
++        returnRaw,
++      )
++    } finally {
++      request.discard()
++    }
++  }
++
++  override async *createChatCompletionStream(
++    params: ChatCompletionCreateParamsStreaming,
++    options?: RequestOptions,
++  ): AsyncGenerator<ChatCompletionChunk> {
++    const request = await this.startRequest(params, options)
++    try {
++      let completed: ResponsesApiResponse | undefined
++      for await (const line of readResponseLines(request.response)) {
++        if (!line.startsWith('data: ')) continue
++        if (line.slice(6) === '[DONE]') break
++        const event = parseStreamJson<Record<string, unknown>>(line.slice(6), 'Responses API')
++        const parsed = parseResponsesEvent(event)
++        if (event['type'] === 'response.completed' && event['response']) {
++          completed = event['response'] as ResponsesApiResponse
++        }
++        if (parsed && parsed !== DONE) yield parsed
++      }
++      if (completed) request.accept(completed)
++    } finally {
++      request.discard()
++    }
++  }
+ 
+   constructor(options: ResponsesClientOptions) {
+     super()
+@@ -368,6 +546,7 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
+ 
+   protected buildRequest(
+     params: ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming,
++    body = buildResponsesRequest(params),
+   ): ChatRequest {
+     return {
+       url: `${this.baseURL}/responses`,
+@@ -375,7 +554,7 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
+         'Content-Type': 'application/json',
+         Authorization: `Bearer ${this.apiKey}`,
+       },
+-      body: JSON.stringify(buildResponsesRequest(params)),
++      body: JSON.stringify(body),
+     }
+   }
+ 
+diff --git a/src/server/llm/types.ts b/src/server/llm/types.ts
+index e7ffe88d..cb80ad59 100644
+--- a/src/server/llm/types.ts
++++ b/src/server/llm/types.ts
+@@ -46,6 +46,8 @@ export interface LLMCompletionRequest {
+   }
+   /** When true, include the raw API response body in the result */
+   returnRaw?: boolean
++  /** Local conversation scope only; never serialized into a provider request. */
++  responsesChainKey?: string
+   /** When true, the client-level reasoningEffort (from thinkingLevel) is NOT applied.
+    *  Used by non-thinking callers (e.g. title generation) that want to opt out. */
+   skipClientReasoningEffort?: boolean
+diff --git a/src/server/provider-manager.test.ts b/src/server/provider-manager.test.ts
+index 59df51ae..f5c5ecea 100644
+--- a/src/server/provider-manager.test.ts
++++ b/src/server/provider-manager.test.ts
+@@ -77,6 +77,19 @@ describe('ProviderManager - Model Selection', () => {
+     vi.restoreAllMocks()
+   })
+ 
++  it('passes each Provider.apiProtocol without leaking the global override into another provider', () => {
++    const configured = {
++      ...config,
++      llm: { ...config.llm, apiProtocol: 'responses' },
++      providers: [{ ...config.providers![0]!, apiProtocol: 'chat-completions' }, config.providers![1]!],
++    } as Config
++    const manager = createProviderManager(configured)
++    manager.createClient('provider-1', 'model-a')
++    expect(createLLMClientMock.mock.calls.at(-1)?.[0].llm).toMatchObject({ apiProtocol: 'chat-completions' })
++    manager.createClient('provider-2', 'model-b')
++    expect(createLLMClientMock.mock.calls.at(-1)?.[0].llm).toMatchObject({ apiProtocol: 'auto' })
++  })
++
+   describe('getProviderModels', () => {
+     it('returns empty array for non-existent provider', async () => {
+       const models = await providerManager.getProviderModels('non-existent')
+diff --git a/src/server/provider-manager.ts b/src/server/provider-manager.ts
+index 3d6d188a..f0fdd1c9 100644
+--- a/src/server/provider-manager.ts
++++ b/src/server/provider-manager.ts
+@@ -485,6 +485,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
+         baseUrl: ensureVersionPrefix(provider.url),
+         model: send.modelId,
+         backend: resolveBackend(provider),
++        apiProtocol: provider.apiProtocol ?? 'auto',
+         ...(provider.apiKey && { apiKey: provider.apiKey }),
+         ...(thinkingField ? { thinkingField } : {}),
+         ...(provider.sendReasoningInMessages !== undefined
+diff --git a/src/server/queue/processor.test.ts b/src/server/queue/processor.test.ts
+index 9d6be1e7..2c91bb6d 100644
+--- a/src/server/queue/processor.test.ts
++++ b/src/server/queue/processor.test.ts
+@@ -70,6 +70,8 @@ describe('QueueProcessor', () => {
+     mockSessionManager = {
+       subscribe: vi.fn(() => () => {}),
+       getSession: vi.fn(() => sessionState),
++      clearSessionLLMClient: vi.fn(),
++      getOrCreateSessionLLMClient: vi.fn((_session, _provider, _model, _effort, create: () => unknown) => create()),
+       hasQueuedMessages: vi.fn(() => queueItems.length > 0),
+       setRunning: vi.fn((_id: string, running: boolean) => {
+         sessionState = { ...sessionState, isRunning: running }
+diff --git a/src/server/queue/processor.ts b/src/server/queue/processor.ts
+index e662faa0..81b9dde7 100644
+--- a/src/server/queue/processor.ts
++++ b/src/server/queue/processor.ts
+@@ -219,9 +219,16 @@ export class QueueProcessor {
+       if (current.providerId && current.model && this.deps.getLLMClientForProvider) {
+         const resolvedModel = providerManager.resolveModel?.(current.providerId, current.model)
+         const effectiveModel = resolvedModel ?? current.model
+-        const client = this.deps.getLLMClientForProvider(current.providerId, effectiveModel, current.reasoningEffort)
++        const client = sessionManager.getOrCreateSessionLLMClient(
++          sessionId,
++          current.providerId,
++          effectiveModel,
++          current.reasoningEffort,
++          () => this.deps.getLLMClientForProvider!(current.providerId!, effectiveModel, current.reasoningEffort),
++        )
+         if (client) return client
+       }
++      sessionManager.clearSessionLLMClient(sessionId)
+       return llmClient
+     }
+ 
+diff --git a/src/server/session/manager.ts b/src/server/session/manager.ts
+index 1bd73ea7..4fa25927 100644
+--- a/src/server/session/manager.ts
++++ b/src/server/session/manager.ts
+@@ -71,7 +71,8 @@ import { logger } from '../utils/logger.js'
+ import { EventEmitter, type Unsubscribe } from '../utils/async.js'
+ import { getLspManager as getOrCreateLspManager, shutdownLspManager, type LspManager } from '../lsp/index.js'
+ import { devServerManager } from '../dev-server/manager.js'
+-import { resolveLLMClientForAgent, getAgentModelOverride } from '../agents/model-overrides.js'
++import { getAgentModelOverride } from '../agents/model-overrides.js'
++import { createHash } from 'node:crypto'
+ import { parseDefaultModelSelection } from '../provider-manager.js'
+ import { getEventStore } from '../events/store.js'
+ import {
+@@ -144,6 +145,37 @@ To land changes from this workspace when the user asks to commit and push:
+ // ============================================================================
+ 
+ export class SessionManager {
++  // One current selection per session, shared by WS, queue and agent overrides.
++  // Replacing (rather than caching by model) prevents A -> B -> A resurrection.
++  private sessionLLMClients = new Map<string, { key: string; client: import('../llm/client.js').LLMClientWithModel }>()
++
++  getOrCreateSessionLLMClient(
++    sessionId: string,
++    providerId: string,
++    model: string,
++    reasoningEffort: string | undefined,
++    create: () => import('../llm/client.js').LLMClientWithModel | undefined,
++  ): import('../llm/client.js').LLMClientWithModel | undefined {
++    const provider = this.providerManager.getProviders().find((candidate) => candidate.id === providerId)
++    const definition = { ...(provider ?? { id: providerId }) } as Record<string, unknown>
++    delete definition['status']
++    delete definition['isActive']
++    delete definition['models']
++    const modelConfig = provider?.models.find((candidate) => candidate.id === model)
++    const key = createHash('sha256')
++      .update(JSON.stringify({ provider: definition, model, modelConfig, reasoningEffort }))
++      .digest('hex')
++    const cached = this.sessionLLMClients.get(sessionId)
++    if (cached?.key === key) return cached.client
++    const client = create()
++    if (client) this.sessionLLMClients.set(sessionId, { key, client })
++    else this.sessionLLMClients.delete(sessionId)
++    return client
++  }
++
++  clearSessionLLMClient(sessionId: string): void {
++    this.sessionLLMClients.delete(sessionId)
++  }
+   private events = new EventEmitter<SessionEvents>()
+   private activeSessionId: string | null = null
+   private providerManager: import('../provider-manager.js').ProviderManager
+@@ -186,15 +218,20 @@ export class SessionManager {
+     preferredFallback?: import('../llm/client.js').LLMClientWithModel,
+   ): import('../llm/client.js').LLMClientWithModel {
+     const fallback = preferredFallback ?? this.providerManager.getLLMClient()
+-    const pinnedEffort = dbGetSession(sessionId)?.providerPinnedEffort ?? undefined
+-    const resolved = resolveLLMClientForAgent(agentId, fallback, this.providerManager, pinnedEffort)
+-    if (resolved.warning) {
++    const override = getAgentModelOverride(agentId)
++    if (!override) return fallback
++    const effort = dbGetSession(sessionId)?.providerPinnedEffort ?? override.reasoningEffort
++    const client = this.getOrCreateSessionLLMClient(sessionId, override.providerId, override.model, effort, () =>
++      this.providerManager.createClient(override.providerId, override.model, effort),
++    )
++    if (!client) {
+       logger.warn('Agent model override unavailable, falling back', {
+         agentId,
+-        warning: resolved.warning,
++        providerId: override.providerId,
++        model: override.model,
+       })
+     }
+-    return resolved.client
++    return client ?? fallback
+   }
+ 
+   /**
+@@ -728,6 +765,7 @@ export class SessionManager {
+ 
+     // Clean up warmup state
+     this.warmedUpSessions.delete(id)
++    this.clearSessionLLMClient(id)
+     this.announcedPromptHashStore.delete(id)
+     this.announcedToolFingerprintStore.delete(id)
+     this.unknownProviderWarned.delete(id)
+diff --git a/src/server/ws/server.test.ts b/src/server/ws/server.test.ts
+index ea0df8a6..231fbe3e 100644
+--- a/src/server/ws/server.test.ts
++++ b/src/server/ws/server.test.ts
+@@ -429,6 +429,8 @@ function createSessionManager(overrides: Record<string, unknown> = {}) {
+     drainCompletionMessages: vi.fn(() => []),
+     clearMessageQueue: vi.fn(),
+     getEffectiveWorkdir: vi.fn(() => session.workdir),
++    clearSessionLLMClient: vi.fn(),
++    getOrCreateSessionLLMClient: vi.fn((_session, _provider, _model, _effort, create: () => unknown) => create()),
+     ...overrides,
+   }
+ 
+diff --git a/src/server/ws/server.ts b/src/server/ws/server.ts
+index de1852ee..eb3f6855 100644
+--- a/src/server/ws/server.ts
++++ b/src/server/ws/server.ts
+@@ -369,22 +369,15 @@ export function createWebSocketServer(
+   const clients = new Map<WebSocket, ClientConnection>()
+   moduleClients = clients
+ 
+-  // Per-session LLM client cache: sessionId -> { cacheKey, client }
+-  const sessionLLMClients = new Map<string, { key: string; client: LLMClientWithModel }>()
+-
+   function getSessionLLMClient(sessionId: string): LLMClientWithModel {
+     const effective = sessionManager.resolveEffectiveProviderModel(sessionId)
+     if (!effective.providerId || !effective.model || !providerManager) {
++      sessionManager.clearSessionLLMClient(sessionId)
+       return getLLMClient()
+     }
+ 
+     const resolvedModel = providerManager.resolveModel(effective.providerId, effective.model)
+     const effectiveModel = resolvedModel ?? effective.model
+-    const cacheKey = `${effective.providerId}:${effectiveModel}:${effective.reasoningEffort ?? ''}`
+-    const cached = sessionLLMClients.get(sessionId)
+-    if (cached && cached.key === cacheKey) {
+-      return cached.client
+-    }
+ 
+     // Look up the provider to get URL, apiKey, backend
+     const provider = providerManager.getProviders().find((p) => p.id === effective.providerId)
+@@ -400,13 +393,19 @@ export function createWebSocketServer(
+         sessionManager.setSessionProvider(sessionId, null, null, false, null)
+         sessionManager.setSessionProviderActive(sessionId, true)
+       }
+-      sessionLLMClients.delete(sessionId)
++      sessionManager.clearSessionLLMClient(sessionId)
+       return getLLMClient()
+     }
+ 
+     // Let ProviderManager create the session client so provider-specific
+     // transports (for example External Provider custom) and auth context are preserved.
+-    const client = providerManager.createClient(effective.providerId, effectiveModel, effective.reasoningEffort)
++    const client = sessionManager.getOrCreateSessionLLMClient(
++      sessionId,
++      effective.providerId,
++      effectiveModel,
++      effective.reasoningEffort,
++      () => providerManager.createClient(effective.providerId!, effectiveModel, effective.reasoningEffort),
++    )
+     if (!client) {
+       logger.warn('Could not create session provider client, falling back to global', {
+         sessionId,
+@@ -435,10 +434,6 @@ export function createWebSocketServer(
+         effective.reasoningEffort,
+       )
+     }
+-    sessionLLMClients.set(sessionId, {
+-      key: `${effective.providerId}:${concreteModel}:${effective.reasoningEffort ?? ''}`,
+-      client,
+-    })
+     return client
+   }
+ 
+diff --git a/src/shared/types.ts b/src/shared/types.ts
+index 9b111c3a..6e77ca83 100644
+--- a/src/shared/types.ts
++++ b/src/shared/types.ts
+@@ -717,6 +717,8 @@ export interface Provider {
+   thinkingField?: string
+   /** When false, strips reasoning/thinking content from outgoing assistant messages */
+   sendReasoningInMessages?: boolean
++  /** Provider protocol override; auto keeps backend/model routing. */
++  apiProtocol?: 'auto' | 'responses' | 'chat-completions'
+ }
+ 
+ export interface Config {
+@@ -737,6 +739,7 @@ export interface Config {
+     sendReasoningInMessages?: boolean
+     /** Vision model for image description fallback when primary model lacks vision support */
+     visionModel?: string
++    apiProtocol?: 'auto' | 'responses' | 'chat-completions'
+   }
+   context: {
+     maxTokens: number
+diff --git a/src/server/llm/responses-continuity.test.ts b/src/server/llm/responses-continuity.test.ts
+new file mode 100644
+index 00000000..3e8826f6
+--- /dev/null
++++ b/src/server/llm/responses-continuity.test.ts
+@@ -0,0 +1,303 @@
++import { afterEach, describe, expect, it } from 'vitest'
++import { createServer, type Server } from 'node:http'
++import type { AddressInfo } from 'node:net'
++import { createLLMClient } from './client.js'
++import type { LLMCompletionRequest, LLMMessage, LLMToolDefinition } from './types.js'
++
++const tools: LLMToolDefinition[] = [
++  {
++    type: 'function',
++    function: {
++      name: 'read_file',
++      description: 'read a file',
++      parameters: { type: 'object', properties: { path: { type: 'string' } } },
++    },
++  },
++]
++const system: LLMMessage = { role: 'system', content: 'Keep the instructions and tools.' }
++const user = (content: string): LLMMessage => ({ role: 'user', content })
++const assistant = (content: string): LLMMessage => ({ role: 'assistant', content })
++const history = [system, user('first')]
++const nextHistory = [...history, assistant('answer-1'), user('second')]
++const image = { id: 'image', filename: 'image.png', mimeType: 'image/png', size: 3, data: 'data:image/png;base64,QUJD' }
++
++const servers: Server[] = []
++afterEach(async () => {
++  for (const server of servers.splice(0)) {
++    server.closeAllConnections()
++    await new Promise<void>((resolve) => server.close(() => resolve()))
++  }
++})
++
++async function boot(
++  overrides: Record<string, unknown> = {},
++  outputs?: Array<Record<string, unknown>[]>,
++  statuses: string[] = [],
++  rejectRetention = false,
++) {
++  const requests: Array<{ path: string; body: Record<string, unknown>; headers: string[] }> = []
++  const server = createServer((req, res) => {
++    let raw = ''
++    req.on('data', (chunk: Buffer) => {
++      raw += chunk.toString()
++    })
++    req.on('end', () => {
++      const body = JSON.parse(raw) as Record<string, unknown>
++      requests.push({ path: req.url!, body, headers: Object.keys(req.headers) })
++      if (rejectRetention && body['store'] === true) {
++        res.writeHead(400, { 'content-type': 'application/json' })
++        res.end(JSON.stringify({ error: { message: 'store is not supported with zero data retention' } }))
++        return
++      }
++      const n = requests.length
++      const output = outputs?.[n - 1] ?? [
++        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `answer-${n}` }] },
++      ]
++      const response = {
++        id: `resp_${n}`,
++        status: statuses[n - 1] ?? 'completed',
++        output,
++        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
++      }
++      if (body['stream']) {
++        res.writeHead(200, { 'content-type': 'text/event-stream' })
++        const events: Record<string, unknown>[] = req.url?.endsWith('/chat/completions')
++          ? [{ id: `chat_${n}`, choices: [{ delta: { content: `answer-${n}` }, finish_reason: 'stop' }] }]
++          : [
++              { type: 'response.created', response: { id: response.id, status: 'in_progress' } },
++              ...output.flatMap<Record<string, unknown>>((item, output_index) =>
++                item['type'] === 'function_call'
++                  ? [
++                      { type: 'response.output_item.added', output_index, item: { ...item, arguments: '' } },
++                      { type: 'response.function_call_arguments.delta', output_index, delta: item['arguments'] },
++                    ]
++                  : item['type'] === 'message'
++                    ? [
++                        {
++                          type: 'response.output_text.delta',
++                          delta: (item['content'] as Array<{ text: string }>).map((c) => c.text).join(''),
++                        },
++                      ]
++                    : [],
++              ),
++              { type: `response.${response.status}`, response },
++            ]
++        for (const event of events) res.write(`data: ${JSON.stringify(event)}\n\n`)
++        res.end()
++      } else {
++        res.writeHead(200, { 'content-type': 'application/json' })
++        res.end(
++          JSON.stringify(
++            req.url?.endsWith('/chat/completions')
++              ? {
++                  id: `chat_${n}`,
++                  choices: [{ message: { content: `answer-${n}` }, finish_reason: 'stop' }],
++                }
++              : response,
++          ),
++        )
++      }
++    })
++  })
++  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
++  servers.push(server)
++  const client = createLLMClient({
++    llm: {
++      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
++      model: 'gpt-5.6-sol',
++      backend: 'openai',
++      apiKey: 'fixture-key',
++      timeout: 5000,
++      idleTimeout: 5000,
++      ...overrides,
++    },
++    context: { maxTokens: 8192, compactionThreshold: 0.85, compactionTarget: 0.6 },
++  } as never)
++  const request = async (messages = history, key: string | undefined = 'session', stream = true) => {
++    const params = {
++      messages,
++      tools,
++      ...(key ? { responsesChainKey: key } : {}),
++      modelSettings: { supportsVision: true },
++    } as LLMCompletionRequest
++    if (!stream) return client.complete(params)
++    let last
++    for await (const event of client.stream(params)) last = event
++    expect(last?.type).toBe('done')
++    return last?.type === 'done' ? last.response : undefined
++  }
++  return { client, requests, request }
++}
++
++describe('fork Responses continuity on the wire', () => {
++  it.each([true, false])('keeps instructions/tools with delta-only input (stream=%s)', async (stream) => {
++    const { request, requests } = await boot()
++    await request(history, 'session', stream)
++    await request(nextHistory, 'session', stream)
++    expect(requests[0]!.body['store']).toBe(true)
++    expect(requests[1]!.body['previous_response_id']).toBe('resp_1')
++    expect(requests[1]!.body['input']).toEqual([{ role: 'user', content: 'second' }])
++    expect(requests[1]!.body['instructions']).toBe(system.content)
++    expect(requests[1]!.body['tools']).toEqual(requests[0]!.body['tools'])
++    expect(Object.keys(requests[1]!.body).sort()).toEqual(
++      [
++        'input',
++        'instructions',
++        'max_output_tokens',
++        'model',
++        'previous_response_id',
++        'store',
++        'stream',
++        'tools',
++      ].sort(),
++    )
++    expect(requests[1]!.headers.some((name) => /session|affinity|conversation/.test(name))).toBe(false)
++  })
++
++  it.each([
++    { model: 'custom-alias', backend: 'unknown', apiProtocol: 'responses', endpoint: '/v1/responses' },
++    { model: 'gpt-5.6-sol', backend: 'openai', apiProtocol: 'chat-completions', endpoint: '/v1/chat/completions' },
++    { model: 'gpt-5.6-sol', backend: 'openai', apiProtocol: 'auto', endpoint: '/v1/responses' },
++    { model: 'qwen3-32b', backend: 'vllm', endpoint: '/v1/chat/completions' },
++  ])('routes $model via $endpoint with provider override $apiProtocol', async ({ endpoint, ...overrides }) => {
++    const { request, requests } = await boot(overrides)
++    await request()
++    await request(nextHistory)
++    expect(requests.map((r) => r.path)).toEqual([endpoint, endpoint])
++    if (endpoint.endsWith('/chat/completions')) {
++      expect(requests[1]!.body['messages']).toEqual(nextHistory)
++      expect(requests[1]!.body['previous_response_id']).toBeUndefined()
++      expect(requests[1]!.body['store']).toBeUndefined()
++    }
++  })
++
++  it('does not resurrect the original chain on model A -> B -> A, even without a B request', async () => {
++    const { client, request, requests } = await boot()
++    await request()
++    client.setModel('gpt-5.5')
++    client.setModel('gpt-5.6-sol')
++    await request(nextHistory)
++    expect(requests[1]!.body['store']).toBe(true)
++    expect(requests[1]!.body['previous_response_id']).toBeUndefined()
++    expect(requests[1]!.body['input']).toHaveLength(3)
++  })
++
++  it('does not resurrect a Responses chain after a real Chat Completions turn', async () => {
++    const { client, request, requests } = await boot()
++    await request()
++    client.setBackend('vllm')
++    await request(nextHistory)
++    client.setBackend('openai')
++    await request([...nextHistory, assistant('answer-2'), user('third')])
++    expect(requests.map((r) => r.path)).toEqual(['/v1/responses', '/v1/chat/completions', '/v1/responses'])
++    expect(requests[2]!.body['previous_response_id']).toBeUndefined()
++    expect(requests[2]!.body['input']).toHaveLength(5)
++  })
++
++  it('resets the same history explicitly after compaction and keeps sessions independent', async () => {
++    const { client, request, requests } = await boot()
++    await request(history, 'A')
++    await request(history, 'B')
++    client.resetResponsesChain?.('A')
++    await request(nextHistory, 'A')
++    await request([...history, assistant('answer-2'), user('B delta')], 'B')
++    expect(requests[2]!.body['previous_response_id']).toBeUndefined()
++    expect(requests[3]!.body['previous_response_id']).toBe('resp_2')
++  })
++
++  it('keeps tool identities through a parallel call/result cycle', async () => {
++    const calls = [
++      { type: 'function_call', id: 'fc_a', call_id: 'a', name: 'read_file', arguments: '{ "path": "a.ts" }' },
++      { type: 'function_call', id: 'fc_b', call_id: 'b', name: 'glob', arguments: '{"pattern":"*.ts"}' },
++    ]
++    const { request, requests } = await boot({}, [calls])
++    const first = await request()
++    await request([
++      ...history,
++      { role: 'assistant', content: '', toolCalls: first!.toolCalls! },
++      { role: 'tool', toolCallId: 'a', content: 'file A' },
++      { role: 'tool', toolCallId: 'b', content: 'a.ts, b.ts' },
++    ])
++    expect(requests[1]!.body['previous_response_id']).toBe('resp_1')
++    expect(requests[1]!.body['input']).toEqual([
++      { type: 'function_call_output', call_id: 'a', output: 'file A' },
++      { type: 'function_call_output', call_id: 'b', output: 'a.ts, b.ts' },
++    ])
++  })
++
++  it.each([true, false])(
++    'converts images in the initial and delta input without changing bytes (stream=%s)',
++    async (stream) => {
++      const { request, requests } = await boot()
++      const first = [system, { ...user('first'), attachments: [image] }]
++      await request(first, 'images', stream)
++      await request([...first, assistant('answer-1'), { ...user('second'), attachments: [image] }], 'images', stream)
++      const converted = (text: string) => [
++        { type: 'input_text', text },
++        { type: 'input_image', image_url: image.data },
++      ]
++      expect(requests[0]!.body['input']).toEqual([{ role: 'user', content: converted('first') }])
++      expect(requests[1]!.body['previous_response_id']).toBe('resp_1')
++      expect(requests[1]!.body['input']).toEqual([{ role: 'user', content: converted('second') }])
++    },
++  )
++
++  it('resets when instructions, tools, or already-sent input change', async () => {
++    for (const change of ['instructions', 'tools', 'history', 'output']) {
++      const { client, request, requests } = await boot()
++      await request()
++      const messages = structuredClone(nextHistory)
++      if (change === 'instructions') messages[0]!.content += 'new'
++      if (change === 'history') messages[1]!.content += 'edited'
++      if (change === 'output') messages[2]!.content += 'edited'
++      await client.complete({ messages, tools: change === 'tools' ? [] : tools, responsesChainKey: 'session' } as never)
++      expect(requests[1]!.body['previous_response_id']).toBeUndefined()
++      expect(requests[1]!.body['input']).toHaveLength(3)
++    }
++  })
++
++  it('never continues from failed or incomplete responses, and stays stateless without a key', async () => {
++    for (const status of ['failed', 'cancelled', 'incomplete']) {
++      const { client, request, requests } = await boot({}, undefined, [status])
++      for await (const _event of client.stream({ messages: history, responsesChainKey: 'session' } as never)) {
++        /* drain */
++      }
++      await request(nextHistory)
++      expect(requests[1]!.body['previous_response_id']).toBeUndefined()
++    }
++    const { request, requests } = await boot()
++    await request(history, '')
++    expect(requests[0]!.body['store']).toBe(false)
++  })
++
++  it.each(['reset', 'abort'])('does not advance a request invalidated in flight by %s', async (action) => {
++    const { client, request, requests } = await boot()
++    const controller = new AbortController()
++    for await (const event of client.stream({
++      messages: history,
++      tools,
++      responsesChainKey: 'session',
++      signal: controller.signal,
++    })) {
++      if (event.type === 'text_delta') {
++        if (action === 'reset') client.resetResponsesChain?.('session')
++        else controller.abort()
++      }
++    }
++    await request(nextHistory)
++    expect(requests[1]!.body['previous_response_id']).toBeUndefined()
++    expect(requests[1]!.body['input']).toHaveLength(3)
++  })
++
++  it('falls back to stateless full history on the next attempt after retention is refused', async () => {
++    const { client, request, requests } = await boot({}, undefined, [], true)
++    let last
++    for await (const event of client.stream({ messages: history, tools, responsesChainKey: 'session' })) last = event
++    expect(last?.type).toBe('error')
++    await request()
++    expect(requests[0]!.body['store']).toBe(true)
++    expect(requests[1]!.body['store']).toBe(false)
++    expect(requests[1]!.body['previous_response_id']).toBeUndefined()
++    expect(requests[1]!.body['input']).toEqual([{ role: 'user', content: 'first' }])
++  })
++})
+diff --git a/src/server/session/responses-client-cache.test.ts b/src/server/session/responses-client-cache.test.ts
+new file mode 100644
+index 00000000..bf340da8
+--- /dev/null
++++ b/src/server/session/responses-client-cache.test.ts
+@@ -0,0 +1,35 @@
++import { describe, expect, it, vi } from 'vitest'
++import { SessionManager } from './manager.js'
++import type { Provider } from '../../shared/types.js'
++import type { ProviderManager } from '../provider-manager.js'
++import type { LLMClientWithModel } from '../llm/client.js'
++
++describe('Responses client ownership per session', () => {
++  it('reuses only the current selection, never resurrects A on A -> B -> A, and invalidates transport edits', () => {
++    const provider = {
++      id: 'provider',
++      url: 'http://127.0.0.1:1',
++      apiProtocol: 'responses',
++      models: [{ id: 'A' }, { id: 'B' }],
++      status: 'connected',
++    } as Provider
++    const manager = new SessionManager({ getProviders: () => [provider] } as ProviderManager)
++    const create = vi.fn(() => ({}) as LLMClientWithModel)
++    const resolve = (session: string, model: string) =>
++      manager.getOrCreateSessionLLMClient(session, 'provider', model, undefined, create)
++    const a = resolve('s1', 'A')
++    expect(resolve('s1', 'A')).toBe(a)
++    expect(resolve('s2', 'A')).not.toBe(a)
++    resolve('s1', 'B')
++    expect(resolve('s1', 'A')).not.toBe(a)
++    const beforeChange = resolve('s1', 'A')
++    provider.apiProtocol = 'chat-completions'
++    expect(resolve('s1', 'A')).not.toBe(beforeChange)
++    const beforeClear = resolve('s1', 'A')
++    manager.clearSessionLLMClient('s1')
++    expect(resolve('s1', 'A')).not.toBe(beforeClear)
++    const stable = resolve('s1', 'A')
++    provider.status = 'disconnected'
++    expect(resolve('s1', 'A')).toBe(stable)
++  })
++})

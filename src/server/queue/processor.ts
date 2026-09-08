@@ -219,9 +219,16 @@ export class QueueProcessor {
       if (current.providerId && current.model && this.deps.getLLMClientForProvider) {
         const resolvedModel = providerManager.resolveModel?.(current.providerId, current.model)
         const effectiveModel = resolvedModel ?? current.model
-        const client = this.deps.getLLMClientForProvider(current.providerId, effectiveModel, current.reasoningEffort)
+        const client = sessionManager.getOrCreateSessionLLMClient(
+          sessionId,
+          current.providerId,
+          effectiveModel,
+          current.reasoningEffort,
+          () => this.deps.getLLMClientForProvider!(current.providerId!, effectiveModel, current.reasoningEffort),
+        )
         if (client) return client
       }
+      sessionManager.clearSessionLLMClient(sessionId)
       return llmClient
     }
 

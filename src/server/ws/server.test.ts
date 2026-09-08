@@ -429,6 +429,8 @@ function createSessionManager(overrides: Record<string, unknown> = {}) {
     drainCompletionMessages: vi.fn(() => []),
     clearMessageQueue: vi.fn(),
     getEffectiveWorkdir: vi.fn(() => session.workdir),
+    clearSessionLLMClient: vi.fn(),
+    getOrCreateSessionLLMClient: vi.fn((_session, _provider, _model, _effort, create: () => unknown) => create()),
     ...overrides,
   }
 

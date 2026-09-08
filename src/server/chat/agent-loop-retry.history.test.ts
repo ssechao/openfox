@@ -225,8 +225,8 @@ describe('agent loop retry history (real EventStore)', () => {
 
   // Real HTTP -> parser -> stream consumer -> SQLite -> tool dispatch -> next
   // request. Only model responses and the first controlled tool error are scripted.
-  async function runFixture(bodies: string[], execute = vi.fn()) {
-    const requests: Array<{ messages: Array<{ role: string; content: string }> }> = []
+  async function runFixture(bodies: string[], execute = vi.fn(), apiProtocol?: 'responses') {
+    const requests: Array<{ messages: Array<{ role: string; content: string }>; [key: string]: unknown }> = []
     const server = createServer((req, res) => {
       let body = ''
       req.on('data', (chunk) => {
@@ -247,6 +247,7 @@ describe('agent loop retry history (real EventStore)', () => {
           backend: 'vllm',
           timeout: 10000,
           idleTimeout: 10000,
+          ...(apiProtocol ? { apiProtocol } : {}),
         },
         context: { maxTokens: 128000, compactionThreshold: 0.85, compactionTarget: 0.6 },
       } as never)
@@ -296,6 +297,51 @@ describe('agent loop retry history (real EventStore)', () => {
     }
     return parts.join('') + frame({}, 'tool_calls')
   }
+
+  it('continues a Responses tool round using only its result through the real agent pipeline', async () => {
+    const call = {
+      type: 'function_call',
+      id: 'fc_1',
+      call_id: 'call-1',
+      name: 'read_file',
+      arguments: '{"path":"a.ts"}',
+    }
+    const encode = (events: unknown[]) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')
+    const execute = vi.fn(async () => ({ success: true, output: 'file A', durationMs: 0, truncated: false }))
+    const fixture = await runFixture(
+      [
+        encode([
+          { type: 'response.output_item.added', output_index: 1, item: { ...call, arguments: '' } },
+          { type: 'response.function_call_arguments.delta', output_index: 1, delta: call.arguments },
+          { type: 'response.completed', response: { id: 'resp_tools', status: 'completed', output: [call] } },
+        ]),
+        encode([
+          { type: 'response.output_text.delta', delta: 'read successfully' },
+          {
+            type: 'response.completed',
+            response: {
+              id: 'resp_final',
+              status: 'completed',
+              output: [
+                { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'read successfully' }] },
+              ],
+            },
+          },
+        ]),
+      ],
+      execute,
+      'responses',
+    )
+    expect(fixture.outcome?.failed).toBeUndefined()
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(fixture.requests).toHaveLength(2)
+    expect(fixture.requests[1]?.['previous_response_id']).toBe('resp_tools')
+    expect(fixture.requests[1]?.['input']).toEqual([
+      { type: 'function_call_output', call_id: 'call-1', output: 'file A' },
+    ])
+    expect(fixture.requests[1]?.['instructions']).toBe(fixture.requests[0]?.['instructions'])
+    expect(fixture.messages.at(-1)).toMatchObject({ content: 'read successfully', isStreaming: false })
+  })
 
   it('completes a long thinking/tool failure/recovery session with intact arguments and resumable state', async () => {
     const workdir = await mkdtemp(join(tmpdir(), 'openfox-long-session-'))

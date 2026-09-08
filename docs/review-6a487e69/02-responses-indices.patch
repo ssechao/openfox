@@ -1,0 +1,127 @@
+diff --git a/src/server/llm/client-responses-e2e.test.ts b/src/server/llm/client-responses-e2e.test.ts
+index 15cf5ef4..f1f5bc18 100644
+--- a/src/server/llm/client-responses-e2e.test.ts
++++ b/src/server/llm/client-responses-e2e.test.ts
+@@ -1,7 +1,15 @@
+-import { afterAll, describe, expect, it } from 'vitest'
++import { afterAll, describe, expect, it, vi } from 'vitest'
+ import { createServer, type Server } from 'node:http'
+ import type { AddressInfo } from 'node:net'
+ import { createLLMClient } from './client.js'
++import { executeTools } from '../chat/execute-tools.js'
++import type { LLMCompletionResponse } from './types.js'
++import type { TurnEvent } from '../events/types.js'
++
++vi.mock('../agents/registry.js', () => ({
++  loadAllAgentsDefault: vi.fn(async () => []),
++  findAgentById: vi.fn(),
++}))
+ 
+ /**
+  * Boots a minimal SSE server emulating the OpenAI Responses API stream:
+@@ -123,6 +131,81 @@ describe('createLLMClient end-to-end against a Responses API mock', () => {
+     expect(done?.response.finishReason).toBe('stop')
+   })
+ 
++  it('keeps parallel interleaved function calls and their results distinct', async () => {
++    const { client } = await boot([
++      { type: 'response.output_item.added', output_index: 0, item: { id: 'reasoning', type: 'reasoning' } },
++      {
++        type: 'response.output_item.added',
++        output_index: 1,
++        item: { type: 'function_call', id: 'fc_a', call_id: 'call-a', name: 'read_file', arguments: '' },
++      },
++      {
++        type: 'response.output_item.added',
++        output_index: 3,
++        item: { type: 'function_call', id: 'fc_b', call_id: 'call-b', name: 'glob', arguments: '' },
++      },
++      { type: 'response.function_call_arguments.delta', output_index: 3, item_id: 'fc_b', delta: '{"pattern":' },
++      { type: 'response.function_call_arguments.delta', output_index: 1, item_id: 'fc_a', delta: '{"path":' },
++      { type: 'response.function_call_arguments.delta', output_index: 3, item_id: 'fc_b', delta: '"*.ts"}' },
++      { type: 'response.function_call_arguments.delta', output_index: 1, item_id: 'fc_a', delta: '"a.ts"}' },
++      { type: 'response.function_call_arguments.done', output_index: 1, item_id: 'fc_a', arguments: '{"path":"a.ts"}' },
++      {
++        type: 'response.function_call_arguments.done',
++        output_index: 3,
++        item_id: 'fc_b',
++        arguments: '{"pattern":"*.ts"}',
++      },
++      COMPLETED_EVENT,
++    ])
++    let response: LLMCompletionResponse | undefined
++    const indices: number[] = []
++    for await (const event of client.stream({ messages: [{ role: 'user', content: 'read and glob' }] })) {
++      if (event.type === 'tool_call_delta') indices.push(event.index)
++      if (event.type === 'done') response = event.response
++    }
++    expect(indices).toEqual([1, 3, 3, 1, 3, 1])
++    expect(response?.toolCalls).toEqual([
++      { id: 'call-a', name: 'read_file', arguments: { path: 'a.ts' } },
++      { id: 'call-b', name: 'glob', arguments: { pattern: '*.ts' } },
++    ])
++    const execute = vi.fn(async (name: string, args: Record<string, unknown>) => ({
++      success: true,
++      output: JSON.stringify({ name, args }),
++      durationMs: 0,
++      truncated: false,
++    }))
++    const persisted: TurnEvent[] = []
++    const results = await executeTools(
++      'message',
++      response!.toolCalls!,
++      {
++        sessionId: 'session',
++        workdir: process.cwd(),
++        sessionManager: {
++          getProjectWorkdir: () => process.cwd(),
++          getEffectiveWorkdir: () => process.cwd(),
++          getLspManager: () => undefined,
++        } as never,
++        toolRegistry: { tools: [], definitions: [], execute },
++        turnMetrics: { addToolTime: () => {} } as never,
++        signal: undefined,
++        onMessage: undefined,
++        llmClient: undefined,
++        statsIdentity: undefined,
++      },
++      (event) => persisted.push(event),
++    )
++    expect(execute).toHaveBeenCalledTimes(2)
++    expect(results.toolMessages.map((message) => [message.toolCallId, JSON.parse(message.content)])).toEqual([
++      ['call-a', { name: 'read_file', args: { path: 'a.ts' } }],
++      ['call-b', { name: 'glob', args: { pattern: '*.ts' } }],
++    ])
++    expect(persisted.filter((event) => event.type === 'tool.result').map((event) => event.data.toolCallId)).toEqual([
++      'call-a',
++      'call-b',
++    ])
++  })
++
+   it('maps non-streaming /responses output to a completion response', async () => {
+     const { client, requests } = await boot([])
+     // Non-streaming: replace the SSE body with a JSON response.
+diff --git a/src/server/llm/responses-native.ts b/src/server/llm/responses-native.ts
+--- a/src/server/llm/responses-native.ts
++++ b/src/server/llm/responses-native.ts
+@@ -265,7 +265,7 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
+       if (item?.type === 'function_call') {
+         const callId = item.call_id ?? item.id
+         const toolCall: StreamToolCall = {
+-          index: 0,
++          index: typeof event['output_index'] === 'number' ? event['output_index'] : 0,
+           ...(callId ? { id: callId } : {}),
+           function: { name: item.name ?? '', arguments: item.arguments ?? '' },
+         }
+@@ -275,7 +275,10 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
+     }
+ 
+     case 'response.function_call_arguments.delta': {
+-      const toolCall: StreamToolCall = { index: 0, function: { arguments: String(event['delta'] ?? '') } }
++      const toolCall: StreamToolCall = {
++        index: typeof event['output_index'] === 'number' ? event['output_index'] : 0,
++        function: { arguments: String(event['delta'] ?? '') },
++      }
+       return chunk(responseId, { tool_calls: [toolCall] })
+     }
+ 

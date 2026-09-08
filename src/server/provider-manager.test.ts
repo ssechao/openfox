@@ -77,6 +77,19 @@ describe('ProviderManager - Model Selection', () => {
     vi.restoreAllMocks()
   })
 
+  it('passes each Provider.apiProtocol without leaking the global override into another provider', () => {
+    const configured = {
+      ...config,
+      llm: { ...config.llm, apiProtocol: 'responses' },
+      providers: [{ ...config.providers![0]!, apiProtocol: 'chat-completions' }, config.providers![1]!],
+    } as Config
+    const manager = createProviderManager(configured)
+    manager.createClient('provider-1', 'model-a')
+    expect(createLLMClientMock.mock.calls.at(-1)?.[0].llm).toMatchObject({ apiProtocol: 'chat-completions' })
+    manager.createClient('provider-2', 'model-b')
+    expect(createLLMClientMock.mock.calls.at(-1)?.[0].llm).toMatchObject({ apiProtocol: 'auto' })
+  })
+
   describe('getProviderModels', () => {
     it('returns empty array for non-existent provider', async () => {
       const models = await providerManager.getProviderModels('non-existent')
