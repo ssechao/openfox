@@ -152,7 +152,6 @@ function makeConfig(overrides?: Partial<TopLevelLoopConfig>): TopLevelLoopConfig
 function makeStreamResult(overrides?: Record<string, any>) {
   return {
     content: '',
-    thinkingContent: undefined,
     toolCalls: [],
     segments: [],
     usage: { promptTokens: 100, completionTokens: 50 },
@@ -322,6 +321,33 @@ describe('agentLoop integration', () => {
     // Should emit chat.done at the end
     const chatDoneEvents = append.mock.calls.filter((args: unknown[]) => (args[0] as any).type === 'chat.done')
     expect(chatDoneEvents.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('settles a returned tool before requesting the single compaction summary', async () => {
+    const append = vi.fn()
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(
+        makeStreamResult({
+          content: '',
+          finishReason: 'tool_calls',
+          toolCalls: [{ id: 'call_read', name: 'read_file', arguments: { path: 'synthetic.txt' } }],
+        }),
+      )
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    vi.mocked(executeTools).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'synthetic result', toolCallId: 'call_read' }],
+      stepDoneCalled: false,
+    } as any)
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockReturnValueOnce(true).mockReturnValue(false)
+    await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+    expect(executeTools).toHaveBeenCalledTimes(1)
+    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(executeTools).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]!,
+    )
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(3)
   })
 
   it('auto-compacts within the loop when threshold is exceeded, then continues normally', async () => {

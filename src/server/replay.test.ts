@@ -102,7 +102,7 @@ describe('Replay endpoint', () => {
     })
 
     server = createServer(app)
-    await new Promise<void>((resolve) => server.listen(0, () => resolve()))
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     port = (server.address() as { port: number }).port
   })
 
@@ -114,6 +114,10 @@ describe('Replay endpoint', () => {
   function url(path: string): string {
     return `http://127.0.0.1:${port}${path}`
   }
+
+  it('binds the fixture to the same IPv4 interface as its client', () => {
+    expect(server.address()).toMatchObject({ address: '127.0.0.1', family: 'IPv4' })
+  })
 
   it('returns 404 if session not found', async () => {
     sessionManager.getSession.mockReturnValue(null)

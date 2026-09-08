@@ -441,6 +441,38 @@ describe('runTopLevelAgentLoop compaction', () => {
       finishReason: 'stop',
       modelParams: {},
     })
+    mockSessionManager = {
+      requireSession: vi.fn().mockReturnValue({
+        workdir: '/test',
+        projectId: 'test-project',
+        executionState: null,
+        criteria: [],
+        isRunning: false,
+      }),
+      getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
+      getProjectWorkdir: vi.fn().mockReturnValue('/test'),
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 0,
+        maxTokens: 200000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: false,
+        dynamicContextChanged: false,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(200000),
+      getCurrentModelSettings: vi.fn().mockReturnValue({}),
+      getModelCompactionThreshold: vi.fn().mockReturnValue(undefined),
+      setCurrentContextSize: vi.fn(),
+      getDynamicContextChanged: vi.fn().mockReturnValue(false),
+      setDynamicContextChanged: vi.fn(),
+      getCachedPrompt: vi.fn().mockReturnValue(undefined),
+      setCachedPrompt: vi.fn(),
+      getLspManager: vi.fn(),
+      drainAsapMessages: vi.fn().mockReturnValue([]),
+      getCurrentWindowMessages: vi.fn().mockReturnValue([]),
+      updateMessage: vi.fn(),
+    } as any
+    mockLLMClient.resetResponsesChain = vi.fn()
   })
 
   function makeConfig(overrides?: Partial<TopLevelLoopConfig>): TopLevelLoopConfig {
@@ -461,38 +493,6 @@ describe('runTopLevelAgentLoop compaction', () => {
   it.each([undefined, 'parallel-1', 'parallel-2'])(
     'applies fresh context and resets the exact Responses scope after compaction (%s)',
     async (subAgentId) => {
-      mockSessionManager = {
-        requireSession: vi.fn().mockReturnValue({
-          workdir: '/test',
-          projectId: 'test-project',
-          executionState: null,
-          criteria: [],
-          isRunning: false,
-        }),
-        getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
-        getProjectWorkdir: vi.fn().mockReturnValue('/test'),
-        getContextState: vi.fn().mockReturnValue({
-          currentTokens: 0,
-          maxTokens: 200000,
-          compactionCount: 0,
-          dangerZone: false,
-          canCompact: false,
-          dynamicContextChanged: false,
-        }),
-        getCurrentModelContext: vi.fn().mockReturnValue(200000),
-        getCurrentModelSettings: vi.fn().mockReturnValue({}),
-        getModelCompactionThreshold: vi.fn().mockReturnValue(undefined),
-        setCurrentContextSize: vi.fn(),
-        getDynamicContextChanged: vi.fn().mockReturnValue(false),
-        setDynamicContextChanged: vi.fn(),
-        getCachedPrompt: vi.fn().mockReturnValue(undefined),
-        setCachedPrompt: vi.fn(),
-        getLspManager: vi.fn(),
-        drainAsapMessages: vi.fn().mockReturnValue([]),
-        getCurrentWindowMessages: vi.fn().mockReturnValue([]),
-        updateMessage: vi.fn(),
-      } as any
-
       const appendMock = vi.fn()
       const rebuildCachedContext = vi.fn().mockResolvedValue(undefined)
       mockLLMClient.resetResponsesChain = vi.fn()
@@ -515,6 +515,90 @@ describe('runTopLevelAgentLoop compaction', () => {
       const scope = vi.mocked(streamLLMPure).mock.calls.at(-1)?.[0].responsesChainKey
       expect(scope).toBe(`test-session:${subAgentId ?? 'top'}`)
       expect(mockLLMClient.resetResponsesChain).toHaveBeenCalledWith(scope)
+    },
+  )
+  it.each(['claude-fable-5', 'gpt-5.6-sol'])(
+    'compacts %s once with no tools and its own output budget',
+    async (model) => {
+      mockLLMClient.getModel.mockReturnValue(model)
+      vi.mocked(mockSessionManager.getCurrentModelSettings).mockReturnValue({ maxTokens: 256 })
+      const tools = [{ type: 'function', function: { name: 'read_file', parameters: {} } }]
+      assembleRequestMock.mockReturnValue({ systemPrompt: 'stable', messages: [], tools })
+      const config = makeConfig({ initialCompacting: true })
+      await runTopLevelAgentLoop(config, mockTurnMetrics)
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+      const request = vi.mocked(streamLLMPure).mock.calls[0]![0]
+      expect(request.toolChoice).toBe('none')
+      expect(request.tools).toEqual([])
+      expect(request.modelSettings?.maxTokens).toBe(8192)
+      expect(request.reasoningEffort).toBe('low')
+      expect(mockLLMClient.resetResponsesChain).toHaveBeenCalledTimes(1)
+      expect(mockLLMClient.resetResponsesChain.mock.invocationCallOrder[0]).toBeGreaterThan(
+        vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[0]!,
+      )
+    },
+  )
+
+  it.each([
+    { name: 'empty', content: '', thinkingContent: 'not a summary', finishReason: 'stop', toolCalls: [] },
+    { name: 'truncated', content: 'partial summary', finishReason: 'length', toolCalls: [] },
+    {
+      name: 'tool call',
+      content: '',
+      finishReason: 'tool_calls',
+      toolCalls: [{ id: 'call_1', name: 'read_file', arguments: {} }],
+    },
+  ])('preserves history and fails once on a $name compaction', async (bad) => {
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce({
+      ...bad,
+      segments: [],
+      usage: { promptTokens: 100, completionTokens: 1 },
+      timing: {} as any,
+      aborted: false,
+      modelParams: {},
+    } as any)
+    const config = makeConfig({ initialCompacting: true })
+    const result = await runTopLevelAgentLoop(config, mockTurnMetrics)
+    expect(result.failed?.error).toBeTruthy()
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+    expect(mockLLMClient.resetResponsesChain).not.toHaveBeenCalled()
+    expect(vi.mocked(config.append).mock.calls.some(([e]) => e.type === 'context.compacted')).toBe(false)
+  })
+
+  it('fails before inference if no usable compaction headroom remains', async () => {
+    vi.mocked(mockSessionManager.getContextState).mockReturnValue({
+      currentTokens: 199000,
+      maxTokens: 200000,
+      compactionCount: 0,
+      dangerZone: true,
+      canCompact: true,
+      dynamicContextChanged: false,
+    })
+    const result = await runTopLevelAgentLoop(makeConfig({ initialCompacting: true }), mockTurnMetrics)
+    expect(result.failed?.error).toBeTruthy()
+    expect(consumeStreamGenerator).not.toHaveBeenCalled()
+    expect(mockLLMClient.resetResponsesChain).not.toHaveBeenCalled()
+  })
+
+  it.each(['HTTP 503 backend unavailable', 'context_length_exceeded'])(
+    'does not retry compaction after %s',
+    async (error) => {
+      vi.mocked(consumeStreamGenerator).mockResolvedValueOnce({
+        error,
+        content: '',
+        toolCalls: [],
+        segments: [],
+        usage: { promptTokens: 0, completionTokens: 0 },
+        timing: {} as any,
+        aborted: false,
+        modelParams: {},
+      } as any)
+      const config = makeConfig({ initialCompacting: true })
+      const result = await runTopLevelAgentLoop(config, mockTurnMetrics)
+      expect(result.failed?.error).toContain(error)
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+      expect(mockLLMClient.resetResponsesChain).not.toHaveBeenCalled()
+      expect(vi.mocked(config.append).mock.calls.some(([event]) => event.type === 'context.compacted')).toBe(false)
     },
   )
 })
