@@ -150,17 +150,52 @@ export function createLLMClient(
     promptFingerprint?: string
   }
   const responsesChains = new Map<string, ResponsesChainState>()
+  // A long-lived server talks to many sessions and sub-agents; without a cap the
+  // map grows for the process lifetime. Oldest-first eviction only costs a
+  // re-primed first request on a conversation nobody has touched in a while.
+  const RESPONSES_CHAIN_MAX_ENTRIES = 256
+
+  function rememberChain(key: string, state: ResponsesChainState): void {
+    // Re-insert so the key moves to the end of the insertion order (LRU-by-write).
+    responsesChains.delete(key)
+    responsesChains.set(key, state)
+    while (responsesChains.size > RESPONSES_CHAIN_MAX_ENTRIES) {
+      const oldest = responsesChains.keys().next().value
+      if (oldest === undefined) break
+      responsesChains.delete(oldest)
+    }
+  }
 
   // Zero-data-retention orgs and providers reject `store: true`. The first such
   // rejection turns server-side chaining off for this client, so the retry goes
   // out as a plain full-history request instead of hard-failing the turn.
   let responsesStoreSupported = true
 
-  function promptFingerprint(systemPrompt: string, tools?: LLMToolDefinition[]): string {
-    const toolsDigest = createHash('sha256')
-      .update(JSON.stringify(tools ?? []))
+  /**
+   * Everything the outgoing request carries except the conversation itself.
+   * Taken from the real params rather than hand-picked, so a newly forwarded
+   * setting is covered by the fingerprint without touching this code.
+   */
+  function requestSettings(params: Record<string, unknown>): Record<string, unknown> {
+    const { messages: _messages, stream: _stream, ...settings } = params
+    return settings
+  }
+
+  /**
+   * Identity of the request settings a stored response was produced under.
+   * Continuing from a response created with a different effort/limit would
+   * silently apply the old settings to the new turn, so they are part of the
+   * fingerprint alongside the model, protocol, system prompt and tools.
+   */
+  function promptFingerprint(
+    systemPrompt: string,
+    tools?: LLMToolDefinition[],
+    settings?: Record<string, unknown>,
+  ): string {
+    const digest = createHash('sha256')
+      .update(JSON.stringify({ tools: tools ?? [], settings: settings ?? {} }))
       .digest('hex')
-    return `${model}::${currentApiProtocol()}::${systemPrompt}::${toolsDigest}`
+    return `${model}::${currentApiProtocol()}::${systemPrompt}::${digest}`
   }
 
   function binaryFingerprint(value: string): string {
@@ -211,6 +246,12 @@ export function createLLMClient(
     fingerprint: string
     count: number
     digest: string
+    /**
+     * The map entry this request owns. It doubles as a generation token: a
+     * reset, a model switch or an overlapping request replaces or removes it,
+     * so a late response can no longer revive a chain that is already obsolete.
+     */
+    ticket?: ResponsesChainState
   }
 
   /**
@@ -224,11 +265,12 @@ export function createLLMClient(
       responsesChainKey?: string
     },
     messages: ChatCompletionMessageParam[],
+    settings?: Record<string, unknown>,
   ): ChainPlan {
     const nonSystem = messages.filter((m) => m.role !== 'system' && m.role !== 'developer')
     const systemPrompt = request.messages.find((m) => m.role === 'system')?.content ?? ''
     const base = {
-      fingerprint: promptFingerprint(systemPrompt, request.tools),
+      fingerprint: promptFingerprint(systemPrompt, request.tools, settings),
       count: nonSystem.length,
       digest: historyDigest(nonSystem),
     }
@@ -246,8 +288,8 @@ export function createLLMClient(
 
     const chain = responsesChains.get(key)
     const previousResponseId = chain?.previousResponseId
-    if (
-      chain &&
+    const reusable =
+      chain !== undefined &&
       previousResponseId !== undefined &&
       chain.promptFingerprint === base.fingerprint &&
       base.count >= chain.storedCount &&
@@ -255,21 +297,34 @@ export function createLLMClient(
       // rewrites earlier turns without shrinking the history would otherwise
       // silently keep the stale server-side context.
       chain.sentDigest === historyDigest(nonSystem.slice(0, chain.sentCount))
-    ) {
+
+    // Claim the key for this request. The pending entry carries no response id,
+    // so a concurrent request cannot continue from it either.
+    const ticket: ResponsesChainState = { storedCount: base.count, sentCount: base.count, sentDigest: base.digest }
+    rememberChain(key, ticket)
+
+    if (reusable) {
       return {
         ...base,
         key,
-        opts: { store: true, previousResponseId, deltaMessages: nonSystem.slice(chain.storedCount) },
+        ticket,
+        opts: { store: true, previousResponseId, deltaMessages: nonSystem.slice(chain!.storedCount) },
       }
     }
-    return { ...base, key, opts: { store: true } }
+    return { ...base, key, ticket, opts: { store: true } }
+  }
+
+  /** True while this request still owns the key (no reset/switch landed since). */
+  function ownsChain(plan: ChainPlan): boolean {
+    return plan.key !== undefined && plan.ticket !== undefined && responsesChains.get(plan.key) === plan.ticket
   }
 
   /** Advance the chain — only a completed response can be continued from. */
   function advanceResponsesChain(plan: ChainPlan, responseId: string | undefined, completed: boolean): void {
     if (!plan.key || currentApiProtocol() !== 'responses') return
+    if (!ownsChain(plan)) return
     if (completed && responseId && responsesStoreSupported) {
-      responsesChains.set(plan.key, {
+      rememberChain(plan.key, {
         previousResponseId: responseId,
         storedCount: plan.count + 1,
         sentCount: plan.count,
@@ -289,7 +344,8 @@ export function createLLMClient(
       logger.warn('Responses API rejected server-side conversation storage, falling back to full history', { model })
       responsesStoreSupported = false
     }
-    responsesChains.delete(plan.key)
+    // Only drop what this request owns: a newer turn may already hold the key.
+    if (ownsChain(plan)) responsesChains.delete(plan.key)
   }
 
   return {
@@ -353,7 +409,11 @@ export function createLLMClient(
           ...buildExtraParams(resolvedEffort),
         })
 
-        chainPlan = planResponsesChain(request, createParams.messages as ChatCompletionMessageParam[])
+        chainPlan = planResponsesChain(
+          request,
+          createParams.messages as ChatCompletionMessageParam[],
+          requestSettings(createParams),
+        )
 
         const httpResponse = await httpFor(backend).createChatCompletion(
           createParams,
@@ -453,7 +513,11 @@ export function createLLMClient(
         // protocol is `responses`, send only the delta (new non-system messages) with
         // previous_response_id instead of the full history. The server stores the
         // conversation, so the next turn only needs the new suffix.
-        chainPlan = planResponsesChain(request, streamingParams.messages as ChatCompletionMessageParam[])
+        chainPlan = planResponsesChain(
+          request,
+          streamingParams.messages as ChatCompletionMessageParam[],
+          requestSettings(streamingParams),
+        )
 
         // Idle timeout tracking. Set up BEFORE the stream, because the stream has to be given a
         // signal the timeout can pull: aborting a controller nothing listens to only sets a flag,

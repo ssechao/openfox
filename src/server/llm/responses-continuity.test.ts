@@ -15,6 +15,8 @@ async function startResponsesMock(
   responses: unknown[][],
   /** Optionally reject a request outright, e.g. a ZDR org refusing `store:true`. */
   reject?: (body: Record<string, unknown>) => { status: number; json: unknown } | null,
+  /** Optionally hold a request open (by index) so a race can be driven deterministically. */
+  hold?: (index: number) => Promise<void>,
 ): Promise<{
   server: Server
   port: number
@@ -35,7 +37,7 @@ async function startResponsesMock(
     req.on('data', (chunk: Buffer) => {
       raw += chunk.toString()
     })
-    req.on('end', () => {
+    req.on('end', async () => {
       const body = JSON.parse(raw || '{}') as Record<string, unknown>
       requests.push({ path: req.url ?? '', headers: req.headers, body })
       const rejection = reject?.(body)
@@ -44,8 +46,10 @@ async function startResponsesMock(
         res.end(JSON.stringify(rejection.json))
         return
       }
+      const current = index
       const events = responses[Math.min(index, responses.length - 1)] ?? []
       index += 1
+      if (hold) await hold(current)
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
       for (const event of events) {
         res.write(`data: ${JSON.stringify(event)}\n\n`)
@@ -711,5 +715,109 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
     // Only the standard protocol headers are present.
     expect(keys).toContain('content-type')
     expect(keys).toContain('authorization')
+  })
+
+  it('re-primes when the reasoning effort changes mid-conversation', async () => {
+    const mock = await startResponsesMock([completedEvents('resp_1'), completedEvents('resp_2')])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+
+    await consume(client, {
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: 'first' },
+      ],
+      tools: TOOLS,
+      reasoningEffort: 'low',
+      responsesChainKey: 'session-effort',
+    })
+    // Same model, prompt and tools, but a different reasoning effort: the stored
+    // response was produced under other request settings, so continuing from it
+    // would silently carry the old effort into the new turn.
+    await consume(client, {
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'A1' },
+        { role: 'user', content: 'second' },
+      ],
+      tools: TOOLS,
+      reasoningEffort: 'high',
+      responsesChainKey: 'session-effort',
+    })
+
+    expect(mock.requests).toHaveLength(2)
+    expect(mock.requests[1]!.body['previous_response_id']).toBeUndefined()
+    expect(mock.requests[1]!.body['store']).toBe(true)
+  })
+
+  it('does not let a late response revive a chain reset while it was in flight', async () => {
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const mock = await startResponsesMock(
+      [completedEvents('resp_1'), completedEvents('resp_2')],
+      undefined,
+      async (i) => {
+        if (i === 0) await gate
+      },
+    )
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+
+    const inFlight = consume(client, {
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: 'first' },
+      ],
+      tools: TOOLS,
+      responsesChainKey: 'session-race',
+    })
+    // Compaction (or any explicit invalidation) lands while the turn is running.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    client.resetResponsesChain?.('session-race')
+    release!()
+    await inFlight
+
+    await consume(client, {
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'A1' },
+        { role: 'user', content: 'second' },
+      ],
+      tools: TOOLS,
+      responsesChainKey: 'session-race',
+    })
+
+    expect(mock.requests).toHaveLength(2)
+    // resp_1 was invalidated before it landed — it must not be continued from.
+    expect(mock.requests[1]!.body['previous_response_id']).toBeUndefined()
+  })
+
+  it('bounds the number of retained chains', async () => {
+    const mock = await startResponsesMock([completedEvents('resp_1')])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+
+    const turn = (key: string, extra: Array<Record<string, unknown>> = []) =>
+      consume(client, {
+        messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: 'first' }, ...extra],
+        tools: TOOLS,
+        responsesChainKey: key,
+      })
+
+    await turn('session-evicted')
+    for (let i = 0; i < 300; i += 1) await turn(`session-filler-${i}`)
+
+    const before = mock.requests.length
+    // Same prompt/tools and a grown history, so this chain WOULD be continued —
+    // unless the cap evicted it. Proves the map cannot grow without bound.
+    await turn('session-evicted', [
+      { role: 'assistant', content: 'A1' },
+      { role: 'user', content: 'second' },
+    ])
+    expect(mock.requests[before]!.body['previous_response_id']).toBeUndefined()
   })
 })
