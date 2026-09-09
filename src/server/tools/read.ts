@@ -19,7 +19,7 @@ interface ReadFileArgs {
  * For SVG files, falls back to content-based detection since file-type
  * may identify them as generic XML.
  */
-async function detectImageType(buffer: Buffer, filePath: string): Promise<string | null> {
+export async function detectImageType(buffer: Buffer, filePath: string): Promise<string | null> {
   const fileType = await fileTypeFromBuffer(buffer)
 
   // Only accept known image MIME types

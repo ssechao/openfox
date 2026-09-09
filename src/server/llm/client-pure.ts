@@ -22,6 +22,7 @@ import {
   extractPdfBlocksFromDataUrl,
   formatVisionFallbackDescription,
 } from './resolve-attachments.js'
+import { sanitizeToolSchema } from './schema-sanitizer.js'
 
 import type { ContentPart } from './resolve-attachments.js'
 export { resolveAttachmentsInMessages } from './resolve-attachments.js'
@@ -128,6 +129,7 @@ function buildAssistantMessage(
   msg: LLMMessage,
   thinkingField?: string,
   sendReasoningInMessages?: boolean,
+  inlineThinking?: boolean,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {
     role: 'assistant',
@@ -136,8 +138,25 @@ function buildAssistantMessage(
   if (msg.toolCalls?.length) {
     result['tool_calls'] = convertToolCalls(msg.toolCalls)
   }
-  if (msg.thinkingContent && sendReasoningInMessages !== false) {
-    result[thinkingField ?? 'reasoning'] = msg.thinkingContent
+  if (sendReasoningInMessages === false) return result
+
+  const echoField = thinkingField ?? 'reasoning'
+  // DeepSeek-style providers (reasoning_content) reject tool-call continuations
+  // when the reasoning field is absent, even empty. Only they get the empty
+  // echo — default 'reasoning' providers keep their prior wire contract.
+  const isReasoningContentProvider = thinkingField === 'reasoning_content'
+
+  if (msg.thinkingContent) {
+    if (inlineThinking && isReasoningContentProvider && !msg.toolCalls?.length) {
+      // Providers like the DeepSeek API ignore the reasoning field in requests
+      // without tools (it is not concatenated into context). Inline the CoT into
+      // the assistant content so the model retains it across turns.
+      result['content'] = `${msg.thinkingContent}\n\n${msg.content || ''}`.trim() || ' '
+    } else {
+      result[echoField] = msg.thinkingContent
+    }
+  } else if (isReasoningContentProvider && msg.toolCalls?.length) {
+    result[echoField] = ''
   }
   return result
 }
@@ -176,6 +195,7 @@ export async function convertMessages(
   modelSupportsVision: boolean,
   thinkingField?: string,
   sendReasoningInMessages?: boolean,
+  inlineThinking?: boolean,
 ): Promise<ChatCompletionMessageParam[]> {
   const filtered = messages.filter((msg) => {
     if (msg.role !== 'assistant') return true
@@ -207,7 +227,12 @@ export async function convertMessages(
       }
     } else if (msg.role === 'assistant') {
       result.push(
-        buildAssistantMessage(msg, thinkingField, sendReasoningInMessages) as unknown as ChatCompletionMessageParam,
+        buildAssistantMessage(
+          msg,
+          thinkingField,
+          sendReasoningInMessages,
+          inlineThinking,
+        ) as unknown as ChatCompletionMessageParam,
       )
     } else if (msg.role === 'user' && msg.attachments && msg.attachments.length > 0) {
       const content = await buildAttachmentContent(msg.content, msg.attachments, modelSupportsVision)
@@ -231,7 +256,7 @@ export function convertTools(tools: LLMToolDefinition[]): ChatCompletionTool[] {
     function: {
       name: tool.function.name,
       description: tool.function.description,
-      parameters: tool.function.parameters,
+      parameters: sanitizeToolSchema(tool.function.parameters),
     },
   }))
 }
@@ -252,11 +277,16 @@ async function buildChatCompletionCreateParams(
 }> {
   const userVisionOverride = request.modelSettings?.supportsVision
   const modelSupportsVision = userVisionOverride ?? profile.supportsVision ?? false
+  // DeepSeek-style providers (reasoning_content) only concatenate the reasoning
+  // field into context when the request carries tools. Without tools, inline
+  // the CoT into the assistant content so the model retains it across turns.
+  const inlineThinking = thinkingField === 'reasoning_content' && !request.tools?.length
   const convertedMessages = await convertMessages(
     request.messages,
     modelSupportsVision,
     thinkingField,
     sendReasoningInMessages,
+    inlineThinking,
   )
 
   const temperature = request.modelSettings?.temperature ?? request.temperature ?? profile.temperature

@@ -47,6 +47,12 @@ import {
 } from '../db/sessions.js'
 import { getProject } from '../db/projects.js'
 import {
+  initSessionMcpOverrides,
+  clearSessionOverrides,
+  getSessionDisabledServers,
+  setSessionDisabledServers,
+} from '../mcp/session-overrides.js'
+import {
   ensureWorkspace,
   resolveAndValidateSourceBranch,
   validateRef,
@@ -147,6 +153,9 @@ export class SessionManager {
   private announcedPromptHashStore = new Map<string, string>()
   private announcedToolFingerprintStore = new Map<string, string>()
   private warmedUpSessions = new Set<string>()
+  // Sessions already warned about an unresolvable provider — getContextState runs on every
+  // turn, and the warning is only worth one line per session.
+  private unknownProviderWarned = new Set<string>()
   private switchLocks = new Map<string, Promise<unknown>>()
   private workspaceCreationLocks = new Map<string, Promise<void>>()
   // A single LLM client per session, shared by WebSocket, REST queue, and agent
@@ -461,6 +470,13 @@ export class SessionManager {
     // Build full session object
     const session = this.buildSessionFromDb(dbSession)
 
+    // Initialize MCP overrides from project settings / global defaults
+    try {
+      initSessionMcpOverrides(session.id, projectId, project.mcpOverrides)
+    } catch {
+      // Non-critical — session works without MCP overrides
+    }
+
     // Persist the current branch asynchronously — the session is valid without it.
     getGitBranch(effectiveWorkdir)
       .then((branch) => {
@@ -559,6 +575,12 @@ export class SessionManager {
     if (cached) {
       updateSessionCachedPrompt(newSession.id, cached.systemPrompt, cached.tools, cached.hash, cached.promptHash)
       this.markWarmedUp(newSession.id)
+    }
+
+    // Preserve parent session MCP disabled servers in the forked session
+    const parentDisabledServers = getSessionDisabledServers(originalSessionId)
+    if (parentDisabledServers.length > 0) {
+      setSessionDisabledServers(newSession.id, parentDisabledServers)
     }
 
     this.emit({ type: 'session_updated', session: this.requireSession(newSession.id) })
@@ -767,6 +789,10 @@ export class SessionManager {
     this.announcedPromptHashStore.delete(id)
     this.announcedToolFingerprintStore.delete(id)
     this.sessionLLMClients.delete(id)
+    this.unknownProviderWarned.delete(id)
+
+    // Clean up session MCP overrides
+    clearSessionOverrides(id)
 
     // Delete session from DB
     dbDeleteSession(id)
@@ -924,6 +950,8 @@ export class SessionManager {
     if (providerId === null || providerManual === true) {
       this.clearSessionPinnedEffort(sessionId)
     }
+    // The pin changed, so a later unresolvable one is worth warning about again.
+    this.unknownProviderWarned.delete(sessionId)
 
     const updatedSession = this.requireSession(sessionId)
     this.emit({ type: 'session_updated', session: updatedSession })
@@ -1810,10 +1838,24 @@ export class SessionManager {
 
     // Get maxTokens from the session's effective model if resolvable, otherwise use global
     const { providerId, model } = this.resolveEffectiveProviderModel(sessionId)
-    const maxTokens =
-      providerId && model
-        ? (this.resolveModelContext(providerId, model) ?? providerManager.getCurrentModelContext())
-        : providerManager.getCurrentModelContext()
+    let maxTokens = providerManager.getCurrentModelContext()
+    if (providerId && model) {
+      const resolved = this.resolveModelContext(providerId, model)
+      if (resolved !== undefined) {
+        maxTokens = resolved
+      } else {
+        // The pinned provider/model is gone: the context window below is the
+        // global one, not the one this session was configured with, so the
+        // reported budget is a guess.
+        if (!this.unknownProviderWarned.has(sessionId)) {
+          this.unknownProviderWarned.add(sessionId)
+          logger.warn('Session references an unknown provider, falling back to the global context window', {
+            sessionId,
+            providerId,
+          })
+        }
+      }
+    }
 
     const state = getSessionState(sessionId, maxTokens)
     const dynamicContextChanged = this.getDynamicContextChanged(sessionId)

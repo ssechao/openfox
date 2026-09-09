@@ -14,6 +14,14 @@ export function formatToolArgs(tool: string, args: Record<string, unknown>): str
     return params.length > 0 ? `${path} [${params.join(', ')}]` : path
   }
 
+  // Describe image - show path with the question
+  if (tool === 'describe_image') {
+    const path = String(args.path ?? '')
+    const question = String(args.question ?? '')
+    const short = question.length > 40 ? question.slice(0, 37) + '…' : question
+    return short ? `${path} — ${short}` : path
+  }
+
   // Other file operations - show path
   if (tool === 'write_file' || tool === 'edit_file') {
     return String(args.path ?? '')

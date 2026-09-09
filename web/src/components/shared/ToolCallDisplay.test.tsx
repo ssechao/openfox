@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useSessionStore } from '../../stores/session'
 import { SETTINGS_KEYS, settingResource } from '../../lib/resources'
@@ -360,5 +360,42 @@ describe('ToolCallDisplay — default expansion', () => {
     )
 
     expect(container.querySelector('[data-testid="file-preview"]')).not.toBeNull()
+  })
+})
+
+describe('ToolCallDisplay — truncated path tooltip', () => {
+  const LONG_PATH = '/home/user/very/long/project/path/to/a/source/file.ts'
+
+  beforeEach(() => {
+    useSessionStore.setState({ pendingPathConfirmations: [] })
+    clearCache()
+  })
+
+  afterEach(() => {
+    delete (HTMLElement.prototype as { clientWidth?: unknown }).clientWidth
+    delete (Element.prototype as { scrollWidth?: unknown }).scrollWidth
+    cleanup()
+  })
+
+  it('shows a hover tooltip with the full path when the label overflows', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 100 })
+    Object.defineProperty(Element.prototype, 'scrollWidth', { configurable: true, value: 300 })
+
+    render(<ToolCallDisplay tool="read_file" args={{ path: LONG_PATH }} status="pending" variant="compact" />)
+
+    const label = screen.getByText(LONG_PATH)
+    fireEvent.mouseEnter(label.parentElement as HTMLElement)
+    await waitFor(() => expect(screen.getByRole('tooltip').textContent).toContain(LONG_PATH))
+  })
+
+  it('does not show a tooltip when the path fits', async () => {
+    const { container } = render(
+      <ToolCallDisplay tool="read_file" args={{ path: 'src/a.ts' }} status="pending" variant="compact" />,
+    )
+
+    fireEvent.mouseEnter(container.firstElementChild as HTMLElement)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+
+    expect(screen.queryByRole('tooltip')).toBeNull()
   })
 })

@@ -22,7 +22,7 @@ import { buildModelsUrl } from './llm/url-utils.js'
 
 import { createMockLLMClient } from './llm/mock.js'
 import { createProviderManager, parseDefaultModelSelection } from './provider-manager.js'
-import { isReasoningEffortValue } from './providers/model-catalog.js'
+import { isReasoningEffortValidForModel } from '../shared/reasoning-effort.js'
 import { createToolRegistry, setMcpTools, getBuiltInToolNames } from './tools/index.js'
 import { ALWAYS_ALLOWED, ALWAYS_ALLOWED_FOR_SUBAGENTS, TOP_LEVEL_ONLY_TOOLS } from './tools/tool-policy.js'
 import { McpManager, createMcpTools } from './mcp/index.js'
@@ -40,6 +40,7 @@ import { createServerMessage } from '../shared/protocol.js'
 import { createContextStateMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
+import { clearSessionsForDeletedProvider, reconcileSessionProviders } from './session/provider-reconcile.js'
 import { toClientSession } from './session/client-session.js'
 import { setRuntimeConfig } from './runtime-config.js'
 import { createSkillRoutes } from './routes/skills.js'
@@ -147,6 +148,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Create Provider Manager (handles LLM client lifecycle)
   const providerManager = createProviderManager(config, { adapters: providerAdapters })
 
+  // Repair sessions still pinned to a provider that is gone (deleted before the delete
+  // cascade existed, or dropped from a hand-edited config).
+  const repairedSessions = reconcileSessionProviders(providerManager.getProviders().map((p) => p.id))
+  if (repairedSessions > 0) {
+    logger.warn('Cleared unknown provider from sessions', { sessions: repairedSessions })
+  }
+
   // Create SessionManager instance (not singleton!)
   const sessionManager = new SessionManager(providerManager)
 
@@ -231,6 +239,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     },
   })
   setMcpManagerForTools(mcpManager)
+  const { setGlobalMcpServersProvider } = await import('./mcp/session-overrides.js')
+  setGlobalMcpServersProvider(() =>
+    mcpManager.getAllServers().map((s) => ({ name: s.name, disabled: s.config.disabled })),
+  )
   setMcpConfigMode(config.mode ?? 'production')
   setMcpConfigPath(config.globalConfigPath)
   setMcpOAuthStoreMode(config.mode ?? 'production')
@@ -852,27 +864,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     // maxTokens is no longer passed - it comes from providerManager.getCurrentModelContext() at query time
     const session = sessionManager.createSession(projectId, title, providerId ?? null, model ?? null)
 
-    // Inherit MCP overrides from project for new sessions
-    try {
-      let disabledServers: string[] = []
-      if (project.mcpOverrides) {
-        disabledServers = Object.entries(project.mcpOverrides)
-          .filter(([, override]) => override.disabled)
-          .map(([name]) => name)
-      } else {
-        // No project overrides — inherit from global config
-        disabledServers = mcpManager
-          .getAllServers()
-          .filter((s) => s.config.disabled)
-          .map((s) => s.name)
-      }
-      if (disabledServers.length > 0) {
-        const { setSessionDisabledServers } = await import('./mcp/session-overrides.js')
-        setSessionDisabledServers(session.id, disabledServers)
-      }
-    } catch {
-      // Non-critical — session works without MCP overrides
-    }
     wssExports.broadcastForProject(projectId, session.id, buildSessionCreatedMessage(session))
     res.status(201).json({ session: toClientSession(session) })
   })
@@ -1066,12 +1057,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     if (!providerId) {
       return res.status(400).json({ error: 'providerId is required' })
     }
-    if (reasoningEffort !== undefined && reasoningEffort !== null && !isReasoningEffortValue(reasoningEffort)) {
+    // Resolve model: use provided model, or first model from provider, or fallback
+    const provider = providerManager.getProviders().find((p) => p.id === providerId)
+    const targetModel = provider?.models.find((m) => m.id === model)
+    if (
+      reasoningEffort !== undefined &&
+      reasoningEffort !== null &&
+      !isReasoningEffortValidForModel(reasoningEffort, targetModel)
+    ) {
       return res.status(400).json({ error: `Unsupported reasoningEffort: ${reasoningEffort}` })
     }
 
-    // Resolve model: use provided model, or first model from provider, or fallback
-    const provider = providerManager.getProviders().find((p) => p.id === providerId)
     const resolvedModel = model ?? provider?.models?.[0]?.id ?? 'auto'
 
     // Set provider for session only — does NOT touch global defaultModelSelection.
@@ -1133,7 +1129,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { effort } = req.body as { effort?: string }
-    if (!effort || !isReasoningEffortValue(effort)) {
+    const sessionModel = session.providerModel
+    const targetModel = providerManager
+      .getProviders()
+      .flatMap((p) => p.models)
+      .find((m) => m.id === sessionModel)
+    if (!effort || !isReasoningEffortValidForModel(effort, targetModel)) {
       return res.status(400).json({ error: `Unsupported reasoningEffort: ${effort}` })
     }
 
@@ -2592,6 +2593,15 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     providerManager.setProviders(updatedConfig.providers, updatedConfig.defaultModelSelection ?? undefined)
     config.defaultModelSelection = updatedConfig.defaultModelSelection
 
+    // Sessions pinned to this provider would keep an id that no longer resolves.
+    const clearedSessions = clearSessionsForDeletedProvider(id)
+    if (clearedSessions > 0) {
+      logger.info('Cleared provider from sessions of deleted provider', { providerId: id, sessions: clearedSessions })
+    }
+
+    const { pruneFavoriteModels } = await import('./db/settings.js')
+    pruneFavoriteModels(updatedConfig.providers)
+
     res.json({ success: true })
   })
 
@@ -2670,6 +2680,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       await saveGlobalConfig(config.mode ?? 'production', updatedConfig, config.globalConfigPath)
       providerManager.setProviders(updatedConfig.providers, updatedConfig.defaultModelSelection ?? undefined)
       config.defaultModelSelection = updatedConfig.defaultModelSelection
+
+      const { pruneFavoriteModels } = await import('./db/settings.js')
+      pruneFavoriteModels(updatedConfig.providers)
+
       res.json({ success: true, provider: updatedConfig.providers.find((p) => p.id === id) })
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to update provider' })
@@ -2690,9 +2704,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       thinkingLevel?: string
       thinkingEnabled?: boolean
     }
-    if (thinkingLevel !== undefined && !isReasoningEffortValue(thinkingLevel)) {
-      return res.status(400).json({ error: `Invalid reasoning effort '${thinkingLevel}'` })
-    }
     if (thinkingEnabled !== undefined && typeof thinkingEnabled !== 'boolean') {
       return res.status(400).json({ error: 'thinkingEnabled must be a boolean' })
     }
@@ -2704,8 +2715,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         return res.status(404).json({ error: 'Provider not found' })
       }
       const models = provider.models ?? []
-      if (!models.some((m) => m.id === modelId)) {
+      const targetModel = models.find((m) => m.id === modelId)
+      if (!targetModel) {
         return res.status(404).json({ error: 'Model not found' })
+      }
+      if (thinkingLevel !== undefined && !isReasoningEffortValidForModel(thinkingLevel, targetModel)) {
+        return res.status(400).json({ error: `Invalid reasoning effort '${thinkingLevel}'` })
       }
       const updatedModels = models.map((m) =>
         m.id === modelId

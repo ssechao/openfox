@@ -238,7 +238,7 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
         <p className="text-sm text-text-muted mb-4">
           {t({
             en: 'Manage providers, workdir and vision fallback.',
-            fr: 'Gérez les fournisseurs, le dossier de travail et le repli vision.',
+            fr: 'Gérez les fournisseurs, le dossier de travail et le fallback vision.',
           })}
         </p>
         <Button variant="secondary" onClick={handleLaunchOnboarding}>

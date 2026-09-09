@@ -12,7 +12,6 @@
 
 import type { StoredEvent, TurnEvent } from '../events/types.js'
 import type { ContextMessage } from '../events/folding.js'
-import type { VisionBackend } from '../llm/vision-fallback.js'
 import {
   handleMessageThinking,
   handleMessageDelta,
@@ -26,8 +25,7 @@ import type { RequestContextMessage } from './request-context.js'
 import { minimalMessagesToRequestContextMessages } from './request-context.js'
 import { buildContextMessagesFromEventHistory, foldContextState } from '../events/folding.js'
 import { getEventStore } from '../events/index.js'
-import { getRuntimeConfig } from '../runtime-config.js'
-import { processContextImages, loadVisionModelFromGlobalConfig } from '../context/image-processor.js'
+import { processContextImages, loadResolvedVisionModel } from '../context/image-processor.js'
 import { modelSupportsVision } from '../llm/profiles.js'
 import type { Attachment } from '../../shared/types.js'
 import type { LLMClientWithModel } from '../llm/client.js'
@@ -223,15 +221,7 @@ export async function processEventsForConversation(
   const eventStore = getEventStore()
   const rawEvents = eventStore.getEvents(sessionId)
   const modelVision = modelSupportsVision(llmClient.getModel())
-  const runtimeConfig = getRuntimeConfig()
-  const visionModel = runtimeConfig.llm?.visionModel
-    ? {
-        baseUrl: runtimeConfig.llm.baseUrl,
-        model: runtimeConfig.llm.visionModel,
-        timeout: runtimeConfig.llm.timeout,
-        backend: (runtimeConfig.llm.backend === 'ollama' ? 'ollama' : 'openai') as VisionBackend,
-      }
-    : await loadVisionModelFromGlobalConfig()
+  const visionModel = await loadResolvedVisionModel()
   const { events: processedEvents } = await processContextImages(rawEvents, {
     modelSupportsVision: modelVision,
     ...(visionModel ? { visionModel } : {}),

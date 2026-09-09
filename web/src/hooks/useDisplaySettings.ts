@@ -22,10 +22,17 @@ export function useDisplaySettings() {
       useSetting(SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING, 'false').value === 'true',
     // Tri-state: 'auto' (default) virtualizes feeds longer than the threshold,
     // 'on' forces it, 'off' disables it. Legacy 'true'/'false' values map to
-    // 'on'/'off' so existing opt-outs keep working.
+    // 'on'/'off' so existing opt-outs keep working — this supersedes the
+    // boolean `feedVirtualization` upstream reads from the same setting key.
     feedVirtualizationMode: normalizeFeedVirtualizationMode(
       useSetting(SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION, 'auto').value,
     ),
+    modelSelectorHeight: useSetting(SETTINGS_KEYS.DISPLAY_MODEL_SELECTOR_HEIGHT, 'default').value || 'default',
+    collapseProvidersByDefault:
+      useSetting(SETTINGS_KEYS.DISPLAY_COLLAPSE_PROVIDERS_BY_DEFAULT, 'false').value === 'true',
+    collapseFavoritesByDefault:
+      useSetting(SETTINGS_KEYS.DISPLAY_COLLAPSE_FAVORITES_BY_DEFAULT, 'false').value === 'true',
+    modelFavoritesRaw: useSetting(SETTINGS_KEYS.DISPLAY_MODEL_FAVORITES, '[]').value,
   }
 }
 

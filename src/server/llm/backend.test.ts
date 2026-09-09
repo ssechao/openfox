@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { detectBackendFromUrl, getBackendCapabilities, getBackendDisplayName, type Backend } from './backend.js'
+import {
+  detectBackendFromUrl,
+  detectProviderDefaultsFromUrl,
+  getBackendCapabilities,
+  getBackendDisplayName,
+  type Backend,
+} from './backend.js'
 
 describe('backend', () => {
   describe('detectBackendFromUrl', () => {
@@ -20,6 +26,29 @@ describe('backend', () => {
 
     it('ignores case and trailing slash', () => {
       expect(detectBackendFromUrl('HTTPS://API.OPENAI.COM/')).toBe('openai')
+    })
+  })
+
+  describe('detectProviderDefaultsFromUrl', () => {
+    it('derives the DeepSeek reasoning field from the API host', () => {
+      expect(detectProviderDefaultsFromUrl('https://api.deepseek.com')).toEqual({ thinkingField: 'reasoning_content' })
+      expect(detectProviderDefaultsFromUrl('https://api.deepseek.com/v1')).toEqual({
+        thinkingField: 'reasoning_content',
+      })
+    })
+
+    it('returns undefined for local or unknown hosts', () => {
+      expect(detectProviderDefaultsFromUrl('http://localhost:8000')).toBeUndefined()
+      expect(detectProviderDefaultsFromUrl('http://192.168.1.223:8000/v1')).toBeUndefined()
+      expect(detectProviderDefaultsFromUrl('https://api.z.ai/api/paas/v4')).toBeUndefined()
+    })
+
+    it('ignores case and trailing slash', () => {
+      expect(detectProviderDefaultsFromUrl('HTTPS://API.DEEPSEEK.COM/')).toEqual({ thinkingField: 'reasoning_content' })
+    })
+
+    it('returns undefined for malformed urls', () => {
+      expect(detectProviderDefaultsFromUrl('not-a-url')).toBeUndefined()
     })
   })
 

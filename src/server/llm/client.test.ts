@@ -146,6 +146,44 @@ describe('llm client', () => {
     })
   })
 
+  it('echoes reasoning back under the configured thinkingField on assistant messages', async () => {
+    httpClientCreateMock.mockResolvedValueOnce({
+      id: 'resp-1',
+      choices: [
+        {
+          finish_reason: 'stop',
+          message: { content: 'done', reasoning_content: 'think' },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    })
+
+    const client = createLLMClient(createConfig({ thinkingField: 'reasoning_content' }), 'vllm')
+    await client.complete({
+      messages: [
+        { role: 'user', content: 'hi' },
+        {
+          role: 'assistant',
+          content: '',
+          thinkingContent: 'think',
+          toolCalls: [{ id: 'call-1', name: 'glob', arguments: {} }],
+        },
+        { role: 'tool', content: 'ok', toolCallId: 'call-1' },
+      ],
+      tools: [{ type: 'function', function: { name: 'glob', description: 'Search', parameters: { type: 'object' } } }],
+    })
+
+    expect(httpClientCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          expect.objectContaining({ role: 'assistant', reasoning_content: 'think', tool_calls: expect.anything() }),
+        ]),
+      }),
+      { signal: undefined },
+      undefined,
+    )
+  })
+
   it('wraps completion failures in LLMError', async () => {
     httpClientCreateMock.mockRejectedValueOnce(new Error('network down'))
 

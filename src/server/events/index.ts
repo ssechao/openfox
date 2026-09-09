@@ -61,7 +61,6 @@ export {
   foldContextState,
   buildSnapshot,
   buildSnapshotFromSessionState,
-  getMessagesForWindow,
   buildContextMessagesFromMessages,
 } from './folding.js'
 

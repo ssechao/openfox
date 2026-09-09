@@ -203,6 +203,86 @@ describe('ProviderManager - Model Selection', () => {
     })
   })
 
+  describe('thinkingField resolution', () => {
+    it('derives thinkingField from the provider URL when config lacks it (DeepSeek rescue)', async () => {
+      const deepseekProvider: Provider = {
+        id: 'provider-deepseek',
+        name: 'DeepSeek API',
+        url: 'https://api.deepseek.com',
+        backend: 'unknown',
+        apiKey: 'sk-x',
+        models: [{ id: 'deepseek-v4-flash', contextWindow: 1000000, source: 'default' }],
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      }
+
+      const dsConfig: Config = {
+        ...config,
+        providers: [deepseekProvider],
+        defaultModelSelection: 'provider-deepseek/deepseek-v4-flash',
+      }
+
+      const manager = createProviderManager(dsConfig)
+      manager.createClient('provider-deepseek', 'deepseek-v4-flash')
+
+      const calls = (createLLMClient as ReturnType<typeof vi.fn>).mock.calls
+      const lastCallConfig = calls[calls.length - 1]![0] as { llm: { thinkingField?: string } }
+      expect(lastCallConfig.llm.thinkingField).toBe('reasoning_content')
+    })
+
+    it('lets an explicit provider thinkingField override the URL default', async () => {
+      const deepseekProvider: Provider = {
+        id: 'provider-deepseek',
+        name: 'DeepSeek API',
+        url: 'https://api.deepseek.com',
+        backend: 'unknown',
+        apiKey: 'sk-x',
+        thinkingField: 'custom_field',
+        models: [{ id: 'deepseek-v4-flash', contextWindow: 1000000, source: 'default' }],
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      }
+
+      const dsConfig: Config = {
+        ...config,
+        providers: [deepseekProvider],
+        defaultModelSelection: 'provider-deepseek/deepseek-v4-flash',
+      }
+
+      const manager = createProviderManager(dsConfig)
+      manager.createClient('provider-deepseek', 'deepseek-v4-flash')
+
+      const calls = (createLLMClient as ReturnType<typeof vi.fn>).mock.calls
+      const lastCallConfig = calls[calls.length - 1]![0] as { llm: { thinkingField?: string } }
+      expect(lastCallConfig.llm.thinkingField).toBe('custom_field')
+    })
+
+    it('leaves thinkingField undefined for providers without a URL default', async () => {
+      const localProvider: Provider = {
+        id: 'provider-local',
+        name: 'Local',
+        url: 'http://192.168.1.223:8000',
+        backend: 'vllm',
+        models: [{ id: 'deepseek-v4-flash', contextWindow: 1000000, source: 'default' }],
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      }
+
+      const localConfig: Config = {
+        ...config,
+        providers: [localProvider],
+        defaultModelSelection: 'provider-local/deepseek-v4-flash',
+      }
+
+      const manager = createProviderManager(localConfig)
+      manager.createClient('provider-local', 'deepseek-v4-flash')
+
+      const calls = (createLLMClient as ReturnType<typeof vi.fn>).mock.calls
+      const lastCallConfig = calls[calls.length - 1]![0] as { llm: { thinkingField?: string } }
+      expect(lastCallConfig.llm.thinkingField).toBeUndefined()
+    })
+  })
+
   describe('setDefaultModelSelection', () => {
     it('returns error for non-existent provider', async () => {
       const result = await providerManager.setDefaultModelSelection('non-existent', 'new-model')
@@ -771,6 +851,52 @@ describe('ProviderManager - Model Selection', () => {
       })
 
       expect(providerManager.resolveModelEffort('provider-1', 'model-a', 'none')).toBe('none')
+    })
+
+    it('preserves selected status, requestBody, and modes when updating model settings', async () => {
+      const pm = createProviderManager({
+        ...config,
+        providers: [
+          {
+            id: 'p-custom',
+            name: 'Custom Provider',
+            url: 'https://example.com/v1',
+            backend: 'openai',
+            models: [
+              {
+                id: 'custom-model',
+                contextWindow: 128000,
+                source: 'user',
+                selected: true,
+                requestBody: { custom_param: 123 },
+                modes: [
+                  { level: 'low', apiModelId: 'custom-model-low' },
+                  { level: 'high', apiModelId: 'custom-model-high' },
+                ],
+              },
+            ],
+            isActive: true,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      })
+
+      const res = await pm.updateModelSettings('p-custom', 'custom-model', {
+        thinkingEnabled: true,
+        thinkingLevel: 'low',
+      })
+
+      expect(res.success).toBe(true)
+      expect(res.model?.selected).toBe(true)
+      expect(res.model?.requestBody).toEqual({ custom_param: 123 })
+      expect(res.model?.modes?.length).toBe(2)
+
+      const provider = pm.getProviders().find((p) => p.id === 'p-custom')
+      const updated = provider?.models.find((m) => m.id === 'custom-model')
+      expect(updated?.selected).toBe(true)
+      expect(updated?.requestBody).toEqual({ custom_param: 123 })
+      expect(updated?.modes?.length).toBe(2)
+      expect(updated?.thinkingLevel).toBe('low')
     })
 
     it('an explicit in-list effort wins over the model default', async () => {

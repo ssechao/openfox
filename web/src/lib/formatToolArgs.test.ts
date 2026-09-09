@@ -13,6 +13,20 @@ describe('formatToolArgsWithMetadata', () => {
       expect(result).toBe('src/file.ts [offset=10, limit=100]')
     })
 
+    it('formats describe_image as path — question (truncated)', () => {
+      const args = {
+        path: 'screenshot.png',
+        question: 'What does the button in the top-right corner say here in detail?',
+      }
+      const result = formatToolArgsWithMetadata('describe_image', args, undefined)
+      expect(result).toBe('screenshot.png — What does the button in the top-right…')
+    })
+
+    it('formats describe_image without a question as just the path', () => {
+      const result = formatToolArgsWithMetadata('describe_image', { path: 'screenshot.png' }, undefined)
+      expect(result).toBe('screenshot.png')
+    })
+
     it('handles unknown tools gracefully', () => {
       const args = { foo: 'bar' }
 

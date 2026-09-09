@@ -4,6 +4,7 @@ import { useDisplaySettings } from '../../hooks/useDisplaySettings'
 import type { Diagnostic, EditContextRegion } from '@shared/types.js'
 import { ToolIcon } from './ToolIcon'
 import { DiffView, FilePreview, EditContextView, ReadFileView } from './DiffView'
+import { DescribeImageView } from './DescribeImageView'
 import { DiagnosticsView } from './DiagnosticsView'
 import { RunCommandView } from './RunCommandView'
 import { Markdown } from './Markdown'
@@ -13,6 +14,7 @@ import { BackgroundProcessView } from './BackgroundProcessView'
 import { WorkspaceView } from './WorkspaceView'
 import { ProjectTasksView } from './ProjectTasksView'
 import { PathConfirmationButtons } from './PathConfirmationButtons'
+import { TruncatedTooltip } from './TruncatedTooltip'
 import { formatToolArgsFull, formatToolArgsWithMetadata } from '../../lib/formatToolArgs'
 import { type PendingPathConfirmation } from '../../stores/session'
 import { useSessionScope, useScopedPaneState } from '../../stores/session/session-scope'
@@ -139,6 +141,7 @@ export const ToolCallDisplay = memo(function ToolCallDisplay({
   const config = statusConfig[status]
   const remoteProtocol = detectRemoteExecution(tool, args)
   const showEditorLink = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_OPEN_IN_EDITOR).value === 'true'
+  const argsLabel = formatToolArgsWithMetadata(tool, args, metadata)
 
   const editorLine =
     tool === 'edit_file'
@@ -181,7 +184,7 @@ export const ToolCallDisplay = memo(function ToolCallDisplay({
       >
         <ToolIcon tool={tool} />
         <span className="text-accent-primary font-medium">{tool}</span>
-        <span className="text-text-muted truncate flex-1">{formatToolArgsWithMetadata(tool, args, metadata)}</span>
+        <TruncatedTooltip text={argsLabel} className="flex-1 text-text-muted" />
         <span className={`${config.color} ${config.animate ? 'animate-pulse' : ''}`}>
           {status === 'pending' ? '...' : t({ en: 'Done', fr: 'Terminé' })}
         </span>
@@ -199,9 +202,7 @@ export const ToolCallDisplay = memo(function ToolCallDisplay({
       >
         <span className={`${config.color} ${config.animate ? 'animate-pulse' : ''}`}>{config.icon}</span>
         <span className="font-mono text-accent-primary text-sm">{tool}</span>
-        <span className="text-text-muted text-xs flex-1 truncate">
-          {formatToolArgsWithMetadata(tool, args, metadata)}
-        </span>
+        <TruncatedTooltip text={argsLabel} className="flex-1 text-text-muted text-xs" />
         <span className="text-text-muted text-xs">{expanded ? '▼' : '▶'}</span>
       </button>
 
@@ -250,6 +251,11 @@ export const ToolCallDisplay = memo(function ToolCallDisplay({
           {/* Specialized rendering for read_file operations */}
           {tool === 'read_file' && status === 'success' && (
             <ReadFileView result={result} metadata={metadata} filePath={String(args.path ?? '')} />
+          )}
+
+          {/* Specialized rendering for describe_image (non-vision models w/ vision fallback) */}
+          {tool === 'describe_image' && (status === 'success' || status === 'pending') && (
+            <DescribeImageView args={args} result={result} metadata={metadata} pending={status === 'pending'} />
           )}
 
           {/* Specialized rendering for return_value */}
@@ -363,6 +369,7 @@ export const ToolCallDisplay = memo(function ToolCallDisplay({
             tool !== 'write_file' &&
             tool !== 'run_command' &&
             tool !== 'read_file' &&
+            tool !== 'describe_image' &&
             tool !== 'return_value' &&
             tool !== 'call_sub_agent' &&
             tool !== 'web_search' &&
@@ -410,11 +417,19 @@ export const ToolCallDisplay = memo(function ToolCallDisplay({
           {(remoteProtocol ||
             (status === 'success' &&
               durationMs !== undefined &&
-              (tool === 'run_command' || tool === 'edit_file' || tool === 'write_file' || tool === 'read_file'))) && (
+              (tool === 'run_command' ||
+                tool === 'edit_file' ||
+                tool === 'write_file' ||
+                tool === 'read_file' ||
+                tool === 'describe_image'))) && (
             <div className="text-[10px] text-text-muted flex items-center gap-2">
               {status === 'success' &&
                 durationMs !== undefined &&
-                (tool === 'run_command' || tool === 'edit_file' || tool === 'write_file' || tool === 'read_file') && (
+                (tool === 'run_command' ||
+                  tool === 'edit_file' ||
+                  tool === 'write_file' ||
+                  tool === 'read_file' ||
+                  tool === 'describe_image') && (
                   <span>
                     {t({ en: 'Completed in {{s}}s', fr: 'Terminé en {{s}} s' }, { s: (durationMs / 1000).toFixed(2) })}
                   </span>

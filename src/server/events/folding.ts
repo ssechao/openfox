@@ -31,8 +31,8 @@ export {
   buildContextMessagesFromEventHistory,
   foldTurnEventsToSnapshotMessages,
   foldTurnEventsToSnapshotMessagesFromInitial,
-  getMessagesForWindow,
   buildContextMessagesFromMessages,
+  snapshotMessagesToEvents,
 } from './fold-messages.js'
 
 export {

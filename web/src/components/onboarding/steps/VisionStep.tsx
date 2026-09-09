@@ -161,7 +161,7 @@ export function VisionStep({ onNext }: VisionStepProps) {
           <span className="text-text-primary">
             {t({
               en: 'Enable vision fallback for non-vision models',
-              fr: 'Activer le repli vision pour les modèles sans vision',
+              fr: 'Activer le fallback vision pour les modèles sans vision',
             })}
           </span>
         </label>

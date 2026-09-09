@@ -162,4 +162,56 @@ describe('turn event persistence', () => {
       isStreaming: false,
     })
   })
+
+  it('stops broadcasting streaming events once the session is deleted', async () => {
+    // Streaming events bypass the events table, so the foreign key that used to
+    // reject an insert for a deleted session no longer stops them: a turn still
+    // in flight when the user deletes its session would keep pushing deltas to
+    // every connected client.
+    const sink = createTurnEventSink(store, 'session-1')
+    const { received, drain, unsubscribe } = collectGlobalEvents(store)
+
+    sink({ type: 'message.start', data: { messageId: 'assistant-1', role: 'assistant' } })
+    sink({ type: 'message.delta', data: { messageId: 'assistant-1', content: 'before ' } })
+    await drain()
+    expect(received).toEqual(['message.start', 'message.delta'])
+
+    store.deleteSession('session-1')
+    received.length = 0
+    sink({ type: 'message.delta', data: { messageId: 'assistant-1', content: 'after' } })
+    await drain()
+
+    expect(received).toEqual([])
+    unsubscribe()
+  })
+
+  it('resumes broadcasting when a session id is reused after deletion', async () => {
+    store.deleteSession('session-1')
+    const sink = createTurnEventSink(store, 'session-1')
+    const { received, drain, unsubscribe } = collectGlobalEvents(store)
+
+    // A persisted event marks the id live again, so suppression cannot outlive
+    // the deleted session and silence a later one.
+    sink({ type: 'message.start', data: { messageId: 'assistant-1', role: 'assistant' } })
+    sink({ type: 'message.delta', data: { messageId: 'assistant-1', content: 'live' } })
+    await drain()
+
+    expect(received).toEqual(['message.start', 'message.delta'])
+    unsubscribe()
+  })
 })
+
+/** Collects events from a global (WS-style) subscription, draining the async
+ *  iterator so assertions see what a connected client would actually receive. */
+function collectGlobalEvents(store: EventStore) {
+  const { iterator, unsubscribe } = store.subscribeAll()
+  const received: string[] = []
+  void (async () => {
+    for await (const event of iterator) received.push(event.type)
+  })()
+  const drain = async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  return { received, drain, unsubscribe }
+}

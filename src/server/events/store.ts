@@ -163,6 +163,13 @@ export class EventStore {
   // limit the first caller happened to request.
   private static readonly PROMPTS_QUERY_LIMIT = 100
   private static readonly RECENT_PROMPTS_MAX_ENTRIES = 20
+  // Sessions deleted while a turn may still be streaming. Persisted events are
+  // rejected for them by the events -> sessions foreign key, but `publish()`
+  // never touches the table, so transient events need this guard to stop at the
+  // same moment. Bounded: an in-flight turn ends within seconds of the delete,
+  // so only the most recent deletions can still matter.
+  private deletedSessions: Set<string> = new Set()
+  private static readonly DELETED_SESSIONS_MAX_ENTRIES = 256
   private static readonly RECENT_PROMPT_MAX_LENGTH = 2000
 
   constructor(db: Database.Database) {
@@ -236,6 +243,10 @@ export class EventStore {
       throw new Error('Invalid event: must have data object')
     }
 
+    // A persisted event proves the id is live again (the foreign key would have
+    // rejected it otherwise), so suppression never outlives the deleted session.
+    this.deletedSessions.delete(sessionId)
+
     const timestamp = Date.now()
     const seq = this.getNextSeq(sessionId)
     const payload = JSON.stringify(event.data)
@@ -271,7 +282,11 @@ export class EventStore {
       type: event.type,
       data: event.data,
     }
-    this.notifySubscribers(sessionId, stored)
+    // A deleted session must go silent immediately, even if its turn is still
+    // streaming — see `deletedSessions`.
+    if (!this.deletedSessions.has(sessionId)) {
+      this.notifySubscribers(sessionId, stored)
+    }
     return stored
   }
 
@@ -917,6 +932,12 @@ export class EventStore {
   deleteSession(sessionId: string): void {
     this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
     this.invalidateSessionCache(sessionId)
+
+    this.deletedSessions.add(sessionId)
+    if (this.deletedSessions.size > EventStore.DELETED_SESSIONS_MAX_ENTRIES) {
+      const oldest = this.deletedSessions.keys().next().value
+      if (oldest !== undefined) this.deletedSessions.delete(oldest)
+    }
 
     // Close all subscribers for this session
     const sessionSubs = this.subscribers.get(sessionId)

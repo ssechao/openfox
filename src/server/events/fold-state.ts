@@ -421,7 +421,8 @@ export function foldWaitingWorkflow(events: EventLike[]): FoldedSessionState['wa
 // - The web UI renders it only while status === 'pending'; finished calls show
 //   `result` (RunCommandView, ToolCallDisplay).
 // - The LLM context is built exclusively from `result.output`
-//   (appendSnapshotMessageContext in fold-messages.ts).
+//   (tool messages are folded through buildContextMessagesFromStoredEvents,
+//   whether they come from raw events or a snapshot replay).
 // Persisting it therefore just bloats snapshots (a single session once
 // accumulated 41MB of it). We drop it from snapshots for EVERY finished call
 // (one that has a result) — unconditionally, no content inspection needed,

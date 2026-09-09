@@ -3,6 +3,7 @@ import type { Tool, ToolRegistry, ToolContext } from './types.js'
 import type { AgentDefinition } from '../agents/types.js'
 import { getSessionDisabledServers } from '../mcp/session-overrides.js'
 import { readFileTool } from './read.js'
+import { describeImageTool } from './describe-image.js'
 import { writeFileTool } from './write.js'
 import { editFileTool } from './edit.js'
 import { runCommandTool } from './shell.js'
@@ -42,6 +43,7 @@ function getBuiltInTools(): Tool[] {
   if (!_builtInTools) {
     _builtInTools = [
       readFileTool,
+      describeImageTool,
       writeFileTool,
       editFileTool,
       runCommandTool,

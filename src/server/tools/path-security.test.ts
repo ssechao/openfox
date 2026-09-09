@@ -674,6 +674,92 @@ describe('path-security', () => {
         const paths = extractAbsolutePathsFromCommand('find /var/log -name x 2>/dev/null')
         expect(paths).toContain('/var/log')
       })
+
+      // Nested quotes: a path in single quotes inside a double-quoted argument
+      // (python -c, node -e, bash -c ...). The quote scanner must pair quotes by
+      // type, otherwise the path becomes a delimiter between two pseudo-strings
+      // and is never inspected — an unconfirmed read/write outside the workdir.
+      it('flags a single-quoted path nested in a double-quoted python -c program', () => {
+        const paths = extractAbsolutePathsFromCommand(`python3 -c "print(open('/etc/passwd').read())"`)
+        expect(paths).toContain('/etc/passwd')
+      })
+
+      it('flags a single-quoted path nested in a double-quoted node -e program', () => {
+        const paths = extractAbsolutePathsFromCommand(`node -e "require('fs').readFileSync('/etc/passwd')"`)
+        expect(paths).toContain('/etc/passwd')
+      })
+
+      it('flags a single-quoted path nested in a double-quoted bash -c command', () => {
+        const paths = extractAbsolutePathsFromCommand(`bash -c "cat '/etc/passwd'"`)
+        expect(paths).toContain('/etc/passwd')
+      })
+
+      it('flags a nested-quote write outside the workdir', () => {
+        const paths = extractAbsolutePathsFromCommand(`python3 -c "open('/etc/evil.conf','w').write('x')"`)
+        expect(paths).toContain('/etc/evil.conf')
+      })
+    })
+
+    describe('search-tool patterns', () => {
+      // grep [OPTIONS] PATTERN [FILE...] — the first non-option operand is the
+      // pattern, never a file. A route-shaped pattern is the common case for an
+      // agent grepping its own codebase, and confirming it blocks headless runs.
+      it('does not extract a route-shaped grep pattern', () => {
+        const paths = extractAbsolutePathsFromCommand('grep -rn "/api/routage/gestes" portail/')
+        expect(paths).not.toContain('/api/routage/gestes')
+      })
+
+      it('does not extract a single-segment grep pattern', () => {
+        expect(extractAbsolutePathsFromCommand('grep -rn "/health" .')).toEqual([])
+      })
+
+      it('does not extract the pattern for ripgrep', () => {
+        const paths = extractAbsolutePathsFromCommand('rg "/api/routage/gestes" portail/')
+        expect(paths).not.toContain('/api/routage/gestes')
+      })
+
+      it('does not extract a pattern passed through -e', () => {
+        const paths = extractAbsolutePathsFromCommand("grep -e '/api/routage' /var/log/messages")
+        expect(paths).not.toContain('/api/routage')
+      })
+
+      it('still extracts file operands after the pattern', () => {
+        const paths = extractAbsolutePathsFromCommand("grep ERROR '/var/log/messages'")
+        expect(paths).toContain('/var/log/messages')
+      })
+
+      it('still extracts file operands when the pattern comes from -e', () => {
+        const paths = extractAbsolutePathsFromCommand("grep -e '/api/routage' /var/log/messages")
+        expect(paths).toContain('/var/log/messages')
+      })
+
+      it('still extracts the pattern file of -f', () => {
+        const paths = extractAbsolutePathsFromCommand('grep -f /etc/patterns.txt file.txt')
+        expect(paths).toContain('/etc/patterns.txt')
+      })
+
+      it('skips option values so the pattern is still identified', () => {
+        const paths = extractAbsolutePathsFromCommand('grep -A 3 "/api/routage" file.txt')
+        expect(paths).not.toContain('/api/routage')
+      })
+
+      it('still extracts a search root given after the pattern', () => {
+        const paths = extractAbsolutePathsFromCommand('grep -rn "/api/routage" /var/log')
+        expect(paths).toContain('/var/log')
+        expect(paths).not.toContain('/api/routage')
+      })
+
+      it('recognises the tool through an absolute invocation path', () => {
+        const paths = extractAbsolutePathsFromCommand('/usr/bin/grep -rn "/api/routage" .')
+        expect(paths).not.toContain('/api/routage')
+        expect(paths).toContain('/usr/bin/grep')
+      })
+
+      it('only masks the pattern of the search sub-command', () => {
+        const paths = extractAbsolutePathsFromCommand('grep -rn "/api/routage" . && cat /etc/hosts')
+        expect(paths).toContain('/etc/hosts')
+        expect(paths).not.toContain('/api/routage')
+      })
     })
 
     describe('sed/awk/perl/ruby regex address false positives', () => {

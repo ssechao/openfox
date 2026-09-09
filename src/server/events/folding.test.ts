@@ -14,9 +14,7 @@ import {
   foldWaitingWorkflow,
   reorderToolMessages,
 } from './folding.js'
-import { appendSnapshotMessageContext } from './fold-messages.js'
 import type { ContextMessage, MessageWithId } from './fold-types.js'
-
 const baseEvent = {
   seq: 1,
   sessionId: 'session-1',
@@ -421,6 +419,64 @@ describe('event folding', () => {
         content: 'Redirect to the project view instead of hanging',
       },
     ])
+  })
+
+  it('keeps snapshot content authoritative when later events target a snapshot-covered message', () => {
+    const snapshotEvent: StoredEvent = {
+      ...baseEvent,
+      seq: 1,
+      type: 'turn.snapshot',
+      data: {
+        mode: 'builder',
+        phase: 'build',
+        isRunning: false,
+        messages: [
+          {
+            id: 'msg-1',
+            role: 'assistant',
+            content: 'complete snapshot content',
+            timestamp: baseEvent.timestamp,
+            contextWindowId: 'window-1',
+          },
+        ],
+        criteria: [],
+        metadataEntries: {},
+        contextState: {
+          currentTokens: 50,
+          maxTokens: 200000,
+          compactionCount: 0,
+          dangerZone: false,
+          canCompact: false,
+          dynamicContextChanged: false,
+        },
+        currentContextWindowId: 'window-1',
+        todos: [],
+        readFiles: [],
+        snapshotSeq: 1,
+        snapshotAt: baseEvent.timestamp,
+      },
+    }
+    const laterEvents: StoredEvent[] = [
+      {
+        ...baseEvent,
+        seq: 2,
+        type: 'message.delta',
+        data: { messageId: 'msg-1', content: ' MUST NOT BE APPENDED' },
+      },
+      {
+        ...baseEvent,
+        seq: 3,
+        type: 'message.start',
+        data: { messageId: 'msg-2', role: 'user', content: 'new turn', contextWindowId: 'window-1' },
+      },
+      { ...baseEvent, seq: 4, type: 'message.done', data: { messageId: 'msg-2' } },
+    ]
+
+    const context = buildContextMessagesFromEventHistory([snapshotEvent, ...laterEvents], 'window-1')
+
+    const assistant = context.find((c) => c.role === 'assistant')
+    expect(assistant!.content).toBe('complete snapshot content')
+    expect(context[context.length - 1]).toEqual({ role: 'user', content: 'new turn' })
   })
 
   it('reconstructs current-window llm context from snapshot history', () => {
@@ -2817,13 +2873,14 @@ describe('buildSnapshot streamingOutput de-duplication', () => {
   })
 })
 
-describe('appendSnapshotMessageContext builds LLM context from result.output only', () => {
+describe('snapshot reconstruction builds LLM context from result.output only', () => {
   it('never leaks streamingOutput of finished tool calls into the context', () => {
     const message: SnapshotMessage = {
       id: 'm1',
       role: 'assistant',
       content: 'running the command',
       timestamp: 1000,
+      contextWindowId: 'window-1',
       toolCalls: [
         {
           id: 'call-1',
@@ -2837,8 +2894,35 @@ describe('appendSnapshotMessageContext builds LLM context from result.output onl
       ],
     }
 
-    const context: ContextMessage[] = []
-    appendSnapshotMessageContext(context, message)
+    const snapshotEvent: StoredEvent = {
+      seq: 1,
+      sessionId: 'session-1',
+      timestamp: 1000,
+      type: 'turn.snapshot',
+      data: {
+        mode: 'builder',
+        phase: 'build',
+        isRunning: false,
+        messages: [message],
+        criteria: [],
+        metadataEntries: {},
+        todos: [],
+        contextState: {
+          currentTokens: 0,
+          maxTokens: 200000,
+          compactionCount: 0,
+          dangerZone: false,
+          canCompact: false,
+          dynamicContextChanged: false,
+        },
+        currentContextWindowId: 'window-1',
+        readFiles: [],
+        snapshotSeq: 1,
+        snapshotAt: 1000,
+      },
+    }
+
+    const context = buildContextMessagesFromEventHistory([snapshotEvent], 'window-1')
 
     const toolMessages = context.filter((c) => c.role === 'tool')
     expect(toolMessages).toHaveLength(1)

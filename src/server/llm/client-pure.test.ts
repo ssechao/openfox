@@ -88,6 +88,202 @@ describe('llm client pure helpers', () => {
     expect(secondAssistant['reasoning']).toBe('Summarizing the result')
   })
 
+  it('writes reasoning back under the configured thinkingField', async () => {
+    const result = await convertMessages(
+      [
+        {
+          role: 'assistant',
+          content: '',
+          thinkingContent: 'I need to read the file first',
+          toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'foo.ts' } }],
+        },
+        { role: 'tool', content: 'file contents', toolCallId: 'call-1' },
+        { role: 'assistant', content: 'Here is the file.', thinkingContent: 'Summarizing the result' },
+      ],
+      false,
+      'reasoning_content',
+      true,
+    )
+
+    // Both assistant messages echo under reasoning_content, never under reasoning
+    const firstAssistant = result[0] as unknown as Record<string, unknown>
+    expect(firstAssistant['reasoning_content']).toBe('I need to read the file first')
+    expect(firstAssistant['reasoning']).toBeUndefined()
+
+    const secondAssistant = result[2] as unknown as Record<string, unknown>
+    expect(secondAssistant['reasoning_content']).toBe('Summarizing the result')
+    expect(secondAssistant['reasoning']).toBeUndefined()
+  })
+
+  it('emits an empty reasoning field on tool_calls assistant messages without thinking content', async () => {
+    const result = await convertMessages(
+      [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'foo.ts' } }],
+        },
+        { role: 'tool', content: 'file contents', toolCallId: 'call-1' },
+      ],
+      false,
+      'reasoning_content',
+      true,
+    )
+
+    const firstAssistant = result[0] as unknown as Record<string, unknown>
+    expect(firstAssistant['reasoning_content']).toBe('')
+    expect(firstAssistant['reasoning']).toBeUndefined()
+  })
+
+  it('keeps the reasoning field on tool_calls messages even when inlineThinking is active', async () => {
+    const result = await convertMessages(
+      [
+        {
+          role: 'assistant',
+          content: '',
+          thinkingContent: 'think text',
+          toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'foo.ts' } }],
+        },
+        { role: 'tool', content: 'file contents', toolCallId: 'call-1' },
+      ],
+      false,
+      'reasoning_content',
+      true,
+      true,
+    )
+
+    // tool_calls messages are never inlined — they keep the reasoning_content
+    // field DeepSeek requires on them.
+    const firstAssistant = result[0] as unknown as Record<string, unknown>
+    expect(firstAssistant['reasoning_content']).toBe('think text')
+    expect(firstAssistant['content']).toBe(' ')
+  })
+
+  it('does not emit an empty reasoning field on tool_calls messages for default providers', async () => {
+    const result = await convertMessages(
+      [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'foo.ts' } }],
+        },
+        { role: 'tool', content: 'file contents', toolCallId: 'call-1' },
+      ],
+      false,
+      undefined,
+      true,
+    )
+
+    const firstAssistant = result[0] as unknown as Record<string, unknown>
+    expect(firstAssistant['reasoning']).toBeUndefined()
+  })
+
+  it('inlines thinking into content when inlineThinking is set (no reasoning field on the wire)', async () => {
+    const result = await convertMessages(
+      [
+        { role: 'assistant', content: 'Here is the file.', thinkingContent: 'Summarizing the result' },
+        { role: 'assistant', content: '', thinkingContent: 'Choosing numbers', toolCalls: [] },
+      ],
+      false,
+      'reasoning_content',
+      true,
+      true,
+    )
+
+    const firstAssistant = result[0] as unknown as Record<string, unknown>
+    expect(firstAssistant['reasoning_content']).toBeUndefined()
+    expect(firstAssistant['content']).toContain('Summarizing the result')
+    expect(firstAssistant['content']).toContain('Here is the file.')
+
+    // Empty-content message keeps its thinking as content
+    const secondAssistant = result[1] as unknown as Record<string, unknown>
+    expect(secondAssistant['reasoning_content']).toBeUndefined()
+    expect(secondAssistant['content']).toContain('Choosing numbers')
+  })
+
+  it('inlines thinking into content for reasoning_content providers only when the request has no tools', async () => {
+    const profile = {
+      temperature: 1,
+      defaultMaxTokens: 16384,
+      topP: 0.95,
+      supportsVision: false,
+    }
+    const capabilities = {
+      supportsTopK: false,
+      supportsChatTemplateKwargs: false,
+      supportsNumCtx: false,
+      routesEffortViaChatTemplateKwargs: false,
+      usesMaxCompletionTokens: false,
+    }
+    const assistantMsg = {
+      role: 'assistant' as const,
+      content: 'answer',
+      thinkingContent: 'think text',
+      toolCalls: [],
+    }
+
+    // No tools → thinking inlined into content
+    const noTools = await buildNonStreamingCreateParams({
+      model: 'deepseek-v4-flash',
+      request: { messages: [assistantMsg], tools: [] },
+      profile,
+      capabilities,
+      thinkingField: 'reasoning_content',
+    })
+    const noToolsAssistant = noTools.params.messages[0] as unknown as Record<string, unknown>
+    expect(noToolsAssistant['reasoning_content']).toBeUndefined()
+    expect(noToolsAssistant['content']).toContain('think text')
+
+    // With tools → reasoning_content field (DeepSeek concatenates it there)
+    const withTools = await buildNonStreamingCreateParams({
+      model: 'deepseek-v4-flash',
+      request: {
+        messages: [assistantMsg],
+        tools: [
+          {
+            type: 'function',
+            function: { name: 'get_weather', description: 'Get weather', parameters: { type: 'object' } },
+          },
+        ],
+      },
+      profile,
+      capabilities,
+      thinkingField: 'reasoning_content',
+    })
+    const withToolsAssistant = withTools.params.messages[0] as unknown as Record<string, unknown>
+    expect(withToolsAssistant['reasoning_content']).toBe('think text')
+    expect(withToolsAssistant['content']).toBe('answer')
+  })
+
+  it('does not inline thinking for reasoning-style providers', async () => {
+    const profile = {
+      temperature: 1,
+      defaultMaxTokens: 16384,
+      topP: 0.95,
+      supportsVision: false,
+    }
+    const capabilities = {
+      supportsTopK: false,
+      supportsChatTemplateKwargs: false,
+      supportsNumCtx: false,
+      routesEffortViaChatTemplateKwargs: false,
+      usesMaxCompletionTokens: false,
+    }
+
+    const { params } = await buildNonStreamingCreateParams({
+      model: 'deepseek-v4-flash',
+      request: {
+        messages: [{ role: 'assistant', content: 'answer', thinkingContent: 'think text', toolCalls: [] }],
+        tools: [],
+      },
+      profile,
+      capabilities,
+    })
+    const assistant = params.messages[0] as unknown as Record<string, unknown>
+    expect(assistant['reasoning']).toBe('think text')
+    expect(assistant['content']).toBe('answer')
+  })
+
   it('strips reasoning from assistant messages when sendReasoningInMessages is false', async () => {
     const result = await convertMessages(
       [
@@ -204,12 +400,38 @@ describe('llm client pure helpers', () => {
     expect(withoutFlag).toEqual([{ role: 'user', content: 'hi' }])
   })
 
-  it('converts tool definitions to openai function schema', () => {
+  it('converts tool definitions to openai function schema and sanitizes invalid schema fields', () => {
     expect(
       convertTools([
-        { type: 'function', function: { name: 'grep', description: 'Search', parameters: { type: 'object' } } },
+        {
+          type: 'function',
+          function: {
+            name: 'grep',
+            description: 'Search',
+            parameters: {
+              type: 'object',
+              properties: {
+                tags: { type: 'array', items: {} },
+              },
+            },
+          },
+        },
       ]),
-    ).toEqual([{ type: 'function', function: { name: 'grep', description: 'Search', parameters: { type: 'object' } } }])
+    ).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'grep',
+          description: 'Search',
+          parameters: {
+            type: 'object',
+            properties: {
+              tags: { type: 'array', items: { type: 'string' } },
+            },
+          },
+        },
+      },
+    ])
   })
 
   it('maps finish reasons', () => {
@@ -415,7 +637,10 @@ describe('llm client pure helpers', () => {
         model: 'test-model',
         messages: [{ role: 'user', content: 'hello' }],
         tools: [
-          { type: 'function', function: { name: 'glob', description: 'Search', parameters: { type: 'object' } } },
+          {
+            type: 'function',
+            function: { name: 'glob', description: 'Search', parameters: { type: 'object', properties: {} } },
+          },
         ],
         tool_choice: 'auto',
         temperature: 0.2,
@@ -456,7 +681,10 @@ describe('llm client pure helpers', () => {
         model: 'test-model',
         messages: [{ role: 'user', content: 'hello' }],
         tools: [
-          { type: 'function', function: { name: 'glob', description: 'Search', parameters: { type: 'object' } } },
+          {
+            type: 'function',
+            function: { name: 'glob', description: 'Search', parameters: { type: 'object', properties: {} } },
+          },
         ],
         tool_choice: 'auto',
         temperature: 0.2,
@@ -497,7 +725,10 @@ describe('llm client pure helpers', () => {
         model: 'test-model',
         messages: [{ role: 'user', content: 'hello' }],
         tools: [
-          { type: 'function', function: { name: 'glob', description: 'Search', parameters: { type: 'object' } } },
+          {
+            type: 'function',
+            function: { name: 'glob', description: 'Search', parameters: { type: 'object', properties: {} } },
+          },
         ],
         tool_choice: 'auto',
         temperature: 0.2,
@@ -538,7 +769,10 @@ describe('llm client pure helpers', () => {
         model: 'test-model',
         messages: [{ role: 'user', content: 'hello' }],
         tools: [
-          { type: 'function', function: { name: 'glob', description: 'Search', parameters: { type: 'object' } } },
+          {
+            type: 'function',
+            function: { name: 'glob', description: 'Search', parameters: { type: 'object', properties: {} } },
+          },
         ],
         tool_choice: 'auto',
         temperature: 0.2,
@@ -580,7 +814,10 @@ describe('llm client pure helpers', () => {
         model: 'test-model',
         messages: [{ role: 'user', content: 'hello' }],
         tools: [
-          { type: 'function', function: { name: 'glob', description: 'Search', parameters: { type: 'object' } } },
+          {
+            type: 'function',
+            function: { name: 'glob', description: 'Search', parameters: { type: 'object', properties: {} } },
+          },
         ],
         tool_choice: 'auto',
         temperature: 0.2,

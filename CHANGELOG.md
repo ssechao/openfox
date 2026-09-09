@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.0.137 - 2026-09-03
+
+### Bug Fixes
+
+- **Image descriptions survive reloads** — vision details no longer drop from tool results after a page reload
+
+## 2.0.136 - 2026-09-02
+
+### Features
+
+- **Model favorites** — heart-toggle any model and pin a Favorites section at the top of the model selector
+- **Model selector display settings** — full-height sizing, and start with providers or favorites collapsed
+- **Describe-image tool for non-vision models** — delegates image questions to a vision-capable fallback
+- **Sync button in the provider editor** — refetch the model catalog without losing current selections
+
+### Enhancements
+
+- **Hover tooltips for truncated tool-call labels** — reveal the full path or command
+- **Compact provider auth badge** — the Connected/Connect button is smaller and better aligned
+
+### Bug Fixes
+
+- **Localized modal footer buttons** — Cancel/Save now translate to French
+- **Tool schemas work with strict providers** — Vertex AI, Antigravity, and Gemini no longer reject tool calls
+- **New sessions inherit project MCP overrides** — forked sessions keep the parent's MCP state too
+- **No more duplicate models after a sync** — merged model families and selections survive a catalog refresh
+- **Deleting a provider cleans up its sessions** — no dead provider pins, wrong context windows, or auto-compaction
+- **Ollama vision images work again** — content arrays are converted to Ollama's native format
+- **grep patterns no longer trigger path confirmations** — only real file operands are checked
+- **Quoted paths can't sneak past path security** — nested quotes are now detected
+- **DeepSeek reasoning preserved** — chain-of-thought is echoed under reasoning_content instead of being dropped
+- **Per-model reasoning efforts accepted** — validation now honors each model's modes and effort lists
+
 ## 2.0.135 - 2026-09-01
 
 ### Features

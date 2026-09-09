@@ -119,6 +119,32 @@ export function detectBackendFromUrl(url: string): Backend | undefined {
   }
 }
 
+/** Provider behavior defaults derived from the URL host (same rescue pattern as the backend map). */
+export interface UrlProviderDefaults {
+  /** Field the provider reads chain-of-thought from in assistant history. */
+  thinkingField?: string
+}
+
+const HOST_PROVIDER_DEFAULTS: Record<string, UrlProviderDefaults> = {
+  // DeepSeek's official API requires reasoning echoed under `reasoning_content`
+  // (its own output field) — anything else is ignored or 400s on tool calls.
+  'api.deepseek.com': { thinkingField: 'reasoning_content' },
+}
+
+/**
+ * Provider defaults derived from a provider URL host, or undefined when the
+ * host is not a known hosted API. Used to fix existing configs that predate a
+ * provider behavior (e.g. missing thinkingField) without re-running auto-config.
+ */
+export function detectProviderDefaultsFromUrl(url: string): UrlProviderDefaults | undefined {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return HOST_PROVIDER_DEFAULTS[host]
+  } catch {
+    return undefined
+  }
+}
+
 /** Display name for each backend */
 export function getBackendDisplayName(backend: Backend): string {
   switch (backend) {

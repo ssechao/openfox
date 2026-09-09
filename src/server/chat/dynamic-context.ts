@@ -358,8 +358,7 @@ async function injectDriftReminders(
     return { injectedToolReminder: false, injectedPromptReminder: false }
   }
 
-  const { getToolRegistryForAgent } = await import('../tools/index.js')
-  const liveTools = getToolRegistryForAgent(agentDef, sessionId).definitions
+  const liveTools = await getEffectiveToolDefinitions(agentDef, sessionId, options.modelName)
 
   let injectedToolReminder = false
   let injectedPromptReminder = false
@@ -533,6 +532,27 @@ function resolveAgentDef(sessionManager: SessionManager, sessionId: string): Pro
 }
 
 /**
+ * The tool set actually offered to the model for a session. Mirrors
+ * getToolRegistryForAgent but conditionally includes the describe_image tool,
+ * which is only surfaced when the active model cannot see images AND a vision
+ * fallback is configured. Keeping this the single source of truth for
+ * buildCachedPrompt, computeSessionHash and drift detection means the cached
+ * prefix, the drift hash and the live tool set always agree.
+ */
+export async function getEffectiveToolDefinitions(
+  agentDef: AgentDefinition,
+  sessionId: string,
+  modelName?: string,
+): Promise<LLMToolDefinition[]> {
+  const { getToolRegistryForAgent } = await import('../tools/index.js')
+  const { isDescribeImageEligible } = await import('../tools/describe-image.js')
+  const all = getToolRegistryForAgent(agentDef, sessionId).definitions
+  const eligible = await isDescribeImageEligible(modelName)
+  if (eligible) return all
+  return all.filter((d) => d.function.name !== 'describe_image')
+}
+
+/**
  * Build the cached prompt for a session using the correct filtered tool list.
  * Single source of truth — used by both eager (applyDynamicContext) and lazy
  * (assembleRequest cache-miss) paths.
@@ -545,8 +565,7 @@ export async function buildCachedPrompt(
 ): Promise<{ systemPrompt: string; tools: LLMToolDefinition[]; hash: string; promptHash: string }> {
   const { instructionContent, skills } = await loadSessionContext(sessionManager, sessionId)
 
-  const { getToolRegistryForAgent } = await import('../tools/index.js')
-  const tools = getToolRegistryForAgent(agentDef, sessionId).definitions
+  const tools = await getEffectiveToolDefinitions(agentDef, sessionId, modelName)
   const toolFingerprint = getToolFingerprint(tools)
 
   const allAgents = await loadAllAgentsDefault(sessionManager.getProjectWorkdir(sessionId))
@@ -579,8 +598,7 @@ export async function computeSessionHash(
   const { instructionContent, skills } = await loadSessionContext(sessionManager, sessionId)
   const agentDef = await resolveAgentDef(sessionManager, sessionId)
 
-  const { getToolRegistryForAgent } = await import('../tools/index.js')
-  const tools = getToolRegistryForAgent(agentDef, sessionId).definitions
+  const tools = await getEffectiveToolDefinitions(agentDef, sessionId, modelName)
   const toolFingerprint = getToolFingerprint(tools)
 
   return computeDynamicContextHash(instructionContent, skills, toolFingerprint, modelName)
