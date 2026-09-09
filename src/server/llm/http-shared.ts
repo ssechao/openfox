@@ -141,6 +141,23 @@ export async function parseCompletionResponse<T>(
 }
 
 /**
+ * Parse one stream line as JSON.
+ *
+ * A damaged event is never skipped: dropping it leaves the caller accumulating
+ * tool-call argument deltas across a hole, which surfaces much later as
+ * unparsable JSON with no trace of where the bytes were lost.
+ */
+export function parseStreamJson<T>(data: string, source: string): T {
+  try {
+    return JSON.parse(data) as T
+  } catch (error) {
+    throw new LLMError(
+      `Failed to parse ${source} stream chunk: ${error instanceof Error ? error.message : 'invalid JSON'}`,
+    )
+  }
+}
+
+/**
  * Yield trimmed, non-empty lines from a streaming response body. Both the
  * SSE stream (OpenAI) and NDJSON stream (native Ollama) are line-delimited.
  */
@@ -167,6 +184,12 @@ export async function* readResponseLines(response: Response): AsyncGenerator<str
         if (trimmed) yield trimmed
       }
     }
+
+    // A body whose last event is not newline-terminated still carries that
+    // event: dropping the tail silently truncates the final delta of the turn.
+    buffer += decoder.decode()
+    const tail = buffer.trim()
+    if (tail) yield tail
   } finally {
     reader.releaseLock()
   }

@@ -4,8 +4,7 @@ import type {
   ChatCompletionResponse,
   ChatCompletionChunk,
 } from './openai-types.js'
-import { logger } from '../utils/logger.js'
-import { ChatHttpClient, DONE, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
+import { ChatHttpClient, DONE, parseStreamJson, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
 import './proxy.js'
 
 export interface HttpClientOptions {
@@ -47,11 +46,6 @@ export class OpenAIHttpClient extends ChatHttpClient {
     const data = trimmed.slice(6)
     if (data === '[DONE]') return DONE
 
-    try {
-      return JSON.parse(data) as ChatCompletionChunk
-    } catch (error) {
-      logger.warn('Failed to parse SSE chunk', { data, error })
-      return null
-    }
+    return parseStreamJson<ChatCompletionChunk>(data, 'LLM')
   }
 }

@@ -32,7 +32,7 @@ import type {
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
-import { ChatHttpClient, DONE, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
+import { ChatHttpClient, DONE, parseStreamJson, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
 
 export interface ResponsesClientOptions {
   baseURL: string
@@ -413,11 +413,8 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
     const data = trimmed.slice(6)
     if (data === '[DONE]') return DONE
 
-    try {
-      return parseResponsesEvent(JSON.parse(data) as Record<string, unknown>)
-    } catch (error) {
-      logger.warn('Failed to parse Responses SSE event', { data, error })
-      return null
-    }
+    // A damaged event used to be logged and dropped, which silently truncated
+    // the turn; parseStreamJson surfaces it instead.
+    return parseResponsesEvent(parseStreamJson<Record<string, unknown>>(data, 'Responses API'))
   }
 }
