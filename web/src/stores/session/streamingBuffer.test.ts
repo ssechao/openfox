@@ -14,6 +14,21 @@ vi.stubGlobal('localStorage', {
   removeItem: vi.fn(),
 })
 
+const { startTransitionSpy } = vi.hoisted(() => ({ startTransitionSpy: vi.fn() }))
+
+// Spy on the real startTransition (kept, not replaced) so a test can prove a
+// commit was scheduled as interruptible work rather than blocking the frame.
+vi.mock('react', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react')>()
+  return {
+    ...actual,
+    startTransition: (cb: () => void) => {
+      startTransitionSpy()
+      return actual.startTransition(cb)
+    },
+  }
+})
+
 const { wsSendMock, wsSubscribeMock, wsConnectMock, wsDisconnectMock, wsStatusMock } = vi.hoisted(() => ({
   wsSendMock: vi.fn(() => 'message-id'),
   wsSubscribeMock: vi.fn(() => () => undefined),
@@ -458,6 +473,40 @@ describe('zustand commit accounting during streaming', () => {
     expect(after).toBe(before)
     expect(after.panes).toBe(before.panes)
     expect(after.messages).toBe(before.messages)
+  })
+
+  it('commits a scheduled streaming flush as an interruptible transition', async () => {
+    const useSessionStore = await bootStreamingSession()
+    startTransitionSpy.mockClear()
+
+    for (let i = 0; i < 20; i++) sendDelta(useSessionStore, `d${i} `)
+    // Buffered only — nothing committed, so nothing scheduled yet.
+    expect(startTransitionSpy).not.toHaveBeenCalled()
+
+    vi.runAllTimers()
+
+    // The frame commit must be deferred work: React can interrupt it to serve
+    // user input, so a long feed never freezes the tab mid-stream.
+    expect(startTransitionSpy).toHaveBeenCalledTimes(1)
+    const expected = Array.from({ length: 20 }, (_, i) => `d${i} `).join('')
+    expect(useSessionStore.getState().messages.find((m) => m.id === 'msg-1')?.content).toBe(expected)
+  })
+
+  it('commits a terminal flush urgently, never as a transition', async () => {
+    const useSessionStore = await bootStreamingSession()
+    sendDelta(useSessionStore, 'tail')
+    startTransitionSpy.mockClear()
+
+    // A terminal event closes the message: deferring it would let React show a
+    // still-streaming bubble after the turn already ended.
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message_updated',
+      sessionId: 'session-1',
+      payload: { messageId: 'msg-1', updates: { isStreaming: false } },
+    } as never)
+
+    expect(startTransitionSpy).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().messages.find((m) => m.id === 'msg-1')?.content).toBe('tail')
   })
 
   it('forces the pending content out on a terminal event', async () => {

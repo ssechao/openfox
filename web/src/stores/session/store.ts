@@ -1,3 +1,4 @@
+import { startTransition } from 'react'
 import { create } from 'zustand'
 import { authFetch } from '../../lib/api'
 import { appUrl } from '../../lib/basePath'
@@ -142,50 +143,64 @@ export const useSessionStore = create<SessionState>((set, get) => {
     const s = get()
     writeSplitLayout({ openSessionIds: s.openSessionIds, focusedSessionId: s.focusedSessionId })
   }
-  setFlushFn((sessionId) => {
+  setFlushFn((sessionId, urgent) => {
     const buf = getBuffer(sessionId)
     if (!buf.messageId) return
 
-    const hasDelta = buf.deltaContent.length > 0
-    const hasThinking = buf.thinkingContent.length > 0
-    const hasToolOutput = buf.toolOutput.length > 0
+    // Cheap pre-check: skip scheduling entirely when there is nothing pending.
+    if (buf.deltaContent.length === 0 && buf.thinkingContent.length === 0 && buf.toolOutput.length === 0) return
 
-    if (!hasDelta && !hasThinking && !hasToolOutput) return
-
-    set((state) => {
-      if (!isLivePane(state, sessionId)) return state
-      return updatePane(state, sessionId, (pane) => {
-        const sm = pane.messages.find((m) => m.id === buf.messageId)
-        if (!sm) {
-          // The target message has not landed in this pane yet (the server can
-          // stream the first deltas before broadcasting the message). Keep the
-          // buffered deltas intact so the next flush applies them instead of
-          // silently dropping the stream.
-          return pane
-        }
-        const updated = { ...sm }
-        let applied = false
-        if (hasDelta) {
-          updated.content = updated.content + buf.deltaContent
-          buf.deltaContent = ''
-          applied = true
-        }
-        if (hasThinking) {
-          updated.thinkingContent = (updated.thinkingContent ?? '') + buf.thinkingContent
-          buf.thinkingContent = ''
-          applied = true
-        }
-        if (hasToolOutput) {
-          const matchedCallIds = new Set<string>()
-          updated.toolCalls = applyToolOutputs(updated.toolCalls, buf.toolOutput, matchedCallIds)
-          const unmatched = buf.toolOutput.filter((o) => !matchedCallIds.has(o.callId))
-          buf.toolOutput = unmatched
-          applied = true
-        }
-        if (!applied) return pane
-        return { ...pane, messages: pane.messages.map((m) => (m.id === buf.messageId ? updated : m)) }
+    const commit = () =>
+      set((state) => {
+        // Re-read at commit time, not at schedule time: a deferred commit can
+        // run after an urgent terminal flush already drained the buffer, and
+        // acting on a stale snapshot would publish a no-op state update.
+        const hasDelta = buf.deltaContent.length > 0
+        const hasThinking = buf.thinkingContent.length > 0
+        const hasToolOutput = buf.toolOutput.length > 0
+        if (!hasDelta && !hasThinking && !hasToolOutput) return state
+        if (!isLivePane(state, sessionId)) return state
+        return updatePane(state, sessionId, (pane) => {
+          const sm = pane.messages.find((m) => m.id === buf.messageId)
+          if (!sm) {
+            // The target message has not landed in this pane yet (the server can
+            // stream the first deltas before broadcasting the message). Keep the
+            // buffered deltas intact so the next flush applies them instead of
+            // silently dropping the stream.
+            return pane
+          }
+          const updated = { ...sm }
+          let applied = false
+          if (hasDelta) {
+            updated.content = updated.content + buf.deltaContent
+            buf.deltaContent = ''
+            applied = true
+          }
+          if (hasThinking) {
+            updated.thinkingContent = (updated.thinkingContent ?? '') + buf.thinkingContent
+            buf.thinkingContent = ''
+            applied = true
+          }
+          if (hasToolOutput) {
+            const matchedCallIds = new Set<string>()
+            updated.toolCalls = applyToolOutputs(updated.toolCalls, buf.toolOutput, matchedCallIds)
+            const unmatched = buf.toolOutput.filter((o) => !matchedCallIds.has(o.callId))
+            buf.toolOutput = unmatched
+            applied = true
+          }
+          if (!applied) return pane
+          return { ...pane, messages: pane.messages.map((m) => (m.id === buf.messageId ? updated : m)) }
+        })
       })
-    })
+
+    // Streaming text is the one update the user never waits on: it is already
+    // coalesced to one commit per frame, and re-rendering a long feed can
+    // outlast the frame budget. Handing it to startTransition lets React pause
+    // that work to serve input, scrolling and incoming socket messages, so the
+    // tab stays responsive while a turn streams. Terminal commits stay
+    // synchronous — they close the message and must not be preempted.
+    if (urgent) commit()
+    else startTransition(commit)
   })
 
   function buildResumePayload(
