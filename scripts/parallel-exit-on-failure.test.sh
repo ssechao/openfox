@@ -86,6 +86,44 @@ else
   failures=$((failures + 1))
 fi
 
+echo "=== Test 10: a hung job is killed by the watchdog ==="
+# Without a watchdog a job that never returns blocks the commit forever. The
+# timeout must fire, report which job was still running, and return non-zero.
+start=$(date +%s%N)
+PEOF_TIMEOUT=1
+export PEOF_TIMEOUT
+output=$(parallel_exit_on_failure \
+  "hangs"     "sleep 30" \
+  "quick_ok"  "true" 2>&1)
+ec=$?
+unset PEOF_TIMEOUT
+end=$(date +%s%N)
+elapsed=$(( (end - start) / 1000000 ))
+if [ "$ec" -ne 0 ] && [ "$elapsed" -lt 5000 ]; then
+  echo "ok: timed out in ${elapsed}ms (exit=$ec)"
+else
+  echo "FAIL: exit=$ec elapsed=${elapsed}ms, expected non-zero exit under 5000ms"
+  echo "$output"
+  failures=$((failures + 1))
+fi
+case "$output" in
+  *"still running: hangs"*) echo "ok: names the job that was still running" ;;
+  *) echo "FAIL: does not name the hung job"; echo "$output"; failures=$((failures + 1)) ;;
+esac
+
+echo "=== Test 11: the watchdog does not fire on a normal run ==="
+PEOF_TIMEOUT=10
+export PEOF_TIMEOUT
+parallel_exit_on_failure "slow_ok" "sleep 1" > /dev/null 2>&1
+ec=$?
+unset PEOF_TIMEOUT
+if [ "$ec" -eq 0 ]; then
+  echo "ok: a job finishing well inside the budget still succeeds"
+else
+  echo "FAIL: watchdog fired on a healthy run (exit=$ec)"
+  failures=$((failures + 1))
+fi
+
 echo ""
 if [ "$failures" -eq 0 ]; then
   echo "ALL TESTS PASSED"

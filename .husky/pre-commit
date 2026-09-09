@@ -11,9 +11,28 @@ script_dir=$(dirname "$0")/..
 
 echo "  Running checks..."
 
+# Static gates are CPU-bound but order-independent, so they run together.
+PEOF_TIMEOUT=300
+export PEOF_TIMEOUT
 parallel_exit_on_failure \
   "lint"      "npm run lint" \
   "typecheck" "npm run typecheck" \
   "format"    "npm run format" \
-  "duplicate" "npm run duplicate" \
-  "test"      "npm test"
+  "duplicate" "npm run duplicate" || { unset PEOF_TIMEOUT; exit 1; }
+
+# Tests run alone, AFTER the static gates. Parts of the suite race against
+# wall-clock deadlines (agent-loop-pause), so sharing the CPU with four other
+# jobs turns them into false failures — and a red hook that says nothing about
+# the commit is worse than a slower one.
+#
+# The e2e suite defaults to 12 forks, each booting its own HTTP server; that is
+# sized for an otherwise idle machine. Dialling it down is the knob e2e/
+# vitest.config.ts documents for constrained hosts, and it is what makes the
+# run deterministic here. Unset OPENFOX_E2E_MAX_WORKERS to get the default back.
+: "${OPENFOX_E2E_MAX_WORKERS:=4}"
+export OPENFOX_E2E_MAX_WORKERS
+
+# The budget only exists to catch a genuine hang, not to police duration.
+PEOF_TIMEOUT=1800
+parallel_exit_on_failure "test" "npm test" || { unset PEOF_TIMEOUT; exit 1; }
+unset PEOF_TIMEOUT
