@@ -6,7 +6,13 @@ export const DEFAULT_BUFFER_KEY = '__default__'
 const buffers = new Map<string, StreamingBuffer>()
 const dirtySessionIds = new Set<string>()
 
-let flushFn: ((sessionId: string) => void) | null = null
+/**
+ * `urgent` tells the consumer how to commit. A scheduled frame flush is
+ * deferrable — React may interrupt it to serve input. A terminal flush (message
+ * done, error, session switch) must land in the same task, or the UI would keep
+ * showing a streaming bubble for a turn that already ended.
+ */
+let flushFn: ((sessionId: string, urgent: boolean) => void) | null = null
 let pendingTimer: ReturnType<typeof setTimeout> | number | null = null
 let pendingTimerKind: 'raf' | 'timeout' | null = null
 let lastFlushTime = 0
@@ -14,7 +20,7 @@ let lastFlushTime = 0
 // frame are coalesced into a single render via the rAF fast path below.
 const MIN_STREAM_FLUSH_INTERVAL_MS = 16
 
-export function setFlushFn(fn: ((sessionId: string) => void) | null) {
+export function setFlushFn(fn: ((sessionId: string, urgent: boolean) => void) | null) {
   flushFn = fn
 }
 
@@ -49,7 +55,7 @@ function doFlush() {
   pendingTimerKind = null
   lastFlushTime = Date.now()
   for (const sessionId of dirtySessionIds) {
-    flushFn?.(sessionId)
+    flushFn?.(sessionId, false)
   }
   dirtySessionIds.clear()
 }
@@ -83,7 +89,7 @@ export function cancelStreamingFlush(sessionId: string = DEFAULT_BUFFER_KEY) {
   lastFlushTime = 0
   clearPendingTimer()
   dirtySessionIds.delete(sessionId)
-  flushFn?.(sessionId)
+  flushFn?.(sessionId, true)
   const buffer = buffers.get(sessionId)
   if (buffer) {
     // Only reset when the flush actually consumed the pending content. If the
