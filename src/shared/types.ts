@@ -28,6 +28,16 @@ export type ToolMode = string
 // Workflow phase shown to user (more granular than mode)
 export type SessionPhase = 'plan' | 'build' | 'verification' | 'waiting' | 'blocked' | 'done'
 
+/**
+ * Pause state of a running session (cooperative pause — never aborts the
+ * in-flight LLM request, only gates the NEXT one):
+ * - none: no pause requested
+ * - pending: pause requested, agent is finishing the current LLM request
+ * - paused: agent is blocked before the next LLM request, waiting for resume
+ * - resuming: resume requested, agent is about to issue the next LLM request
+ */
+export type PauseState = 'none' | 'pending' | 'paused' | 'resuming'
+
 // ============================================================================
 // Workflow Types
 // ============================================================================
@@ -90,6 +100,7 @@ export interface Session {
   mode: SessionMode
   phase: SessionPhase // Current workflow phase
   isRunning: boolean // Is the agent actively working?
+  pauseState?: PauseState // Cooperative pause state (default 'none' when absent)
   providerId?: string | null // Per-session provider override
   providerModel?: string | null // Per-session model override
   providerReasoningEffort?: string | null // Per-session reasoning effort override (with providerModel)
@@ -446,6 +457,29 @@ export type TaskStatus = 'todo' | 'in_progress' | 'done'
 export type TaskRunState = 'running' | 'queued'
 export type TaskActor = 'human' | 'agent' | 'system'
 
+/** Google-Calendar-style schedule for a task. Present ⇒ the task auto-triggers. */
+export type TaskSchedule =
+  | { type: 'once'; runAt: string }
+  | {
+      type: 'recurring'
+      freq: 'day' | 'week' | 'month' | 'year'
+      /** Repeat every X days/weeks/months/years. */
+      interval: number
+      /** Week freq only: selected weekdays, 0 = Sunday … 6 = Saturday. */
+      weekdays?: number[]
+      /** Month/year freq: day of month (1..31). */
+      monthDay?: number
+      /** Year freq only: month, 1..12. */
+      yearMonth?: number
+      /** First occurrence (date + local time-of-day) — anchor and first trigger. */
+      startAt: string
+      end: { kind: 'never' } | { kind: 'until'; until: string } | { kind: 'count'; count: number }
+      /** How many occurrences have already been triggered (drives `count`). */
+      occurrencesDone: number
+      /** Next trigger time — kept in sync with the DB `next_run_at` column. */
+      nextRunAt: string
+    }
+
 /** Per-project gate (Definition of Done) configuration. */
 export interface TaskGateConfig {
   id: string
@@ -489,6 +523,8 @@ export interface ProjectTask {
   queuePosition?: number
   /** Ordering within the column (stable, used for drag-reorder). */
   position: number
+  /** Auto-trigger schedule (once or recurring). Present ⇒ planned task. */
+  schedule?: TaskSchedule
   /** Monotonic revision counter — bumped on every mutation. Optimistic concurrency guard. */
   version: number
   agentId?: string

@@ -474,6 +474,19 @@ function runMigrations(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, status)`)
 
+  // Migration: scheduled/planned tasks — `schedule` holds the JSON rule,
+  // `next_run_at` is the denormalized trigger time the scheduler queries.
+  const taskColumns = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[]
+  const taskColumnNames = taskColumns.map((c) => c.name)
+  if (!taskColumnNames.includes('schedule')) {
+    logger.info('Migrating tasks table: adding schedule column')
+    db.exec(`ALTER TABLE tasks ADD COLUMN schedule TEXT`)
+  }
+  if (!taskColumnNames.includes('next_run_at')) {
+    logger.info('Migrating tasks table: adding next_run_at column')
+    db.exec(`ALTER TABLE tasks ADD COLUMN next_run_at TEXT`)
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS task_links (
       task_id TEXT NOT NULL,

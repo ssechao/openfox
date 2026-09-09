@@ -17,13 +17,15 @@ import { AttachmentPreview } from '../shared/AttachmentPreview.js'
 import { PromptHistoryList } from '../shared/PromptHistory.js'
 import { RunningIndicator } from '../shared/RunningIndicator'
 import { AutoScrollToggle } from '../shared/AutoScrollToggle'
-import { SearchIcon, StopIcon } from '../shared/icons'
+import { PauseIcon, PlayIcon, SearchIcon, SendIcon, StopIcon, XCloseIcon } from '../shared/icons'
 import { WorkflowBar } from './WorkflowBar'
 import { processFile } from '../../lib/file-processing.js'
 import { mimeTypeToExtension, isSupportedMimeType } from '../../lib/attachment-utils.js'
 import { CHAT_TEXTAREA_ID } from '../../lib/focusChatTextarea'
 import { shouldAutofocus } from '../../lib/device'
+import { useIsTouchDevice } from '../../hooks/useIsTouchDevice'
 import { useScrolledSend } from '../../hooks/useScrolledSend'
+import { useVisualViewport } from '../../hooks/useVisualViewport'
 import { MoreMenu } from './MoreMenu'
 import { QueuedMessages } from './QueuedMessages'
 import { AgentSelector } from './AgentSelector'
@@ -41,6 +43,9 @@ import { SlashAutocomplete, type SlashAutocompleteHandle, type SlashSuggestion }
 
 const COMPOSER_MIN_HEIGHT = 24
 const COMPOSER_MAX_HEIGHT = 200
+// Chrome below the textarea when the composer expands full-height on mobile:
+// row padding + selector rows + form padding, with a small buffer.
+const COMPOSER_EXPANDED_RESERVE = 96
 
 interface ChatInputProps {
   input: string
@@ -102,16 +107,46 @@ export function ChatInput({
   clearInput,
 }: ChatInputProps) {
   const t = useT()
+  const isTouch = useIsTouchDevice()
+  const [isFocused, setIsFocused] = useState(false)
+  const viewport = useVisualViewport()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const prevLenRef = useRef(0)
+  const wasExpandedRef = useRef(false)
   const cursorPosRef = useRef(0)
   const autocompleteRef = useRef<AtMentionAutocompleteHandle>(null)
   const slashAutocompleteRef = useRef<SlashAutocompleteHandle>(null)
 
   const isRunning = useIsRunning(sessionId)
   const perSessionMcpEnabled = useSetting(SETTINGS_KEYS.FEATURES_PER_SESSION_MCP, 'false').value === 'true'
+  const fullscreenComposer = useSetting(SETTINGS_KEYS.DISPLAY_MOBILE_FULLSCREEN_COMPOSER, 'false').value === 'true'
   const stopGeneration = useSessionStore((state) => state.stopGeneration)
+  const pauseGeneration = useSessionStore((state) => state.pauseGeneration)
+  const resumeGeneration = useSessionStore((state) => state.resumeGeneration)
+  const pauseState = useScopedPaneState(
+    sessionId,
+    (pane) => pane.session?.pauseState ?? 'none',
+    (state) => state.currentSession?.pauseState ?? 'none',
+    'none',
+  )
+  const pauseTooltip =
+    pauseState === 'pending'
+      ? t({ en: 'Cancel pausing', fr: 'Annuler la mise en pause' })
+      : pauseState === 'paused'
+        ? t({ en: 'Paused', fr: 'En pause' })
+        : pauseState === 'resuming'
+          ? t({ en: 'Resuming…', fr: 'Reprise en cours…' })
+          : t({ en: 'Pause', fr: 'Mettre en pause' })
+  const handlePauseResume = () => {
+    if (!sessionId) return
+    if (pauseState === 'none') {
+      pauseGeneration(sessionId)
+    } else {
+      // pending → cancel the pause (no interruption), paused → resume
+      resumeGeneration(sessionId)
+    }
+  }
   const cancelQueued = useSessionStore((state) => state.cancelQueued)
   const queuedMessages = useQueuedMessages(sessionId)
   const restoredInput = useScopedPaneState(
@@ -167,6 +202,8 @@ export function ChatInput({
     (opts: { force?: boolean } = {}) => {
       const textarea = textareaRef.current
       if (!textarea) return
+      // While the mobile composer is pinned full-height, auto-resize must not fight it.
+      if (wasExpandedRef.current) return
       // An empty textarea reports its wrapped placeholder in scrollHeight, which
       // balloons the box on narrow layouts; pin it to the minimum height instead.
       if (!input) {
@@ -224,6 +261,26 @@ export function ChatInput({
   useEffect(() => {
     resizeTextarea()
   }, [input, resizeTextarea])
+
+  // Mobile full-height composer (opt-in): while the textarea is focused on a
+  // touch device and the keyboard is up, pin it to the remaining pane height so
+  // it fills the screen instead of auto-growing endlessly (scrolls internally).
+  const expandedHeight =
+    isTouch && isFocused && viewport.keyboardVisible && fullscreenComposer
+      ? Math.max(COMPOSER_MIN_HEIGHT, viewport.height - COMPOSER_EXPANDED_RESERVE)
+      : null
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    if (expandedHeight !== null) {
+      wasExpandedRef.current = true
+      textarea.style.height = `${expandedHeight}px`
+    } else if (wasExpandedRef.current) {
+      wasExpandedRef.current = false
+      resizeTextarea({ force: true })
+    }
+  }, [expandedHeight, resizeTextarea])
 
   // Re-evaluate the height when the composer's column changes width (narrower or
   // wider panes change how content wraps). Forces a fresh 'auto' measurement so a
@@ -545,6 +602,86 @@ export function ChatInput({
     cursorPosRef.current = e.currentTarget.selectionStart
   }, [])
 
+  // While the composer is pinned full-screen, pressing an action button must not
+  // blur the textarea: the collapse would swallow the tap (first press only
+  // minimizes, the second one actually sends).
+  const keepComposerFocus = (e: React.MouseEvent) => {
+    if (expandedHeight !== null) e.preventDefault()
+  }
+
+  const moreMenu = ({ mobile = false }: { mobile?: boolean } = {}) => (
+    <MoreMenu
+      onSendCommand={onSendCommand}
+      onSelectWorkflow={onSelectWorkflow}
+      onSelectWorkflowWithSubGroup={onSelectWorkflowWithSubGroup}
+      onOpenCommandsManager={onOpenCommandsModal}
+      onOpenWorkflowsManager={onOpenWorkflowsModal}
+      onAttach={handleAttachClick}
+      textareaContent={input}
+      attachments={attachments.length > 0 ? attachments : undefined}
+      {...(mobile ? { onTriggerMouseDown: keepComposerFocus } : {})}
+    />
+  )
+
+  const sendButton = ({ mobile = false }: { mobile?: boolean } = {}) => (
+    <button
+      type="button"
+      onClick={handleSend}
+      disabled={!input.trim() && attachments.length === 0}
+      data-testid={mobile ? 'chat-send-button-touch' : 'chat-send-button'}
+      {...(mobile ? { 'aria-label': t({ en: 'Send', fr: 'Envoyer' }), onMouseDown: keepComposerFocus } : {})}
+      className={`rounded-l bg-accent-primary/20 text-sm text-accent-primary font-medium hover:bg-accent-primary/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors ${
+        mobile ? 'flex items-center justify-center px-4 py-2' : 'px-4 py-1.5'
+      }`}
+    >
+      {mobile ? <SendIcon className="w-4 h-4" /> : t({ en: 'Send', fr: 'Envoyer' })}
+    </button>
+  )
+
+  const pauseButton = ({ mobile = false }: { mobile?: boolean } = {}) => (
+    <button
+      type="button"
+      onClick={handlePauseResume}
+      disabled={!sessionId || pauseState === 'resuming'}
+      data-testid={mobile ? 'chat-pause-button-touch' : 'chat-pause-button'}
+      title={pauseTooltip}
+      aria-label={pauseTooltip}
+      {...(mobile ? { onMouseDown: keepComposerFocus } : {})}
+      className={`group flex items-center justify-center px-3 py-2 rounded-l bg-accent-warning/20 text-accent-warning hover:bg-accent-warning/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
+        pauseState === 'pending' ? 'animate-pause-pulse' : ''
+      }`}
+    >
+      {pauseState === 'paused' || pauseState === 'resuming' ? (
+        <PlayIcon className="w-4 h-4" />
+      ) : pauseState === 'pending' ? (
+        <>
+          <PauseIcon className="w-4 h-4 group-hover:hidden" />
+          <XCloseIcon className="hidden w-4 h-4 group-hover:block" />
+        </>
+      ) : (
+        <PauseIcon className="w-4 h-4" />
+      )}
+    </button>
+  )
+
+  const stopButton = ({ mobile = false }: { mobile?: boolean } = {}) => (
+    <button
+      type="button"
+      onClick={() => sessionId && stopGeneration(sessionId)}
+      data-testid={mobile ? 'chat-stop-button-touch' : 'chat-stop-button'}
+      title={t({ en: 'Stop', fr: 'Stopper' })}
+      aria-label={t({ en: 'Stop', fr: 'Stopper' })}
+      {...(mobile ? { onMouseDown: keepComposerFocus } : {})}
+      className={`flex items-center justify-center bg-accent-error/20 text-accent-error hover:bg-accent-error/30 transition-colors ${
+        mobile
+          ? 'px-3 py-2 rounded-r border-l border-black/10 dark:border-white/10'
+          : 'px-3 py-2 rounded-r border-l border-black/10 dark:border-white/10'
+      }`}
+    >
+      <StopIcon />
+    </button>
+  )
+
   return (
     <div className="relative">
       <div className="absolute -top-8 left-2 @md:left-4 z-10">
@@ -633,10 +770,15 @@ export function ChatInput({
               onKeyDown={handleKeyDown}
               onSelect={handleSelect}
               onKeyUp={handleKeyUp}
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
               placeholder={t({ en: 'What would you like to build?', fr: 'Que souhaitez-vous construire ?' })}
               data-testid="chat-input-textarea"
               className="w-full bg-transparent text-sm placeholder:text-text-muted resize-none overflow-y-auto focus:outline-none"
-              style={{ minHeight: `${COMPOSER_MIN_HEIGHT}px`, maxHeight: `${COMPOSER_MAX_HEIGHT}px` }}
+              style={{
+                minHeight: `${COMPOSER_MIN_HEIGHT}px`,
+                maxHeight: expandedHeight !== null ? 'none' : `${COMPOSER_MAX_HEIGHT}px`,
+              }}
               spellCheck={false}
             />
             <AtMentionAutocomplete
@@ -672,49 +814,45 @@ export function ChatInput({
                 )
               })()}
           </div>
-          <div className="flex items-center self-center gap-1.5">
+          <div className="hidden @md:flex items-center self-center gap-1.5">
             {isRunning && (
-              <button
-                type="button"
-                onClick={() => sessionId && stopGeneration(sessionId)}
-                data-testid="chat-stop-button"
-                className="flex items-center gap-1 px-4 py-1.5 rounded bg-accent-error/20 text-sm text-accent-error font-medium hover:bg-accent-error/30 transition-colors whitespace-nowrap"
-              >
-                <StopIcon />
-                {t({ en: 'Abort', fr: 'Stopper' })}
-              </button>
+              <div className="flex items-center self-center">
+                {pauseButton()}
+                {stopButton()}
+              </div>
             )}
             <div className="flex items-center">
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!input.trim() && attachments.length === 0}
-                data-testid="chat-send-button"
-                className="px-4 py-1.5 rounded-l bg-accent-primary/20 text-sm text-accent-primary font-medium hover:bg-accent-primary/30 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >
-                {t({ en: 'Send', fr: 'Envoyer' })}
-              </button>
-              <MoreMenu
-                onSendCommand={onSendCommand}
-                onSelectWorkflow={onSelectWorkflow}
-                onSelectWorkflowWithSubGroup={onSelectWorkflowWithSubGroup}
-                onOpenCommandsManager={onOpenCommandsModal}
-                onOpenWorkflowsManager={onOpenWorkflowsModal}
-                onAttach={handleAttachClick}
-                textareaContent={input}
-                attachments={attachments.length > 0 ? attachments : undefined}
-              />
+              {sendButton()}
+              {moreMenu()}
+            </div>
+          </div>
+          <div className="flex @md:hidden items-center self-center gap-1.5">
+            {isRunning && (
+              <div className="flex items-center">
+                {pauseButton({ mobile: true })}
+                {stopButton({ mobile: true })}
+              </div>
+            )}
+            <div className="flex items-center">
+              {sendButton({ mobile: true })}
+              {moreMenu({ mobile: true })}
             </div>
           </div>
         </div>
-        <div className="mt-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        <div className="mt-3 flex flex-col gap-y-1 @md:flex-row @md:flex-nowrap @md:items-center @md:gap-x-2">
+          <div className="flex items-center justify-between gap-2 @md:justify-start">
             <AgentSelector />
             <DangerLevelSelector />
           </div>
-          <div className="flex items-center gap-2">
-            {perSessionMcpEnabled && <McpSelector />}
-            <ProviderSelector />
+          <div className="flex items-center @md:ms-auto" data-testid="model-selector-group">
+            {perSessionMcpEnabled && (
+              <div data-testid="mcp-selector-slot">
+                <McpSelector />
+              </div>
+            )}
+            <div className="ms-auto @md:ms-0 min-w-0" data-testid="provider-selector-slot">
+              <ProviderSelector />
+            </div>
           </div>
         </div>
       </form>

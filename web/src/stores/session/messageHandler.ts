@@ -5,6 +5,7 @@ import type {
   GitDiffFile,
   SessionListPayload,
   SessionRunningPayload,
+  SessionPausePayload,
   ChatAskUserPayload,
   ChatDeltaPayload,
   ChatThinkingPayload,
@@ -51,6 +52,9 @@ import {
 } from './panes'
 
 const triggeredNewMessageSound = new Set<string>()
+// Message ids already counted into the flat summaries (homepage, sidebar,
+// search corpus). Re-delivered chat.message events must not inflate counts.
+const countedChatMessageIds = new Set<string>()
 
 function addUnreadSessionId(unreadSessionIds: string[], sessionId: string): string[] {
   return unreadSessionIds.includes(sessionId) ? unreadSessionIds : [...unreadSessionIds, sessionId]
@@ -186,6 +190,32 @@ function applyChat(
   if (!isLivePane(state, sessionId)) return false
   set((s) => updatePane(s, sessionId, updater))
   return true
+}
+
+/**
+ * Refresh a session's flat summary on live message activity: bump the message
+ * count and record the latest message date. Lists ordered by last activity
+ * (homepage recent sessions, sidebar, search corpus) stay fresh even when no
+ * pane is open for the session.
+ */
+function refreshSessionSummaryActivity(
+  set: (fn: (state: SessionState) => Partial<SessionState> | SessionState) => void,
+  sessionId: string | undefined,
+  timestamp: string,
+): void {
+  if (!sessionId) return
+  set((state) => {
+    const sessions = state.sessions.map((s) =>
+      s.id === sessionId ? { ...s, messageCount: s.messageCount + 1, updatedAt: timestamp } : s,
+    )
+    const searchSessions = state.searchSessions?.map((s) =>
+      s.id === sessionId ? { ...s, messageCount: s.messageCount + 1, updatedAt: timestamp } : s,
+    )
+    return {
+      sessions,
+      ...(searchSessions ? { searchSessions } : {}),
+    }
+  })
 }
 
 /**
@@ -369,34 +399,42 @@ export function handleServerMessage(
       break
     }
 
+    case 'session.pause': {
+      const payload = message.payload as SessionPausePayload
+      const eventSessionId = message.sessionId
+      if (!eventSessionId || !isLivePane(get(), eventSessionId)) {
+        break
+      }
+      set((state) => updatePaneSession(state, eventSessionId, (s) => ({ ...s, pauseState: payload.pauseState })))
+      break
+    }
+
     case 'chat.message': {
+      const payload = message.payload as ChatMessagePayload
       if (
         !applyChat(set, get, message.sessionId, (pane) => {
-          const payload = message.payload as ChatMessagePayload
           if (pane.messages.some((m) => m.id === payload.message.id)) {
             return pane
           }
-          const isUserMessage = payload.message.role === 'user'
           return {
             ...pane,
             messages: [...pane.messages, payload.message],
-            session:
-              pane.session && isUserMessage
-                ? { ...pane.session, messageCount: (pane.session.messageCount ?? 0) + 1 }
-                : pane.session,
+            session: pane.session
+              ? { ...pane.session, messageCount: (pane.session.messageCount ?? 0) + 1 }
+              : pane.session,
           }
         })
       ) {
-        const payload = message.payload as ChatMessagePayload
-        if (payload.message.role === 'user') {
-          // Keep session message counts fresh even for non-open sessions
-          set((state) => ({
-            sessions: state.sessions.map((s) =>
-              s.id === message.sessionId ? { ...s, messageCount: s.messageCount + 1 } : s,
-            ),
-          }))
-        }
         markBackgroundSessionUnread(set, message)
+      }
+      // Keep the flat summaries (homepage recent list, sidebar, search corpus)
+      // fresh: every message start, whatever the role and whether a live pane
+      // exists, bumps the message count and records the latest message date so
+      // lists ordered by last activity match the user experience. Re-delivered
+      // messages are skipped so counts stay idempotent.
+      if (!countedChatMessageIds.has(payload.message.id)) {
+        countedChatMessageIds.add(payload.message.id)
+        refreshSessionSummaryActivity(set, message.sessionId, payload.message.timestamp)
       }
       break
     }

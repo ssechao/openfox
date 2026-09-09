@@ -20,6 +20,7 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
   const [, navigate] = useLocation()
   const showOpenInEditor = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_OPEN_IN_EDITOR).value === 'true'
   const dynamicSystemPrompt = useSetting(SETTINGS_KEYS.LLM_DYNAMIC_SYSTEM_PROMPT).value === 'true'
+  const cavemanThinking = useSetting(SETTINGS_KEYS.LLM_CAVEMAN_THINKING).value === 'true'
   const cacheWarming = useSetting(SETTINGS_KEYS.CACHE_WARMING).value === 'true'
   const retryPatternsSetting = useSetting(SETTINGS_KEYS.RETRY_PATTERNS).value
   const proxyUrlSetting = useSetting(SETTINGS_KEYS.PROXY_URL).value
@@ -30,6 +31,7 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
     openInEditor: showOpenInEditor,
     dynamicPrompt: dynamicSystemPrompt,
     cacheWarming,
+    cavemanThinking,
   })
 
   const [retryPatterns, setRetryPatterns] = useState<RetryPatternsValue>({ patterns: [], maxRetriesPerTurn: 10 })
@@ -55,8 +57,9 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
       openInEditor: showOpenInEditor,
       dynamicPrompt: dynamicSystemPrompt,
       cacheWarming,
+      cavemanThinking,
     })
-  }, [showOpenInEditor, dynamicSystemPrompt, cacheWarming])
+  }, [showOpenInEditor, dynamicSystemPrompt, cacheWarming, cavemanThinking])
 
   useEffect(() => {
     if (retryPatternsSetting) {
@@ -114,6 +117,12 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
     const newValue = !localToggles.cacheWarming
     setLocalToggles((prev) => ({ ...prev, cacheWarming: newValue }))
     void setSetting(SETTINGS_KEYS.CACHE_WARMING, String(newValue))
+  }
+
+  const handleToggleCavemanThinking = () => {
+    const newValue = !localToggles.cavemanThinking
+    setLocalToggles((prev) => ({ ...prev, cavemanThinking: newValue }))
+    void setSetting(SETTINGS_KEYS.LLM_CAVEMAN_THINKING, String(newValue))
   }
 
   function handleLaunchOnboarding() {
@@ -320,6 +329,17 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
         })}
         enabled={localToggles.dynamicPrompt}
         onToggle={handleToggleDynamicSystemPrompt}
+        boldTitle
+      />
+      <hr className="border-border" />
+      <SettingsToggle
+        title={t({ en: 'Caveman thinking', fr: 'Pensée caveman' })}
+        description={t({
+          en: 'Instruct the agent to reason in compressed, telegraphic fragments to cut thinking tokens. Experimental — may affect output quality.',
+          fr: 'Demande à l’agent de raisonner en fragments télégraphiques pour réduire les jetons de réflexion. Expérimental — peut affecter la qualité des réponses.',
+        })}
+        enabled={localToggles.cavemanThinking}
+        onToggle={handleToggleCavemanThinking}
         boldTitle
       />
     </div>

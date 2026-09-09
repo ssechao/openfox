@@ -18,6 +18,7 @@ import {
   cancelPathConfirmationsForSession,
   cancelPathConfirmation,
   hasPendingPathConfirmation,
+  autoApprovePendingConfirmationsForSession,
   isSensitivePath,
   registerPathConfirmation,
   requestPathAccess,
@@ -1274,6 +1275,82 @@ describe('path-security', () => {
       await expect(pendingC).rejects.toThrow('cleanup')
     })
 
+    it('auto-approves all pending confirmations for a session when switching to dangerous mode', async () => {
+      const pendingA = registerPathConfirmation(
+        'danger-a',
+        ['/tmp/a'],
+        'session-danger',
+        'read_file',
+        '/tmp',
+        'outside_workdir',
+      )
+      const pendingB = registerPathConfirmation(
+        'danger-b',
+        ['/tmp/b'],
+        'session-danger',
+        'write_file',
+        '/tmp',
+        'sensitive_file',
+      )
+      const pendingOther = registerPathConfirmation(
+        'danger-other',
+        ['/tmp/c'],
+        'session-other',
+        'read_file',
+        '/tmp',
+        'outside_workdir',
+      )
+
+      const approvedA = expect(pendingA).resolves.toBe(true)
+      const approvedB = expect(pendingB).resolves.toBe(true)
+
+      const resolved = autoApprovePendingConfirmationsForSession('session-danger')
+      expect(resolved.sort()).toEqual(['danger-a', 'danger-b'])
+      expect(hasPendingPathConfirmation('danger-a')).toBe(false)
+      expect(hasPendingPathConfirmation('danger-b')).toBe(false)
+      expect(hasPendingPathConfirmation('danger-other')).toBe(true)
+      expect(autoApprovePendingConfirmationsForSession('session-danger')).toEqual([])
+
+      await Promise.all([approvedA, approvedB])
+      expect(cancelPathConfirmation('danger-other', 'cleanup')).toBe(true)
+      await expect(pendingOther).rejects.toThrow('cleanup')
+    })
+
+    it('auto-approve keeps git_no_verify confirmations pending even in dangerous mode', async () => {
+      const pendingGit = registerPathConfirmation(
+        'danger-git',
+        ['/tmp'],
+        'session-git',
+        'run_command',
+        '/tmp',
+        'git_no_verify',
+      )
+      const pendingCmd = registerPathConfirmation(
+        'danger-cmd',
+        ['rm -rf /'],
+        'session-git',
+        'run_command',
+        '/tmp',
+        'dangerous_command',
+      )
+
+      const approvedCmd = expect(pendingCmd).resolves.toBe(true)
+
+      const resolved = autoApprovePendingConfirmationsForSession('session-git')
+      expect(resolved).toEqual(['danger-cmd'])
+      expect(hasPendingPathConfirmation('danger-git')).toBe(true)
+      expect(hasPendingPathConfirmation('danger-cmd')).toBe(false)
+
+      await approvedCmd
+      expect(providePathConfirmation('danger-git', true)).toEqual({
+        found: true,
+        sessionId: 'session-git',
+        approved: true,
+      })
+      await expect(pendingGit).resolves.toBe(true)
+      expect(hasPendingPathConfirmation('danger-git')).toBe(false)
+    })
+
     it('requests path access, emits confirmation events, and resolves approval/denial', async () => {
       const onEvent = vi.fn()
       const sensitivePath = join(CANONICAL_WORKDIR, '.env')
@@ -1774,6 +1851,26 @@ describe('path-security', () => {
           'echo "=== maxVisibleItems / virtualization new? ==="; git show 2d51cb87 --stat | grep -iE "virtualiz|display|chatfeed|messagelist|feed" ; git grep -n "maxVisibleItems" 2d51cb87 -- web/src | head; echo; echo "=== new setting keys in config.ts ==="; git show 2d51cb87 -- web/src/stores/config.ts | grep -E "^\\+" | grep -iE "setting|key:|name|nativeScrollbar|collapseLarge|deferHighlight|highlight|scrollbar" | head -20',
         ),
       ).toBe(false)
+    })
+
+    it('detects --no-verify after a quoted commit message containing a semicolon', () => {
+      expect(
+        extractGitNoVerify(
+          'git add src/server/db/sessions.ts && git commit -m "feat(web): flat recent-sessions homepage with starred-first projects index - Homepage shows up to 20 most recent sessions across all projects, ordered by last activity, always visible, with real links (open in new tab) and running/waiting/blocked status dots. - listHomeSessions returns the 20 most recent sessions flat (drops the 5-per-project cap) and pins running/waiting/blocked sessions so active work never drops off the list. - Projects section below keeps Tasks/+ New Session/delete actions; cards contain no sessions, ordered starred first then alphabetical (star icon for starred projects)." --no-verify 2>&1 | tail -5',
+        ),
+      ).toBe(true)
+    })
+
+    it('detects --no-verify when shell separators appear inside the quoted message', () => {
+      expect(extractGitNoVerify('git commit -m "a; b | c && d" --no-verify')).toBe(true)
+    })
+
+    it('does not flag --no-verify used as a quoted message value', () => {
+      expect(extractGitNoVerify('git commit -m "--no-verify"')).toBe(false)
+    })
+
+    it('still flags --no-verify after an unterminated quoted message', () => {
+      expect(extractGitNoVerify('git commit -m "msg --no-verify')).toBe(true)
     })
   })
 

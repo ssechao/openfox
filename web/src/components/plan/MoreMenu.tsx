@@ -26,6 +26,7 @@ interface MoreMenuProps {
   onAttach: () => void
   textareaContent?: string
   attachments?: Attachment[]
+  onTriggerMouseDown?: (e: React.MouseEvent) => void
 }
 
 type Tab = 'commands' | 'workflows' | 'attach'
@@ -52,6 +53,7 @@ export function MoreMenu({
   onAttach,
   textareaContent,
   attachments,
+  onTriggerMouseDown,
 }: MoreMenuProps) {
   const t = useT()
   const [isOpen, setIsOpen] = useState(false)
@@ -160,6 +162,7 @@ export function MoreMenu({
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
+        onMouseDown={onTriggerMouseDown}
         className="px-1.5 py-2 rounded-r bg-bg-secondary text-text-muted hover:text-text-primary hover:bg-bg-tertiary transition-colors border-l border-border/50"
         title={t({ en: 'More options', fr: 'Plus d’options' })}
       >

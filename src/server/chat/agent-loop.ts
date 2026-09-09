@@ -278,6 +278,7 @@ export async function runTopLevelAgentLoop(
       const modelSettings = sessionManager.getCurrentModelSettings(sessionId, config.mode)
 
       await resolveClient().complete({
+        sessionId,
         messages: [{ role: 'system', content: assembledRequest.systemPrompt }],
         tools: assembledRequest.tools,
         maxTokens: 1,
@@ -286,6 +287,14 @@ export async function runTopLevelAgentLoop(
       })
 
       return {}
+    }
+
+    // Pause gate: block before the next LLM request if the user requested a
+    // pause. The current (in-flight) request is never aborted — the pause only
+    // takes effect here, at the request boundary.
+    const pauseOutcome = await sessionManager.enterPauseGate(sessionId, signal)
+    if (pauseOutcome === 'aborted') {
+      throw new Error('Aborted')
     }
 
     const session = sessionManager.requireSession(sessionId)
@@ -411,6 +420,7 @@ export async function runTopLevelAgentLoop(
         messageId: assistantMsgId,
         systemPrompt: assembledRequest.systemPrompt,
         llmClient: attemptClient,
+        sessionId,
         messages: assembledRequest.messages,
         tools: assembledRequest.tools,
         toolChoice: 'auto',

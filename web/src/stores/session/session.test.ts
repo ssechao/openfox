@@ -539,6 +539,295 @@ describe('useSessionStore session isolation', () => {
     expect(useSessionStore.getState().unreadSessionIds).toEqual([])
   })
 
+  it('refreshes updatedAt and messageCount on the flat summary when a user message arrives for a session with no live pane', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 2,
+        },
+      ],
+      currentSession: null,
+    }))
+
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-3',
+          role: 'user',
+          content: 'hello',
+          timestamp: '2024-01-02T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: false,
+        },
+      },
+    })
+
+    const summary = useSessionStore.getState().sessions[0]
+    expect(summary?.messageCount).toBe(3)
+    expect(summary?.updatedAt).toBe('2024-01-02T00:00:00.000Z')
+  })
+
+  it('refreshes updatedAt and messageCount on the flat summary when an assistant message arrives for a session with no live pane', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 2,
+        },
+      ],
+      currentSession: null,
+    }))
+
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-3',
+          role: 'assistant',
+          content: '',
+          timestamp: '2024-01-02T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: true,
+        },
+      },
+    })
+
+    const summary = useSessionStore.getState().sessions[0]
+    expect(summary?.messageCount).toBe(3)
+    expect(summary?.updatedAt).toBe('2024-01-02T00:00:00.000Z')
+  })
+
+  it('refreshes the flat summary when a message arrives for a session with a live pane, without double-counting', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 2,
+        },
+      ],
+      currentSession: {
+        id: 'session-1',
+        projectId: 'project-1',
+        workdir: '/tmp/project-1',
+        mode: 'planner',
+        phase: 'plan',
+        isRunning: false,
+        criteria: [],
+        summary: null,
+        messageCount: 2,
+      } as any,
+    }))
+
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-3',
+          role: 'user',
+          content: 'hello',
+          timestamp: '2024-01-02T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: false,
+        },
+      },
+    })
+
+    const state = useSessionStore.getState()
+    // Flat summary: exactly one increment, and the latest message date.
+    expect(state.sessions[0]?.messageCount).toBe(3)
+    expect(state.sessions[0]?.updatedAt).toBe('2024-01-02T00:00:00.000Z')
+    // Live pane sees the same single increment.
+    expect(state.currentSession?.messageCount).toBe(3)
+  })
+
+  it('applies the flat-summary refresh to the search corpus (searchSessions) as well', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [],
+      searchSessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 2,
+        },
+      ],
+      currentSession: null,
+    }))
+
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-3',
+          role: 'assistant',
+          content: '',
+          timestamp: '2024-01-02T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: true,
+        },
+      },
+    })
+
+    const summary = useSessionStore.getState().searchSessions?.[0]
+    expect(summary?.messageCount).toBe(3)
+    expect(summary?.updatedAt).toBe('2024-01-02T00:00:00.000Z')
+  })
+
+  it('does not double-count a re-delivered chat.message on the flat summary', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 2,
+        },
+      ],
+      currentSession: null,
+    }))
+
+    const message = {
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-3',
+          role: 'user',
+          content: 'hello',
+          timestamp: '2024-01-02T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: false,
+        },
+      },
+    }
+    useSessionStore.getState().handleServerMessage(message as any)
+    useSessionStore.getState().handleServerMessage(message as any)
+
+    const summary = useSessionStore.getState().sessions[0]
+    expect(summary?.messageCount).toBe(3)
+  })
+
+  it('bumps the live pane messageCount for assistant messages too, matching the flat summary', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 2,
+        },
+      ],
+      currentSession: {
+        id: 'session-1',
+        projectId: 'project-1',
+        workdir: '/tmp/project-1',
+        mode: 'planner',
+        phase: 'plan',
+        isRunning: false,
+        criteria: [],
+        summary: null,
+        messageCount: 2,
+      } as any,
+    }))
+
+    useSessionStore.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-3',
+          role: 'assistant',
+          content: '',
+          timestamp: '2024-01-02T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: true,
+        },
+      },
+    })
+
+    const state = useSessionStore.getState()
+    expect(state.currentSession?.messageCount).toBe(3)
+    expect(state.sessions[0]?.messageCount).toBe(3)
+  })
+
   it('clears pending path confirmation when the active session stops running', async () => {
     const useSessionStore = await loadSessionStore()
 

@@ -457,4 +457,183 @@ describe('TaskEditor', () => {
       expect(putBody().providerId).toBeNull()
     })
   })
+
+  describe('schedule', () => {
+    // Switching to "Repeat" derives its defaults from the current time: the
+    // weekday chip, the day of month and the month all come from `Date.now()`.
+    // Left on the real clock, "click thu to select it" instead DESELECTS it on
+    // a Thursday, weekdays ends up empty and the save is refused — and the
+    // month/year defaults would drift the same way on a boundary. Pin the clock
+    // to a fixed mid-month Tuesday so these defaults never depend on the day
+    // the suite happens to run.
+    const FIXED_NOW = new Date('2026-09-08T10:15:00').getTime()
+    beforeEach(() => {
+      vi.spyOn(Date, 'now').mockReturnValue(FIXED_NOW)
+    })
+    afterEach(() => {
+      vi.mocked(Date.now).mockRestore()
+    })
+
+    const promptEl = () => screen.getByPlaceholderText(/Describe the task/i) as HTMLTextAreaElement
+    const typePrompt = () => {
+      fireEvent.change(promptEl(), { target: { value: 'Do the thing' } })
+    }
+    const save = async () => {
+      fireEvent.keyDown(promptEl(), { key: 'Enter', ctrlKey: true })
+    }
+    const postedBody = () => {
+      const post = vi
+        .mocked(authFetch)
+        .mock.calls.find(([url, init]) => url === '/api/projects/proj-1/tasks' && init?.method === 'POST')
+      return post ? JSON.parse(String(post[1]?.body)) : null
+    }
+    const putBody = () => {
+      const put = vi
+        .mocked(authFetch)
+        .mock.calls.find(([url, init]) => url === '/api/projects/proj-1/tasks/t-edit' && init?.method === 'PUT')
+      return put ? JSON.parse(String(put[1]?.body)) : null
+    }
+    const mockSave = () => {
+      vi.mocked(authFetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ task: task({ prompt: 'Do the thing' }) }),
+      } as unknown as Response)
+      vi.mocked(authFetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          tasks: [],
+          settings: { slotLimit: 1, queuePaused: false },
+          counts: { open: 0, todo: 0, inProgress: 0, running: 0, queued: 0, done: 0 },
+        }),
+      } as unknown as Response)
+    }
+
+    it('submits a one-off schedule with the chosen run time', async () => {
+      mockSave()
+      render(<TaskEditor projectId="proj-1" onClose={() => {}} onSaved={() => {}} />)
+      fireEvent.click(screen.getByRole('button', { name: /run once/i }))
+      fireEvent.change(screen.getByLabelText(/run at/i), { target: { value: '2030-01-01T09:00' } })
+      typePrompt()
+      await save()
+      await waitFor(() => expect(postedBody()).toBeTruthy())
+      expect(postedBody().schedule).toMatchObject({ type: 'once' })
+      expect(new Date(postedBody().schedule.runAt).toISOString()).toBe(new Date('2030-01-01T09:00').toISOString())
+    })
+
+    it('submits a weekly recurring schedule with selected weekdays', async () => {
+      mockSave()
+      render(<TaskEditor projectId="proj-1" onClose={() => {}} onSaved={() => {}} />)
+      fireEvent.click(screen.getByRole('button', { name: /repeat/i }))
+      fireEvent.change(screen.getByLabelText(/first run/i), { target: { value: '2030-01-01T09:00' } })
+      fireEvent.change(screen.getByLabelText(/repeat unit/i), { target: { value: 'week' } })
+      fireEvent.click(screen.getByRole('button', { name: /^thu$/i }))
+      typePrompt()
+      await save()
+      await waitFor(() => expect(postedBody()).toBeTruthy())
+      expect(postedBody().schedule.type).toBe('recurring')
+      expect(postedBody().schedule.freq).toBe('week')
+      expect(postedBody().schedule.weekdays).toContain(4)
+      expect(postedBody().schedule.end).toEqual({ kind: 'never' })
+      expect(postedBody().schedule.startAt).toBe(new Date('2030-01-01T09:00').toISOString())
+    })
+
+    it('submits a monthly recurrence ending after N occurrences', async () => {
+      mockSave()
+      render(<TaskEditor projectId="proj-1" onClose={() => {}} onSaved={() => {}} />)
+      fireEvent.click(screen.getByRole('button', { name: /repeat/i }))
+      fireEvent.change(screen.getByLabelText(/repeat unit/i), { target: { value: 'month' } })
+      fireEvent.change(screen.getByLabelText(/day of month/i), { target: { value: '15' } })
+      fireEvent.click(screen.getByLabelText(/after .*occurrences/i))
+      fireEvent.change(screen.getByLabelText('Occurrences'), { target: { value: '5' } })
+      typePrompt()
+      await save()
+      await waitFor(() => expect(postedBody()).toBeTruthy())
+      expect(postedBody().schedule.type).toBe('recurring')
+      expect(postedBody().schedule.freq).toBe('month')
+      expect(postedBody().schedule.monthDay).toBe(15)
+      expect(postedBody().schedule.end).toEqual({ kind: 'count', count: 5 })
+    })
+
+    it('clearing the schedule on edit sends schedule null', async () => {
+      vi.mocked(authFetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ task: task({ prompt: 'Do the thing' }) }),
+      } as unknown as Response)
+      vi.mocked(authFetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          tasks: [],
+          settings: { slotLimit: 1, queuePaused: false },
+          counts: { open: 0, todo: 0, inProgress: 0, running: 0, queued: 0, done: 0 },
+        }),
+      } as unknown as Response)
+
+      render(
+        <TaskEditor
+          projectId="proj-1"
+          initialTask={task({ schedule: { type: 'once', runAt: '2030-01-01T09:00:00' } })}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button', { name: /no schedule/i }))
+      typePrompt()
+      await save()
+      await waitFor(() => expect(putBody()).toBeTruthy())
+      expect(putBody().schedule).toBeNull()
+    })
+
+    it('prefills the schedule controls when editing a scheduled task', () => {
+      render(
+        <TaskEditor
+          projectId="proj-1"
+          initialTask={task({ schedule: { type: 'once', runAt: '2030-01-01T09:00:00' } })}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />,
+      )
+      expect(screen.getByRole('button', { name: /run once/i }).getAttribute('aria-pressed')).toBe('true')
+      expect((screen.getByLabelText(/run at/i) as HTMLInputElement).value).toBe('2030-01-01T09:00')
+    })
+
+    it('does not resend the schedule when editing only the prompt of a recurring task', async () => {
+      vi.mocked(authFetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ task: task({ prompt: 'Edited prompt' }) }),
+      } as unknown as Response)
+      vi.mocked(authFetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          tasks: [],
+          settings: { slotLimit: 1, queuePaused: false },
+          counts: { open: 0, todo: 0, inProgress: 0, running: 0, queued: 0, done: 0 },
+        }),
+      } as unknown as Response)
+
+      render(
+        <TaskEditor
+          projectId="proj-1"
+          initialTask={task({
+            prompt: 'Original',
+            schedule: {
+              type: 'recurring',
+              freq: 'day',
+              interval: 1,
+              startAt: '2026-01-01T09:00:00',
+              end: { kind: 'never' },
+              occurrencesDone: 5,
+              nextRunAt: '2099-01-01T09:00:00',
+            },
+          })}
+          onClose={() => {}}
+          onSaved={() => {}}
+        />,
+      )
+      fireEvent.change(screen.getByPlaceholderText(/Describe the task/i), { target: { value: 'Edited prompt' } })
+      fireEvent.keyDown(screen.getByPlaceholderText(/Describe the task/i), { key: 'Enter', ctrlKey: true })
+      await waitFor(() => expect(putBody()).toBeTruthy())
+      // Schedule untouched → omitted so the server keeps nextRunAt + count.
+      expect(putBody()).not.toHaveProperty('schedule')
+    })
+  })
 })

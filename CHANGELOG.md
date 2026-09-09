@@ -1,5 +1,74 @@
 # Changelog
 
+## 2.0.142 - 2026-09-09
+
+### Features
+
+- **Schedule tasks, one-off or recurring** — pick a date and time, or repeat daily, weekly, monthly, or yearly; due tasks fire automatically and float to the top of To Do with a countdown badge
+
+### Enhancements
+
+- **Homepage and counts stay fresh** — recent sessions, sidebar, and search reorder live as messages arrive, and message counts now include assistant messages
+
+### Bug Fixes
+
+- **Fullscreen mobile composer is now opt-in** — a Display setting (off by default) keeps the conversation visible while typing
+- **Mobile send works on the first tap** — send, pause, stop, and the more menu no longer need a double press while the keyboard is up
+- **Session message counts no longer double-count on reconnect** — re-delivered chat events are deduplicated
+
+## 2.0.141 - 2026-09-09
+
+### Enhancements
+
+- **Homepage lists your 20 most recent sessions** — flat across all projects, sorted by last activity, with live status dots and links that open in a new tab; running sessions stay pinned so active work never drops off.
+- **Projects section decluttered** — cards now sort starred-first and hold no sessions; tasks and new-session actions stay one click away.
+- **Send and pause stay reachable on mobile** — the send, pause, and stop buttons now show while the agent is running instead of hiding.
+
+### Bug Fixes
+
+- **Git --no-verify confirmation can no longer be skipped** — a semicolon, pipe, or `&&` inside a quoted commit message used to orphan the flag and silently bypass the confirmation; detection is now quote-aware.
+- **Live task-board sync reaches every window** — task updates are now broadcast to all windows, so boards without an active session no longer go stale.
+- **MCP servers connect once the HTTP server is listening** — OpenFox's self-referencing MCP entry no longer races startup and lands in a permanent error state.
+
+## 2.0.140 - 2026-09-08
+
+### Features
+
+- **Authenticated Ollama proxies** — Ollama behind OpenWebUI or any Bearer-auth proxy now works when an API key is configured
+
+### Enhancements
+
+- **Refined mobile interface** — composer expands full-height with the keyboard, send/stop become icon pills, and the footer rebalances (agent + danger on top, MCP + model below)
+- **Model names truncate on narrow screens** — no more overflowing the composer
+
+### Bug Fixes
+
+- **MCP dropdown stays in view** — opens as a centered modal on touch and left-aligns on narrow windows instead of overflowing
+- **iOS no longer auto-zooms into the composer** — input fields keep a comfortable size on focus
+- **opencode.ai providers work reliably** — chain-of-thought is no longer echoed into assistant history (fixing HTTP 400 on multi-turn thinking requests), and stable x-opencode-session headers restore prompt caching
+
+## 2.0.139 - 2026-09-06
+
+### Features
+
+- **Caveman thinking mode** — opt-in setting that compresses the agent's reasoning into terse fragments to cut thinking tokens
+
+### Enhancements
+
+- **Pause-in-progress is now obvious** — pulsing pause button while waiting, cancel cross on hover, height matched to Send
+
+## 2.0.138 - 2026-09-06
+
+### Features
+
+- **Pause button** — pause the next LLM request without aborting the in-flight turn
+- **Resume a paused run from the chat input** — session status shows Pausing…/Paused
+
+### Bug Fixes
+
+- **Dangerous mode applies immediately** — switching auto-approves every pending path confirmation
+- **Allow Everything clears the whole batch** — sibling tool calls continue without re-prompting
+
 ## 2.0.137 - 2026-09-03
 
 ### Bug Fixes

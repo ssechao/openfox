@@ -149,6 +149,10 @@ export interface SessionState {
   ) => void
   stopGeneration: (sessionId: string) => void
   continueGeneration: (sessionId: string) => void
+  /** Request a cooperative pause (takes effect before the next LLM request). */
+  pauseGeneration: (sessionId: string) => void
+  /** Cancel a pending pause, or release a paused agent. */
+  resumeGeneration: (sessionId: string) => void
   launchWorkflow: (
     sessionId: string,
     content?: string,
@@ -166,7 +170,7 @@ export interface SessionState {
   retryLLM: (sessionId: string) => void
   exitWorkflow: (sessionId: string) => void
   switchMode: (sessionId: string, mode: SessionMode) => void
-  switchDangerLevel: (sessionId: string, dangerLevel: 'normal' | 'dangerous') => void
+  switchDangerLevel: (sessionId: string, dangerLevel: 'normal' | 'dangerous') => Promise<boolean>
   editCriteria: (sessionId: string, criteria: Criterion[]) => void
   compactContext: (sessionId: string) => void
   setSessionProvider: (

@@ -41,6 +41,8 @@ export interface PureStreamOptions {
   messageId: string
   systemPrompt: string
   llmClient: LLMClientWithModel
+  /** Stable session id, forwarded as x-opencode-session to opencode.ai endpoints. */
+  sessionId?: string
   messages: Array<{
     role: 'system' | 'user' | 'assistant' | 'tool'
     content: string
@@ -222,6 +224,7 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
     signal: combinedSignal,
     modelSettings: options.modelSettings,
     responsesChainKey: options.responsesChainKey,
+    sessionId: options.sessionId,
   })
 
   // Track tool call indices we've emitted preparing events for

@@ -8,6 +8,7 @@ import { CreateProjectModal } from '../CreateProjectModal.js'
 import { DirectoryBrowser } from '../shared/DirectoryBrowser.js'
 import { useWorkdir } from '../../hooks/useWorkdir.js'
 import { pathBasename } from '../../lib/path'
+import { sortProjectsStarredFirst } from '../../lib/projects'
 
 interface ProjectDropdownProps {
   projects: Array<{ id: string; name: string; workdir: string; isStarred?: boolean }>
@@ -38,11 +39,7 @@ export function ProjectDropdown({ projects, currentProject }: ProjectDropdownPro
     [createProject, navigate],
   )
 
-  const sortedProjects = useMemo(() => {
-    const starred = projects.filter((p) => p.isStarred).sort((a, b) => a.name.localeCompare(b.name))
-    const unstarred = projects.filter((p) => !p.isStarred).sort((a, b) => a.name.localeCompare(b.name))
-    return [...starred, ...unstarred]
-  }, [projects])
+  const sortedProjects = useMemo(() => sortProjectsStarredFirst(projects), [projects])
 
   const items: DropdownMenuItem[] = sortedProjects.map((proj) => ({
     label: (

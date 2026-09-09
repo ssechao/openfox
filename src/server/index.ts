@@ -249,13 +249,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // OAuth credentials live next to the config they belong to, never inside it.
   setMcpOAuthStorePath(config.globalConfigPath ? join(dirname(config.globalConfigPath), 'mcp-auth.json') : undefined)
   const mcpServers = (config.mcpServers ?? {}) as Record<string, import('./mcp/types.js').McpServerConfig>
-  Promise.all(
-    Object.entries(mcpServers).map(([name, serverConfig]) =>
-      mcpManager.addServer(name, serverConfig).catch((err) => {
-        logger.warn('Failed to connect MCP server on startup', { name, error: String(err) })
-      }),
-    ),
-  ).then(async () => {
+  // Connect configured MCP servers only once the HTTP server is listening:
+  // a self-referencing server (OpenFox as its own MCP client) would otherwise
+  // race the listen and land in an error state. Invoked from start() below.
+  async function connectMcpServers(): Promise<void> {
+    await Promise.all(
+      Object.entries(mcpServers).map(([name, serverConfig]) =>
+        mcpManager.addServer(name, serverConfig).catch((err) => {
+          logger.warn('Failed to connect MCP server on startup', { name, error: String(err) })
+        }),
+      ),
+    )
     const mcpTools = createMcpTools(mcpManager)
     if (mcpTools.length > 0) {
       setMcpTools(mcpTools)
@@ -264,7 +268,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
     const { signalMcpReady } = await import('./ws/server.js')
     signalMcpReady()
-  })
+  }
 
   const app = express()
 
@@ -541,6 +545,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     launchWorkflow: (sessionId, launch) => deferTasksLaunchWorkflow(sessionId, launch),
   })
   setTasksService(tasksService)
+  // Periodic tick for scheduled tasks: runs once at boot (catch-up for tasks
+  // missed while OpenFox was off) then every 30s. Stopped in close().
+  const { createTaskScheduler } = await import('./tasks/scheduler.js')
+  const taskScheduler = createTaskScheduler({ run: () => tasksService.runScheduled() })
+  taskScheduler.start()
   const tasksRouter = express.Router()
   registerTaskRoutes(tasksRouter, tasksService)
   app.use('/api', tasksRouter)
@@ -808,8 +817,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
 
   /**
-   * Lightweight homepage list. Returns only the N most recently updated
-   * sessions per project (summaries only — no recentUserPrompts, no pending
+   * Lightweight homepage list. Returns the 20 most recently updated sessions
+   * across all projects (summaries only — no recentUserPrompts, no pending
    * confirmations), so a fresh load never parses session snapshots.
    * Registered before /api/sessions/:id so 'home' is not treated as an id.
    */
@@ -864,7 +873,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     // maxTokens is no longer passed - it comes from providerManager.getCurrentModelContext() at query time
     const session = sessionManager.createSession(projectId, title, providerId ?? null, model ?? null)
 
-    wssExports.broadcastForProject(projectId, session.id, buildSessionCreatedMessage(session))
+    wssExports.broadcastAll(buildSessionCreatedMessage(session))
     res.status(201).json({ session: toClientSession(session) })
   })
 
@@ -1318,6 +1327,22 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     sessionManager.setDangerLevel(sessionId, dangerLevel)
+
+    // Entering dangerous mode resolves every pending confirmation for the
+    // session (except git_no_verify, which always requires explicit consent),
+    // so sibling tool calls of the same batch continue without prompting again.
+    if (dangerLevel === 'dangerous') {
+      const { autoApprovePendingConfirmationsForSession } = await import('./tools/index.js')
+      const approvedCallIds = autoApprovePendingConfirmationsForSession(sessionId)
+      for (const callId of approvedCallIds) {
+        wssExports.broadcastForSession(sessionId, {
+          type: 'session.confirmation_resolved',
+          sessionId,
+          payload: { sessionId, callId },
+        })
+      }
+    }
+
     const updatedSession = sessionManager.getSession(sessionId)
 
     res.json({ session: toClientSession(updatedSession!) })
@@ -1609,6 +1634,42 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     eventStore.append(sessionId, { type: 'running.changed', data: { isRunning: false } })
 
     res.json({ success: true, queuedMessages })
+  })
+
+  // Chat pause (cooperative — pauses the NEXT LLM request, never aborts the current one)
+  app.post('/api/sessions/:id/pause', async (req, res) => {
+    const sessionId = req.params.id
+    const session = sessionManager.getSession(sessionId)
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    if (!session.isRunning) {
+      return res.status(409).json({ error: 'Session is not running' })
+    }
+
+    const ok = sessionManager.requestPause(sessionId)
+    if (!ok) {
+      return res.status(409).json({ error: 'A pause is already in progress' })
+    }
+
+    res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
+  })
+
+  // Chat resume (cancels a pending pause, or releases a paused agent)
+  app.post('/api/sessions/:id/resume', async (req, res) => {
+    const sessionId = req.params.id
+    const session = sessionManager.getSession(sessionId)
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const ok = sessionManager.requestResume(sessionId)
+    if (!ok) {
+      return res.status(409).json({ error: 'Nothing to resume' })
+    }
+
+    res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
   })
 
   // Truncate session messages at a given index
@@ -3526,8 +3587,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const wss = wssExports.wss
 
   // Point the tasks service at the live WebSocket broadcaster now that it exists.
-  deferTasksBroadcast = (projectId, payload) =>
-    wssExports.broadcastForProject(projectId, '', { type: 'tasks.update', payload })
+  // Broadcast to ALL clients (not just the project's active session): a task
+  // board can be open in a window with no session loaded (homepage) or in
+  // another project's session — those windows must see live updates too. The
+  // payload carries projectId; clients write through into their per-project
+  // board cache, so unaffected boards are untouched.
+  deferTasksBroadcast = (_projectId, payload) => wssExports.broadcastAll({ type: 'tasks.update', payload })
 
   // Point the tasks service at the workflow launcher. Task-seeded workflows run
   // through the same shared launcher as runner.launch (src/server/runner/launch.ts).
@@ -3701,6 +3766,16 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           const actualPort = typeof addr === 'object' && addr ? addr.port : listenPort
           setMcpOAuthServerPort(actualPort)
           mcpActualPort = actualPort
+          // The /mcp endpoint is only reachable once we're listening, so start
+          // MCP client connections now — a self-referencing server (OpenFox as
+          // its own MCP client) would otherwise race the listen and fail.
+          // The very first requests may arrive before MCP tools register;
+          // connectMcpServers settles shortly after, then signals MCP readiness.
+          connectMcpServers().catch((err) => {
+            logger.error('MCP server startup connection failed', {
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
           const client = getLLMClient()
           logger.info(`OpenFox server running at http://${host}:${actualPort}`)
           logger.info(`WebSocket available at ws://${host}:${actualPort}/ws`)
@@ -3720,6 +3795,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         void (async () => {
           await devServerManager.stopAll()
           await mcpManager.disconnectAll()
+          taskScheduler.stop()
           const { stopAllInspectProxies } = await import('./dev-server/inspect-proxy.js')
           stopAllInspectProxies()
           const { cleanupAllProcesses } = await import('./tools/background-process/store.js')

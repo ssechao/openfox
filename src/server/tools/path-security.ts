@@ -1221,24 +1221,72 @@ export function extractDangerousPatterns(command: string): string[] {
 /** Git subcommands where `-n` is the documented shorthand for `--no-verify`. */
 const GIT_N_NO_VERIFY_SUBCOMMANDS = new Set(['commit', 'am'])
 
-export function extractGitNoVerify(command: string): boolean {
-  const subCommands = command.split(/\s*(?:&&|\|\||\||;)\s*/)
-  for (const sub of subCommands) {
-    const parts = sub.trim().split(/\s+/)
-    const gitIndex = parts.indexOf('git')
-    const subCmd = parts[gitIndex + 1]
-    if (gitIndex >= 0 && subCmd && !subCmd.startsWith('-')) {
-      const gitArgs = parts.slice(gitIndex + 2)
-      // Explicit --no-verify always counts: it bypasses hooks on any
-      // supporting subcommand (commit, am, rebase, merge, push, ...).
-      if (gitArgs.includes('--no-verify')) return true
-      // `-n` is only `--no-verify` for commit/am. Elsewhere git assigns it a
-      // harmless meaning (--dry-run, --no-stat, line numbers, commit-count
-      // limits, --no-tags, ...), so flagging it is a false positive.
-      if (GIT_N_NO_VERIFY_SUBCOMMANDS.has(subCmd) && gitArgs.includes('-n')) return true
+/** Shell operators that separate one command from the next. */
+const COMMAND_SEPARATORS = new Set([';', '&&', '||', '|'])
+
+/** True when a `'`, `"` or backtick opens without closing (escapes honored). */
+function hasDanglingQuote(command: string): boolean {
+  let quote: string | null = null
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote !== null) {
+      if (ch === '\\' && quote !== "'") {
+        i += 1
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
     }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch
+  }
+  return quote !== null
+}
+
+function gitSubHasNoVerify(sub: string[]): boolean {
+  const gitIndex = sub.indexOf('git')
+  const subCmd = sub[gitIndex + 1]
+  if (gitIndex >= 0 && subCmd && !subCmd.startsWith('-')) {
+    const gitArgs = sub.slice(gitIndex + 2)
+    // Explicit --no-verify always counts: it bypasses hooks on any
+    // supporting subcommand (commit, am, rebase, merge, push, ...).
+    if (gitArgs.includes('--no-verify')) return true
+    // `-n` is only `--no-verify` for commit/am. Elsewhere git assigns it a
+    // harmless meaning (--dry-run, --no-stat, line numbers, commit-count
+    // limits, --no-tags, ...), so flagging it is a false positive.
+    if (GIT_N_NO_VERIFY_SUBCOMMANDS.has(subCmd) && gitArgs.includes('-n')) return true
   }
   return false
+}
+
+export function extractGitNoVerify(command: string): boolean {
+  // Tokenize with shell quoting honored: a `;`, `|` or `&&` inside a quoted
+  // argument (e.g. a commit message) is literal text, not a command boundary.
+  // Splitting blindly on those characters orphans a trailing --no-verify into
+  // a "subcommand" that has no git token, silently bypassing the confirmation.
+  if (hasDanglingQuote(command)) {
+    // A dangling quote would make the tokenizer swallow the rest of the
+    // command as one quoted token and miss a trailing --no-verify. The shell
+    // refuses to run unterminated quotes anyway, but fall back to the
+    // quote-blind separator split to keep detection parity.
+    for (const sub of command.split(/\s*(?:&&|\|\||\||;)\s*/)) {
+      if (gitSubHasNoVerify(sub.trim().split(/\s+/))) return true
+    }
+    return false
+  }
+
+  const tokens = tokenizeShell(command)
+  let sub: string[] = []
+  for (const token of tokens) {
+    if (token.isOperator && COMMAND_SEPARATORS.has(token.text)) {
+      if (gitSubHasNoVerify(sub)) return true
+      sub = []
+      continue
+    }
+    // Only plain words belong to a subcommand; redirects, parens and the like
+    // are operators and carry no argument meaning here.
+    if (!token.isOperator) sub.push(token.text)
+  }
+  return gitSubHasNoVerify(sub)
 }
 
 // ===========================================================================
@@ -1550,6 +1598,36 @@ export function cancelPathConfirmationsForSession(sessionId: string, reason: str
   }
 
   return cancelledCount
+}
+
+/**
+ * Auto-approve every pending path confirmation for a session.
+ * Used when a session switches to dangerous mode: pending confirmations
+ * (e.g. sibling tool calls of the same batch) resolve as approved so their
+ * tool calls continue without further prompting.
+ *
+ * git_no_verify confirmations are never auto-approved — they always require
+ * explicit user confirmation, even in dangerous mode.
+ *
+ * @param sessionId - The session whose confirmations should be resolved
+ * @returns The callIds that were auto-approved
+ */
+export function autoApprovePendingConfirmationsForSession(sessionId: string): string[] {
+  const resolvedCallIds: string[] = []
+  for (const callId of [...pendingConfirmations.keys()]) {
+    const pending = pendingConfirmations.get(callId)
+    if (!pending || pending.sessionId !== sessionId) {
+      continue
+    }
+    if (pending.reason === 'git_no_verify') {
+      continue
+    }
+    const result = providePathConfirmation(callId, true, false)
+    if (result.found) {
+      resolvedCallIds.push(callId)
+    }
+  }
+  return resolvedCallIds
 }
 
 /**

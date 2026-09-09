@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { DisplayTab } from './DisplayTab'
 import { setLocale } from '@shared/i18n/index.js'
@@ -83,6 +83,32 @@ describe('DisplayTab Language setting', () => {
     const select = screen.getByLabelText('Language') as HTMLSelectElement
     await user.selectOptions(select, 'fr')
     expect(mockSetSetting).toHaveBeenCalledWith('display.locale', 'fr')
+  })
+})
+
+describe('DisplayTab Composer setting', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Object.keys(mockSettings).forEach((k) => delete mockSettings[k])
+    setLocale('en')
+  })
+
+  it('renders the Composer section with the fullscreen toggle', () => {
+    render(<DisplayTab />)
+
+    expect(screen.getByText('Composer')).toBeTruthy()
+    expect(screen.getByText('Expand composer full-screen on mobile')).toBeTruthy()
+  })
+
+  it('persists the fullscreen composer toggle', async () => {
+    const user = userEvent.setup()
+    render(<DisplayTab />)
+
+    const label = screen.getByText('Expand composer full-screen on mobile').closest('label') as HTMLElement
+    const toggle = within(label).getByRole('button')
+    await user.click(toggle)
+
+    expect(mockSetSetting).toHaveBeenCalledWith(SETTINGS_KEYS.DISPLAY_MOBILE_FULLSCREEN_COMPOSER, 'true')
   })
 })
 

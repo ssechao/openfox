@@ -10,6 +10,7 @@ export interface TaskCreateInput {
   agentId?: string
   providerId?: string
   model?: string
+  schedule?: import('@shared/types.js').TaskSchedule
 }
 
 export interface TaskMoveResult {
@@ -40,6 +41,7 @@ interface TasksState {
       agentId?: string | null
       providerId?: string | null
       model?: string | null
+      schedule?: import('@shared/types.js').TaskSchedule | null
     },
   ) => Promise<ProjectTask | null>
   deleteTask: (projectId: string, taskId: string) => Promise<boolean>

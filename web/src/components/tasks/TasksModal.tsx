@@ -13,8 +13,15 @@ import { ModalCrumbTitle } from '../shared/ModalCrumbTitle'
 import { TaskColumn } from './TaskColumn'
 import { TaskEditor } from './TaskEditor'
 import { GatesEditor } from './GatesEditor'
-import type { ProjectTask, TaskStatus } from '@shared/types.js'
+import type { ProjectTask, TaskStatus, TaskSchedule } from '@shared/types.js'
 import { useT } from '../../hooks/useT'
+
+/** Canonical next trigger of a planned task (used to float them in To Do). */
+function scheduleNextRun(task: ProjectTask): string | undefined {
+  const s: TaskSchedule | undefined = task.schedule
+  if (!s) return undefined
+  return s.type === 'once' ? s.runAt : s.nextRunAt
+}
 
 interface TasksModalProps {
   isOpen: boolean
@@ -52,7 +59,18 @@ export function TasksModal({ isOpen, onClose, projectId }: TasksModalProps) {
   }, [tasks, search])
 
   const byColumn = useMemo(() => {
-    const todo = filteredTasks.filter((t) => t.status === 'todo').sort((a, b) => a.position - b.position)
+    const todo = filteredTasks
+      .filter((t) => t.status === 'todo')
+      .sort((a, b) => {
+        // Planned tasks float to the top of To Do, soonest trigger first;
+        // regular tasks keep their drag position below.
+        const aNext = scheduleNextRun(a)
+        const bNext = scheduleNextRun(b)
+        if (aNext && bNext) return aNext.localeCompare(bNext)
+        if (aNext) return -1
+        if (bNext) return 1
+        return a.position - b.position
+      })
     const inProgress = filteredTasks
       .filter((t) => t.status === 'in_progress')
       .sort((a, b) => {

@@ -449,17 +449,17 @@ function listSessionsPaged(
 }
 
 /**
- * The lightweight homepage list: the N most recently updated sessions per
- * project, summaries only. Deliberately does NOT load recent user prompts —
- * that requires parsing each session's snapshot, which is the slow path the
- * homepage must avoid. Returns a flat list ordered by last activity.
+ * The lightweight homepage list: the 20 most recently updated sessions across
+ * ALL projects, summaries only, plus any running / waiting / blocked session
+ * that falls outside that budget so active work never drops off the homepage.
+ * Deliberately does NOT load recent user prompts — that requires parsing each
+ * session's snapshot, which is the slow path the homepage must avoid. Returns
+ * a flat list ordered by last activity.
  */
-export function listHomeSessions(sessionsPerProject = 5): SessionSummary[] {
+export function listHomeSessions(limit = 20): SessionSummary[] {
   const db = getDatabase()
 
-  const rows = db
-    .prepare(
-      `
+  const select = `
     SELECT
       s.id,
       s.project_id,
@@ -477,20 +477,25 @@ export function listHomeSessions(sessionsPerProject = 5): SessionSummary[] {
       s.provider_model,
       s.message_count
     FROM sessions s
-    ORDER BY s.updated_at DESC
-  `,
-    )
-    .all() as SessionSummaryRow[]
+  `
 
-  const seen = new Map<string, number>()
-  const result: SessionSummary[] = []
-  for (const row of rows) {
-    const count = seen.get(row.project_id) ?? 0
-    if (count >= sessionsPerProject) continue
-    seen.set(row.project_id, count + 1)
-    result.push(mapSessionSummaryRow(row))
-  }
-  return result
+  const rows = db.prepare(`${select} ORDER BY s.updated_at DESC LIMIT ?`).all(limit) as SessionSummaryRow[]
+
+  // Pin attention-required sessions that fell outside the recent budget so a
+  // single busy project cannot hide running/waiting/blocked work elsewhere.
+  const pinned = db
+    .prepare(
+      `${select}
+       WHERE (s.is_running = 1 OR s.workflow_phase IN ('waiting', 'blocked'))
+         AND s.id NOT IN (SELECT id FROM sessions ORDER BY updated_at DESC LIMIT ?)`,
+    )
+    .all(limit) as SessionSummaryRow[]
+
+  const merged = [...rows, ...pinned].sort(
+    (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+  )
+
+  return merged.map(mapSessionSummaryRow)
 }
 
 export function updateSessionWorkdir(

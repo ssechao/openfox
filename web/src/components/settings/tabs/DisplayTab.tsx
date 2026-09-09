@@ -126,6 +126,21 @@ const PERF_TOGGLES: ToggleDefinition[] = [
   },
 ]
 
+const COMPOSER_TOGGLES: ToggleDefinition[] = [
+  {
+    key: SETTINGS_KEYS.DISPLAY_MOBILE_FULLSCREEN_COMPOSER,
+    label: {
+      en: 'Expand composer full-screen on mobile',
+      fr: 'Agrandir la zone de saisie en plein écran sur mobile',
+    },
+    description: {
+      en: 'When the keyboard is open on a touch device, fill the screen with the textarea so you can focus on writing. Off by default: the textarea grows with its content and you keep seeing the conversation.',
+      fr: 'Lorsque le clavier est ouvert sur un appareil tactile, remplir l’écran avec la zone de saisie pour rester concentré sur la rédaction. Désactivé par défaut : la zone grandit avec son contenu et la conversation reste visible.',
+    },
+    defaultValue: 'false',
+  },
+]
+
 export function DisplayTab() {
   const t = useT()
   const applyLocale = useLocaleStore((state) => state.applyLocale)
@@ -143,6 +158,7 @@ export function DisplayTab() {
   )
   const feedVirtualization = useSetting(SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION, 'auto')
   const syntaxHighlighting = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_SYNTAX_HIGHLIGHTING, 'true')
+  const fullscreenComposer = useSetting(SETTINGS_KEYS.DISPLAY_MOBILE_FULLSCREEN_COMPOSER, 'false')
   const maxVisibleItems = useSetting(SETTINGS_KEYS.DISPLAY_MAX_VISIBLE_ITEMS, '300')
   const storedLocale = useSetting(SETTINGS_KEYS.DISPLAY_LOCALE, 'automatic')
   const isLoading = showThinking.loading
@@ -160,7 +176,7 @@ export function DisplayTab() {
     void setSetting(SETTINGS_KEYS.DISPLAY_MAX_VISIBLE_ITEMS, String(clamped))
   }
 
-  const allToggles = [...FEED_TOGGLES, ...PERF_TOGGLES]
+  const allToggles = [...FEED_TOGGLES, ...PERF_TOGGLES, ...COMPOSER_TOGGLES]
 
   const localValues: Record<string, string> = {
     [SETTINGS_KEYS.DISPLAY_SHOW_THINKING]: showThinking.value,
@@ -173,6 +189,7 @@ export function DisplayTab() {
     [SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS]: collapseLargeToolCalls.value,
     [SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING]: deferCodeHighlightWhileStreaming.value,
     [SETTINGS_KEYS.DISPLAY_SHOW_SYNTAX_HIGHLIGHTING]: syntaxHighlighting.value,
+    [SETTINGS_KEYS.DISPLAY_MOBILE_FULLSCREEN_COMPOSER]: fullscreenComposer.value,
   }
   const [local, setLocal] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(allToggles.map((toggle) => [toggle.key, localValues[toggle.key] === 'true'])),
@@ -223,6 +240,11 @@ export function DisplayTab() {
           {t({ en: 'Model Selector', fr: 'Sélecteur de modèles' })}
         </h3>
         <ModelSelectorEditor />
+      </div>
+
+      <div className="border-t border-border pt-4">
+        <h3 className="text-sm font-medium text-text-primary mb-4">{t({ en: 'Composer', fr: 'Zone de saisie' })}</h3>
+        <ToggleList toggles={COMPOSER_TOGGLES} local={local} onToggle={handleToggle} />
       </div>
 
       <div className="border-t border-border pt-4">

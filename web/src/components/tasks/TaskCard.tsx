@@ -6,6 +6,7 @@ import type { AgentInfo } from '../../lib/agents-actions'
 import { getAgentColor } from '../../lib/agents-actions'
 import { useT } from '../../hooks/useT'
 import { DropdownMenu, type DropdownMenuItem } from '../shared/DropdownMenu'
+import { TaskScheduleBadge } from './TaskScheduleBadge'
 import {
   EllipsisIcon,
   ChevronDownIcon,
@@ -175,6 +176,7 @@ export function TaskCard({
       </div>
 
       <div className="mt-2 flex items-center gap-2 flex-wrap">
+        {task.status === 'todo' && task.schedule && <TaskScheduleBadge schedule={task.schedule} />}
         {task.attachments.length > 0 && (
           <span
             className="text-xs text-text-muted flex items-center gap-1"

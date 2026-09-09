@@ -16,6 +16,7 @@ import type {
   Criterion,
   ContextState,
   Attachment,
+  PauseState,
 } from '../../shared/types.js'
 import type { QueuedMessage } from '../../shared/protocol.js'
 import {
@@ -105,6 +106,7 @@ export type SessionEvent =
   | { type: 'mode_changed'; sessionId: string; from: SessionMode; to: SessionMode }
   | { type: 'phase_changed'; sessionId: string; phase: SessionPhase }
   | { type: 'running_changed'; sessionId: string; isRunning: boolean }
+  | { type: 'pause_changed'; sessionId: string; pauseState: PauseState }
   | { type: 'criteria_updated'; sessionId: string; criteria: Criterion[] }
   | {
       type: 'metadata_updated'
@@ -162,6 +164,10 @@ export class SessionManager {
   // override paths. One slot prevents A -> B -> A from resurrecting an old
   // Responses chain while preserving previous_response_id across tool rounds.
   private sessionLLMClients = new Map<string, { key: string; client: import('../llm/client.js').LLMClientWithModel }>()
+  // Cooperative pause: in-memory only (a pause is only meaningful for a live,
+  // running turn — it never survives a process restart).
+  private pauseStates = new Map<string, PauseState>()
+  private pauseWaiters = new Map<string, Set<(outcome: 'released' | 'aborted') => void>>()
 
   constructor(providerManager: import('../provider-manager.js').ProviderManager) {
     this.providerManager = providerManager
@@ -739,11 +745,11 @@ export class SessionManager {
   }
 
   /**
-   * Lightweight homepage list: the N most recently updated sessions per
-   * project, summaries only (no prompt extraction, no snapshot parsing).
+   * Lightweight homepage list: the 20 most recently updated sessions across
+   * all projects, summaries only (no prompt extraction, no snapshot parsing).
    */
-  listHomeSessions(sessionsPerProject = 5): SessionSummary[] {
-    return dbListHomeSessions(sessionsPerProject)
+  listHomeSessions(limit = 20): SessionSummary[] {
+    return dbListHomeSessions(limit)
   }
 
   /**
@@ -783,6 +789,9 @@ export class SessionManager {
 
     // Clear message queue to prevent memory leak
     this.messageQueues.delete(id)
+
+    // Release any blocked pause gate and drop the pause state
+    this.clearPauseState(id)
 
     // Clean up warmup state
     this.warmedUpSessions.delete(id)
@@ -926,11 +935,154 @@ export class SessionManager {
     updateSessionRunning(sessionId, isRunning)
     emitRunningChanged(sessionId, isRunning)
 
+    // A pause is only meaningful while a turn is running. A transition to
+    // !isRunning (turn ended, aborted, or stopped) clears any stale pause
+    // state and releases blocked gates.
+    if (!isRunning) {
+      this.clearPauseState(sessionId)
+    }
+
     const updatedSession = this.requireSession(sessionId)
     this.emit({ type: 'session_updated', session: updatedSession })
     this.emit({ type: 'running_changed', sessionId, isRunning })
 
     return updatedSession
+  }
+
+  // ============================================================================
+  // Cooperative pause
+  //
+  // A pause never aborts the in-flight LLM request: it only gates the NEXT one.
+  // The agent loop calls enterPauseGate() before every top-level LLM request;
+  // the gate blocks until the user resumes (or the session aborts).
+  //
+  //   none --requestPause--> pending --gate reached--> paused
+  //   pending --requestResume--> none (cancel, no interruption)
+  //   paused --requestResume--> resuming --gate released--> none
+  // ============================================================================
+
+  /** Current pause state ('none' when the session has no pause in flight). */
+  getPauseState(sessionId: string): PauseState {
+    return this.pauseStates.get(sessionId) ?? 'none'
+  }
+
+  /** Request a pause. Succeeds only from 'none'. Returns false otherwise. */
+  requestPause(sessionId: string): boolean {
+    if (this.getPauseState(sessionId) !== 'none') {
+      return false
+    }
+    this.transitionPauseState(sessionId, 'pending')
+    return true
+  }
+
+  /**
+   * Request resume. From 'pending' this cancels the pause (the running turn is
+   * left alone); from 'paused' it releases the blocked gate. Returns false
+   * when there is nothing to resume.
+   */
+  requestResume(sessionId: string): boolean {
+    const state = this.getPauseState(sessionId)
+    if (state === 'pending') {
+      this.transitionPauseState(sessionId, 'none')
+      return true
+    }
+    if (state === 'paused') {
+      this.transitionPauseState(sessionId, 'resuming')
+      this.wakePauseWaiters(sessionId, 'released')
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Pause gate — call before each top-level LLM request. Resolves 'released'
+   * when the request may proceed (no pause, or the user resumed) and 'aborted'
+   * when the session was aborted while paused. Concurrent gates (parent +
+   * sub-agent loops) all block on a single pause and all release on resume.
+   */
+  async enterPauseGate(sessionId: string, signal?: AbortSignal): Promise<'released' | 'aborted'> {
+    const state = this.getPauseState(sessionId)
+    if (state === 'none') {
+      return 'released'
+    }
+    if (state === 'resuming') {
+      // Stale (e.g. the gate that set it never ran) — clear and proceed.
+      this.transitionPauseState(sessionId, 'none')
+      return 'released'
+    }
+    if (state === 'pending') {
+      // The agent reached the boundary the user asked to pause at.
+      this.transitionPauseState(sessionId, 'paused')
+    }
+
+    const outcome = await new Promise<'released' | 'aborted'>((resolve) => {
+      let waiters = this.pauseWaiters.get(sessionId)
+      if (!waiters) {
+        waiters = new Set()
+        this.pauseWaiters.set(sessionId, waiters)
+      }
+      const onWake = (o: 'released' | 'aborted') => {
+        cleanup()
+        resolve(o)
+      }
+      const onAbort = () => {
+        cleanup()
+        resolve('aborted')
+      }
+      const cleanup = () => {
+        waiters.delete(onWake)
+        signal?.removeEventListener('abort', onAbort)
+        if (waiters.size === 0) {
+          this.pauseWaiters.delete(sessionId)
+        }
+      }
+      waiters.add(onWake)
+      if (signal?.aborted) {
+        cleanup()
+        resolve('aborted')
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+
+    // Whether released or aborted, the pause is over — clear it.
+    this.transitionPauseState(sessionId, 'none')
+    return outcome
+  }
+
+  /**
+   * Clear any pause state and wake blocked gates with 'aborted'. Used by the
+   * stop/abort paths and session deletion so a paused gate never hangs.
+   */
+  clearPauseState(sessionId: string): void {
+    if (this.getPauseState(sessionId) !== 'none') {
+      this.transitionPauseState(sessionId, 'none')
+    }
+    this.wakePauseWaiters(sessionId, 'aborted')
+  }
+
+  private transitionPauseState(sessionId: string, next: PauseState): void {
+    if (this.getPauseState(sessionId) === next) {
+      return
+    }
+    logger.debug('Changing session pause state', { sessionId, from: this.getPauseState(sessionId), to: next })
+    this.pauseStates.set(sessionId, next)
+    this.emit({ type: 'pause_changed', sessionId, pauseState: next })
+  }
+
+  private wakePauseWaiters(sessionId: string, outcome: 'released' | 'aborted'): void {
+    const waiters = this.pauseWaiters.get(sessionId)
+    if (!waiters) {
+      return
+    }
+    this.pauseWaiters.delete(sessionId)
+    for (const wake of waiters) {
+      try {
+        wake(outcome)
+      } catch (error) {
+        logger.error('Pause waiter wake error', { sessionId, error })
+      }
+    }
   }
 
   /**
@@ -2219,6 +2371,7 @@ export class SessionManager {
         mode: dbSession.mode,
         phase: 'plan',
         isRunning: dbSession.isRunning,
+        pauseState: this.getPauseState(dbSession.id),
         messages: [],
         criteria: [],
         contextWindows: [],
@@ -2259,6 +2412,7 @@ export class SessionManager {
       mode: eventState.mode,
       phase: eventState.phase,
       isRunning,
+      pauseState: this.getPauseState(dbSession.id),
       messages,
       criteria: eventState.criteria,
       metadataEntries: eventState.metadataEntries,

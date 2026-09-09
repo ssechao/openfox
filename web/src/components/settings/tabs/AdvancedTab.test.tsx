@@ -39,6 +39,15 @@ describe('AdvancedTab', () => {
     expect(container.textContent).toContain('Dynamic System Prompt')
   })
 
+  it('renders the Caveman thinking toggle and persists it', async () => {
+    const { container } = render(<AdvancedTab onClose={vi.fn()} />)
+    const toggles = container.querySelectorAll('label')
+    const cavemanToggle = Array.from(toggles).find((t) => t.textContent?.includes('Caveman thinking'))
+    expect(cavemanToggle).toBeTruthy()
+    await userEvent.setup().click(cavemanToggle!)
+    expect(mockSetSetting).toHaveBeenCalledWith('llm.cavemanThinking', 'true')
+  })
+
   it('renders the Speculative Cache Warming toggle', () => {
     const { container } = render(<AdvancedTab onClose={vi.fn()} />)
     expect(container.textContent).toContain('Speculative Cache Warming')

@@ -6,6 +6,16 @@ import { getProject } from '../db/projects.js'
 import { getGateConfig, getTaskSettings } from '../db/tasks.js'
 import { serverT } from '../i18n.js'
 
+/** Loose shape guard for an incoming schedule — the service validates deeply. */
+function isSchedule(value: unknown): value is import('../../shared/types.js').TaskSchedule {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'type' in value &&
+    ((value as { type?: unknown }).type === 'once' || (value as { type?: unknown }).type === 'recurring')
+  )
+}
+
 /**
  * REST API for the project task board. All mutations funnel through the
  * tasks service so transition/gate enforcement is server-side. Static routes
@@ -121,7 +131,7 @@ export function registerTaskRoutes(router: Router, tasksService: TasksService): 
   router.post('/projects/:projectId/tasks', (req: Request, res: Response) => {
     const projectId = requireProject(req, res)
     if (!projectId) return
-    const { prompt, attachments, agentId, providerId, model } = req.body
+    const { prompt, attachments, agentId, providerId, model, schedule } = req.body
     if (typeof prompt !== 'string') {
       return res
         .status(400)
@@ -136,6 +146,7 @@ export function registerTaskRoutes(router: Router, tasksService: TasksService): 
           ...(typeof agentId === 'string' ? { agentId } : {}),
           ...(typeof providerId === 'string' ? { providerId } : {}),
           ...(typeof model === 'string' ? { model } : {}),
+          ...(isSchedule(schedule) ? { schedule } : {}),
         },
         { actor: HUMAN },
       )
@@ -156,13 +167,14 @@ export function registerTaskRoutes(router: Router, tasksService: TasksService): 
   router.put('/projects/:projectId/tasks/:taskId', (req: Request, res: Response) => {
     const projectId = requireProject(req, res)
     if (!projectId) return
-    const { prompt, attachments, agentId, providerId, model, expectedVersion } = req.body
+    const { prompt, attachments, agentId, providerId, model, schedule, expectedVersion } = req.body
     const patch: {
       prompt?: string
       attachments?: import('../../shared/types.js').Attachment[]
       agentId?: string | null
       providerId?: string | null
       model?: string | null
+      schedule?: import('../../shared/types.js').TaskSchedule | null
     } = {}
     if (typeof prompt === 'string') patch.prompt = prompt
     if (Array.isArray(attachments)) {
@@ -171,6 +183,8 @@ export function registerTaskRoutes(router: Router, tasksService: TasksService): 
     if (typeof agentId === 'string' || agentId === null) patch.agentId = agentId
     if (typeof providerId === 'string' || providerId === null) patch.providerId = providerId
     if (typeof model === 'string' || model === null) patch.model = model
+    if (schedule === null || isSchedule(schedule))
+      patch.schedule = schedule as import('../../shared/types.js').TaskSchedule | null
     if (Object.keys(patch).length === 0) {
       return res
         .status(400)

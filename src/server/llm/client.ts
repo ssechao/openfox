@@ -71,11 +71,33 @@ export interface LLMClientWithModel extends LLMClient {
   resetResponsesChain?(key: string): void
 }
 
+/**
+ * opencode.ai endpoints (Zen / Go) require a stable per-conversation
+ * x-opencode-session header; see https://opencode.ai/docs/go/.
+ */
+function isOpenCodeEndpoint(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl)
+    return url.protocol === 'https:' && url.hostname.replace(/\.$/, '') === 'opencode.ai'
+  } catch {
+    return false
+  }
+}
+
+function openCodeSessionHeaders(sessionId: string): Record<string, string> {
+  return {
+    'x-opencode-session': sessionId,
+    'x-opencode-client': 'openfox',
+    'User-Agent': 'openfox',
+  }
+}
+
 export function createLLMClient(
   config: Config,
   initialBackend: Backend = config.llm.backend ?? 'unknown',
 ): LLMClientWithModel {
   const baseURL = ensureVersionPrefix(config.llm.baseUrl)
+  const isOpencode = isOpenCodeEndpoint(baseURL)
 
   const httpClient = new OpenAIHttpClient({
     baseURL,
@@ -86,6 +108,7 @@ export function createLLMClient(
   // options.num_ctx). Dispatched per request based on the current backend.
   const ollamaHttpClient = new OllamaHttpClient({
     baseURL: stripVersionPrefix(baseURL),
+    ...(config.llm.apiKey ? { apiKey: config.llm.apiKey } : {}),
   })
   // Some models (OpenCode Go: gpt-5.6-luna, grok-4.6, muse-spark-1.2-…; OpenAI
   // gpt-5 family) are served through OpenAI's Responses API rather than
@@ -420,6 +443,7 @@ export function createLLMClient(
           {
             signal: request.signal,
             ...(chainPlan.opts ? { chain: chainPlan.opts } : {}),
+            ...(request.sessionId && isOpencode && { headers: openCodeSessionHeaders(request.sessionId) }),
           },
           request.returnRaw,
         )
@@ -546,6 +570,7 @@ export function createLLMClient(
         const stream = httpFor(backend).createChatCompletionStream(streamingParams, {
           signal: streamSignal,
           ...(chainPlan.opts ? { chain: chainPlan.opts } : {}),
+          ...(request.sessionId && isOpencode && { headers: openCodeSessionHeaders(request.sessionId) }),
         })
 
         let fullContent = ''
