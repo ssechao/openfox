@@ -22,7 +22,7 @@ describe('Auto-Compaction Trigger', () => {
   let testDir: TestProject
 
   beforeAll(async () => {
-    server = await createTestServer({ maxContext: 100 })
+    server = await createTestServer({ maxContext: 5_000 })
   })
 
   afterAll(async () => {
@@ -55,7 +55,7 @@ describe('Auto-Compaction Trigger', () => {
       3000,
     )
 
-    expect(client.getContextState()?.maxTokens).toBe(100)
+    expect(client.getContextState()?.maxTokens).toBe(5_000)
     expect(client.getContextState()?.currentTokens).toBeGreaterThanOrEqual(100)
 
     client.clearEvents()

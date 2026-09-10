@@ -92,7 +92,7 @@ vi.mock('../events/index.js', () => ({
 }))
 
 import { runTopLevelAgentLoop } from './agent-loop.js'
-import { consumeStreamGenerator } from './stream-pure.js'
+import { consumeStreamGenerator, streamLLMPure } from './stream-pure.js'
 import { executeTools } from './execute-tools.js'
 
 function createMockSessionManager(overrides?: Record<string, any>): SessionManager {
@@ -153,7 +153,6 @@ function makeConfig(overrides?: Partial<TopLevelLoopConfig>): TopLevelLoopConfig
 function makeStreamResult(overrides?: Record<string, any>) {
   return {
     content: '',
-    thinkingContent: undefined,
     toolCalls: [],
     segments: [],
     usage: { promptTokens: 100, completionTokens: 50 },
@@ -358,6 +357,103 @@ describe('agentLoop integration', () => {
     expect(batchContexts.length).toBeGreaterThanOrEqual(2)
     expect(batchContexts[0].dangerLevel).toBe('normal')
     expect(batchContexts[batchContexts.length - 1].dangerLevel).toBe('dangerous')
+  })
+
+  it('executes an accepted tool before compacting at the threshold', async () => {
+    const append = vi.fn()
+    const toolCall: ToolCall = { id: 'call-read', name: 'read_file', arguments: { path: 'synthetic.txt' } }
+
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    vi.mocked(executeTools).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'synthetic result', toolCallId: 'call-read' }],
+      stepDoneCalled: false,
+    } as any)
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockReturnValueOnce(true).mockReturnValue(false)
+
+    await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+
+    expect(executeTools).toHaveBeenCalledTimes(1)
+    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(executeTools).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]!,
+    )
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(3)
+  })
+
+  it('compacts an already-full session before the next model request', async () => {
+    const append = vi.fn()
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 180000,
+        maxTokens: 200000,
+        compactionCount: 0,
+        dangerZone: true,
+        canCompact: true,
+        dynamicContextChanged: false,
+      }),
+    })
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockReturnValueOnce(true).mockReturnValue(false)
+
+    await runTopLevelAgentLoop(makeConfig({ append, sessionManager }), turnMetrics)
+
+    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[0]!,
+    )
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses a tool-free request and a dedicated output budget for compaction', async () => {
+    const definitions = [{ type: 'function', function: { name: 'read_file', parameters: {} } }]
+    const assembleRequest = vi.fn(async ({ promptTools }) => ({
+      systemPrompt: 'test-prompt',
+      messages: [],
+      tools: promptTools,
+    }))
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+      makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }),
+    )
+
+    await runTopLevelAgentLoop(
+      makeConfig({
+        initialCompacting: true,
+        assembleRequest,
+        getToolRegistry: () => ({ definitions, execute: vi.fn() }) as any,
+      }),
+      turnMetrics,
+    )
+
+    const request = vi.mocked(streamLLMPure).mock.calls[0]?.[0]
+    expect(request).toBeDefined()
+    expect(request!.toolChoice).toBe('none')
+    expect(request!.tools).toEqual([])
+    expect(request!.modelSettings?.maxTokens).toBe(8192)
+  })
+
+  it('fails compaction once without replacing history when the summary is incomplete', async () => {
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+      makeStreamResult({
+        content: '',
+        finishReason: 'tool_calls',
+        toolCalls: [{ id: 'call-read', name: 'read_file', arguments: { path: 'synthetic.txt' } }],
+      }),
+    )
+    const append = vi.fn()
+
+    const result = await runTopLevelAgentLoop(makeConfig({ initialCompacting: true, append }), turnMetrics)
+
+    expect(result.failed?.error).toBeTruthy()
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+    expect(executeTools).not.toHaveBeenCalled()
+    expect(append.mock.calls.some(([event]) => event.type === 'context.compacted')).toBe(false)
   })
 
   it('auto-compacts within the loop when threshold is exceeded, then continues normally', async () => {
