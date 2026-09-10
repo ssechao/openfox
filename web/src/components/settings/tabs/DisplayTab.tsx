@@ -80,7 +80,7 @@ const PERF_TOGGLES: ToggleDefinition[] = [
       en: 'Swap custom styled scrollbars for native ones in tool call views (file previews, arguments, results). Faster, but native scrollbars look different on some platforms.',
       fr: 'Remplace les barres de défilement personnalisées par des barres natives dans les vues d’appels d’outils (aperçus de fichiers, arguments, résultats). Plus rapide, mais l’apparence diffère selon les plateformes.',
     },
-    defaultValue: 'false',
+    defaultValue: 'true',
   },
   {
     key: SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS,
@@ -149,7 +149,7 @@ export function DisplayTab() {
   const showStats = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_STATS, 'true')
   const showAgentDefinitions = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_AGENT_DEFINITIONS, 'true')
   const showWorkflowBars = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_WORKFLOW_BARS, 'true')
-  const nativeScrollbars = useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS, 'false')
+  const nativeScrollbars = useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS, 'true')
   const nativeScrollbarsCodeBlocks = useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS, 'false')
   const collapseLargeToolCalls = useSetting(SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS, 'false')
   const deferCodeHighlightWhileStreaming = useSetting(

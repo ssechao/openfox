@@ -48,6 +48,41 @@
   right: 3px !important;
 }
 
+/* Native tool-call scrolling avoids creating hundreds of OverlayScrollbars
+ * instances in long sessions. Keep the browser-native performance while
+ * matching the app theme instead of showing a bright platform-default track. */
+[data-native-scroll-area] {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--color-text-primary) / 0.32) transparent;
+}
+
+[data-native-scroll-area]::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+[data-native-scroll-area]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-native-scroll-area]::-webkit-scrollbar-thumb {
+  min-width: 32px;
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgb(var(--color-text-primary) / 0.32);
+  background-clip: padding-box;
+}
+
+[data-native-scroll-area]::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--color-accent-primary) / 0.85);
+  background-clip: padding-box;
+}
+
+[data-native-scroll-area]::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
