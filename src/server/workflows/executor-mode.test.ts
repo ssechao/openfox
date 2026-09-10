@@ -726,4 +726,59 @@ describe('executeWorkflow mode changes', () => {
     // Should complete successfully (reach $done)
     expect(result.finalAction).toHaveProperty('type', 'DONE')
   })
+
+  it('passes providerManager to executeSubAgent when executing sub_agent steps', async () => {
+    const { executeSubAgent } = await import('../sub-agents/manager.js')
+    const { findAgentById } = await import('../agents/registry.js')
+
+    const mockProviderManager = { createClient: vi.fn(), getProviders: vi.fn(() => []) }
+    const sessionManagerWithPm = {
+      ...mockSessionManager,
+      getProviderManager: vi.fn(() => mockProviderManager),
+    }
+
+    vi.mocked(findAgentById).mockReturnValue({
+      metadata: {
+        id: 'jira_agent',
+        name: 'Jira Agent',
+        description: 'Jira sub-agent',
+        subagent: true,
+        allowedTools: ['run_command'],
+      },
+      prompt: 'Do Jira tasks',
+    })
+
+    const workflowWithSubAgent: WorkflowDefinition = {
+      metadata: { id: 'test-subagent-wf', name: 'Test Subagent WF', description: '', version: '1' },
+      entryStep: 'step-subagent',
+      settings: { maxIterations: 10 },
+      steps: [
+        {
+          id: 'step-subagent',
+          name: 'Jira Step',
+          type: 'sub_agent',
+          phase: 'build',
+          subAgentType: 'jira_agent',
+          prompt: 'Process ticket',
+          transitions: [{ when: { type: 'step_result', result: 'success' }, goto: '$done' }],
+        },
+      ],
+    }
+
+    const result = await executeWorkflow(workflowWithSubAgent, {
+      ...options,
+      sessionManager: sessionManagerWithPm as any,
+      sessionId: 'test-session',
+      llmClient: { getModel: () => 'gpt-4', complete: vi.fn() } as any,
+    })
+
+    expect(result.finalAction).toHaveProperty('type', 'DONE')
+    expect(sessionManagerWithPm.getProviderManager).toHaveBeenCalled()
+    expect(executeSubAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subAgentType: 'jira_agent',
+        providerManager: mockProviderManager,
+      }),
+    )
+  })
 })

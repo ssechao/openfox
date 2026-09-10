@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.143 - 2026-09-10
+
+### Features
+
+- **Unsloth Studio added as a supported provider** — pick it from the engine list in the provider modal; its local URL and name are pre-filled and models are fetched like any other OpenAI-compatible backend.
+
+### Enhancements
+
+- **Provider engine cards no longer truncate** — cards now wrap onto multiple rows on narrow windows instead of clipping their labels, and the provider modal is wider to fit.
+
+### Bug Fixes
+
+- **Engine quick-pick buttons overwrite stale values** — clicking a second local port card now replaces the previously pre-filled URL and name instead of keeping the first card's values.
+- **Workflow sub-agent steps now honor per-provider model overrides** — the configured override model was silently ignored during workflow sub-agent execution, falling back to the parent's LLM client.
+- **Ordered lists after a paragraph render as lists again** — a numbered list following a paragraph is no longer flattened into inline text, and the numbering is preserved.
+
 ## 2.0.142 - 2026-09-09
 
 ### Features

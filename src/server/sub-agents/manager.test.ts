@@ -335,6 +335,35 @@ describe('SubAgentManager', () => {
       expect(result.content).toBe('Test result content')
     })
 
+    it('falls back to sessionManager.getProviderManager() when providerManager is omitted in options', async () => {
+      resolveLLMClientForAgentMock.mockReturnValue({
+        client: createMockLLMClient(),
+        usedOverride: true,
+        override: { providerId: 'p1', model: 'claude-x' },
+      })
+      const dedicatedClient = createMockLLMClient()
+      const pm = createMockProviderManager(dedicatedClient)
+      const parentClient = createMockLLMClient()
+
+      const mockSessionManager = createMockSessionManager()
+      mockSessionManager.getProviderManager = vi.fn(() => pm) as any
+
+      const result = await executeSubAgent({
+        subAgentType: 'explorer',
+        prompt: 'Explore.',
+        sessionManager: mockSessionManager,
+        sessionId: 'test-session',
+        llmClient: parentClient,
+        toolRegistry: createMockToolRegistry(),
+        turnMetrics: createMockTurnMetrics(),
+        statsIdentity: TEST_STATS_IDENTITY,
+      })
+
+      expect(mockSessionManager.getProviderManager).toHaveBeenCalled()
+      expect(resolveLLMClientForAgentMock).toHaveBeenCalledWith('explorer', parentClient, pm, undefined)
+      expect(result.content).toBe('Test result content')
+    })
+
     it('derives non-thinking model settings when the override effort is none', async () => {
       resolveLLMClientForAgentMock.mockReturnValue({
         client: createMockLLMClient(),

@@ -526,7 +526,10 @@ describe('TaskEditor', () => {
       fireEvent.click(screen.getByRole('button', { name: /repeat/i }))
       fireEvent.change(screen.getByLabelText(/first run/i), { target: { value: '2030-01-01T09:00' } })
       fireEvent.change(screen.getByLabelText(/repeat unit/i), { target: { value: 'week' } })
-      fireEvent.click(screen.getByRole('button', { name: /^thu$/i }))
+      const thuBtn = screen.getByRole('button', { name: /^thu$/i })
+      if (thuBtn.getAttribute('aria-pressed') !== 'true') {
+        fireEvent.click(thuBtn)
+      }
       typePrompt()
       await save()
       await waitFor(() => expect(postedBody()).toBeTruthy())

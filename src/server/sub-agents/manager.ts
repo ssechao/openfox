@@ -156,21 +156,23 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
   const session = sessionManager.requireSession(sessionId)
   const windowOptions = getWindowOptions(sessionId)
 
+  const effectiveProviderManager = providerManager ?? sessionManager.getProviderManager?.()
+
   // --- Resolve model override (per-user setting, sub-agent scoped: session untouched) ---
 
   let llmClient = parentLlmClient
   let statsIdentity = parentStatsIdentity
   let hasOverride = false
   let overrideModelSettings: Record<string, unknown> | undefined
-  if (providerManager) {
+  if (effectiveProviderManager) {
     // A session-pinned effort ("Keep current reasoning effort") wins over the
     // sub-agent override's own effort, mirroring the top-level agent path.
     const pinnedEffort = session.providerPinnedEffort ?? undefined
-    const resolved = resolveLLMClientForAgent(subAgentType, parentLlmClient, providerManager, pinnedEffort)
+    const resolved = resolveLLMClientForAgent(subAgentType, parentLlmClient, effectiveProviderManager, pinnedEffort)
     if (resolved.usedOverride && resolved.override) {
       hasOverride = true
       llmClient = resolved.client
-      const provider = providerManager.getProviders().find((p) => p.id === resolved.override!.providerId)
+      const provider = effectiveProviderManager.getProviders().find((p) => p.id === resolved.override!.providerId)
       statsIdentity = {
         providerId: resolved.override.providerId,
         providerName: provider?.name ?? resolved.override.providerId,
@@ -181,12 +183,12 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
       // Use model settings from the override provider/model, not the session model
       // — with the mode derived from the override's effective effort so "none"
       // disables thinking instead of forcing chat_template_kwargs enable_thinking=true.
-      const overrideEffort = providerManager.resolveModelEffort(
+      const overrideEffort = effectiveProviderManager.resolveModelEffort(
         resolved.override.providerId,
         resolved.override.model,
         resolved.override.reasoningEffort,
       )
-      overrideModelSettings = providerManager.getModelSettings(
+      overrideModelSettings = effectiveProviderManager.getModelSettings(
         resolved.override.providerId,
         resolved.override.model,
         overrideEffort === 'none' ? 'non-thinking' : 'thinking',
@@ -224,14 +226,14 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
       // may be running a top-level override that must not leak into sub-agents.
       const effective = sessionManager.resolveEffectiveProviderModel(sessionId, subAgentType)
       if (effective.providerId && effective.model) {
-        const effectiveClient = providerManager.createClient(
+        const effectiveClient = effectiveProviderManager.createClient(
           effective.providerId,
           effective.model,
           effective.reasoningEffort,
         )
         if (effectiveClient) {
           llmClient = effectiveClient
-          const provider = providerManager.getProviders().find((p) => p.id === effective.providerId)
+          const provider = effectiveProviderManager.getProviders().find((p) => p.id === effective.providerId)
           statsIdentity = {
             providerId: effective.providerId,
             providerName: provider?.name ?? effective.providerId,

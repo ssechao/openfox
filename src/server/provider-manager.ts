@@ -650,7 +650,8 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         clearModelCache(cacheUrl)
 
         // Refetch models from backend when switching providers
-        const backend = provider.backend as 'ollama' | 'vllm' | 'sglang' | 'llamacpp' | 'lmstudio' | 'unknown'
+        const backend = provider.backend as
+          'ollama' | 'vllm' | 'sglang' | 'llamacpp' | 'lmstudio' | 'unsloth' | 'unknown'
         logger.info('activateProvider fetching models', {
           providerId,
           providerName: provider.name,
@@ -1030,7 +1031,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         return { success: false, error: 'Provider not found' }
       }
 
-      const backend = provider.backend as 'ollama' | 'vllm' | 'sglang' | 'llamacpp' | 'lmstudio' | 'unknown'
+      const backend = provider.backend as 'ollama' | 'vllm' | 'sglang' | 'llamacpp' | 'lmstudio' | 'unsloth' | 'unknown'
       logger.info('refreshProviderModels fetching models', {
         providerId,
         providerName: provider.name,
