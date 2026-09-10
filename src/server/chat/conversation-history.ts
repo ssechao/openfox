@@ -217,10 +217,11 @@ export async function processEventsForConversation(
   sessionId: string,
   llmClient: LLMClientWithModel,
   onEvent: (event: TurnEvent) => void,
+  visionOverride?: boolean,
 ): Promise<StoredEvent[]> {
   const eventStore = getEventStore()
   const rawEvents = eventStore.getEvents(sessionId)
-  const modelVision = modelSupportsVision(llmClient.getModel())
+  const modelVision = modelSupportsVision(llmClient.getModel(), visionOverride)
   const visionModel = await loadResolvedVisionModel()
   const { events: processedEvents } = await processContextImages(rawEvents, {
     modelSupportsVision: modelVision,

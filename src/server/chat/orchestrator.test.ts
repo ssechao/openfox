@@ -10,6 +10,7 @@ const {
   streamLLMPureMock,
   consumeStreamGeneratorMock,
   getConversationMessagesMock,
+  processEventsForConversationMock,
 } = vi.hoisted(() => ({
   getEventStoreMock: vi.fn(),
   getContextMessagesMock: vi.fn(),
@@ -20,6 +21,7 @@ const {
   streamLLMPureMock: vi.fn(),
   consumeStreamGeneratorMock: vi.fn(),
   getConversationMessagesMock: vi.fn((): import('./request-context.js').RequestContextMessage[] => []),
+  processEventsForConversationMock: vi.fn(async () => []),
 }))
 
 vi.mock('../events/index.js', () => ({
@@ -34,7 +36,7 @@ vi.mock('../events/index.js', () => ({
 
 vi.mock('./conversation-history.js', () => ({
   getConversationMessages: getConversationMessagesMock,
-  processEventsForConversation: vi.fn(async (_sessionId: string, _llmClient: any, _onEvent: any) => []),
+  processEventsForConversation: processEventsForConversationMock,
 }))
 
 vi.mock('../db/settings.js', () => ({
@@ -229,7 +231,7 @@ function createSessionManager(state: Record<string, any>) {
       contextState.currentTokens = tokens
     }),
     addTokensUsed: vi.fn(),
-    getCurrentModelSettings: vi.fn(() => undefined),
+    getCurrentModelSettings: vi.fn((): { supportsVision?: boolean } | undefined => undefined),
     getLspManager: vi.fn(() => ({ name: 'lsp' })),
     getEffectiveWorkdir: vi.fn((_id: string) => state['current']?.workspace ?? state['current']?.workdir ?? '/test'),
     getProjectWorkdir: vi.fn((_id: string) => state['current']?.workdir ?? '/test'),
@@ -297,6 +299,8 @@ describe('chat orchestrator', () => {
     getContextMessagesMock.mockReset()
     getCurrentContextWindowIdMock.mockReset()
     getConversationMessagesMock.mockReset()
+    processEventsForConversationMock.mockReset()
+    processEventsForConversationMock.mockResolvedValue([])
     getContextMessagesMock.mockReturnValue([])
     getConversationMessagesMock.mockReturnValue([])
     getCurrentContextWindowIdMock.mockReturnValue(undefined)
@@ -348,6 +352,7 @@ describe('chat orchestrator', () => {
       },
     }
     const sessionManager = createSessionManager(state)
+    sessionManager.getCurrentModelSettings.mockReturnValue({ supportsVision: true })
 
     await runChatTurn({
       sessionManager: sessionManager as never,
@@ -362,6 +367,12 @@ describe('chat orchestrator', () => {
     expect(eventTypes).toContain('turn.snapshot')
     expect(eventTypes.at(-1)).toBe('running.changed')
     expect(sessionManager.setCurrentContextSize).toHaveBeenCalledWith('session-1', 30, 10, undefined)
+    expect(processEventsForConversationMock).toHaveBeenCalledWith(
+      'session-1',
+      expect.anything(),
+      expect.any(Function),
+      true,
+    )
     expect(eventStore.append.mock.calls.find(([, event]) => event.type === 'turn.snapshot')?.[1]).toMatchObject({
       type: 'turn.snapshot',
       data: expect.objectContaining({ mode: 'planner', phase: 'plan', snapshotSeq: expect.any(Number) }),

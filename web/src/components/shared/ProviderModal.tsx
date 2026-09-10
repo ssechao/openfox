@@ -70,6 +70,7 @@ function buildMergedModel(baseId: string, baseModel: ModelInfo | undefined, memb
 interface ModelConfig {
   contextWindow: number
   supportsVision?: boolean
+  supportsVisionSource?: 'profile' | 'backend' | 'user'
   thinkingEnabled?: boolean
   thinkingLevel?: string
   reasoningEfforts?: string[]
@@ -247,7 +248,9 @@ function ModelConfigPanel({
           <input
             type="checkbox"
             checked={modelConfigs[model.id]?.supportsVision ?? false}
-            onChange={(e) => onUpdateConfig(model.id, { supportsVision: e.target.checked })}
+            onChange={(e) =>
+              onUpdateConfig(model.id, { supportsVision: e.target.checked, supportsVisionSource: 'user' })
+            }
             className="accent-accent-primary"
           />{' '}
           {t({ en: 'Supports vision', fr: 'Prend en charge la vision' })}
@@ -863,6 +866,7 @@ export function ProviderModal({
       contextWindow: merged.contextWindow,
       ...(merged.requestBody !== undefined ? { requestBody: merged.requestBody } : {}),
       ...(merged.supportsVision !== undefined ? { supportsVision: merged.supportsVision } : {}),
+      ...(merged.supportsVisionSource !== undefined ? { supportsVisionSource: merged.supportsVisionSource } : {}),
     }))
     setModels((current) => [...members, ...current.filter((m) => m.id !== merged.id)])
     const mergedConfig = modelConfigs[merged.id]
@@ -964,6 +968,7 @@ export function ProviderModal({
           configs[m.id] = {
             contextWindow: m.contextWindow,
             supportsVision: m.supportsVision,
+            supportsVisionSource: m.supportsVisionSource,
             thinkingEnabled: m.thinkingEnabled,
             thinkingLevel: m.thinkingLevel ?? defaultReasoningEffort(m.reasoningEfforts),
             nonThinkingEnabled: m.nonThinkingEnabled,
@@ -1174,6 +1179,7 @@ export function ProviderModal({
               next[m.id] = {
                 contextWindow: m.contextWindow,
                 supportsVision: m.supportsVision,
+                supportsVisionSource: m.supportsVisionSource,
                 thinkingEnabled: true,
                 thinkingLevel: defaultReasoningEffort(m.reasoningEfforts),
                 defaultTemperature: (m as { defaultTemperature?: number }).defaultTemperature,
@@ -1227,7 +1233,8 @@ export function ProviderModal({
           id: string
           contextWindow: number
           contextSource: 'backend' | 'hardcoded' | 'default'
-          supportsVision: boolean
+          supportsVision?: boolean
+          supportsVisionSource?: 'profile' | 'backend'
           thinkingConfig: Record<string, unknown> | null
           nonThinkingConfig: Record<string, unknown> | null
           sendReasoningInMessages?: boolean
@@ -1239,10 +1246,12 @@ export function ProviderModal({
       }
       for (const m of data.models) {
         const config: Partial<ModelConfig> = {}
-        // Only apply context/supportsvision when reliably detected
         if (m.contextSource !== 'default') {
           config.contextWindow = m.contextWindow
+        }
+        if (m.supportsVision !== undefined) {
           config.supportsVision = m.supportsVision
+          config.supportsVisionSource = m.supportsVisionSource ?? 'backend'
         }
         if (m.thinkingConfig) {
           config.thinkingEnabled = true
@@ -1384,6 +1393,7 @@ export function ProviderModal({
         contextWindow: modelConfigs[m.id]?.contextWindow ?? m.contextWindow,
         selected: selectedModelIds.has(m.id) || undefined,
         supportsVision: modelConfigs[m.id]?.supportsVision,
+        supportsVisionSource: modelConfigs[m.id]?.supportsVisionSource,
         thinkingEnabled: modelConfigs[m.id]?.thinkingEnabled,
         thinkingLevel: modelConfigs[m.id]?.thinkingLevel,
         nonThinkingEnabled: modelConfigs[m.id]?.nonThinkingEnabled,

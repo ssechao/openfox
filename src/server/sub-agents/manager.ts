@@ -350,7 +350,13 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
         }),
       getToolRegistry: () => toolRegistry,
       getConversationMessages: async () => {
-        const processedEvents = await processEventsForConversation(sessionId, llmClient, append)
+        const overrideVision = overrideModelSettings?.['supportsVision']
+        const visionOverride = hasOverride
+          ? typeof overrideVision === 'boolean'
+            ? overrideVision
+            : undefined
+          : sessionManager.getCurrentModelSettings(sessionId, subAgentType)?.supportsVision
+        const processedEvents = await processEventsForConversation(sessionId, llmClient, append, visionOverride)
         return getConversationMessages(subAgentScope, { events: processedEvents })
       },
       subAgentMetadata: { subAgentId, subAgentType },

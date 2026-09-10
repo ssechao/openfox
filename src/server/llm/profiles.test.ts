@@ -56,6 +56,21 @@ describe('profiles', () => {
       expect(profile.temperature).toBe(1)
     })
 
+    it.each([
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-opus-4-8',
+      'claude-fable-5',
+      'anthropic/claude-opus-5',
+      'claude-opus-5:batch',
+    ])('marks modern Claude model %s as vision capable', (model) => {
+      expect(getModelProfile(model).supportsVision).toBe(true)
+    })
+
+    it('does not classify legacy Claude models as vision capable', () => {
+      expect(getModelProfile('claude-2.1').supportsVision).toBe(false)
+    })
+
     it('returns Llama profile', () => {
       const profile = getModelProfile('llama-3-70b')
 

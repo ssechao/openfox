@@ -721,6 +721,7 @@ export interface ModelConfig {
   maxTokens?: number
   compactionThreshold?: number
   supportsVision?: boolean
+  supportsVisionSource?: 'profile' | 'backend' | 'user'
   // Per-model thinking configuration
   thinkingEnabled?: boolean
   thinkingLevel?: string

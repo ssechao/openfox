@@ -622,3 +622,75 @@ describe('Rejected-params probing', () => {
     }
   })
 })
+
+describe('Vision capability detection', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubOpenAIEndpoint(modelId: string) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url.endsWith('/models')) {
+          return new Response(JSON.stringify({ data: [{ id: modelId, max_model_len: 1_000_000 }] }), {
+            status: 200,
+          })
+        }
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'hi' } }] }), { status: 200 })
+      }),
+    )
+  }
+
+  it('uses the known Claude profile when the OpenAI models endpoint omits modality metadata', async () => {
+    stubOpenAIEndpoint('claude-opus-5')
+
+    const result = await autoConfig({
+      url: 'https://provider.example/v1',
+      backend: 'openai',
+      models: [{ id: 'claude-opus-5' }],
+    })
+
+    expect(result.models[0]?.supportsVision).toBe(true)
+    expect(result.models[0]?.supportsVisionSource).toBe('profile')
+  })
+
+  it('leaves vision unknown instead of persisting false for an unrecognized OpenAI model', async () => {
+    stubOpenAIEndpoint('custom-model')
+
+    const result = await autoConfig({
+      url: 'https://provider.example/v1',
+      backend: 'openai',
+      models: [{ id: 'custom-model' }],
+    })
+
+    expect(result.models[0]?.supportsVision).toBeUndefined()
+    expect(result.models[0]?.supportsVisionSource).toBeUndefined()
+  })
+
+  it('keeps an explicit negative modality result from llama.cpp', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (url.endsWith('/props')) {
+          return new Response(
+            JSON.stringify({ default_generation_settings: { n_ctx: 131_072 }, modalities: { vision: false } }),
+            { status: 200 },
+          )
+        }
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'hi' } }] }), { status: 200 })
+      }),
+    )
+
+    const result = await autoConfig({
+      url: 'http://localhost:8080',
+      backend: 'llamacpp',
+      models: [{ id: 'custom-model' }],
+    })
+
+    expect(result.models[0]?.supportsVision).toBe(false)
+    expect(result.models[0]?.supportsVisionSource).toBe('backend')
+  })
+})

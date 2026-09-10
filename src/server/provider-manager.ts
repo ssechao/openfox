@@ -70,16 +70,21 @@ async function fetchModelsFromBackend(
 
 function enrichWithProfileDefaults(model: ModelConfig): ModelConfig {
   const profile = getModelProfile(model.id)
+  const modernClaudeLegacyFalse =
+    profile.name === 'Claude' &&
+    profile.supportsVision &&
+    model.supportsVision === false &&
+    model.supportsVisionSource === undefined
+  const profileVision = model.supportsVision === undefined || modernClaudeLegacyFalse
+  const profileVisionSource = profile.name === 'Claude' && profile.supportsVision ? ('profile' as const) : undefined
   return {
     ...model,
-    // Only fill supportsVision from the profile when the model lacks it —
-    // a backend-detected value (e.g. Ollama /api/show, a transport plugin's
-    // listModels) must win over the static profile default.
-    ...(model.supportsVision !== undefined
-      ? {}
-      : profile.supportsVision !== undefined
-        ? { supportsVision: profile.supportsVision }
-        : {}),
+    ...(profileVision
+      ? {
+          supportsVision: profile.supportsVision,
+          ...(profileVisionSource !== undefined ? { supportsVisionSource: profileVisionSource } : {}),
+        }
+      : {}),
     defaultTemperature: profile.temperature,
     defaultTopP: profile.topP,
     ...(profile.topK !== undefined && { defaultTopK: profile.topK }),
@@ -188,7 +193,10 @@ export async function fetchModelsWithContext(
   return models.map((m) => ({
     id: m.id,
     contextWindow: m.contextWindow ?? 200000,
-    ...(m.supportsVision !== undefined && { supportsVision: m.supportsVision }),
+    ...(m.supportsVision !== undefined && {
+      supportsVision: m.supportsVision,
+      supportsVisionSource: 'backend' as const,
+    }),
     source: m.contextWindow ? 'backend' : ('default' as const),
   }))
 }
@@ -247,7 +255,7 @@ async function fetchOllamaModelsWithContext(baseUrl: string, _apiKey?: string): 
           modelsWithContext.push({
             id: model.name,
             contextWindow: contextLength,
-            ...(isVisionModel ? { supportsVision: true } : {}),
+            ...(isVisionModel ? { supportsVision: true, supportsVisionSource: 'backend' as const } : {}),
             source: contextLength !== 200000 ? 'backend' : ('default' as const),
           })
         } else {
@@ -332,6 +340,7 @@ export interface ModelSettingsUpdate {
   topK?: number | null
   maxTokens?: number | null
   supportsVision?: boolean
+  supportsVisionSource?: 'profile' | 'backend' | 'user'
   thinkingEnabled?: boolean
   thinkingLevel?: string
   reasoningEfforts?: string[]
@@ -717,6 +726,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
       const id = crypto.randomUUID()
       const provider: Provider = {
         ...providerData,
+        models: providerData.models.map((model) => enrichWithProfileDefaults(model)),
         id,
         createdAt: new Date().toISOString(),
       }
@@ -754,7 +764,10 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
     },
 
     setProviders(newProviders, newDefaultModelSelection) {
-      providers = [...newProviders]
+      providers = newProviders.map((provider) => ({
+        ...provider,
+        models: provider.models.map((model) => enrichWithProfileDefaults(model)),
+      }))
       defaultModelSelection = newDefaultModelSelection
       configDefaultModelSelection = newDefaultModelSelection
 
@@ -876,6 +889,10 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         settings.maxTokens !== undefined && settings.maxTokens !== null ? settings.maxTokens : existingModel?.maxTokens
       const finalSupportsVision =
         settings.supportsVision !== undefined ? settings.supportsVision : existingModel?.supportsVision
+      const finalSupportsVisionSource =
+        settings.supportsVision !== undefined
+          ? (settings.supportsVisionSource ?? 'user')
+          : existingModel?.supportsVisionSource
 
       logger.info('Updating model settings', {
         providerId,
@@ -888,6 +905,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
           topK: finalTopK,
           maxTokens: finalMaxTokens,
           supportsVision: finalSupportsVision,
+          supportsVisionSource: finalSupportsVisionSource,
         },
       })
 
@@ -906,6 +924,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         ...(finalTopK !== undefined && { topK: finalTopK }),
         ...(finalMaxTokens !== undefined && { maxTokens: finalMaxTokens }),
         ...(finalSupportsVision !== undefined && { supportsVision: finalSupportsVision }),
+        ...(finalSupportsVisionSource !== undefined && { supportsVisionSource: finalSupportsVisionSource }),
         ...(settings.thinkingEnabled !== undefined
           ? { thinkingEnabled: settings.thinkingEnabled }
           : existingModel?.thinkingEnabled !== undefined

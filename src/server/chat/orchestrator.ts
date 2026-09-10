@@ -91,10 +91,16 @@ async function buildRetryPatterns(): Promise<{ retryPatterns: RetryPatternConfig
 function buildGetConversationMessages(
   sessionId: string,
   resolveLLMClient: () => LLMClientWithModel,
+  resolveVisionOverride: () => boolean | undefined,
   append: (event: import('../events/types.js').TurnEvent) => void,
 ): () => Promise<RequestContextMessage[]> {
   return async () => {
-    const processedEvents = await processEventsForConversation(sessionId, resolveLLMClient(), (event) => append(event))
+    const processedEvents = await processEventsForConversation(
+      sessionId,
+      resolveLLMClient(),
+      (event) => append(event),
+      resolveVisionOverride(),
+    )
     return getConversationMessages({ type: 'toplevel', sessionId }, { events: processedEvents })
   }
 }
@@ -513,7 +519,12 @@ export async function runAgentTurn(
         })
       },
       getToolRegistry: () => getToolRegistryForAgent(agentDef, options.sessionId),
-      getConversationMessages: buildGetConversationMessages(options.sessionId, resolveAgentClient, append),
+      getConversationMessages: buildGetConversationMessages(
+        options.sessionId,
+        resolveAgentClient,
+        () => options.sessionManager.getCurrentModelSettings(options.sessionId, agentId)?.supportsVision,
+        append,
+      ),
       injectAgentReminder: () => injectAgentReminder(options.sessionId, agentDef),
       rebuildCachedContext: async () => {
         const { applyDynamicContext } = await import('./dynamic-context.js')

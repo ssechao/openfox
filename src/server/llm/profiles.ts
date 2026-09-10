@@ -44,6 +44,14 @@ const MOCK_PROFILE: ModelProfile = {
   supportsVision: false,
 }
 
+const CLAUDE_VISION_PROFILE: ModelProfile = {
+  name: 'Claude',
+  temperature: 0.7,
+  topP: 0.9,
+  defaultMaxTokens: 16384,
+  supportsVision: true,
+}
+
 /**
  * Model profiles indexed by model name patterns.
  * Patterns are matched against the model name (case-insensitive, partial match).
@@ -182,6 +190,10 @@ const MODEL_PROFILES: Array<{ pattern: string; profile: ModelProfile }> = [
       supportsVision: false,
     },
   },
+  { pattern: 'claude-opus-5', profile: CLAUDE_VISION_PROFILE },
+  { pattern: 'claude-sonnet-5', profile: CLAUDE_VISION_PROFILE },
+  { pattern: 'claude-opus-4-8', profile: CLAUDE_VISION_PROFILE },
+  { pattern: 'claude-fable-5', profile: CLAUDE_VISION_PROFILE },
   {
     pattern: 'claude',
     profile: {
@@ -245,6 +257,6 @@ export function getModelProfile(modelName: string): ModelProfile {
 /**
  * Check if a model supports vision/images.
  */
-export function modelSupportsVision(modelName: string): boolean {
-  return getModelProfile(modelName).supportsVision
+export function modelSupportsVision(modelName: string, override?: boolean): boolean {
+  return override ?? getModelProfile(modelName).supportsVision
 }

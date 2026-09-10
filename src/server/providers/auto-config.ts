@@ -7,6 +7,7 @@ import { logger } from '../utils/logger.js'
 import { findLmStudioModel } from './lmstudio.js'
 import { ensureVersionPrefix } from '../llm/url-utils.js'
 import { getCatalogEntry } from './model-catalog.js'
+import { getModelProfile } from '../llm/profiles.js'
 import { hasVisionEvidence } from './vision.js'
 
 /** Build the standard JSON headers with optional bearer auth. */
@@ -24,7 +25,8 @@ export interface ModelProbeResult {
   id: string
   contextWindow: number
   contextSource: 'backend' | 'hardcoded' | 'default'
-  supportsVision: boolean
+  supportsVision?: boolean
+  supportsVisionSource?: 'profile' | 'backend'
   thinkingConfig: Record<string, unknown> | null
   nonThinkingConfig: Record<string, unknown> | null
   /** Set to false when the provider rejects reasoning in assistant history. */
@@ -76,7 +78,13 @@ const THINKING_COMBOS: Record<string, unknown>[] = [
 interface ModelInfo {
   contextWindow: number
   source: 'backend' | 'hardcoded' | 'default'
-  supportsVision: boolean
+  supportsVision?: boolean
+  supportsVisionSource?: 'profile' | 'backend'
+}
+
+function knownVisionSupport(modelId: string): boolean | undefined {
+  const profile = getModelProfile(modelId)
+  return profile.name === 'default' ? undefined : profile.supportsVision
 }
 
 async function detectModelInfo(
@@ -100,7 +108,14 @@ async function detectModelInfo(
       'glm-4-32b-0414-128k': { ctx: 128_000, vision: false },
     }
     const knownVal = known[modelId]
-    if (knownVal) return { contextWindow: knownVal.ctx, source: 'hardcoded', supportsVision: knownVal.vision }
+    if (knownVal) {
+      return {
+        contextWindow: knownVal.ctx,
+        source: 'hardcoded',
+        supportsVision: knownVal.vision,
+        supportsVisionSource: 'profile',
+      }
+    }
   }
 
   try {
@@ -119,7 +134,12 @@ async function detectModelInfo(
     // vLLM and others: try /v1/models
     return await detectVllmInfo(baseUrl, apiKey, modelId)
   } catch {
-    return { contextWindow: 200_000, source: 'default', supportsVision: false }
+    const supportsVision = knownVisionSupport(modelId)
+    return {
+      contextWindow: 200_000,
+      source: 'default',
+      ...(supportsVision !== undefined ? { supportsVision, supportsVisionSource: 'profile' as const } : {}),
+    }
   }
 }
 
@@ -133,7 +153,12 @@ async function detectVllmInfo(baseUrl: string, apiKey: string | undefined, model
   const data = (await response.json()) as { data?: Array<{ id: string; max_model_len?: number }> }
   const model = data.data?.find((m) => m.id === modelId)
   if (model?.max_model_len) {
-    return { contextWindow: model.max_model_len, source: 'backend', supportsVision: false }
+    const supportsVision = knownVisionSupport(modelId)
+    return {
+      contextWindow: model.max_model_len,
+      source: 'backend',
+      ...(supportsVision !== undefined ? { supportsVision, supportsVisionSource: 'profile' as const } : {}),
+    }
   }
   throw new Error('No context window in response')
 }
@@ -149,7 +174,7 @@ async function detectLlamacppInfo(baseUrl: string): Promise<ModelInfo> {
   const nCtx = data.default_generation_settings?.n_ctx
   const supportsVision = data.modalities?.vision ?? false
   if (nCtx) {
-    return { contextWindow: nCtx, source: 'backend', supportsVision }
+    return { contextWindow: nCtx, source: 'backend', supportsVision, supportsVisionSource: 'backend' }
   }
   throw new Error('No n_ctx in props')
 }
@@ -176,7 +201,7 @@ async function detectOllamaInfo(baseUrl: string, modelId: string): Promise<Model
   const supportsVision = hasVisionEvidence(mi)
 
   if (ctxLen && !isNaN(ctxLen)) {
-    return { contextWindow: ctxLen, source: 'backend', supportsVision }
+    return { contextWindow: ctxLen, source: 'backend', supportsVision, supportsVisionSource: 'backend' }
   }
   throw new Error('No context_length in model_info')
 }
@@ -191,7 +216,12 @@ async function detectLmstudioInfo(baseUrl: string, modelId: string): Promise<Mod
   if (!model) throw new Error(`Model ${modelId} not found in LM Studio`)
 
   if (model.contextWindow) {
-    return { contextWindow: model.contextWindow, source: 'backend', supportsVision: model.supportsVision }
+    return {
+      contextWindow: model.contextWindow,
+      source: 'backend',
+      supportsVision: model.supportsVision,
+      supportsVisionSource: 'backend',
+    }
   }
   throw new Error('No context_length in LM Studio response')
 }
@@ -479,6 +509,7 @@ export async function autoConfig(input: AutoConfigInput): Promise<AutoConfigOutp
       contextWindow,
       source: contextSource,
       supportsVision,
+      supportsVisionSource,
     } = await detectModelInfo(baseUrl, apiKey, backend, model.id)
 
     const catalog = getCatalogEntry(model.id)
@@ -505,7 +536,8 @@ export async function autoConfig(input: AutoConfigInput): Promise<AutoConfigOutp
       id: model.id,
       contextWindow,
       contextSource,
-      supportsVision,
+      ...(supportsVision !== undefined ? { supportsVision } : {}),
+      ...(supportsVisionSource !== undefined ? { supportsVisionSource } : {}),
       thinkingConfig,
       nonThinkingConfig,
       ...(thinkingField ? { thinkingField } : {}),

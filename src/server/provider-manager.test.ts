@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createProviderManager, fetchModelsWithContext } from './provider-manager.js'
-import { createLLMClient } from './llm/index.js'
+import { createLLMClient, getModelProfile } from './llm/index.js'
 import type { Config, Provider } from '../shared/types.js'
 
 // Mock the LLM client
@@ -18,6 +18,7 @@ vi.mock('./llm/index.js', () => ({
 }))
 
 const createLLMClientMock = vi.mocked(createLLMClient)
+const getModelProfileMock = vi.mocked(getModelProfile)
 
 // Mock fetch
 const mockFetch = vi.fn()
@@ -904,6 +905,75 @@ describe('ProviderManager - Model Selection', () => {
 
       const settings = providerManager.getModelSettings('provider-1', 'model-a')
       expect(settings?.numCtx).toBeUndefined()
+    })
+
+    it('repairs a legacy false capability for a modern Claude model', () => {
+      getModelProfileMock.mockReturnValue({
+        name: 'Claude',
+        temperature: 0.7,
+        topP: 0.9,
+        defaultMaxTokens: 16384,
+        supportsVision: true,
+      })
+      const manager = createProviderManager({
+        ...config,
+        providers: [
+          {
+            id: 'claude-provider',
+            name: 'Claude',
+            url: 'http://localhost:3457/v1',
+            backend: 'openai',
+            models: [
+              {
+                id: 'claude-opus-5',
+                contextWindow: 1_000_000,
+                source: 'user',
+                supportsVision: false,
+              },
+            ],
+            isActive: true,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        defaultModelSelection: 'claude-provider/claude-opus-5',
+      })
+
+      expect(manager.getModelSettings('claude-provider', 'claude-opus-5')?.supportsVision).toBe(true)
+    })
+
+    it('keeps an explicit user vision override above the Claude profile', () => {
+      getModelProfileMock.mockReturnValue({
+        name: 'Claude',
+        temperature: 0.7,
+        topP: 0.9,
+        defaultMaxTokens: 16384,
+        supportsVision: true,
+      })
+      const manager = createProviderManager({
+        ...config,
+        providers: [
+          {
+            id: 'claude-provider',
+            name: 'Claude',
+            url: 'http://localhost:3457/v1',
+            backend: 'openai',
+            models: [
+              {
+                id: 'claude-opus-5',
+                contextWindow: 1_000_000,
+                source: 'user',
+                supportsVision: false,
+                supportsVisionSource: 'user',
+              },
+            ],
+            isActive: true,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        defaultModelSelection: 'claude-provider/claude-opus-5',
+      })
+
+      expect(manager.getModelSettings('claude-provider', 'claude-opus-5')?.supportsVision).toBe(false)
     })
   })
 

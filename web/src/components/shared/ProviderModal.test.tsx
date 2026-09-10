@@ -177,6 +177,33 @@ describe('ProviderModal - thinkingLevel persistence', () => {
     expect(savedProvider().models.find((model) => model.id === 'reasoning-model')?.thinkingLevel).toBe('high')
   })
 
+  it('marks a changed vision capability as an explicit user override', async () => {
+    await renderProviderModal({
+      editProvider: providerWithModels([
+        {
+          id: 'claude-opus-5',
+          contextWindow: 1_000_000,
+          supportsVision: true,
+          supportsVisionSource: 'profile',
+        },
+      ]),
+      editModelId: 'claude-opus-5',
+    })
+
+    const visionLabel = Array.from(document.body.querySelectorAll('label')).find((label) =>
+      label.textContent?.includes('Supports vision'),
+    )
+    const checkbox = visionLabel?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+    expect(checkbox?.checked).toBe(true)
+    checkbox?.click()
+    clickSave()
+
+    expect(savedProvider().models[0]).toMatchObject({
+      supportsVision: false,
+      supportsVisionSource: 'user',
+    })
+  })
+
   it('includes all model fields in save payload', async () => {
     const { modelId } = await renderAndSave(undefined)
 
@@ -190,6 +217,7 @@ describe('ProviderModal - thinkingLevel persistence', () => {
       'id',
       'contextWindow',
       'supportsVision',
+      'supportsVisionSource',
       'thinkingEnabled',
       'thinkingLevel',
       'nonThinkingEnabled',
