@@ -668,6 +668,7 @@ export async function runTopLevelAgentLoop(
       const contextState = sessionManager.getContextState(sessionId)
       const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
       if (
+        compactAfterTools ||
         shouldCompact(
           contextState.currentTokens,
           contextState.maxTokens,
@@ -680,6 +681,7 @@ export async function runTopLevelAgentLoop(
         } else {
           appendCompactionPrompt(sessionId, append)
           compacting = true
+          compactAfterTools = false
           continue
         }
       }
@@ -831,13 +833,6 @@ export async function runTopLevelAgentLoop(
 
       if (!config.subAgentMetadata) {
         void drainQueue(sessionManager, sessionId, append, onMessage)
-      }
-
-      if (compactAfterTools) {
-        const { appendCompactionPrompt } = await import('../context/compactor.js')
-        appendCompactionPrompt(sessionId, append)
-        compacting = true
-        compactAfterTools = false
       }
 
       retryLimiter.reset()

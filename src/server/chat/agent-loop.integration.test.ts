@@ -359,12 +359,14 @@ describe('agentLoop integration', () => {
     expect(batchContexts[batchContexts.length - 1].dangerLevel).toBe('dangerous')
   })
 
-  it('executes an accepted tool before compacting at the threshold', async () => {
+  it('settles an accepted tool with the same catalogue before compacting', async () => {
     const append = vi.fn()
     const toolCall: ToolCall = { id: 'call-read', name: 'read_file', arguments: { path: 'synthetic.txt' } }
+    const definitions = [{ type: 'function', function: { name: 'read_file', parameters: {} } }]
 
     vi.mocked(consumeStreamGenerator)
       .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Tool result settled', finishReason: 'stop' }))
       .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
       .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
     vi.mocked(executeTools).mockResolvedValue({
@@ -374,14 +376,27 @@ describe('agentLoop integration', () => {
     const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
     vi.mocked(shouldCompact).mockReturnValueOnce(true).mockReturnValue(false)
 
-    await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+    await runTopLevelAgentLoop(
+      makeConfig({
+        append,
+        assembleRequest: vi.fn(async ({ promptTools }) => ({
+          systemPrompt: 'test-prompt',
+          messages: [],
+          tools: promptTools,
+        })),
+        getToolRegistry: () => ({ definitions, execute: vi.fn() }) as any,
+      }),
+      turnMetrics,
+    )
 
     expect(executeTools).toHaveBeenCalledTimes(1)
     expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(executeTools).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]!,
-    )
-    expect(consumeStreamGenerator).toHaveBeenCalledTimes(3)
+    const requests = vi.mocked(streamLLMPure).mock.calls.map(([request]) => request)
+    expect(requests[1]?.toolChoice).toBe('auto')
+    expect(requests[1]?.tools).toEqual(definitions)
+    expect(requests[2]?.toolChoice).toBe('none')
+    expect(requests[2]?.tools).toEqual([])
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(4)
   })
 
   it('compacts an already-full session before the next model request', async () => {
