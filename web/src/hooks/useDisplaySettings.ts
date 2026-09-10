@@ -14,7 +14,7 @@ export function useDisplaySettings() {
     showWorkflowBars: useSetting(SETTINGS_KEYS.DISPLAY_SHOW_WORKFLOW_BARS, 'true').value === 'true',
     showSyntaxHighlighting: useSetting(SETTINGS_KEYS.DISPLAY_SHOW_SYNTAX_HIGHLIGHTING, 'true').value === 'true',
     maxVisibleItems: Number(useSetting(SETTINGS_KEYS.DISPLAY_MAX_VISIBLE_ITEMS, '300').value),
-    useNativeScrollbars: useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS, 'false').value === 'true',
+    useNativeScrollbars: useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS, 'true').value === 'true',
     useNativeScrollbarsCodeBlocks:
       useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS, 'false').value === 'true',
     collapseLargeToolCalls: useSetting(SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS, 'false').value === 'true',

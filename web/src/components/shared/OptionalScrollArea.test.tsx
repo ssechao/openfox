@@ -14,11 +14,25 @@ describe('OptionalScrollArea', () => {
 
   afterEach(cleanup)
 
-  it('renders the styled ScrollArea by default (both scopes off)', () => {
+  it('renders a native tool-call scroller by default', () => {
     const { container } = render(<OptionalScrollArea>content</OptionalScrollArea>)
 
     expect(container.textContent).toContain('content')
+    expect(container.querySelector('[data-native-scroll-area].overflow-y-auto')).not.toBeNull()
+  })
+
+  it('keeps the styled ScrollArea when native tool-call scrolling is explicitly disabled', () => {
+    settingResource.write('false', SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS)
+    const { container } = render(<OptionalScrollArea>content</OptionalScrollArea>)
+
+    expect(container.querySelector('[data-native-scroll-area]')).toBeNull()
     expect(container.querySelector('[class*="overflow-"]')).toBeNull()
+  })
+
+  it('keeps code-block scrollbars styled by default', () => {
+    const { container } = render(<OptionalScrollArea scope="codeBlocks">content</OptionalScrollArea>)
+
+    expect(container.querySelector('[data-native-scroll-area]')).toBeNull()
   })
 
   it('renders a native scrollable div when the toolCalls scope is enabled', () => {
@@ -48,7 +62,8 @@ describe('OptionalScrollArea', () => {
     expect((div as HTMLElement | null)?.style.color).toBe('red')
   })
 
-  it('keeps scopes independent: codeBlocks on does not affect toolCalls', () => {
+  it('keeps scopes independent: codeBlocks on does not affect an explicit toolCalls opt-out', () => {
+    settingResource.write('false', SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS)
     settingResource.write('true', SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS)
     const { container } = render(
       <div>

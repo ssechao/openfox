@@ -31,7 +31,7 @@ export function OptionalScrollArea({
   if (native) {
     const overflowClass = horizontal ? 'overflow-x-auto' : 'overflow-y-auto'
     return (
-      <div className={`${overflowClass} ${className}`.trim()} style={style}>
+      <div data-native-scroll-area="" className={`${overflowClass} ${className}`.trim()} style={style}>
         {children}
       </div>
     )
