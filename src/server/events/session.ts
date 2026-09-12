@@ -33,12 +33,14 @@ import type {
 import type { SessionSnapshot, SnapshotMessage, ReadFileEntry } from './types.js'
 import { getEventStore } from './store.js'
 import { getRuntimeConfig } from '../runtime-config.js'
+import { canCompact, isInDangerZone } from '../context/tokenizer.js'
 import {
   foldSessionState,
   foldContextState,
   buildContextMessagesFromEventHistory,
   buildMessagesFromStoredEvents,
   spreadOptionalMessageFields,
+  buildSnapshot,
   type ContextMessage,
   type FoldedSessionState,
 } from './folding.js'
@@ -661,37 +663,135 @@ export function emitTurnSnapshot(sessionId: string, snapshot: SessionSnapshot): 
   })
 }
 
-/**
- * Truncate session messages at a given index.
- * Keeps messages[0..messageIndex], removes everything after.
- * messageIndex is 0-based — the message at that index is kept.
- * Emits a new snapshot with the truncated messages and cleans up stale events.
- */
-export function truncateSessionMessages(sessionId: string, messageIndex: number): void {
+export type TruncateSessionMessagesResult = { success: true; removed: number } | { success: false; error: string }
+
+function restoredContextUsage(
+  messages: SnapshotMessage[],
+  targetWindowId: string,
+  currentModel?: string,
+): { currentTokens: number; currentTokensKnown: boolean } {
+  const windowMessages = messages.filter((message) => !message.subAgentId && message.contextWindowId === targetWindowId)
+  if (windowMessages.length === 0) return { currentTokens: 0, currentTokensKnown: true }
+  const lastMessage = windowMessages.at(-1)
+  if (lastMessage?.role !== 'assistant' || !currentModel) {
+    return { currentTokens: 0, currentTokensKnown: false }
+  }
+  const lastCall = lastMessage.stats?.llmCalls?.at(-1)
+  if (!lastCall || lastCall.model !== currentModel) {
+    return { currentTokens: 0, currentTokensKnown: false }
+  }
+  return {
+    currentTokens: lastCall.promptTokens + lastCall.completionTokens,
+    currentTokensKnown: true,
+  }
+}
+
+function truncateSessionState(
+  sessionId: string,
+  state: FoldedSessionState,
+  lastKeptIndex: number,
+  targetWindowId: string,
+  currentModel?: string,
+): TruncateSessionMessagesResult {
   const eventStore = getEventStore()
+  if (lastKeptIndex < -1 || lastKeptIndex >= state.messages.length) {
+    return { success: false, error: 'Message index is outside the available history' }
+  }
+  if (!targetWindowId) {
+    return { success: false, error: 'Context window for the replay target is unavailable' }
+  }
 
-  const snapshotEvent = eventStore.getLatestSnapshot(sessionId)
-  if (!snapshotEvent) return
+  const keepCount = lastKeptIndex + 1
+  const messages = state.messages.slice(0, keepCount)
+  const keptMessageIds = new Set(messages.map((message) => message.id))
+  const sourceSnapshot = eventStore.getLatestSnapshot(sessionId)?.data
+  const compactionRecords = new Map<string, NonNullable<SessionSnapshot['contextWindows']>[number]>()
+  for (const record of [...(sourceSnapshot?.contextWindows ?? []), ...(state.contextWindows ?? [])]) {
+    compactionRecords.set(record.newWindowId, record)
+  }
+  const contextWindows: NonNullable<SessionSnapshot['contextWindows']> = []
+  const seenWindowIds = new Set<string>()
+  let windowId =
+    state.sessionInit?.contextWindowId ?? state.messages.find((message) => message.contextWindowId)?.contextWindowId
+  while (windowId && windowId !== targetWindowId && !seenWindowIds.has(windowId)) {
+    seenWindowIds.add(windowId)
+    const record = [...compactionRecords.values()].find((candidate) => candidate.closedWindowId === windowId)
+    if (!record) break
+    contextWindows.push(record)
+    windowId = record.newWindowId
+  }
+  const compactionCount = Math.max(
+    contextWindows.length,
+    messages.filter((message) => message.isCompactionSummary && !message.subAgentId).length,
+  )
 
-  const snapshot = snapshotEvent.data
-  const messages = snapshot.messages
+  const latestSeq = eventStore.getLatestSeq(sessionId) ?? 0
+  const truncatedSnapshot = buildSnapshot(state, latestSeq)
+  const usage = restoredContextUsage(messages, targetWindowId, currentModel)
+  truncatedSnapshot.messages = messages
+  truncatedSnapshot.currentContextWindowId = targetWindowId
+  truncatedSnapshot.contextState = {
+    currentTokens: usage.currentTokens,
+    currentTokensKnown: usage.currentTokensKnown,
+    maxTokens: state.contextState.maxTokens,
+    compactionCount,
+    dangerZone: usage.currentTokensKnown && isInDangerZone(usage.currentTokens, state.contextState.maxTokens),
+    canCompact: usage.currentTokensKnown && canCompact(usage.currentTokens, state.contextState.maxTokens),
+    dynamicContextChanged: false,
+  }
+  truncatedSnapshot.readFiles = []
+  truncatedSnapshot.pendingConfirmations = []
+  if (truncatedSnapshot.messageStats) {
+    truncatedSnapshot.messageStats = truncatedSnapshot.messageStats.filter((entry) =>
+      keptMessageIds.has(entry.messageId),
+    )
+  }
+  if (truncatedSnapshot.visionFallbacks) {
+    truncatedSnapshot.visionFallbacks = truncatedSnapshot.visionFallbacks.filter((entry) =>
+      keptMessageIds.has(entry.messageId),
+    )
+  }
+  if (contextWindows.length > 0) truncatedSnapshot.contextWindows = contextWindows
+  else delete truncatedSnapshot.contextWindows
+  delete truncatedSnapshot.pendingUserInput
+  delete truncatedSnapshot.waitingWorkflow
+  delete truncatedSnapshot.preparingToolCalls
+  delete truncatedSnapshot.formatRetries
 
-  const lastKept = messageIndex + 1
-  if (lastKept < 0 || lastKept >= messages.length) return
+  eventStore.append(sessionId, { type: 'turn.snapshot', data: truncatedSnapshot })
 
-  // Clone before mutating: the snapshot object is shared with the in-memory
-  // snapshot cache, and the cache is only invalidated by the append below.
-  const truncatedSnapshot = { ...snapshot, messages: messages.slice(0, lastKept) }
+  const removed = state.messages.length - keepCount
+  if (removed > 0) updateSessionMessageCount(sessionId, -removed)
+  return { success: true, removed }
+}
 
-  eventStore.deleteEventsAfterSeq(sessionId, snapshotEvent.seq)
+export function truncateSessionMessages(
+  sessionId: string,
+  messageIndex: number,
+  currentModel?: string,
+  maxTokens?: number,
+): TruncateSessionMessagesResult {
+  const state = getSessionState(sessionId, maxTokens)
+  if (!state) return { success: false, error: 'Session history is unavailable' }
+  const message = state.messages[messageIndex]
+  if (!message) return { success: false, error: 'Message index is outside the available history' }
+  const targetWindowId = message.contextWindowId ?? state.sessionInit?.contextWindowId ?? ''
+  return truncateSessionState(sessionId, state, messageIndex, targetWindowId, currentModel)
+}
 
-  eventStore.append(sessionId, {
-    type: 'turn.snapshot',
-    data: truncatedSnapshot,
-  })
-
-  const removed = messages.length - lastKept
-  updateSessionMessageCount(sessionId, -removed)
+export function truncateSessionMessagesBefore(
+  sessionId: string,
+  messageId: string,
+  currentModel?: string,
+  maxTokens?: number,
+): TruncateSessionMessagesResult {
+  const state = getSessionState(sessionId, maxTokens)
+  if (!state) return { success: false, error: 'Session history is unavailable' }
+  const targetIndex = state.messages.findIndex((message) => message.id === messageId)
+  if (targetIndex < 0) return { success: false, error: 'Replay target is outside the available history' }
+  const target = state.messages[targetIndex]!
+  const targetWindowId = target.contextWindowId ?? state.sessionInit?.contextWindowId ?? ''
+  return truncateSessionState(sessionId, state, targetIndex - 1, targetWindowId, currentModel)
 }
 
 // ============================================================================

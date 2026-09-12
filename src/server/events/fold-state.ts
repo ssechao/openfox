@@ -268,6 +268,12 @@ export function foldSessionState(
 
   for (const event of events) {
     switch (event.type) {
+      case 'turn.snapshot': {
+        const data = event.data as SessionSnapshot
+        contextWindows.length = 0
+        contextWindows.push(...(data.contextWindows ?? []).map((record) => ({ ...record })))
+        break
+      }
       case 'session.initialized': {
         const data = event.data as { projectId: string; workdir: string; contextWindowId: string; maxTokens?: number }
         sessionInit = {
@@ -555,6 +561,9 @@ export function buildSnapshotFromSessionState(input: {
     metadataEntries: foldedState.metadataEntries,
     contextState: {
       currentTokens: foldedState.contextState.currentTokens,
+      ...(foldedState.contextState.currentTokensKnown !== undefined && {
+        currentTokensKnown: foldedState.contextState.currentTokensKnown,
+      }),
       maxTokens: foldedState.contextState.maxTokens,
       compactionCount: foldedState.contextState.compactionCount,
       dangerZone: foldedState.contextState.dangerZone,

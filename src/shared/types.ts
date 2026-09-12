@@ -629,6 +629,7 @@ export interface ExecutionState {
 
 export interface ContextState {
   currentTokens: number // Current context window usage
+  currentTokensKnown?: boolean
   maxTokens: number // Maximum context window size
   compactionCount: number // Number of times context has been compacted
   dangerZone: boolean // True if approaching max (< 20K remaining)

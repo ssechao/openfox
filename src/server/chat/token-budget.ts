@@ -13,6 +13,10 @@ export function estimateToolResultTokens(toolMessages: Array<Pick<RequestContext
   )
 }
 
+export function estimatePromptTokensForSafety(systemPrompt: string, messages: unknown[], tools: unknown[]): number {
+  return Buffer.byteLength(systemPrompt + JSON.stringify(messages) + JSON.stringify(tools), 'utf8')
+}
+
 const CONTEXT_LENGTH_ERROR_PATTERN = /context\s*length|context_length|context window|prompt (?:is )?too long/i
 
 export function isContextLengthError(message: string | undefined): boolean {

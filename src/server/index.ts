@@ -19,6 +19,7 @@ import './llm/proxy.js'
 import { detectModel, getLlmStatus, getBackendDisplayName } from './llm/index.js'
 import { detectBackendFromUrl } from './llm/backend.js'
 import { buildModelsUrl } from './llm/url-utils.js'
+import { responsesChainKeyFor } from './chat/agent-loop.js'
 
 import { createMockLLMClient } from './llm/mock.js'
 import { createProviderManager, parseDefaultModelSelection } from './provider-manager.js'
@@ -1672,12 +1673,32 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
   })
 
+  const getSessionModelContext = (sessionId: string): { model?: string; maxTokens: number } => {
+    const effective = sessionManager.resolveEffectiveProviderModel(sessionId)
+    const model =
+      effective.providerId && effective.model
+        ? (providerManager.resolveModel(effective.providerId, effective.model) ?? effective.model)
+        : (effective.model ?? undefined)
+    return {
+      ...(model ? { model } : {}),
+      maxTokens: sessionManager.getCurrentModelContext(sessionId),
+    }
+  }
+
+  const invalidateSessionContinuity = (sessionId: string): void => {
+    getLLMClient().resetResponsesChain?.(responsesChainKeyFor(sessionId))
+    sessionManager.clearSessionLLMClient(sessionId)
+  }
+
   // Truncate session messages at a given index
   app.post('/api/sessions/:id/truncate', async (req, res) => {
     const sessionId = req.params.id as string
     const session = sessionManager.getSession(sessionId)
     if (!session) {
       return res.status(404).json({ error: 'Session not found' })
+    }
+    if (session.isRunning) {
+      return res.status(409).json({ error: 'Cannot truncate while session is running' })
     }
 
     const { messageIndex } = req.body
@@ -1686,8 +1707,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { truncateSessionMessages } = await import('./events/index.js')
-    truncateSessionMessages(sessionId, messageIndex)
+    const currentSession = sessionManager.getSession(sessionId)
+    if (!currentSession) return res.status(404).json({ error: 'Session not found' })
+    if (currentSession.isRunning) {
+      return res.status(409).json({ error: 'Cannot truncate while session is running' })
+    }
 
+    const context = getSessionModelContext(sessionId)
+    const result = truncateSessionMessages(sessionId, messageIndex, context.model, context.maxTokens)
+    if (!result.success) return res.status(409).json({ error: result.error })
+
+    invalidateSessionContinuity(sessionId)
     res.json({ success: true })
   })
 
@@ -1697,6 +1727,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const session = sessionManager.getSession(sessionId)
     if (!session) {
       return res.status(404).json({ error: 'Session not found' })
+    }
+    if (session.isRunning) {
+      return res.status(409).json({ error: 'Cannot replay while session is running' })
     }
 
     const { messageId, content, attachments } = req.body
@@ -1726,9 +1759,18 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(400).json({ error: 'Can only replay user messages' })
     }
 
-    const { truncateSessionMessages } = await import('./events/index.js')
-    truncateSessionMessages(sessionId, msgIndex - 1)
+    const { truncateSessionMessagesBefore } = await import('./events/index.js')
+    const currentSession = sessionManager.getSession(sessionId)
+    if (!currentSession) return res.status(404).json({ error: 'Session not found' })
+    if (currentSession.isRunning) {
+      return res.status(409).json({ error: 'Cannot replay while session is running' })
+    }
 
+    const context = getSessionModelContext(sessionId)
+    const result = truncateSessionMessagesBefore(sessionId, messageId, context.model, context.maxTokens)
+    if (!result.success) return res.status(409).json({ error: result.error })
+
+    invalidateSessionContinuity(sessionId)
     sessionManager.queueMessage(
       sessionId,
       'asap',

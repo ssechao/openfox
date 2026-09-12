@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  estimatePromptTokensForSafety,
   estimateToolResultTokens,
   isContextLengthError,
   isNonRetryableLLMError,
@@ -26,6 +27,17 @@ describe('estimateToolResultTokens', () => {
     const a = 'a'.repeat(CHARS_PER_TOKEN * 5)
     const b = 'b'.repeat(CHARS_PER_TOKEN * 7)
     expect(estimateToolResultTokens([{ content: a }, { content: b }])).toBe(2 * TOOL_MESSAGE_OVERHEAD_TOKENS + 12)
+  })
+})
+
+describe('estimatePromptTokensForSafety', () => {
+  it('uses a UTF-8 byte upper bound for high-token-density content', () => {
+    const systemPrompt = '系统😀'
+    const messages = [{ role: 'user', content: '漢字🙂'.repeat(10) }]
+    const tools = [{ type: 'function', name: '工具' }]
+    const serialized = systemPrompt + JSON.stringify(messages) + JSON.stringify(tools)
+
+    expect(estimatePromptTokensForSafety(systemPrompt, messages, tools)).toBe(Buffer.byteLength(serialized, 'utf8'))
   })
 })
 

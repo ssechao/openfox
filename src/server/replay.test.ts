@@ -19,6 +19,9 @@ function mountReplayRoute(
     if (!session) {
       return res.status(404).json({ error: 'Session not found' })
     }
+    if (session.isRunning) {
+      return res.status(409).json({ error: 'Cannot replay while session is running' })
+    }
 
     const { messageId, content, attachments } = req.body
     if (typeof messageId !== 'string' || !messageId) {
@@ -47,8 +50,9 @@ function mountReplayRoute(
       return res.status(400).json({ error: 'Can only replay user messages' })
     }
 
-    const { truncateSessionMessages } = await import('./events/index.js')
-    truncateSessionMessages(sessionId, msgIndex - 1)
+    const { truncateSessionMessagesBefore } = await import('./events/index.js')
+    const result = truncateSessionMessagesBefore(sessionId, messageId)
+    if (!result.success) return res.status(409).json({ error: result.error })
 
     deps.sessionManager.queueMessage(
       sessionId,
@@ -124,6 +128,19 @@ describe('Replay endpoint', () => {
       body: JSON.stringify({ messageId: 'msg-1' }),
     })
     expect(status).toBe(404)
+  })
+
+  it('returns 409 if the session is running', async () => {
+    sessionManager.getSession.mockReturnValue({ id: 'session-1', messages: [], isRunning: true })
+
+    const { status, body } = await fetchJson(url('/api/sessions/session-1/replay'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageId: 'msg-1' }),
+    })
+    expect(status).toBe(409)
+    expect(body).toEqual({ error: 'Cannot replay while session is running' })
+    expect(sessionManager.queueMessage).not.toHaveBeenCalled()
   })
 
   it('returns 400 if messageId is missing', async () => {

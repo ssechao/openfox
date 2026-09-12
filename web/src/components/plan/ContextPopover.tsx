@@ -41,7 +41,8 @@ export function ContextPopover({ variant = 'popover', onUpdateSystemPrompt }: Co
   if (!contextState || !currentSession) return null
 
   const { currentTokens, maxTokens, compactionCount, dangerZone } = contextState
-  const percent = Math.round((currentTokens / maxTokens) * 100)
+  const currentTokensKnown = contextState.currentTokensKnown !== false
+  const percent = currentTokensKnown ? Math.round((currentTokens / maxTokens) * 100) : 0
   const isRunning = currentSession.isRunning
   const needsRebase = contextState.dynamicContextChanged === true
 
@@ -54,14 +55,16 @@ export function ContextPopover({ variant = 'popover', onUpdateSystemPrompt }: Co
 
   const tokenDisplay = (
     <span className={getTextColor(percent, dangerZone)}>
-      {`${formatTokens(currentTokens)} / ${formatTokens(maxTokens)} (${percent}%)`}
+      {currentTokensKnown
+        ? `${formatTokens(currentTokens)} / ${formatTokens(maxTokens)} (${percent}%)`
+        : `${t({ en: 'Unknown', fr: 'Inconnu' })} / ${formatTokens(maxTokens)}`}
     </span>
   )
 
   const progressSlot = (
     <div className="flex items-center gap-2">
-      <ProgressBar percent={percent} dangerZone={dangerZone} className="flex-1" />
-      <LowTokenWarning dangerZone={dangerZone} />
+      {currentTokensKnown && <ProgressBar percent={percent} dangerZone={dangerZone} className="flex-1" />}
+      {currentTokensKnown && <LowTokenWarning dangerZone={dangerZone} />}
       {compactionCount > 0 && (
         <span className="text-[10px] text-text-muted bg-bg-tertiary px-1 py-0.5 rounded">{`${compactionCount}x`}</span>
       )}

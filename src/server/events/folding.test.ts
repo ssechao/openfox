@@ -1074,6 +1074,77 @@ describe('event folding', () => {
     ])
   })
 
+  it('preserves unknown usage through an interrupted snapshot and replaces it with provider usage', () => {
+    const session = { mode: 'planner' as const, phase: 'plan' as const, isRunning: false, criteria: [] }
+    const initialized = {
+      timestamp: 1,
+      type: 'session.initialized' as const,
+      data: { projectId: 'proj-1', workdir: '/tmp', contextWindowId: 'window-1' },
+    }
+    const unknownSnapshot = {
+      mode: 'planner' as const,
+      phase: 'plan' as const,
+      isRunning: false,
+      messages: [],
+      criteria: [],
+      metadataEntries: {},
+      contextState: {
+        currentTokens: 0,
+        currentTokensKnown: false,
+        maxTokens: 200000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: false,
+        dynamicContextChanged: false,
+      },
+      currentContextWindowId: 'window-1',
+      todos: [],
+      readFiles: [],
+      snapshotSeq: 2,
+      snapshotAt: 2,
+    }
+    const interrupted = buildSnapshotFromSessionState({
+      session,
+      events: [initialized, { timestamp: 2, type: 'turn.snapshot', data: unknownSnapshot }],
+      latestSeq: 2,
+    })
+
+    expect(interrupted.contextState.currentTokensKnown).toBe(false)
+    expect(
+      foldContextState([{ type: 'turn.snapshot', data: interrupted }], 'window-1').latestContextState,
+    ).toMatchObject({
+      currentTokens: 0,
+      currentTokensKnown: false,
+    })
+
+    const measured = buildSnapshotFromSessionState({
+      session,
+      events: [
+        initialized,
+        { timestamp: 2, type: 'turn.snapshot', data: interrupted },
+        {
+          timestamp: 3,
+          type: 'context.state',
+          data: {
+            currentTokens: 12345,
+            maxTokens: 200000,
+            compactionCount: 0,
+            dangerZone: false,
+            canCompact: true,
+            dynamicContextChanged: false,
+          },
+        },
+      ],
+      latestSeq: 3,
+    })
+
+    expect(measured.contextState.currentTokens).toBe(12345)
+    expect(measured.contextState.currentTokensKnown).toBeUndefined()
+    expect(foldContextState([{ type: 'turn.snapshot', data: measured }], 'window-1').latestContextState).toMatchObject({
+      currentTokens: 12345,
+    })
+  })
+
   describe('foldPendingConfirmations', () => {
     it('returns pending confirmations when no response received', () => {
       const events: StoredEvent[] = [

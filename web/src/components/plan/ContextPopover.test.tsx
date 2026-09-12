@@ -91,6 +91,24 @@ describe('ContextPopover', () => {
 
   afterEach(() => cleanup())
 
+  it('labels restored token usage as unknown instead of displaying zero as a measurement', () => {
+    storeState = {
+      ...makeBaseState(),
+      panes: {
+        s1: {
+          ...(makeBaseState().panes as Record<string, any>)['s1'],
+          contextState: { ...makeContextState(), currentTokens: 0, currentTokensKnown: false },
+        },
+      },
+    }
+    render(
+      <SessionScopeProvider value="s1">
+        <ContextPopover />
+      </SessionScopeProvider>,
+    )
+    expect(screen.getByText('Unknown / 1 000')).toBeDefined()
+  })
+
   it('shows the "Rebase system prompt" action unconditionally (no drift flag needed)', () => {
     render(
       <SessionScopeProvider value="s1">

@@ -461,6 +461,63 @@ describe('agentLoop integration', () => {
     expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
   })
 
+  it('estimates unknown restored usage before the first request and compacts when near the limit', async () => {
+    const append = vi.fn()
+    const injectKickoff = vi.fn()
+    const unknownState = {
+      currentTokens: 0,
+      currentTokensKnown: false,
+      maxTokens: 50_000,
+      compactionCount: 0,
+      dangerZone: false,
+      canCompact: false,
+      dynamicContextChanged: false,
+    }
+    const knownState = { ...unknownState, currentTokensKnown: true }
+    const getContextState = vi
+      .fn()
+      .mockReturnValueOnce(unknownState)
+      .mockReturnValueOnce(unknownState)
+      .mockReturnValueOnce(unknownState)
+      .mockReturnValue(knownState)
+    const sessionManager = createMockSessionManager({
+      getContextState,
+      getCurrentModelContext: vi.fn().mockReturnValue(50_000),
+    })
+    const history = [{ role: 'user' as const, content: 'x'.repeat(44_000), source: 'history' as const }]
+    const assembleRequest = vi.fn(async ({ messages, promptTools }) => ({
+      systemPrompt: 'system',
+      messages,
+      tools: promptTools,
+    }))
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockImplementation(
+      (currentTokens, maxTokens, threshold) => currentTokens > maxTokens * threshold,
+    )
+
+    await runTopLevelAgentLoop(
+      makeConfig({
+        append,
+        sessionManager,
+        assembleRequest,
+        injectKickoff,
+        getConversationMessages: vi.fn().mockResolvedValue(history),
+      }),
+      turnMetrics,
+    )
+
+    expect(vi.mocked(shouldCompact).mock.calls[0]?.[0]).toBeGreaterThan(0)
+    expect(injectKickoff).toHaveBeenCalledTimes(1)
+    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[0]!,
+    )
+    expect(vi.mocked(streamLLMPure).mock.calls[0]?.[0].toolChoice).toBe('none')
+  })
+
   it('uses a tool-free request and a dedicated output budget for compaction', async () => {
     const definitions = [{ type: 'function', function: { name: 'read_file', parameters: {} } }]
     const assembleRequest = vi.fn(async ({ promptTools }) => ({

@@ -44,6 +44,7 @@ import {
 } from '../ws/protocol.js'
 import { executeTools, type ToolBatchContext } from './execute-tools.js'
 import {
+  estimatePromptTokensForSafety,
   estimateToolResultTokens,
   isContextLengthError,
   isNonRetryableLLMError,
@@ -247,6 +248,7 @@ export async function runTopLevelAgentLoop(
   let preflightCompactionPending = !compacting
   let compactAfterTools = false
   let finalizingAfterStepDone = false
+  let kickoffInjected = false
   let returnValueNudgeCount = 0
   const failLLM = (error: string, attempts: number) => {
     append({ type: 'chat.error', data: { error, recoverable: true } })
@@ -257,7 +259,7 @@ export async function runTopLevelAgentLoop(
     return { failed: { error } }
   }
 
-  for (;;) {
+  agentLoop: for (;;) {
     if (signal?.aborted) throw new Error('Aborted')
 
     // Warmup mode: just assemble the request to populate the cache, then fire a
@@ -306,10 +308,11 @@ export async function runTopLevelAgentLoop(
     const runtimeConfig = getRuntimeConfig()
 
     if (!compacting && preflightCompactionPending) {
-      preflightCompactionPending = false
       const contextState = sessionManager.getContextState(sessionId)
+      if (contextState.currentTokensKnown !== false) preflightCompactionPending = false
       const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
       if (
+        contextState.currentTokensKnown !== false &&
         contextState.canCompact &&
         shouldCompact(
           contextState.currentTokens,
@@ -324,7 +327,8 @@ export async function runTopLevelAgentLoop(
     }
 
     // Inject kickoff prompt (e.g., builder kickoff) on first iteration
-    if (retryLimiter.count() === 0) {
+    if (retryLimiter.count() === 0 && !kickoffInjected) {
+      kickoffInjected = true
       await config.injectKickoff?.()
     }
 
@@ -398,6 +402,33 @@ export async function runTopLevelAgentLoop(
         ...(skills.length > 0 ? { skills } : {}),
       })
 
+      const contextState = sessionManager.getContextState(sessionId)
+      const contextWindow = sessionManager.getCurrentModelContext(sessionId, config.mode)
+      const currentTokensForBudget =
+        contextState.currentTokensKnown === false
+          ? estimatePromptTokensForSafety(
+              assembledRequest.systemPrompt,
+              assembledRequest.messages,
+              assembledRequest.tools,
+            )
+          : contextState.currentTokens
+      if (!compacting && preflightCompactionPending) {
+        preflightCompactionPending = false
+        const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+        if (
+          shouldCompact(
+            currentTokensForBudget,
+            contextWindow,
+            sessionManager.getModelCompactionThreshold(sessionId, config.mode) ??
+              runtimeConfig.context.compactionThreshold,
+          )
+        ) {
+          appendCompactionPrompt(sessionId, append)
+          compacting = true
+          continue agentLoop
+        }
+      }
+
       assistantMsgId = crypto.randomUUID()
       // The assistant message.start is DEFERRED until the first streamed event:
       // a request that fails before any content (case 1) leaves nothing behind.
@@ -415,13 +446,11 @@ export async function runTopLevelAgentLoop(
         )
       }
 
-      const contextState = sessionManager.getContextState(sessionId)
-      previousContextTokens = contextState.currentTokens
+      previousContextTokens = currentTokensForBudget
 
-      const contextWindow = sessionManager.getCurrentModelContext(sessionId, config.mode)
       const availableForOutput = Math.max(
         256,
-        contextWindow - contextState.currentTokens - pendingToolResultTokens - OUTPUT_RESERVE_TOKENS,
+        contextWindow - currentTokensForBudget - pendingToolResultTokens - OUTPUT_RESERVE_TOKENS,
       )
 
       let modelSettings = config.modelSettings ?? sessionManager.getCurrentModelSettings(sessionId, config.mode)

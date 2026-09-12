@@ -340,15 +340,19 @@ export function SidebarSummaryHeader({ visible }: SidebarSummaryHeaderProps) {
           {contextState && (
             <>
               <span className="text-text-muted text-xs font-mono tabular-nums">
-                {contextState.currentTokens >= 1000
-                  ? `${Math.round(contextState.currentTokens / 1000)}K`
-                  : contextState.currentTokens}
+                {contextState.currentTokensKnown === false
+                  ? t({ en: 'Unknown', fr: 'Inconnu' })
+                  : contextState.currentTokens >= 1000
+                    ? `${Math.round(contextState.currentTokens / 1000)}K`
+                    : contextState.currentTokens}
               </span>
-              <ProgressBar
-                percent={Math.round((contextState.currentTokens / contextState.maxTokens) * 100)}
-                dangerZone={contextState.dangerZone}
-                size="sm"
-              />
+              {contextState.currentTokensKnown !== false && (
+                <ProgressBar
+                  percent={Math.round((contextState.currentTokens / contextState.maxTokens) * 100)}
+                  dangerZone={contextState.dangerZone}
+                  size="sm"
+                />
+              )}
               <Popover
                 ref={contextPopoverRef}
                 trigger={

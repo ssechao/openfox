@@ -99,6 +99,7 @@ export {
   emitTurnSnapshot,
   emitMetadataSet,
   truncateSessionMessages,
+  truncateSessionMessagesBefore,
   getRecentUserPromptsForSession,
   combineEventsWithSnapshot,
 } from './session.js'
