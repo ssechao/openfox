@@ -6,8 +6,13 @@ export const CHARS_PER_TOKEN = 4
 /** JSON framing overhead per tool message (role, tool_call_id, content key). */
 export const TOOL_MESSAGE_OVERHEAD_TOKENS = 16
 
-export function estimateToolResultTokens(toolMessages: Array<Pick<RequestContextMessage, 'content'>>): number {
-  return toolMessages.reduce(
+/**
+ * Cheap size estimate for a batch of messages — a freshly executed tool batch
+ * or a whole history. Only ever used to decide whether something must shrink,
+ * so a coarse over-estimate is the safe direction.
+ */
+export function estimateMessagesTokens(messages: Array<Pick<RequestContextMessage, 'content'>>): number {
+  return messages.reduce(
     (sum, message) => sum + TOOL_MESSAGE_OVERHEAD_TOKENS + Math.ceil(message.content.length / CHARS_PER_TOKEN),
     0,
   )
@@ -17,11 +22,53 @@ export function estimatePromptTokensForSafety(systemPrompt: string, messages: un
   return Buffer.byteLength(systemPrompt + JSON.stringify(messages) + JSON.stringify(tools), 'utf8')
 }
 
+/** The context gauge as reported by the session, plus whether it is a real measurement. */
+export interface ContextGauge {
+  currentTokens: number
+  currentTokensKnown?: boolean
+}
+
+/**
+ * Tokens the NEXT request will carry.
+ *
+ * `currentTokens` is the last measurement reported by the provider, so anything
+ * appended since (typically a tool result) is invisible to it. Deciding on the
+ * raw gauge lets a single large tool result push the request past the window
+ * before compaction ever fires — the unmeasured delta MUST be added back.
+ *
+ * When no measurement exists at all, the caller's local estimate of the
+ * assembled request is the only usable number.
+ */
+export function effectiveContextTokens(
+  gauge: ContextGauge,
+  unmeasuredTokens: number,
+  estimateAssembledRequest: () => number,
+): number {
+  if (gauge.currentTokensKnown === false) return estimateAssembledRequest()
+  return gauge.currentTokens + unmeasuredTokens
+}
+
+/**
+ * Providers phrase a context overflow in incompatible ways: OpenAI talks about
+ * the "maximum context length", Anthropic about "input length and max_tokens",
+ * llama.cpp/ollama about the "available context size". Every variant means the
+ * same thing — the INPUT no longer fits, and only compaction can fix it.
+ */
 const CONTEXT_LENGTH_ERROR_PATTERN = /context\s*length|context_length|context window|prompt (?:is )?too long/i
+
+/**
+ * Phrases that only mean an overflow when something says so. "context size"
+ * also names a load-time setting and "input length" appears in plain validation
+ * errors; matching them bare would force a pointless auto-compaction (an extra
+ * LLM call plus a history rewrite) on an unrelated failure.
+ */
+const QUALIFIED_CONTEXT_NOUN = /context limit|context size|input (?:length|token count)/i
+const OVERFLOW_QUALIFIER = /exceed(?:s|ed|ing)?\b|too (?:long|large|big|many)|does(?:n't| not) fit/i
 
 export function isContextLengthError(message: string | undefined): boolean {
   if (!message) return false
-  return CONTEXT_LENGTH_ERROR_PATTERN.test(message)
+  if (CONTEXT_LENGTH_ERROR_PATTERN.test(message)) return true
+  return QUALIFIED_CONTEXT_NOUN.test(message) && OVERFLOW_QUALIFIER.test(message)
 }
 
 /**

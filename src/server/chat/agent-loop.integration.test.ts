@@ -692,4 +692,397 @@ describe('agentLoop integration', () => {
       .filter((e: any) => e.type === 'chat.done' && e.data?.reason === 'complete')
     expect(chatDoneEvents.length).toBeGreaterThanOrEqual(1)
   })
+
+  it('compacts before the next request when a large tool result lands after the last usage report', async () => {
+    const append = vi.fn()
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 100_000,
+        currentTokensKnown: true,
+        maxTokens: 200_000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: true,
+        dynamicContextChanged: false,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(200_000),
+    })
+    const toolCall: ToolCall = { id: 'call-read', name: 'read_file', arguments: { path: 'huge.txt' } }
+
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(
+        makeStreamResult({
+          toolCalls: [toolCall],
+          finishReason: 'tool_calls',
+          usage: { promptTokens: 100_000, completionTokens: 50 },
+        }),
+      )
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    ;(executeTools as any).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'x'.repeat(400_000), source: 'history', toolCallId: 'call-read' }],
+      stepDoneCalled: false,
+    })
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockImplementation(
+      (currentTokens, maxTokens, threshold) => currentTokens > maxTokens * threshold,
+    )
+
+    await runTopLevelAgentLoop(makeConfig({ append, sessionManager }), turnMetrics)
+
+    // The 400k-char tool result (~100k tokens) lands AFTER the provider's last
+    // usage report, so the stale gauge (100k/200k) stays under the threshold.
+    // The delta must be accounted for before the next request goes out.
+    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[1]!,
+    )
+    expect(vi.mocked(streamLLMPure).mock.calls[1]?.[0].tools).toEqual([])
+  })
+
+  it('switches to compaction when the input keeps overflowing the context window', async () => {
+    const append = vi.fn()
+    const overflowError =
+      "HTTP 400: This model's maximum context length is 128000 tokens. However, you requested 190000 tokens."
+
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(makeStreamResult({ error: overflowError }))
+      .mockResolvedValueOnce(makeStreamResult({ error: overflowError }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockReturnValue(false)
+
+    await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+
+    // Halving maxTokens only shrinks the OUTPUT budget — it cannot fix an input
+    // that already exceeds the window. A repeated overflow must compact.
+    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(streamLLMPure).mock.calls[2]?.[0].tools).toEqual([])
+  })
+
+  it('shrinks the history instead of failing when manual compaction overflows the window', async () => {
+    const append = vi.fn()
+    const history = [
+      { role: 'user' as const, content: 'do the thing', source: 'history' as const },
+      { role: 'tool' as const, content: 'A'.repeat(200_000), source: 'history' as const, toolCallId: 'call-1' },
+      { role: 'tool' as const, content: 'B'.repeat(200_000), source: 'history' as const, toolCallId: 'call-2' },
+      { role: 'assistant' as const, content: 'partial work', source: 'history' as const },
+    ]
+    const assembleRequest = vi.fn(async ({ messages, promptTools }: any) => ({
+      systemPrompt: 'system',
+      messages,
+      tools: promptTools,
+    }))
+
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(
+        makeStreamResult({ error: 'HTTP 400: prompt is too long: 420000 tokens > 200000 maximum' }),
+      )
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+    const { shouldCompact } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockReturnValue(false)
+
+    const result = await runTopLevelAgentLoop(
+      makeConfig({
+        append,
+        initialCompacting: true,
+        assembleRequest,
+        getConversationMessages: vi.fn().mockResolvedValue(history),
+      }),
+      turnMetrics,
+    )
+
+    // Manual compaction resends the very history the model just refused. It must
+    // retry on a reduced history instead of failing the user's /compact.
+    expect(result.failed).toBeUndefined()
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    const firstSize = JSON.stringify(assembleRequest.mock.calls[0]![0].messages).length
+    const secondSize = JSON.stringify(assembleRequest.mock.calls[1]![0].messages).length
+    expect(secondSize).toBeLessThan(firstSize)
+  })
+
+  it('measures the compaction threshold against the authoritative model window', async () => {
+    const append = vi.fn()
+    // The tracked window is stale (a 1M-context model was selected earlier) while
+    // the session now runs a 262144-token model: 260240 tokens is 26% of the stale
+    // window but 99% of the real one.
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 260_240,
+        maxTokens: 1_000_000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: true,
+        dynamicContextChanged: false,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(262_144),
+    })
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Working', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    // The pre-request gate stays quiet so the POST-TURN threshold check — the
+    // third and last shouldCompact site — is actually reached.
+    vi.mocked(shouldCompact)
+      .mockReturnValueOnce(false)
+      .mockImplementationOnce((current, max, threshold) => current > max * threshold)
+      .mockReturnValue(false)
+
+    await runTopLevelAgentLoop(makeConfig({ append, sessionManager }), turnMetrics)
+
+    // EVERY site must weigh the count against the window this turn requests
+    // with — one stale-window site is enough to skip compaction entirely.
+    const windows = vi.mocked(shouldCompact).mock.calls.map(([, max]) => max)
+    expect(windows.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(windows)).toEqual(new Set([262_144]))
+    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+    // The gauge must be emitted against that same window: resolving it without
+    // the turn's mode is how one count ends up shown against two windows.
+    expect(sessionManager.setCurrentContextSize).toHaveBeenCalledWith(
+      'test-session',
+      expect.any(Number),
+      expect.any(Number),
+      undefined,
+      'planner',
+    )
+  })
+
+  it('reduces history instead of dead-ending manual compaction on a saturated window', async () => {
+    const append = vi.fn()
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 261_974,
+        maxTokens: 262_144,
+        compactionCount: 0,
+        dangerZone: true,
+        canCompact: true,
+        dynamicContextChanged: false,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(262_144),
+    })
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+      makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }),
+    )
+
+    // A session at 100% is exactly the one that needs compaction most: refusing to
+    // summarize for lack of output headroom leaves the user with no way out.
+    const result = await runTopLevelAgentLoop(
+      makeConfig({ append, sessionManager, initialCompacting: true }),
+      turnMetrics,
+    )
+
+    expect(result.failed).toBeUndefined()
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+  })
+
+  it('invalidates the stored provider chain before continuing an interrupted stream', async () => {
+    const resetResponsesChain = vi.fn()
+    const llmClient = { getModel: vi.fn().mockReturnValue('test-model'), resetResponsesChain } as any
+    vi.mocked(consumeStreamGenerator)
+      .mockImplementationOnce(async (_stream: any, onEvent: any) => {
+        onEvent({ type: 'message.delta', data: { messageId: 'partial', content: 'half a tool call' } })
+        return makeStreamResult({ content: 'half a tool call', error: 'HTTP 500: upstream hiccup' })
+      })
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+
+    await runTopLevelAgentLoop(makeConfig({ llmClient }), turnMetrics)
+
+    // The provider kept a native context that may end on an unconfirmed tool
+    // call; replaying a user message onto it is refused with a 409.
+    expect(resetResponsesChain).toHaveBeenCalledWith('test-session:top')
+    expect(resetResponsesChain.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[1]!,
+    )
+  })
+
+  it('invalidates the stored provider chain before the compaction prompt is sent', async () => {
+    const resetResponsesChain = vi.fn()
+    const llmClient = { getModel: vi.fn().mockReturnValue('test-model'), resetResponsesChain } as any
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 180_000,
+        maxTokens: 200_000,
+        compactionCount: 0,
+        dangerZone: true,
+        canCompact: true,
+        dynamicContextChanged: false,
+      }),
+    })
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    const { shouldCompact } = await import('../context/compactor.js')
+    vi.mocked(shouldCompact).mockReturnValueOnce(true).mockReturnValue(false)
+
+    await runTopLevelAgentLoop(makeConfig({ llmClient, sessionManager }), turnMetrics)
+
+    expect(resetResponsesChain.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[0]!,
+    )
+  })
+
+  it('invalidates the stored provider chain when queued messages land after tool output', async () => {
+    const resetResponsesChain = vi.fn()
+    const llmClient = { getModel: vi.fn().mockReturnValue('test-model'), resetResponsesChain } as any
+    const drainAsapMessages = vi
+      .fn()
+      .mockReturnValueOnce([{ content: 'also do this' }])
+      .mockReturnValue([])
+    const sessionManager = createMockSessionManager({ drainAsapMessages })
+    const toolCall: ToolCall = { id: 'call-1', name: 'run_command', arguments: { command: 'echo hi' } }
+
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    vi.mocked(executeTools).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'output', source: 'history', toolCallId: 'call-1' }],
+      stepDoneCalled: false,
+    } as any)
+
+    await runTopLevelAgentLoop(makeConfig({ llmClient, sessionManager }), turnMetrics)
+
+    // Claude-native tool output cannot be followed by a queued user message on
+    // the stored conversation — the next request must go out as plain history.
+    expect(resetResponsesChain).toHaveBeenCalledWith('test-session:top')
+    expect(resetResponsesChain.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[1]!,
+    )
+  })
+
+  it('settles an interrupted tool call before a user message is sent behind it', async () => {
+    const assembleRequest = vi.fn(async ({ messages, promptTools }: any) => ({
+      systemPrompt: 'system',
+      messages,
+      tools: promptTools,
+    }))
+    // An assistant turn whose tool call never got an answer (stream cut mid-way),
+    // then a user message injected behind it — the exact shape that draws
+    // "unconfirmed tool call, replay is refused" / "tool output cannot be
+    // followed by queued user messages".
+    const history = [
+      { role: 'user' as const, content: 'edit the file', source: 'history' as const },
+      {
+        role: 'assistant' as const,
+        content: '',
+        source: 'history' as const,
+        toolCalls: [{ id: 'call-cut', name: 'edit_file', arguments: {} }],
+      },
+      { role: 'user' as const, content: 'continue where you left off', source: 'history' as const },
+    ]
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+
+    await runTopLevelAgentLoop(
+      makeConfig({ assembleRequest, getConversationMessages: vi.fn().mockResolvedValue(history) }),
+      turnMetrics,
+    )
+
+    const sent = assembleRequest.mock.calls[0]![0].messages as any[]
+    const callIndex = sent.findIndex((m) => m.role === 'assistant' && m.toolCalls?.length)
+    // Every call must be answered, and the answer must come BEFORE the user turn.
+    expect(sent[callIndex + 1]).toMatchObject({ role: 'tool', toolCallId: 'call-cut' })
+    expect(sent[callIndex + 2]).toMatchObject({ role: 'user' })
+    expect(sent.filter((m) => m.role === 'user')).toHaveLength(2)
+  })
+
+  it('drops the stored chain once per broken tool call, not on every rebuild', async () => {
+    const resetResponsesChain = vi.fn()
+    const llmClient = { getModel: vi.fn().mockReturnValue('test-model'), resetResponsesChain } as any
+    // The synthetic answer lives in the request only, so the same break is
+    // re-detected on every rebuild. Re-dropping the chain each time would cost
+    // the session its provider-side continuity for the rest of the run.
+    const history = [
+      { role: 'user' as const, content: 'edit the file', source: 'history' as const },
+      {
+        role: 'assistant' as const,
+        content: '',
+        source: 'history' as const,
+        toolCalls: [{ id: 'call-cut', name: 'edit_file', arguments: {} }],
+      },
+      { role: 'user' as const, content: 'continue where you left off', source: 'history' as const },
+    ]
+    const toolCall: ToolCall = { id: 'call-next', name: 'run_command', arguments: { command: 'echo hi' } }
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    vi.mocked(executeTools).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'output', source: 'history', toolCallId: 'call-next' }],
+      stepDoneCalled: false,
+    } as any)
+
+    await runTopLevelAgentLoop(
+      makeConfig({ llmClient, getConversationMessages: vi.fn().mockResolvedValue(history) }),
+      turnMetrics,
+    )
+
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    expect(resetResponsesChain).toHaveBeenCalledTimes(1)
+  })
+
+  it('raises the output budget when a truncated tool call yields unparsable arguments', async () => {
+    const append = vi.fn()
+    const truncatedToolCall = () =>
+      makeStreamResult({
+        finishReason: 'length',
+        toolCalls: [
+          {
+            id: 'call-edit',
+            name: 'edit_file',
+            arguments: {},
+            parseError: 'Failed to parse tool call arguments: Unterminated string',
+          },
+        ],
+      })
+    vi.mocked(consumeStreamGenerator)
+      .mockResolvedValueOnce(truncatedToolCall())
+      .mockResolvedValueOnce(truncatedToolCall())
+      .mockResolvedValueOnce(truncatedToolCall())
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+    vi.mocked(executeTools).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'Failed to parse tool call arguments', toolCallId: 'call-edit' }],
+      stepDoneCalled: false,
+    } as any)
+
+    const result = await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+
+    // finishReason=length means the JSON was cut off, not malformed by the model:
+    // counting it as a formatting fault stops the session after three strikes
+    // while the output budget is never raised.
+    expect(result.failed).toBeUndefined()
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(4)
+    const budgets = vi.mocked(streamLLMPure).mock.calls.map(([request]) => request.modelSettings?.maxTokens)
+    expect(budgets[1]).toBeGreaterThan(budgets[0]!)
+  })
+
+  it('stops instead of looping when a bigger output budget never closes the tool arguments', async () => {
+    const append = vi.fn()
+    const truncatedToolCall = () =>
+      makeStreamResult({
+        finishReason: 'length',
+        toolCalls: [
+          {
+            id: 'call-edit',
+            name: 'edit_file',
+            arguments: {},
+            parseError: 'Failed to parse tool call arguments: Unterminated string',
+          },
+        ],
+      })
+    vi.mocked(consumeStreamGenerator).mockResolvedValue(truncatedToolCall())
+    vi.mocked(executeTools).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'Failed to parse tool call arguments', toolCallId: 'call-edit' }],
+      stepDoneCalled: false,
+    } as any)
+
+    const result = await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+
+    // Once the truncation retries are spent the budget stops growing, so the
+    // cut-off exemption must hand back to the malformed-tool valve — otherwise
+    // the loop has no cap left and burns tokens forever.
+    expect(result.failed).toBeTruthy()
+    // 3 truncation retries then 3 malformed strikes — anything beyond that is
+    // the runaway loop this guards against.
+    expect(vi.mocked(consumeStreamGenerator).mock.calls.length).toBeLessThanOrEqual(8)
+  })
 })

@@ -44,12 +44,15 @@ import {
 } from '../ws/protocol.js'
 import { executeTools, type ToolBatchContext } from './execute-tools.js'
 import {
+  effectiveContextTokens,
+  estimateMessagesTokens,
   estimatePromptTokensForSafety,
-  estimateToolResultTokens,
   isContextLengthError,
   isNonRetryableLLMError,
   isNonTransientHttpError,
 } from './token-budget.js'
+import { reduceHistoryForWindow } from './history-reduction.js'
+import { settleUnpairedToolCalls } from './unpaired-tool-calls.js'
 import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
@@ -206,7 +209,15 @@ export interface TopLevelLoopConfig {
 // ============================================================================
 
 const MAX_TRUNCATION_RETRIES = 3
-const MAX_CONTEXT_LENGTH_RETRIES = 3
+/**
+ * A context overflow buys exactly one output-budget halving. Halving shrinks
+ * what the model may WRITE, which only helps when the output side is what tips
+ * the request over; a second failure proves the INPUT is too big, and only
+ * compaction can fix that.
+ */
+const MAX_OUTPUT_BUDGET_HALVINGS = 1
+/** Guard against an endless shrink loop when reduction stops freeing anything. */
+const MAX_HISTORY_REDUCTIONS = 3
 const MAX_MALFORMED_TOOL_ATTEMPTS = 3
 const OUTPUT_RESERVE_TOKENS = 2048
 const COMPACTION_OUTPUT_TOKENS = 8192
@@ -238,6 +249,14 @@ export async function runTopLevelAgentLoop(
   const retryLimiter: RetryLimiter = createRetryLimiter(config.maxRetriesPerTurn ?? 10)
   let truncationRetryCount = 0
   let contextRetryCount = 0
+  let historyReductionTarget: number | undefined
+  let historyReductionAttempts = 0
+  /** Reduction computed while deciding to retry — reused instead of redone. */
+  let pendingReducedMessages: RequestContextMessage[] | undefined
+  /** Last folded gauge; cleared whenever an event could have changed it. */
+  let lastMeasuredState: ReturnType<SessionManager['getContextState']> | undefined
+  /** Tool calls whose synthetic answer already cost the stored chain. */
+  const chainInvalidatedForCalls = new Set<string>()
   let malformedToolAttempts = 0
   let pendingToolResultTokens = 0
   let returnValueContent: string | undefined
@@ -250,6 +269,19 @@ export async function runTopLevelAgentLoop(
   let finalizingAfterStepDone = false
   let kickoffInjected = false
   let returnValueNudgeCount = 0
+  /**
+   * Drop the provider-side stored conversation for this turn.
+   *
+   * Any message injected OUTSIDE the plain assistant→tool→assistant flow makes
+   * that stored context diverge from local history, and providers refuse the
+   * mismatch: a native context still ending on an unconfirmed tool call rejects
+   * the replay (409), and Claude-native tool output rejects a queued user
+   * message (400). Dropping the chain turns the next request into a plain
+   * full-history one, which is always accepted.
+   */
+  const invalidateStoredChain = () => {
+    resolveClient().resetResponsesChain?.(chainKey)
+  }
   const failLLM = (error: string, attempts: number) => {
     append({ type: 'chat.error', data: { error, recoverable: true } })
     if (!config.subAgentMetadata) {
@@ -307,21 +339,37 @@ export async function runTopLevelAgentLoop(
     const session = sessionManager.requireSession(sessionId)
     const runtimeConfig = getRuntimeConfig()
 
-    if (!compacting && preflightCompactionPending) {
-      const contextState = sessionManager.getContextState(sessionId)
+    // Reading the gauge folds the WHOLE event store, so it is read once per
+    // iteration, shared with the budget computation below, and reused from the
+    // measurement the previous iteration already took. Only a completed LLM
+    // call (or a compaction, which clears the cache) moves these numbers —
+    // tool events in between cannot, so re-folding for them is pure waste.
+    const contextState = lastMeasuredState ?? sessionManager.getContextState(sessionId)
+    lastMeasuredState = contextState
+    const contextWindow = sessionManager.getCurrentModelContext(sessionId, config.mode)
+
+    // Compaction gate, re-evaluated on EVERY iteration. Two readings of the
+    // gauge are wrong here, and both end in a request the model refuses:
+    //  - `currentTokens` is the last measurement REPORTED BY THE PROVIDER, so a
+    //    tool result appended since is invisible to it. A single large result
+    //    can therefore double the request while the gauge still reads "safe".
+    //  - the window must be the one THIS request will use. A tracked window left
+    //    over from a wider model turns 99% full into a harmless-looking 26%.
+    if (!compacting) {
       if (contextState.currentTokensKnown !== false) preflightCompactionPending = false
       const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
       if (
         contextState.currentTokensKnown !== false &&
         contextState.canCompact &&
         shouldCompact(
-          contextState.currentTokens,
-          contextState.maxTokens,
+          effectiveContextTokens(contextState, pendingToolResultTokens, () => contextState.currentTokens),
+          contextWindow,
           sessionManager.getModelCompactionThreshold(sessionId, config.mode) ??
             runtimeConfig.context.compactionThreshold,
         )
       ) {
         appendCompactionPrompt(sessionId, append)
+        invalidateStoredChain()
         compacting = true
       }
     }
@@ -367,7 +415,7 @@ export async function runTopLevelAgentLoop(
       const attemptClient = resolveClient()
       const profileDefaultMaxTokens = getModelProfile(attemptClient.getModel()).defaultMaxTokens
 
-      const requestMessages = await config.getConversationMessages()
+      let requestMessages = await config.getConversationMessages()
 
       // The format-retry continuation is appended once per round (not on
       // LLM-error retries) — its persisted copy feeds later context rebuilds.
@@ -387,6 +435,42 @@ export async function runTopLevelAgentLoop(
         requestMessages.push({ role: 'user', content: continueContent, source: 'history' })
       }
 
+      // Close any tool call the history left hanging BEFORE the request goes
+      // out. Every user message injected off the plain assistant → tool →
+      // assistant path (continuation, compaction prompt, drained queue) can
+      // otherwise land right behind an unanswered call, a shape providers
+      // refuse outright. Settling is unconditional: cheap, idempotent, and the
+      // only way the invariant holds for injection sites added later.
+      const settlement = settleUnpairedToolCalls(requestMessages)
+      if (settlement.settled > 0) {
+        requestMessages = settlement.messages
+        // The repair is request-only, so the same break is re-detected on every
+        // rebuild. Dropping the stored chain each time would cost the session
+        // its provider-side continuity for good — do it once per broken call.
+        const unseen = settlement.settledCallIds.filter((id) => !chainInvalidatedForCalls.has(id))
+        if (unseen.length > 0) {
+          for (const id of unseen) chainInvalidatedForCalls.add(id)
+          invalidateStoredChain()
+        }
+      }
+
+      // Set only after a request was refused for being too large: resending the
+      // identical history can only fail again, so the oldest raw tool results
+      // are truncated until the request fits.
+      if (historyReductionTarget !== undefined) {
+        const reduction =
+          pendingReducedMessages?.length === requestMessages.length
+            ? { messages: pendingReducedMessages, truncated: 0 }
+            : reduceHistoryForWindow(requestMessages, historyReductionTarget)
+        requestMessages = reduction.messages
+        pendingReducedMessages = undefined
+        logger.info('Reduced history to fit the context window', {
+          sessionId,
+          targetTokens: historyReductionTarget,
+          truncatedToolResults: reduction.truncated,
+        })
+      }
+
       const configDir = getGlobalConfigDir(runtimeConfig.mode ?? 'production')
       const skills = await getEnabledSkillMetadata(configDir, sessionManager.getProjectWorkdir(sessionId))
       if (signal?.aborted) throw new Error('Aborted')
@@ -402,8 +486,6 @@ export async function runTopLevelAgentLoop(
         ...(skills.length > 0 ? { skills } : {}),
       })
 
-      const contextState = sessionManager.getContextState(sessionId)
-      const contextWindow = sessionManager.getCurrentModelContext(sessionId, config.mode)
       const currentTokensForBudget =
         contextState.currentTokensKnown === false
           ? estimatePromptTokensForSafety(
@@ -424,6 +506,7 @@ export async function runTopLevelAgentLoop(
           )
         ) {
           appendCompactionPrompt(sessionId, append)
+          invalidateStoredChain()
           compacting = true
           continue agentLoop
         }
@@ -448,7 +531,7 @@ export async function runTopLevelAgentLoop(
 
       previousContextTokens = currentTokensForBudget
 
-      const availableForOutput = Math.max(
+      let availableForOutput = Math.max(
         256,
         contextWindow - currentTokensForBudget - pendingToolResultTokens - OUTPUT_RESERVE_TOKENS,
       )
@@ -464,14 +547,42 @@ export async function runTopLevelAgentLoop(
       }
 
       if (compacting) {
+        // A session with no headroom left is exactly the one that needs a
+        // summary most — refusing here leaves the user with no way out. Free
+        // room instead of giving up, and only fail when nothing can be freed.
         if (availableForOutput < MIN_COMPACTION_OUTPUT_TOKENS) {
-          return failLLM(
-            serverT({
-              en: 'Not enough context headroom to summarize safely. History was preserved; compact earlier or reduce the input.',
-              fr: 'Marge de contexte insuffisante pour résumer correctement. Historique conservé ; compactez plus tôt ou réduisez les entrées.',
-            }),
-            0,
+          const reductionTarget = Math.max(
+            MIN_COMPACTION_OUTPUT_TOKENS,
+            contextWindow - COMPACTION_OUTPUT_TOKENS - OUTPUT_RESERVE_TOKENS,
           )
+          const reduction = reduceHistoryForWindow(requestMessages, reductionTarget)
+          if (historyReductionAttempts < MAX_HISTORY_REDUCTIONS && reduction.changed) {
+            historyReductionAttempts += 1
+            historyReductionTarget = reductionTarget
+            pendingReducedMessages = reduction.messages
+            continue
+          }
+          // Nothing left to shrink: fall back to what we are ACTUALLY about to
+          // send. The gauge measures a history the summary request no longer
+          // carries, so it can forbid a request that would fit comfortably.
+          const assembledHeadroom =
+            contextWindow -
+            estimatePromptTokensForSafety(
+              assembledRequest.systemPrompt,
+              assembledRequest.messages,
+              assembledRequest.tools,
+            ) -
+            OUTPUT_RESERVE_TOKENS
+          if (assembledHeadroom < MIN_COMPACTION_OUTPUT_TOKENS) {
+            return failLLM(
+              serverT({
+                en: 'Not enough context headroom to summarize safely. History was preserved; compact earlier or reduce the input.',
+                fr: 'Marge de contexte insuffisante pour résumer correctement. Historique conservé ; compactez plus tôt ou réduisez les entrées.',
+              }),
+              0,
+            )
+          }
+          availableForOutput = assembledHeadroom
         }
         modelSettings = { ...modelSettings, maxTokens: Math.min(COMPACTION_OUTPUT_TOKENS, availableForOutput) }
       }
@@ -515,6 +626,13 @@ export async function runTopLevelAgentLoop(
       }
 
       if (!attemptResult.error) {
+        // The request went through: later turns start from the full history
+        // again, any reduction applied here was a one-off rescue. The budget
+        // resets with it — a turn that spent its rescues early must still be
+        // able to survive a genuine overflow fifty iterations later.
+        historyReductionTarget = undefined
+        historyReductionAttempts = 0
+        pendingReducedMessages = undefined
         result = attemptResult
         break
       }
@@ -523,10 +641,10 @@ export async function runTopLevelAgentLoop(
       // Deterministic failures: a Responses turn that produced no actionable
       // output, or a non-transient 4xx that would just re-hit the same wall.
       // Context-length errors are excluded — they retry with a smaller budget.
+      const overflowed = isContextLengthError(attemptResult.error)
       const failWithoutRetry =
-        compacting ||
-        (!isContextLengthError(attemptResult.error) &&
-          (isNonRetryableLLMError(attemptResult.error) || isNonTransientHttpError(attemptResult.error)))
+        !overflowed &&
+        (compacting || isNonRetryableLLMError(attemptResult.error) || isNonTransientHttpError(attemptResult.error))
       // Case 2: content was streamed → finalize the partial bubble. When the
       // failure is retryable, append ONE visible continuation prompt so the
       // retry rebuilds context from the partial response. A deterministic
@@ -544,6 +662,7 @@ export async function runTopLevelAgentLoop(
             }),
           )
           append({ type: 'message.done', data: { messageId: continueMsgId } })
+          invalidateStoredChain()
           continuationAppended = true
         }
       }
@@ -552,12 +671,51 @@ export async function runTopLevelAgentLoop(
 
       // Context overflow: the prompt (including tool results) plus the requested
       // maxTokens exceeds the model's window. The error is deterministic, so
-      // retry immediately with a reduced maxTokens instead of waiting out backoff.
-      if (!compacting && isContextLengthError(attemptResult.error) && contextRetryCount < MAX_CONTEXT_LENGTH_RETRIES) {
-        contextRetryCount += 1
-        const currentMax = modelSettings?.maxTokens ?? currentMaxTokensOverride ?? profileDefaultMaxTokens
-        currentMaxTokensOverride = Math.max(256, Math.floor(currentMax / 2))
-        continue
+      // handle it immediately instead of waiting out backoff.
+      if (overflowed) {
+        // The output budget gets ONE halving: it is the only part of the
+        // request we can shrink without touching history.
+        if (!compacting && contextRetryCount < MAX_OUTPUT_BUDGET_HALVINGS) {
+          contextRetryCount += 1
+          const currentMax = modelSettings?.maxTokens ?? currentMaxTokensOverride ?? profileDefaultMaxTokens
+          currentMaxTokensOverride = Math.max(256, Math.floor(currentMax / 2))
+          continue
+        }
+        // Still refused: the INPUT is what does not fit, and no output budget
+        // can fix that. Summarize instead of burning the remaining retries.
+        if (!compacting) {
+          const { appendCompactionPrompt } = await import('../context/compactor.js')
+          appendCompactionPrompt(sessionId, append)
+          invalidateStoredChain()
+          compacting = true
+          contextRetryCount = 0
+          currentMaxTokensOverride = undefined
+          continue agentLoop
+        }
+        // Already summarizing: the summary request itself is too large, so it
+        // has to be rebuilt on a smaller history — resending it verbatim would
+        // hit the exact same wall.
+        const reductionTarget = Math.floor(estimateMessagesTokens(requestMessages) / 2)
+        const reduction = reduceHistoryForWindow(requestMessages, reductionTarget)
+        if (historyReductionAttempts < MAX_HISTORY_REDUCTIONS && reduction.changed) {
+          historyReductionAttempts += 1
+          historyReductionTarget = reductionTarget
+          pendingReducedMessages = reduction.messages
+          continue
+        }
+        // Nothing left to shrink. The raw provider string is jargon to the
+        // user, so keep it for the logs and say what can actually be done.
+        logger.error('Compaction request still exceeds the context window', {
+          sessionId,
+          error: attemptResult.error,
+        })
+        return failLLM(
+          serverT({
+            en: 'This conversation is too large to summarize, even after shrinking it. History was preserved — start a new session to continue.',
+            fr: 'Cette conversation est trop volumineuse pour être résumée, même après réduction. Historique conservé — démarrez une nouvelle session pour continuer.',
+          }),
+          1,
+        )
       }
 
       // Deterministic request failures cannot succeed on an automatic retry —
@@ -689,6 +847,7 @@ export async function runTopLevelAgentLoop(
       result.usage.promptTokens,
       result.usage.completionTokens,
       config.subAgentMetadata?.subAgentId,
+      config.mode,
     )
     pendingToolResultTokens = 0
     currentMaxTokensOverride = undefined
@@ -697,13 +856,16 @@ export async function runTopLevelAgentLoop(
     // When exceeded, append compaction prompt and let the next iteration
     // handle summarization — same agent, same loop, no nested call.
     if (!compacting) {
-      const contextState = sessionManager.getContextState(sessionId)
+      // Re-read: the call above recorded a fresh measurement. The window stays
+      // the one resolved for this turn (see the gate at the top of the loop).
+      const measuredState = sessionManager.getContextState(sessionId)
+      lastMeasuredState = measuredState
       const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
       if (
         compactAfterTools ||
         shouldCompact(
-          contextState.currentTokens,
-          contextState.maxTokens,
+          effectiveContextTokens(measuredState, pendingToolResultTokens, () => measuredState.currentTokens),
+          contextWindow,
           sessionManager.getModelCompactionThreshold(sessionId, config.mode) ??
             runtimeConfig.context.compactionThreshold,
         )
@@ -712,6 +874,7 @@ export async function runTopLevelAgentLoop(
           compactAfterTools = true
         } else {
           appendCompactionPrompt(sessionId, append)
+          invalidateStoredChain()
           compacting = true
           compactAfterTools = false
           continue
@@ -725,7 +888,6 @@ export async function runTopLevelAgentLoop(
         const currentMaxTokens =
           result.modelParams?.maxTokens ?? getModelProfile(resolveClient().getModel()).defaultMaxTokens
         const promptTokens = result.usage.promptTokens
-        const contextWindow = sessionManager.getCurrentModelContext(sessionId, config.mode)
         const newMaxTokens = Math.min(
           Math.floor(currentMaxTokens * 1.5),
           Math.max(256, contextWindow - promptTokens - OUTPUT_RESERVE_TOKENS),
@@ -772,6 +934,32 @@ export async function runTopLevelAgentLoop(
       }
     }
 
+    // Tool arguments whose JSON never closed are a CUT-OFF response, not a
+    // formatting fault: the model wrote valid JSON and ran out of budget. The
+    // cure is a bigger output budget — treating it as a format error instead
+    // stops the session after three strikes while the budget never moves. The
+    // call is still executed so its error result settles the tool_call pair.
+    //
+    // The exemption lasts EXACTLY as long as the budget can still grow: once
+    // the truncation retries are spent, a response that keeps coming back cut
+    // off has to fall through to the malformed-tool valve. Nothing else caps
+    // this loop, so an unconditional exemption would burn tokens forever.
+    const truncatedToolCall =
+      !compacting &&
+      result.finishReason === 'length' &&
+      result.toolCalls.length > 0 &&
+      result.toolCalls.every((call) => call.parseError) &&
+      truncationRetryCount < MAX_TRUNCATION_RETRIES
+    if (truncatedToolCall) {
+      truncationRetryCount += 1
+      const currentMaxTokens =
+        result.modelParams?.maxTokens ?? getModelProfile(resolveClient().getModel()).defaultMaxTokens
+      currentMaxTokensOverride = Math.min(
+        Math.floor(currentMaxTokens * 1.5),
+        Math.max(256, contextWindow - result.usage.promptTokens - OUTPUT_RESERVE_TOKENS),
+      )
+    }
+
     if (result.toolCalls.length > 0) {
       append(
         createMessageDoneEvent(assistantMsgId, {
@@ -803,10 +991,11 @@ export async function runTopLevelAgentLoop(
         }
         batchContext.agentTimeout = getRuntimeConfig().agent.toolTimeout
         const batchResult = await executeTools(assistantMsgId, result.toolCalls, batchContext, append)
-        pendingToolResultTokens = estimateToolResultTokens(batchResult.toolMessages)
+        pendingToolResultTokens = estimateMessagesTokens(batchResult.toolMessages)
         // Invalid JSON must never become an unbounded model/tool recovery loop.
         // Keep the failed tool results in history, allowing two correction turns.
-        malformedToolAttempts = result.toolCalls.some((call) => call.parseError) ? malformedToolAttempts + 1 : 0
+        malformedToolAttempts =
+          !truncatedToolCall && result.toolCalls.some((call) => call.parseError) ? malformedToolAttempts + 1 : 0
         if (malformedToolAttempts >= MAX_MALFORMED_TOOL_ATTEMPTS) {
           const error = serverT({
             en: 'Stopped after three consecutive responses with malformed tool arguments. You can resume this session.',
@@ -869,7 +1058,8 @@ export async function runTopLevelAgentLoop(
       }
 
       if (!config.subAgentMetadata) {
-        void drainQueue(sessionManager, sessionId, append, onMessage)
+        const drained = drainQueue(sessionManager, sessionId, append, onMessage)
+        if (drained.hasMessages) invalidateStoredChain()
       }
 
       retryLimiter.reset()
@@ -921,6 +1111,8 @@ export async function runTopLevelAgentLoop(
       // Reinject the agent reminder into the new window
       config.injectAgentReminder?.()
       compacting = false
+      // context.compacted rewrote the window: the cached gauge is meaningless.
+      lastMeasuredState = undefined
 
       // Manual compaction (initialCompacting) is a one-shot operation — break after done.
       // Auto-compaction continues the loop for subsequent user messages.

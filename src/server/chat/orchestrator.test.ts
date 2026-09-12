@@ -366,7 +366,7 @@ describe('chat orchestrator', () => {
     expect(eventTypes).toContain('chat.done')
     expect(eventTypes).toContain('turn.snapshot')
     expect(eventTypes.at(-1)).toBe('running.changed')
-    expect(sessionManager.setCurrentContextSize).toHaveBeenCalledWith('session-1', 30, 10, undefined)
+    expect(sessionManager.setCurrentContextSize).toHaveBeenCalledWith('session-1', 30, 10, undefined, 'planner')
     expect(processEventsForConversationMock).toHaveBeenCalledWith(
       'session-1',
       expect.anything(),

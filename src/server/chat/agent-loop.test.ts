@@ -1079,7 +1079,15 @@ describe('maxTokens clamping', () => {
 
     // Both prompt AND completion tokens must flow into context tracking so the
     // next clamp knows the real context size (input + last output).
-    expect(mockSessionManager.setCurrentContextSize).toHaveBeenCalledWith('test-session', 55100, 6030, undefined)
+    // The turn's mode travels with the measurement: the gauge must be reported
+    // against the same window the request was budgeted against.
+    expect(mockSessionManager.setCurrentContextSize).toHaveBeenCalledWith(
+      'test-session',
+      55100,
+      6030,
+      undefined,
+      'planner',
+    )
   })
 
   it('does not reset context size to zero when the LLM query fails', async () => {
@@ -1528,7 +1536,7 @@ describe('maxTokens clamping', () => {
     expect(calls[1]?.[0].modelSettings?.maxTokens).toBe(8192)
   })
 
-  it('gives up after exhausting context-length retries and falls through to the failure path', async () => {
+  it('escalates to compaction when the input still overflows after the output-budget halving', async () => {
     mockSessionManager = {
       enterPauseGate: vi.fn().mockResolvedValue('released'),
       requireSession: vi.fn().mockReturnValue({
@@ -1598,17 +1606,6 @@ describe('maxTokens clamping', () => {
         modelParams: {},
         error: contextError,
       })
-      .mockResolvedValueOnce({
-        content: '',
-        toolCalls: [],
-        segments: [],
-        usage: { promptTokens: 0, completionTokens: 0 },
-        timing: { ttft: 0, completionTime: 0, tps: 0, prefillTps: 0 },
-        aborted: false,
-        finishReason: 'stop',
-        modelParams: {},
-        error: contextError,
-      })
 
     await runTopLevelAgentLoop(
       makeConfig({ llmRetryPolicy: { backoffMs: [0], minIntervalMs: 0, maxDurationMs: 60_000, maxAttempts: 1 } }),
@@ -1616,13 +1613,15 @@ describe('maxTokens clamping', () => {
     ).catch(() => {})
 
     const calls = (streamLLMPure as any).mock.calls
-    // 1 initial + 3 halving retries; the 4th failure exhausts the budget and
-    // falls through to the normal failure path (maxAttempts 1 → give up).
-    expect(calls.length).toBe(4)
+    // 1 initial + 1 halving: a second refusal proves the INPUT is what does not
+    // fit, so the third request is the (tool-free) summarization, not a third
+    // halving that could never help. It overflows too and nothing is left to
+    // shrink in an empty history, so the turn fails there.
+    expect(calls.length).toBe(3)
     expect(calls[0]?.[0].modelSettings?.maxTokens).toBe(16384)
     expect(calls[1]?.[0].modelSettings?.maxTokens).toBe(8192)
-    expect(calls[2]?.[0].modelSettings?.maxTokens).toBe(4096)
-    expect(calls[3]?.[0].modelSettings?.maxTokens).toBe(2048)
+    expect(calls[2]?.[0].toolChoice).toBe('none')
+    expect(calls[2]?.[0].tools).toEqual([])
   })
 
   it('applies the context-length halving even when config.modelSettings is set', async () => {

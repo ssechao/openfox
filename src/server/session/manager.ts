@@ -1601,9 +1601,19 @@ export class SessionManager {
    * maxTokens comes from the session model's context window (falling back to
    * the currently selected model's limit).
    */
-  setCurrentContextSize(sessionId: string, promptTokens: number, completionTokens = 0, subAgentId?: string): void {
-    const state = getSessionState(sessionId, this.getCurrentModelContext(sessionId))
-    const maxTokens = this.getCurrentModelContext(sessionId)
+  setCurrentContextSize(
+    sessionId: string,
+    promptTokens: number,
+    completionTokens = 0,
+    subAgentId?: string,
+    agentId?: string,
+  ): void {
+    // The gauge must report the window the request was actually budgeted
+    // against. Resolving without the caller's mode falls back to the session's
+    // persisted one, and the two diverge on every mode/agent override — that is
+    // how the same token count ends up shown against two different windows.
+    const maxTokens = this.getCurrentModelContext(sessionId, agentId)
+    const state = getSessionState(sessionId, maxTokens)
     const currentTokens = promptTokens + completionTokens
     // Sub-agent runs happen in a fresh, never-compacted scoped context, so
     // their context.state must never inherit the main session's count.
