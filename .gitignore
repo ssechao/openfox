@@ -8,6 +8,7 @@ dist-sea-bundle/
 out/
 launcher/
 *.tsbuildinfo
+openfox-*.tgz
 
 # Database
 *.db
