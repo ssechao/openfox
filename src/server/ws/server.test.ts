@@ -468,7 +468,7 @@ async function createHarness(
     options.providerManager as never,
   )
 
-  await new Promise<void>((resolve) => httpServer.listen(0, resolve))
+  await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve))
   const address = httpServer.address()
   if (!address || typeof address === 'string') {
     throw new Error('Failed to bind http server')
@@ -588,6 +588,15 @@ async function createHarness(
 }
 
 describe('createWebSocketServer', () => {
+  it('binds the fixture to the same IPv4 interface as its client', async () => {
+    const harness = await createHarness()
+    try {
+      expect(harness.httpServer.address()).toMatchObject({ address: '127.0.0.1', family: 'IPv4' })
+    } finally {
+      await harness.close()
+    }
+  })
+
   beforeEach(() => {
     createProjectMock.mockReset()
     getProjectMock.mockReset()

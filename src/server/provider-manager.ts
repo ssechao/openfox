@@ -506,7 +506,8 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         ...(provider.apiKey && { apiKey: provider.apiKey }),
         ...(thinkingField ? { thinkingField } : {}),
         ...(sendReasoningInMessages !== undefined ? { sendReasoningInMessages } : {}),
-        ...(provider.apiProtocol ? { apiProtocol: provider.apiProtocol } : {}),
+        // An unset provider must not inherit another provider's global override.
+        apiProtocol: provider.apiProtocol ?? 'auto',
         ...(modelThinking.reasoningEffort &&
           !send.suppressEffort && { reasoningEffort: modelThinking.reasoningEffort }),
       },

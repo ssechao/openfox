@@ -78,6 +78,28 @@ describe('ProviderManager - Model Selection', () => {
     vi.restoreAllMocks()
   })
 
+  it.each([
+    { protocol: undefined, expected: 'auto' },
+    { protocol: 'auto' as const, expected: 'auto' },
+    { protocol: 'responses' as const, expected: 'responses' },
+    { protocol: 'chat-completions' as const, expected: 'chat-completions' },
+  ])('isolates provider protocol $protocol from a global Responses override', ({ protocol, expected }) => {
+    const configured: Config = {
+      ...config,
+      llm: { ...config.llm, apiProtocol: 'responses' },
+      providers: [{ ...config.providers![0]!, ...(protocol ? { apiProtocol: protocol } : {}) }],
+    }
+    const manager = createProviderManager(configured)
+    manager.createClient('provider-1', 'model-a')
+    expect(createLLMClientMock.mock.calls.at(-1)?.[0].llm).toMatchObject({ apiProtocol: expected })
+  })
+
+  it('does not inherit a global Chat override when a provider has no protocol', () => {
+    const manager = createProviderManager({ ...config, llm: { ...config.llm, apiProtocol: 'chat-completions' } })
+    manager.createClient('provider-1', 'model-a')
+    expect(createLLMClientMock.mock.calls.at(-1)?.[0].llm).toMatchObject({ apiProtocol: 'auto' })
+  })
+
   describe('getProviderModels', () => {
     it('returns empty array for non-existent provider', async () => {
       const models = await providerManager.getProviderModels('non-existent')

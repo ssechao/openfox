@@ -237,7 +237,9 @@ export function hasBackgroundAmpersand(command: string, nesting = 0): boolean {
         let delimiter = ''
         let quoted = false
         let hasDelimiter = false
-        while (j < n && !/[\s;&|<>()]/.test(command[j]!)) {
+        // CR is part of the shell word, including the heredoc delimiter.
+        // Using \s here strips it but not from the closing line.
+        while (j < n && !/[ \t\n;&|<>()]/.test(command[j]!)) {
           hasDelimiter = true
           const quote = command[j]
           // ANSI-C/localized delimiter quoting requires shell expansion; do
