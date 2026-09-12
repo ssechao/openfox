@@ -349,7 +349,7 @@ describe('useAutoScroll', () => {
     }
   })
 
-  it('detaches via lone scroll events once following has been idle for more than the guard window', () => {
+  it('stays live when content growth causes a late downward scroll event', () => {
     vi.useFakeTimers()
     try {
       const { el, metrics, result } = setup()
@@ -361,7 +361,7 @@ describe('useAutoScroll', () => {
       vi.setSystemTime(Date.now() + 4600)
       el.scrollTop = 690
       act(() => el.dispatchEvent(new Event('scroll')))
-      expect(result.current.isAutoScrollActive).toBe(false)
+      expect(result.current.isAutoScrollActive).toBe(true)
     } finally {
       vi.useRealTimers()
     }

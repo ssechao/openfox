@@ -145,7 +145,12 @@ export const useAutoScroll = (
       reEnableIfNearBottom()
     }
 
+    let previousScrollTop = scroller.scrollTop
     const onScroll = () => {
+      const currentScrollTop = scroller.scrollTop
+      const movedUp = currentScrollTop < previousScrollTop
+      previousScrollTop = currentScrollTop
+      if (!movedUp) return
       if (draggingRef.current) return
       if (programmaticRef.current) return
       if (Date.now() - lastFollowRef.current <= FOLLOW_GUARD_MS) return

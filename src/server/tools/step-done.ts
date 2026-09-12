@@ -17,7 +17,7 @@ export const stepDoneTool: Tool = {
     function: {
       name: 'step_done',
       description:
-        'Signal that you have completed the current workflow step. Call this exactly once when you have finished all work for this step. After calling this, no further tool calls should be made.',
+        'Signal that you have completed the current workflow step. Call this exactly once when you have finished all work for this step. After this tool returns, provide a concise user-visible final response explaining what was done and verified; make no further tool calls.',
       parameters: {
         type: 'object',
         properties: {},

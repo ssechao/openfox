@@ -646,6 +646,7 @@ export async function executeWorkflow(
               ...(!firstEntryForStep.has(step.id) && !agentStep.prompt && !isResumingCurrentStep
                 ? { injectKickoff: () => injectGenericKickoff(sessionId) }
                 : {}),
+              stopOnStepDone: true,
               onToolExecuted: (toolCall: ToolCall, toolResult: ToolResult) => {
                 // Also detected in execute-tools.ts (stepDoneCalled flag) to break
                 // the agent loop immediately. This layer handles workflow orchestration

@@ -169,6 +169,9 @@ describe('agentLoop integration', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(streamLLMPure).mockReset()
+    vi.mocked(consumeStreamGenerator).mockReset()
+    vi.mocked(executeTools).mockReset()
     turnMetrics = {
       addToolTime: vi.fn(),
       addLLMCall: vi.fn(),
@@ -280,7 +283,40 @@ describe('agentLoop integration', () => {
     expect(truncatedEvents.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('breaks loop immediately when step_done is called', async () => {
+  it('requests a visible final response after step_done outside a workflow', async () => {
+    const append = vi.fn()
+    const toolCall: ToolCall = { id: 'call-1', name: 'step_done', arguments: {} }
+    const finalSegments = [{ type: 'text', content: 'Implemented and verified the fix.' }]
+
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(
+        makeStreamResult({
+          content: 'Implemented and verified the fix.',
+          segments: finalSegments,
+          finishReason: 'stop',
+        }),
+      )
+    ;(executeTools as any).mockResolvedValue({
+      toolMessages: [
+        { role: 'tool', content: 'Step completion signal recorded.', source: 'history', toolCallId: 'call-1' },
+      ],
+      stepDoneCalled: true,
+    })
+
+    await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    expect(streamLLMPure).toHaveBeenNthCalledWith(2, expect.objectContaining({ toolChoice: 'none' }))
+    expect(append).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'message.done', data: expect.objectContaining({ segments: finalSegments }) }),
+    )
+    expect(append).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'step_done' }) }),
+    )
+  })
+
+  it('breaks immediately after step_done when a workflow owns the step', async () => {
     const append = vi.fn()
     const toolCall: ToolCall = { id: 'call-1', name: 'step_done', arguments: {} }
 
@@ -294,13 +330,12 @@ describe('agentLoop integration', () => {
       stepDoneCalled: true,
     })
 
-    await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+    await runTopLevelAgentLoop(makeConfig({ append, stopOnStepDone: true }), turnMetrics)
 
-    // Should have called streamLLM only once (no second LLM call after step_done)
     expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
-    // Should emit chat.done
-    const chatDoneEvents = append.mock.calls.filter((args: unknown[]) => (args[0] as any).type === 'chat.done')
-    expect(chatDoneEvents.length).toBeGreaterThanOrEqual(1)
+    expect(append).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'step_done' }) }),
+    )
   })
 
   it('continues loop when step_done is not called', async () => {

@@ -169,6 +169,7 @@ export interface TopLevelLoopConfig {
   }>
   getToolRegistry: () => ToolRegistry
   onToolExecuted?: ((toolCall: ToolCall, result: ToolResult) => void) | undefined
+  stopOnStepDone?: boolean
   injectKickoff?: (() => void | Promise<void>) | undefined
   /** Called after auto-compaction completes within the loop, before the next iteration.
    *  Reinjects the agent definition reminder into the new context window. */
@@ -245,6 +246,7 @@ export async function runTopLevelAgentLoop(
   let compacting = config.initialCompacting ?? false
   let preflightCompactionPending = !compacting
   let compactAfterTools = false
+  let finalizingAfterStepDone = false
   let returnValueNudgeCount = 0
   const failLLM = (error: string, attempts: number) => {
     append({ type: 'chat.error', data: { error, recoverable: true } })
@@ -385,12 +387,13 @@ export async function runTopLevelAgentLoop(
       const skills = await getEnabledSkillMetadata(configDir, sessionManager.getProjectWorkdir(sessionId))
       if (signal?.aborted) throw new Error('Aborted')
 
+      const requestToolChoice = compacting || finalizingAfterStepDone ? 'none' : 'auto'
       const assembledRequest = await config.assembleRequest({
         workdir: session.workdir,
         messages: requestMessages,
         injectedFiles,
         promptTools: compacting ? [] : toolRegistry.definitions,
-        toolChoice: compacting ? 'none' : 'auto',
+        toolChoice: requestToolChoice,
         ...(instructionContent ? { customInstructions: instructionContent } : {}),
         ...(skills.length > 0 ? { skills } : {}),
       })
@@ -457,7 +460,7 @@ export async function runTopLevelAgentLoop(
         sessionId,
         messages: assembledRequest.messages,
         tools: compacting ? [] : assembledRequest.tools,
-        toolChoice: compacting ? 'none' : 'auto',
+        toolChoice: requestToolChoice,
         ...(compacting && /^(claude-|gpt-)/i.test(attemptClient.getModel()) ? { reasoningEffort: 'low' as const } : {}),
         signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
         subAgentAliases,
@@ -784,18 +787,23 @@ export async function runTopLevelAgentLoop(
           return failLLM(error, malformedToolAttempts)
         }
         if (batchResult.stepDoneCalled) {
-          emitDoneAndBreak(
-            assistantMsgId,
-            result.segments,
-            statsIdentity,
-            mode,
-            turnMetrics,
-            append,
-            onMessage,
-            'step_done',
-            agentType,
-          )
-          break
+          if (config.stopOnStepDone) {
+            emitDoneAndBreak(
+              assistantMsgId,
+              result.segments,
+              statsIdentity,
+              mode,
+              turnMetrics,
+              append,
+              onMessage,
+              'step_done',
+              agentType,
+            )
+            break
+          }
+          finalizingAfterStepDone = true
+          retryLimiter.reset()
+          continue
         }
         if (batchResult.returnValueContent) {
           returnValueContent = batchResult.returnValueContent
@@ -924,7 +932,7 @@ export async function runTopLevelAgentLoop(
         stats,
       }),
     )
-    append(createChatDoneEvent(assistantMsgId, 'complete', stats, agentType))
+    append(createChatDoneEvent(assistantMsgId, finalizingAfterStepDone ? 'step_done' : 'complete', stats, agentType))
 
     break
   }

@@ -63,5 +63,6 @@ describe('stepDoneTool', () => {
     expect(description).toContain('completed')
     expect(description).toContain('workflow step')
     expect(description).toContain('once')
+    expect(description).toContain('user-visible final response')
   })
 })

@@ -404,6 +404,7 @@ export async function runAgentTurn(
   callbacks?: {
     injectKickoff?: () => void
     onToolExecuted?: (toolCall: ToolCall, toolResult: ToolResult) => void
+    stopOnStepDone?: boolean
   },
 ): Promise<{ returnValueContent?: string; returnValueResult?: string; failed?: { error: string } }> {
   const allAgents = await loadAllAgentsDefault(options.sessionManager.getProjectWorkdir(options.sessionId))
@@ -533,6 +534,7 @@ export async function runAgentTurn(
       ...(options.initialCompacting ? { initialCompacting: true } : {}),
       ...(callbacks?.injectKickoff ? { injectKickoff: callbacks.injectKickoff } : {}),
       ...(callbacks?.onToolExecuted ? { onToolExecuted: callbacks.onToolExecuted } : {}),
+      ...(callbacks?.stopOnStepDone ? { stopOnStepDone: true } : {}),
       ...(options.llmRetryPolicy ? { llmRetryPolicy: options.llmRetryPolicy } : {}),
       ...(options.warmup ? { warmup: true } : {}),
     },
