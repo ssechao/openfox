@@ -271,12 +271,12 @@ export async function runTopLevelAgentLoop(
   /**
    * Drop the provider-side stored conversation for this turn.
    *
-   * Any message injected OUTSIDE the plain assistant→tool→assistant flow makes
-   * that stored context diverge from local history, and providers refuse the
-   * mismatch: a native context still ending on an unconfirmed tool call rejects
-   * the replay (409), and Claude-native tool output rejects a queued user
-   * message (400). Dropping the chain turns the next request into a plain
-   * full-history one, which is always accepted.
+   * Any message injected OUTSIDE the plain assistant→tool→assistant flow can
+   * make that stored context diverge from local history. A user message queued
+   * while an external tool is running is the exception: the next delta must keep
+   * the stored boundary so it can deliver that tool result before the queued
+   * prompt. Dropping the boundary strands the native resident in
+   * `awaiting_result`, after which a full-history replay is correctly refused.
    */
   const invalidateStoredChain = () => {
     resolveClient().resetResponsesChain?.(chainKey)
@@ -1092,8 +1092,7 @@ export async function runTopLevelAgentLoop(
       }
 
       if (!config.subAgentMetadata) {
-        const drained = drainQueue(sessionManager, sessionId, append, onMessage)
-        if (drained.hasMessages) invalidateStoredChain()
+        drainQueue(sessionManager, sessionId, append, onMessage)
       }
 
       retryLimiter.reset()

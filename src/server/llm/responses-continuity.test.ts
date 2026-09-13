@@ -103,7 +103,12 @@ const TOOLS: LLMToolDefinition[] = [
   { type: 'function', function: { name: 'read_file', description: 'read', parameters: {} } },
 ]
 
-function makeClient(port: number, model: string, backend: string) {
+function makeClient(
+  port: number,
+  model: string,
+  backend: string,
+  apiProtocol?: 'auto' | 'chat-completions' | 'responses',
+) {
   return createLLMClient({
     llm: {
       baseUrl: `http://127.0.0.1:${port}`,
@@ -112,6 +117,7 @@ function makeClient(port: number, model: string, backend: string) {
       model,
       apiKey: 'test-key',
       backend,
+      apiProtocol,
     },
     context: { maxTokens: 8192, compactionThreshold: 0.85, compactionTarget: 0.6 },
   } as never)
@@ -327,6 +333,54 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
     expect((r2.body['tools'] as Array<{ name: string }>).map((t) => t.name)).toEqual(['read_file'])
     // previous_response_id is never combined with `conversation`.
     expect(r2.body['conversation']).toBeUndefined()
+  })
+
+  it('delivers a tool result and a user message queued behind it on the same stored chain', async () => {
+    const call = {
+      type: 'function_call',
+      id: 'item_call_1',
+      call_id: 'call-1',
+      name: 'read_file',
+      arguments: JSON.stringify({ path: 'alpha.ts' }),
+    }
+    const toolEvents = completedEvents('resp_tool', [
+      { type: 'response.output_item.added', output_index: 0, item: { ...call, arguments: '' } },
+      { type: 'response.function_call_arguments.delta', output_index: 0, delta: call.arguments },
+    ])
+    ;(toolEvents.at(-1) as { response: { output: unknown[] } }).response.output = [call]
+    const mock = await startResponsesMock([toolEvents, completedEvents('resp_done')])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, 'claude-opus-5', 'openai', 'responses')
+
+    await consume(client, {
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: 'inspect the file' },
+      ],
+      tools: TOOLS,
+      responsesChainKey: 'queued-after-tool',
+    })
+    await consume(client, {
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: 'inspect the file' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'alpha.ts' } }],
+        },
+        { role: 'tool', content: 'file contents', toolCallId: 'call-1' },
+        { role: 'user', content: 'also inspect the timeout' },
+      ],
+      tools: TOOLS,
+      responsesChainKey: 'queued-after-tool',
+    })
+
+    expect(mock.requests[1]!.body['previous_response_id']).toBe('resp_tool')
+    expect(mock.requests[1]!.body['input']).toEqual([
+      { type: 'function_call_output', call_id: 'call-1', output: 'file contents' },
+      { role: 'user', content: 'also inspect the timeout' },
+    ])
   })
 
   it.each(['arguments', 'result', 'image'] as const)(

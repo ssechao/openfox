@@ -1126,7 +1126,7 @@ describe('agentLoop integration', () => {
     )
   })
 
-  it('invalidates the stored provider chain when queued messages land after tool output', async () => {
+  it('preserves the stored provider chain when queued messages land after tool output', async () => {
     const resetResponsesChain = vi.fn()
     const llmClient = { getModel: vi.fn().mockReturnValue('test-model'), resetResponsesChain } as any
     const drainAsapMessages = vi
@@ -1146,12 +1146,11 @@ describe('agentLoop integration', () => {
 
     await runTopLevelAgentLoop(makeConfig({ llmClient, sessionManager }), turnMetrics)
 
-    // Claude-native tool output cannot be followed by a queued user message on
-    // the stored conversation — the next request must go out as plain history.
-    expect(resetResponsesChain).toHaveBeenCalledWith('test-session:top')
-    expect(resetResponsesChain.mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[1]!,
-    )
+    // The stored response is exactly the boundary that owns this tool call.
+    // Keep it so the next request delivers the tool result and the queued user
+    // prompt as a delta. Dropping it strands the server-side resident in
+    // `awaiting_result` and a full-history replay is then refused with 409.
+    expect(resetResponsesChain).not.toHaveBeenCalled()
   })
 
   it('settles an interrupted tool call before a user message is sent behind it', async () => {
