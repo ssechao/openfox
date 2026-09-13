@@ -165,6 +165,7 @@ describe('GET /api/agents', () => {
     const ids = data.agents.map((a) => a.id)
     expect(ids).toContain('planner')
     expect(ids).toContain('builder')
+    expect(ids).toContain('assistante')
     expect(ids).toContain('verifier')
   })
 })

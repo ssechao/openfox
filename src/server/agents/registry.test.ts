@@ -41,6 +41,7 @@ describe('loadDefaultAgents', () => {
     const ids = agents.map((a) => a.metadata.id)
     expect(ids).toContain('planner')
     expect(ids).toContain('builder')
+    expect(ids).toContain('assistante')
     expect(ids).toContain('verifier')
     expect(ids).toContain('code_reviewer')
     expect(ids).toContain('explorer')
@@ -63,14 +64,33 @@ describe('loadDefaultAgents', () => {
     expect(verifier.prompt).toContain('independent verification')
   })
 
+  it('should load the administrative assistant as an executable top-level mode', async () => {
+    const agents = await loadDefaultAgents()
+    const assistante = agents.find((a) => a.metadata.id === 'assistante')
+
+    expect(assistante).toBeDefined()
+    expect(assistante!.metadata).toMatchObject({
+      name: 'Assistante',
+      subagent: false,
+    })
+    expect(assistante!.metadata.allowedTools).toEqual(
+      expect.arrayContaining(['read_file', 'write_file', 'edit_file', 'session_metadata', 'project_tasks']),
+    )
+    expect(assistante!.prompt).toContain('## Continuity and case memory')
+    expect(assistante!.prompt).toContain('record acceptance criteria before substantive execution')
+    expect(assistante!.prompt).toContain('one specific, useful continuation')
+  })
+
   it('should distinguish subagent vs top-level agents', async () => {
     const agents = await loadDefaultAgents()
     const planner = agents.find((a) => a.metadata.id === 'planner')!
     const builder = agents.find((a) => a.metadata.id === 'builder')!
+    const assistante = agents.find((a) => a.metadata.id === 'assistante')!
     const verifier = agents.find((a) => a.metadata.id === 'verifier')!
 
     expect(planner.metadata.subagent).toBe(false)
     expect(builder.metadata.subagent).toBe(false)
+    expect(assistante.metadata.subagent).toBe(false)
     expect(verifier.metadata.subagent).toBe(true)
   })
 })
@@ -331,11 +351,13 @@ describe('isDefaultAgent', () => {
   it('should correctly identify built-in default agents', async () => {
     const isPlannerDefault = await isDefaultAgent('planner')
     const isBuilderDefault = await isDefaultAgent('builder')
+    const isAssistanteDefault = await isDefaultAgent('assistante')
     const isVerifierDefault = await isDefaultAgent('verifier')
     const isNonExistentDefault = await isDefaultAgent('nonexistent')
 
     expect(isPlannerDefault).toBe(true)
     expect(isBuilderDefault).toBe(true)
+    expect(isAssistanteDefault).toBe(true)
     expect(isVerifierDefault).toBe(true)
     expect(isNonExistentDefault).toBe(false)
   })
@@ -347,6 +369,7 @@ describe('getDefaultAgentIds', () => {
 
     expect(ids).toContain('planner')
     expect(ids).toContain('builder')
+    expect(ids).toContain('assistante')
     expect(ids).toContain('verifier')
     expect(ids).toContain('explorer')
     expect(ids).toContain('code-reviewer')
