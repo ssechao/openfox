@@ -130,10 +130,13 @@ function buildAssistantMessage(
   thinkingField?: string,
   sendReasoningInMessages?: boolean,
   inlineThinking?: boolean,
+  apiProtocol?: 'chat-completions' | 'responses',
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {
     role: 'assistant',
-    content: msg.content || ' ',
+    // Responses tool calls are standalone items; a Chat placeholder would
+    // invent an assistant message and break native-history prefix matching.
+    content: apiProtocol === 'responses' ? msg.content : msg.content || ' ',
   }
   if (msg.toolCalls?.length) {
     result['tool_calls'] = convertToolCalls(msg.toolCalls)
@@ -196,6 +199,7 @@ export async function convertMessages(
   thinkingField?: string,
   sendReasoningInMessages?: boolean,
   inlineThinking?: boolean,
+  apiProtocol?: 'chat-completions' | 'responses',
 ): Promise<ChatCompletionMessageParam[]> {
   const filtered = messages.filter((msg) => {
     if (msg.role !== 'assistant') return true
@@ -232,6 +236,7 @@ export async function convertMessages(
           thinkingField,
           sendReasoningInMessages,
           inlineThinking,
+          apiProtocol,
         ) as unknown as ChatCompletionMessageParam,
       )
     } else if (msg.role === 'user' && msg.attachments && msg.attachments.length > 0) {
@@ -287,6 +292,7 @@ async function buildChatCompletionCreateParams(
     thinkingField,
     sendReasoningInMessages,
     inlineThinking,
+    apiProtocol,
   )
 
   const temperature = request.modelSettings?.temperature ?? request.temperature ?? profile.temperature

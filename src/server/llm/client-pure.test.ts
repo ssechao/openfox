@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { buildResponsesRequest } from './responses-native.js'
 import {
   buildNonStreamingCreateParams,
   buildStreamingCreateParams,
@@ -8,6 +9,70 @@ import {
 } from './client-pure.js'
 
 describe('llm client pure helpers', () => {
+  describe.each([
+    ['complete', buildNonStreamingCreateParams],
+    ['stream', buildStreamingCreateParams],
+  ] as const)('%s assistant tool-call content', (_mode, build) => {
+    it.each(['responses', 'chat-completions'] as const)(
+      'preserves empty versus genuine whitespace using the effective %s protocol',
+      async (apiProtocol) => {
+        for (const content of ['', ' ', '\n', 'Reading the file.']) {
+          for (const sendReasoningInMessages of [false, true]) {
+            const toolCalls = [
+              { id: 'call-1', name: 'read_file', arguments: { path: '日本語.ts' } },
+              { id: 'call-2', name: 'read_file', arguments: { path: 'second.ts' } },
+            ]
+            const { params } = await build({
+              // Deliberately unrelated to the protocol: provider overrides win.
+              model: 'arbitrary-model',
+              request: {
+                messages: [{ role: 'assistant', content, thinkingContent: 'Inspect files', toolCalls }],
+              },
+              profile: {
+                temperature: 0.2,
+                defaultMaxTokens: 1000,
+                topP: 0.9,
+                supportsVision: true,
+                apiProtocol: 'responses',
+              },
+              capabilities: {
+                supportsTopK: false,
+                supportsChatTemplateKwargs: false,
+                supportsNumCtx: false,
+                routesEffortViaChatTemplateKwargs: false,
+                usesMaxCompletionTokens: false,
+              },
+              thinkingField: 'reasoning_content',
+              sendReasoningInMessages,
+              apiProtocol,
+            })
+            const assistant = params.messages[0]!
+            expect(assistant.content).toBe(apiProtocol === 'responses' ? content : content || ' ')
+            expect(assistant).toMatchObject({
+              tool_calls: toolCalls.map(({ id, name, arguments: args }) => ({
+                id,
+                type: 'function',
+                function: { name, arguments: JSON.stringify(args) },
+              })),
+            })
+            expect(assistant['reasoning_content']).toBe(sendReasoningInMessages ? 'Inspect files' : undefined)
+            if (apiProtocol === 'responses') {
+              expect(buildResponsesRequest(params).input).toEqual([
+                ...(content ? [{ role: 'assistant', content }] : []),
+                ...toolCalls.map(({ id, name, arguments: args }) => ({
+                  type: 'function_call',
+                  call_id: id,
+                  name,
+                  arguments: JSON.stringify(args),
+                })),
+              ])
+            }
+          }
+        }
+      },
+    )
+  })
+
   it('keeps image_url content parts intact on the Chat-Completions path (not converted to input_image)', async () => {
     const converted = await convertMessages(
       [

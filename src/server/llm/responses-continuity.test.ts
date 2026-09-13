@@ -1,7 +1,14 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import Database from 'better-sqlite3'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createLLMClient } from './client.js'
+import type { LLMCompletionRequest, LLMCompletionResponse, LLMToolDefinition } from './types.js'
+import { EventStore } from '../events/store.js'
+import { buildContextMessagesFromEventHistory, buildSnapshot, foldSessionState } from '../events/folding.js'
 
 /**
  * Boots an SSE server emulating the OpenAI Responses API that records every
@@ -50,6 +57,12 @@ async function startResponsesMock(
       const events = responses[Math.min(index, responses.length - 1)] ?? []
       index += 1
       if (hold) await hold(current)
+      if (body['stream'] === false) {
+        const terminal = events.at(-1) as { response: unknown }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(terminal.response))
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
       for (const event of events) {
         res.write(`data: ${JSON.stringify(event)}\n\n`)
@@ -86,7 +99,9 @@ function failedEvents(id: string): unknown[] {
 }
 
 const SYSTEM = 'You are a helpful assistant.'
-const TOOLS = [{ type: 'function', function: { name: 'read_file', description: 'read', parameters: {} } }]
+const TOOLS: LLMToolDefinition[] = [
+  { type: 'function', function: { name: 'read_file', description: 'read', parameters: {} } },
+]
 
 function makeClient(port: number, model: string, backend: string) {
   return createLLMClient({
@@ -115,6 +130,145 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
   afterAll(() => {
     for (const s of servers) s.close()
   })
+
+  it.each([
+    ['claude-opus-5', 'stream'],
+    ['claude-opus-5', 'complete'],
+    ['gpt-5.6-sol', 'stream'],
+    ['gpt-5.6-sol', 'complete'],
+  ] as const)(
+    '%s %s: tool-only history survives SQLite restart without invented assistant messages',
+    async (model, mode) => {
+      const cycles = 19
+      const nativeCalls = Array.from({ length: cycles }, (_, i) => ({
+        type: 'function_call',
+        id: `fc_${i}`,
+        call_id: `call-${i}`,
+        name: 'read_file',
+        arguments: JSON.stringify({ path: `file-${i}.ts`, note: '日本語 🦊' }),
+      }))
+      const responses = nativeCalls.map((call, i) => {
+        const events = completedEvents(`resp_${i}`, [
+          { type: 'response.output_item.added', output_index: 0, item: { ...call, arguments: '' } },
+          { type: 'response.function_call_arguments.delta', output_index: 0, delta: call.arguments },
+        ])
+        const terminal = events.at(-1) as { response: { output: unknown[] } }
+        terminal.response.output = [call]
+        return events
+      })
+      responses.push(completedEvents('resp_summary', [{ type: 'response.output_text.delta', delta: 'Summary.' }]))
+      const mock = await startResponsesMock(responses)
+      servers.push(mock.server)
+      const newClient = () =>
+        createLLMClient({
+          llm: { baseUrl: `http://127.0.0.1:${mock.port}`, model, backend: 'openai', apiProtocol: 'responses' },
+          context: { maxTokens: 1000000, compactionThreshold: 0.85, compactionTarget: 0.6 },
+        } as never)
+      const client = newClient()
+      const send = async (target: ReturnType<typeof newClient>, request: LLMCompletionRequest) => {
+        if (mode === 'complete') return target.complete(request)
+        const last = (await consume(target, request as unknown as Record<string, unknown>)) as {
+          type: string
+          response: LLMCompletionResponse
+        }
+        expect(last.type).toBe('done')
+        return last.response
+      }
+      const dir = mkdtempSync(join(tmpdir(), 'openfox-empty-assistant-'))
+      const dbPath = join(dir, 'test.sqlite')
+      let db = new Database(dbPath)
+      let store = new EventStore(db)
+      const session = 'empty-assistant-session'
+      const windowId = 'window-1'
+      const prompt = 'Inspect the code.\n' + 'export const value = 1\n'.repeat(4000)
+      const compact = 'Summarize the code findings and pending tasks. Do not execute any tools.'
+      const request = (): LLMCompletionRequest => ({
+        messages: [
+          { role: 'system', content: SYSTEM },
+          ...buildContextMessagesFromEventHistory(store.getEvents(session), windowId),
+        ],
+        tools: TOOLS,
+        responsesChainKey: session,
+      })
+      try {
+        store.append(session, {
+          type: 'message.start',
+          data: { messageId: 'u1', role: 'user', content: prompt, contextWindowId: windowId },
+        })
+        store.append(session, { type: 'message.done', data: { messageId: 'u1' } })
+        for (let i = 0; i < cycles; i++) {
+          const response = await send(client, request())
+          expect(response.content).toBe('')
+          expect(response.toolCalls).toHaveLength(1)
+          const call = response.toolCalls![0]!
+          expect(call.id).toBe(nativeCalls[i]!.call_id)
+          const messageId = `a${i}`
+          store.appendBatch(session, [
+            {
+              type: 'message.start',
+              data: { messageId, role: 'assistant', content: response.content, contextWindowId: windowId },
+            },
+            { type: 'tool.call', data: { messageId, toolCall: call } },
+            {
+              type: 'tool.result',
+              data: {
+                messageId,
+                toolCallId: call.id,
+                result: { success: true, output: `result-${i}`, durationMs: 1, truncated: false },
+              },
+            },
+            { type: 'message.done', data: { messageId } },
+          ])
+        }
+        const events = store.getEvents(session)
+        const snapshot = buildSnapshot(foldSessionState(events, windowId, 1000000), events.at(-1)!.seq)
+        expect(snapshot.messages.filter((m) => m.role === 'assistant').map((m) => m.content)).toEqual(
+          Array(cycles).fill(''),
+        )
+        store.append(session, { type: 'turn.snapshot', data: snapshot })
+        store.append(session, {
+          type: 'message.start',
+          data: { messageId: 'compact', role: 'user', content: compact, contextWindowId: windowId },
+        })
+        const beforeRestart = request()
+        // Harness compaction changes tool choice, invalidating the in-memory chain.
+        await send(client, { ...beforeRestart, toolChoice: 'none' })
+        db.close()
+        db = new Database(dbPath)
+        store = new EventStore(db)
+        expect(request()).toEqual(beforeRestart)
+        // A recreated client must reconstruct the same full input as the warm one.
+        await send(newClient(), { ...request(), toolChoice: 'none' })
+
+        expect(mock.requests.every((r) => r.path === '/v1/responses')).toBe(true)
+        for (let i = 1; i < cycles; i++) {
+          expect(mock.requests[i]!.body['previous_response_id']).toBe(`resp_${i - 1}`)
+          expect(mock.requests[i]!.body['input']).toEqual([
+            { type: 'function_call_output', call_id: `call-${i - 1}`, output: `result-${i - 1}` },
+          ])
+        }
+        const expected = [
+          { role: 'user', content: prompt },
+          ...nativeCalls.flatMap(({ id: _id, ...call }, i) => [
+            call,
+            { type: 'function_call_output', call_id: call.call_id, output: `result-${i}` },
+          ]),
+          { role: 'user', content: compact },
+        ]
+        for (const r of mock.requests.slice(cycles)) {
+          expect(r.body['previous_response_id']).toBeUndefined()
+          expect(r.body['store']).toBe(true)
+          expect(r.body['conversation']).toBeUndefined()
+          expect(r.body['instructions']).toBe(SYSTEM)
+          expect(r.body['tools']).toBeDefined()
+          expect(r.body['input']).toEqual(expected)
+        }
+      } finally {
+        if (db.open) db.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
 
   it('first turn: /v1/responses, store:true, no previous_response_id; second turn: previous_response_id + delta only', async () => {
     const mock = await startResponsesMock([completedEvents('resp_1'), completedEvents('resp_2')])
@@ -172,6 +326,50 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
     // previous_response_id is never combined with `conversation`.
     expect(r2.body['conversation']).toBeUndefined()
   })
+
+  it.each(['arguments', 'result', 'image'] as const)(
+    'still invalidates a tool-only history after a %s edit',
+    async (field) => {
+      const mock = await startResponsesMock([completedEvents('resp_1'), completedEvents('resp_2')])
+      servers.push(mock.server)
+      const client = makeClient(mock.port, 'gpt-5.6-sol', 'openai')
+      const messages: LLMCompletionRequest['messages'] = [
+        {
+          role: 'user',
+          content: 'inspect',
+          attachments: [
+            { id: 'image', filename: 'a.png', mimeType: 'image/png', size: 3, data: 'data:image/png;base64,QUJD' },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'a.ts' } }],
+        },
+        { role: 'tool', content: 'result-a', toolCallId: 'call-1' },
+        { role: 'user', content: 'explain' },
+      ]
+      await consume(client, { messages, tools: TOOLS, responsesChainKey: 'edited-tools' })
+      const expected = structuredClone(mock.requests[0]!.body['input']) as Array<Record<string, unknown>>
+      if (field === 'arguments') {
+        messages[1]!.toolCalls![0]!.arguments = { path: 'b.ts' }
+        expected[1]!['arguments'] = '{"path":"b.ts"}'
+      } else if (field === 'result') {
+        messages[2]!.content = 'result-b'
+        expected[2]!['output'] = 'result-b'
+      } else {
+        messages[0]!.attachments![0]!.data = 'data:image/png;base64,REVG'
+        const parts = expected[0]!['content'] as Array<Record<string, unknown>>
+        parts[1]!['image_url'] = 'data:image/png;base64,REVG'
+      }
+      messages.push({ role: 'assistant', content: 'Understood.' }, { role: 'user', content: 'continue' })
+      expected.push({ role: 'assistant', content: 'Understood.' }, { role: 'user', content: 'continue' })
+      await consume(client, { messages, tools: TOOLS, responsesChainKey: 'edited-tools' })
+      expect(mock.requests[1]!.path).toBe('/v1/responses')
+      expect(mock.requests[1]!.body['previous_response_id']).toBeUndefined()
+      expect(mock.requests[1]!.body['input']).toEqual(expected)
+    },
+  )
 
   it('a failed response does NOT advance the response id (chain reset, next request re-primes)', async () => {
     const mock = await startResponsesMock([

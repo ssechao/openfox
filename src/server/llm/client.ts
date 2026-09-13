@@ -153,7 +153,8 @@ export function createLLMClient(
       ...(resolvedEffort ? { reasoningEffort: resolvedEffort } : {}),
       ...(thinkingField ? { thinkingField } : {}),
       ...(sendReasoningInMessages !== undefined ? { sendReasoningInMessages } : {}),
-      apiProtocol: currentApiProtocol(),
+      // httpFor keeps Ollama on /api/chat even with a Responses override.
+      apiProtocol: backend === 'ollama' ? ('chat-completions' as const) : currentApiProtocol(),
     }
   }
 

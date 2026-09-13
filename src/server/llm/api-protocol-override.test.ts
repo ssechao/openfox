@@ -21,6 +21,11 @@ async function startMock(): Promise<{
     req.on('data', (c: Buffer) => (raw += c.toString()))
     req.on('end', () => {
       requests.push({ path: req.url ?? '', body: JSON.parse(raw || '{}') as Record<string, unknown> })
+      if (req.url === '/api/chat') {
+        res.writeHead(200, { 'Content-Type': 'application/x-ndjson' })
+        res.end(JSON.stringify({ message: { role: 'assistant', content: 'ok' }, done: true }) + '\n')
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
       // chat-completions empty stream / responses terminal event
       res.write('data: [DONE]\n\n')
@@ -55,6 +60,61 @@ describe('apiProtocol override wiring (real HTTP endpoint selection)', () => {
   const servers: Server[] = []
   afterAll(() => {
     for (const s of servers) s.close()
+  })
+
+  it.each([
+    ['claude-opus-5', 'responses', 'unknown', '/v1/responses'],
+    ['gpt-5.6-sol', 'responses', 'openai', '/v1/responses'],
+    ['gpt-5.6-sol', 'chat-completions', 'openai', '/v1/chat/completions'],
+    ['qwen38-27b', 'auto', 'vllm', '/v1/chat/completions'],
+    ['qwen38-27b', 'auto', 'ollama', '/api/chat'],
+    ['qwen38-27b', 'responses', 'ollama', '/api/chat'],
+  ] as const)('%s/%s/%s preserves actual content on %s', async (model, protocol, backend, path) => {
+    const mock = await startMock()
+    servers.push(mock.server)
+    const client = makeClient(mock.port, model, protocol, backend)
+    for (const content of ['', ' ', '\n', 'Reading the source.']) {
+      for await (const _ of client.stream({
+        messages: [
+          {
+            role: 'user',
+            content: 'inspect',
+            attachments: [
+              { id: 'img', filename: 'code.png', mimeType: 'image/png', size: 3, data: 'data:image/png;base64,QUJD' },
+            ],
+          },
+          {
+            role: 'assistant',
+            content,
+            toolCalls: [{ id: 'call-1', name: 'read_file', arguments: { path: 'source.ts' } }],
+          },
+          { role: 'tool', toolCallId: 'call-1', content: 'result\n' },
+        ],
+        modelSettings: { supportsVision: true },
+      })) {
+        /* drain */
+      }
+      const sent = mock.requests.at(-1)!
+      expect(sent.path).toBe(path)
+      if (path === '/v1/responses') {
+        expect(sent.body['input']).toEqual([
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'inspect' },
+              { type: 'input_image', image_url: 'data:image/png;base64,QUJD' },
+            ],
+          },
+          ...(content ? [{ role: 'assistant', content }] : []),
+          { type: 'function_call', call_id: 'call-1', name: 'read_file', arguments: '{"path":"source.ts"}' },
+          { type: 'function_call_output', call_id: 'call-1', output: 'result\n' },
+        ])
+      } else {
+        const messages = sent.body['messages'] as Array<Record<string, unknown>>
+        expect(messages[1]!['content']).toBe(content || ' ')
+        expect(sent.body['previous_response_id']).toBeUndefined()
+      }
+    }
   })
 
   it('forces a claude model (no responses profile) to /v1/responses', async () => {
