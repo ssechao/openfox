@@ -1,4 +1,5 @@
 import type { RequestContextMessage } from './request-context.js'
+import { estimateTextTokens } from './text-token-estimate.js'
 
 /** Rough token estimate: ~4 chars per token, matching the tool-definition estimate in mcp/manager.ts. */
 export const CHARS_PER_TOKEN = 4
@@ -18,8 +19,61 @@ export function estimateMessagesTokens(messages: Array<Pick<RequestContextMessag
   )
 }
 
-export function estimatePromptTokensForSafety(systemPrompt: string, messages: unknown[], tools: unknown[]): number {
-  return Buffer.byteLength(systemPrompt + JSON.stringify(messages) + JSON.stringify(tools), 'utf8')
+/** Planning reserve, not measured usage or a universal vision-token upper bound.
+ * Covers the documented 30k patches * 1.2 for GPT-5.6/6 with headroom. Other
+ * providers may differ: the bounded provider-overflow recovery still applies.
+ */
+const IMAGE_TOKEN_RESERVE = 40_000
+
+export interface PromptTokenBudget {
+  fixedTokens: number
+  estimateMessageTokens: (message: unknown) => number
+}
+
+export function createPromptTokenBudget(systemPrompt: string, tools: unknown[], model?: string): PromptTokenBudget {
+  return {
+    fixedTokens: estimateTextTokens(systemPrompt, model) + estimateTextTokens(JSON.stringify(tools ?? []), model) + 1,
+    estimateMessageTokens: (message) => {
+      if (!message || typeof message !== 'object') return estimateTextTokens(JSON.stringify(message) ?? '', model) + 1
+      const { source: _source, ...copy } = message as Record<string, unknown>
+      void _source
+      let images = 0
+      if (Array.isArray(copy['attachments'])) {
+        copy['attachments'] = copy['attachments'].map((value: unknown) => {
+          if (!value || typeof value !== 'object') return value
+          const attachment = value as Record<string, unknown>
+          // Only actual image attachment fields, never data URLs mentioned in
+          // prose, tool arguments or text/PDF attachments. Keep unknown formats.
+          if (
+            typeof attachment['mimeType'] !== 'string' ||
+            !/^image\/(png|jpeg|webp|gif)$/.test(attachment['mimeType']) ||
+            typeof attachment['data'] !== 'string' ||
+            !attachment['data'].startsWith(`data:${attachment['mimeType']};base64,`)
+          )
+            return attachment
+          images++
+          const { data: _data, size: _size, ...metadata } = attachment
+          void _data
+          void _size
+          return metadata
+        })
+      }
+      return estimateTextTokens(JSON.stringify(copy), model) + 1 + images * IMAGE_TOKEN_RESERVE
+    },
+  }
+}
+
+export function estimatePromptTokensForSafety(
+  systemPrompt: string,
+  messages: unknown[],
+  tools: unknown[],
+  model?: string,
+): number {
+  const budget = createPromptTokenBudget(systemPrompt, tools, model)
+  return (
+    budget.fixedTokens +
+    (messages.length === 0 ? 1 : messages.reduce<number>((n, m) => n + budget.estimateMessageTokens(m), 0))
+  )
 }
 
 /** The context gauge as reported by the session, plus whether it is a real measurement. */

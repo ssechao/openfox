@@ -6,6 +6,7 @@ import {
   isContextLengthError,
   isNonRetryableLLMError,
   CHARS_PER_TOKEN,
+  createPromptTokenBudget,
   TOOL_MESSAGE_OVERHEAD_TOKENS,
 } from './token-budget.js'
 
@@ -32,6 +33,87 @@ describe('estimateMessagesTokens', () => {
 })
 
 describe('estimatePromptTokensForSafety', () => {
+  it('does not count transported image base64 as text tokens', () => {
+    const message = (data: string) => [
+      {
+        role: 'user',
+        content: 'Explain the screenshot',
+        attachments: [{ id: 'image', filename: 'screen.png', mimeType: 'image/png', size: 3, data }],
+      },
+    ]
+    const short = message('data:image/png;base64,YWJj')
+    const long = message('data:image/png;base64,' + 'YWJj'.repeat(400_000))
+    for (const model of ['gpt-5.6-sol', 'gpt-6-astra', 'claude-opus-5']) {
+      const a = estimatePromptTokensForSafety('system', short, [], model)
+      const b = estimatePromptTokensForSafety('system', long, [], model)
+      expect(b).toBe(a)
+      expect(b).toBeGreaterThan(1_000)
+      expect(b).toBeLessThan(100_000)
+    }
+  })
+
+  it('locally estimates GPT code without turning bytes into tokens', () => {
+    const messages = [
+      { role: 'user', content: 'const total = invoices.reduce((sum, row) => sum + row.amount, 0);\n'.repeat(5000) },
+    ]
+    const estimated = estimatePromptTokensForSafety('Review this code.', messages, [], 'gpt-5.6-sol')
+    expect(estimated).toBeGreaterThan(60_000)
+    expect(estimated).toBeLessThan(180_000)
+  })
+
+  it('still counts data URLs in ordinary text and non-image attachments', () => {
+    const content = 'data:image/png;base64,' + 'YWJj'.repeat(30_000)
+    expect(estimatePromptTokensForSafety('', [{ role: 'user', content }], [])).toBeGreaterThan(120_000)
+    expect(
+      estimatePromptTokensForSafety(
+        '',
+        [{ role: 'user', content: '', attachments: [{ mimeType: 'text/plain', data: content }] }],
+        [],
+      ),
+    ).toBeGreaterThan(120_000)
+  })
+
+  it('counts images individually, preserves input, and includes arguments, tools and system text', () => {
+    const image = { mimeType: 'image/jpeg', data: 'data:image/jpeg;base64,YWJj' }
+    const messages = [{ role: 'user', content: 'look', attachments: [image] }]
+    const before = JSON.stringify(messages)
+    const one = estimatePromptTokensForSafety('', messages, [])
+    const two = estimatePromptTokensForSafety('', [{ ...messages[0], attachments: [image, image] }], [])
+    expect(two - one).toBeGreaterThanOrEqual(40_000)
+    expect(JSON.stringify(messages)).toBe(before)
+    const withArguments = [
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'c', name: 'edit', arguments: { content: 'x'.repeat(10_000) } }],
+      },
+    ]
+    expect(estimatePromptTokensForSafety('', withArguments, [])).toBeGreaterThan(10_000)
+    expect(
+      estimatePromptTokensForSafety('s'.repeat(20_000), messages, [{ description: 'd'.repeat(10_000) }]),
+    ).toBeGreaterThan(one + 30_000)
+  })
+
+  it('uses an identical total for preflight and reduction including framing', () => {
+    const messages = [
+      { role: 'tool', content: '漢字🙂'.repeat(1000) },
+      { role: 'user', content: 'sum' },
+    ]
+    for (const model of ['gpt-5.6-sol', 'claude-opus-5']) {
+      const budget = createPromptTokenBudget('system', [{ name: 'read' }], model)
+      expect(estimatePromptTokensForSafety('system', messages, [{ name: 'read' }], model)).toBe(
+        budget.fixedTokens + messages.reduce((n, m) => n + budget.estimateMessageTokens(m), 0),
+      )
+    }
+  })
+
+  it('does not throw for special-token-looking text or discount dense Unicode', () => {
+    const messages = [{ role: 'user', content: '<|endoftext|>\u0001漢字😀'.repeat(10_000) }]
+    const estimate = estimatePromptTokensForSafety('', messages, [], 'gpt-5.6-sol')
+    expect(estimate).toBeGreaterThan(50_000)
+    expect(Number.isFinite(estimate)).toBe(true)
+  })
+
   it('uses a UTF-8 byte upper bound for high-token-density content', () => {
     const systemPrompt = '系统😀'
     const messages = [{ role: 'user', content: '漢字🙂'.repeat(10) }]

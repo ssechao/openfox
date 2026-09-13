@@ -45,6 +45,7 @@ import {
 import { executeTools, type ToolBatchContext } from './execute-tools.js'
 import {
   effectiveContextTokens,
+  createPromptTokenBudget,
   estimateMessagesTokens,
   estimatePromptTokensForSafety,
   isContextLengthError,
@@ -175,6 +176,8 @@ export interface TopLevelLoopConfig {
   getToolRegistry: () => ToolRegistry
   onToolExecuted?: ((toolCall: ToolCall, result: ToolResult) => void) | undefined
   stopOnStepDone?: boolean
+  /** Durable workflow outbox: confirm this result, never execute its tool again. */
+  resumeStepDoneCallId?: string
   injectKickoff?: (() => void | Promise<void>) | undefined
   /** Called after auto-compaction completes within the loop, before the next iteration.
    *  Reinjects the agent definition reminder into the new context window. */
@@ -249,8 +252,6 @@ export async function runTopLevelAgentLoop(
   let contextRetryCount = 0
   let historyReductionTarget: number | undefined
   let historyReductionAttempts = 0
-  /** Reduction computed while deciding to retry — reused instead of redone. */
-  let pendingReducedMessages: RequestContextMessage[] | undefined
   /** Last folded gauge; cleared whenever an event could have changed it. */
   let lastMeasuredState: ReturnType<SessionManager['getContextState']> | undefined
   /** Tool calls whose synthetic answer already cost the stored chain. */
@@ -262,10 +263,10 @@ export async function runTopLevelAgentLoop(
   let currentMaxTokensOverride: number | undefined
   let lastPatternMatch: { pattern: string; field: string; matchedContent: string } | undefined
   let compacting = config.initialCompacting ?? false
-  let preflightCompactionPending = !compacting
+  let preflightCompactionPending = !compacting && !config.resumeStepDoneCallId
   let compactAfterTools = false
-  let finalizingAfterStepDone = false
-  let kickoffInjected = false
+  let finalizingAfterStepDone = Boolean(config.resumeStepDoneCallId)
+  let kickoffInjected = Boolean(config.resumeStepDoneCallId)
   let returnValueNudgeCount = 0
   /**
    * Drop the provider-side stored conversation for this turn.
@@ -353,7 +354,7 @@ export async function runTopLevelAgentLoop(
     //    can therefore double the request while the gauge still reads "safe".
     //  - the window must be the one THIS request will use. A tracked window left
     //    over from a wider model turns 99% full into a harmless-looking 26%.
-    if (!compacting) {
+    if (!compacting && !finalizingAfterStepDone) {
       if (contextState.currentTokensKnown !== false) preflightCompactionPending = false
       const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
       if (
@@ -414,6 +415,28 @@ export async function runTopLevelAgentLoop(
       const profileDefaultMaxTokens = getModelProfile(attemptClient.getModel()).defaultMaxTokens
 
       let requestMessages = await config.getConversationMessages()
+      if (config.resumeStepDoneCallId) {
+        const callIndex = requestMessages.findIndex(
+          (message) =>
+            message.role === 'assistant' &&
+            message.toolCalls?.some((call) => call.id === config.resumeStepDoneCallId && call.name === 'step_done'),
+        )
+        const resultIndex = requestMessages.findIndex(
+          (message, index) =>
+            index > callIndex && message.role === 'tool' && message.toolCallId === config.resumeStepDoneCallId,
+        )
+        if (callIndex < 0 || resultIndex < 0)
+          return failLLM(
+            serverT({
+              en: 'The saved workflow result is missing from this context. No tool was re-executed.',
+              fr: 'Le résultat du workflow enregistré manque dans ce contexte. Aucun outil n’a été réexécuté.',
+            }),
+            1,
+          )
+        // A pending delivery predates the newly queued user prompt. Confirm
+        // only its original prefix; do not generate new work during settlement.
+        requestMessages = requestMessages.slice(0, resultIndex + 1)
+      }
 
       // The format-retry continuation is appended once per round (not on
       // LLM-error retries) — its persisted copy feeds later context rebuilds.
@@ -452,16 +475,43 @@ export async function runTopLevelAgentLoop(
         }
       }
 
-      // Set only after a request was refused for being too large: resending the
-      // identical history can only fail again, so the oldest raw tool results
-      // are truncated until the request fits.
+      const configDir = getGlobalConfigDir(runtimeConfig.mode ?? 'production')
+      const skills = await getEnabledSkillMetadata(configDir, sessionManager.getProjectWorkdir(sessionId))
+      if (signal?.aborted) throw new Error('Aborted')
+
+      const requestToolChoice = compacting || finalizingAfterStepDone ? 'none' : 'auto'
+      const assemble = (messages: RequestContextMessage[]) =>
+        config.assembleRequest({
+          workdir: session.workdir,
+          messages,
+          injectedFiles,
+          promptTools: compacting ? [] : toolRegistry.definitions,
+          toolChoice: requestToolChoice,
+          ...(instructionContent ? { customInstructions: instructionContent } : {}),
+          ...(skills.length > 0 ? { skills } : {}),
+        })
+      let assembledRequest = await assemble(requestMessages)
+      let promptBudget: ReturnType<typeof createPromptTokenBudget> | undefined
+      const getPromptBudget = () =>
+        (promptBudget ??= createPromptTokenBudget(
+          assembledRequest.systemPrompt,
+          compacting ? [] : assembledRequest.tools,
+          attemptClient.getModel(),
+        ))
+      const estimateAssembled = () =>
+        estimatePromptTokensForSafety(
+          assembledRequest.systemPrompt,
+          assembledRequest.messages,
+          compacting ? [] : assembledRequest.tools,
+          attemptClient.getModel(),
+        )
+      // Recompute from this attempt's history/model, never reuse a reduced array
+      // merely because an edited/replayed history happens to have the same length.
       if (historyReductionTarget !== undefined) {
-        const reduction =
-          pendingReducedMessages?.length === requestMessages.length
-            ? { messages: pendingReducedMessages, truncated: 0 }
-            : reduceHistoryForWindow(requestMessages, historyReductionTarget)
+        const reduction = reduceHistoryForWindow(requestMessages, historyReductionTarget, getPromptBudget())
         requestMessages = reduction.messages
-        pendingReducedMessages = undefined
+        assembledRequest = await assemble(requestMessages)
+        promptBudget = undefined
         logger.info('Reduced history to fit the context window', {
           sessionId,
           targetTokens: historyReductionTarget,
@@ -469,28 +519,9 @@ export async function runTopLevelAgentLoop(
         })
       }
 
-      const configDir = getGlobalConfigDir(runtimeConfig.mode ?? 'production')
-      const skills = await getEnabledSkillMetadata(configDir, sessionManager.getProjectWorkdir(sessionId))
-      if (signal?.aborted) throw new Error('Aborted')
-
-      const requestToolChoice = compacting || finalizingAfterStepDone ? 'none' : 'auto'
-      const assembledRequest = await config.assembleRequest({
-        workdir: session.workdir,
-        messages: requestMessages,
-        injectedFiles,
-        promptTools: compacting ? [] : toolRegistry.definitions,
-        toolChoice: requestToolChoice,
-        ...(instructionContent ? { customInstructions: instructionContent } : {}),
-        ...(skills.length > 0 ? { skills } : {}),
-      })
-
       const currentTokensForBudget =
-        contextState.currentTokensKnown === false
-          ? estimatePromptTokensForSafety(
-              assembledRequest.systemPrompt,
-              assembledRequest.messages,
-              assembledRequest.tools,
-            )
+        contextState.currentTokensKnown === false || historyReductionTarget !== undefined
+          ? estimateAssembled()
           : contextState.currentTokens
       if (!compacting && preflightCompactionPending) {
         preflightCompactionPending = false
@@ -531,7 +562,12 @@ export async function runTopLevelAgentLoop(
 
       let availableForOutput = Math.max(
         256,
-        contextWindow - currentTokensForBudget - pendingToolResultTokens - OUTPUT_RESERVE_TOKENS,
+        contextWindow -
+          currentTokensForBudget -
+          (contextState.currentTokensKnown === false || historyReductionTarget !== undefined
+            ? 0
+            : pendingToolResultTokens) -
+          OUTPUT_RESERVE_TOKENS,
       )
 
       let modelSettings = config.modelSettings ?? sessionManager.getCurrentModelSettings(sessionId, config.mode)
@@ -553,24 +589,16 @@ export async function runTopLevelAgentLoop(
             MIN_COMPACTION_OUTPUT_TOKENS,
             contextWindow - COMPACTION_OUTPUT_TOKENS - OUTPUT_RESERVE_TOKENS,
           )
-          const reduction = reduceHistoryForWindow(requestMessages, reductionTarget)
+          const reduction = reduceHistoryForWindow(requestMessages, reductionTarget, getPromptBudget())
           if (historyReductionAttempts < MAX_HISTORY_REDUCTIONS && reduction.changed) {
             historyReductionAttempts += 1
             historyReductionTarget = reductionTarget
-            pendingReducedMessages = reduction.messages
             continue
           }
           // Nothing left to shrink: fall back to what we are ACTUALLY about to
           // send. The gauge measures a history the summary request no longer
           // carries, so it can forbid a request that would fit comfortably.
-          const assembledHeadroom =
-            contextWindow -
-            estimatePromptTokensForSafety(
-              assembledRequest.systemPrompt,
-              assembledRequest.messages,
-              assembledRequest.tools,
-            ) -
-            OUTPUT_RESERVE_TOKENS
+          const assembledHeadroom = contextWindow - estimateAssembled() - OUTPUT_RESERVE_TOKENS
           if (assembledHeadroom < MIN_COMPACTION_OUTPUT_TOKENS) {
             return failLLM(
               serverT({
@@ -630,12 +658,17 @@ export async function runTopLevelAgentLoop(
         // able to survive a genuine overflow fifty iterations later.
         historyReductionTarget = undefined
         historyReductionAttempts = 0
-        pendingReducedMessages = undefined
         result = attemptResult
         break
       }
 
       // ---- LLM failure ----
+      // Delivery may already have reached a native tool callback. Do not retry,
+      // compact or inject another prompt behind that unconfirmed operation.
+      if (config.stopOnStepDone && finalizingAfterStepDone) {
+        if (assistantMessageStarted) append(createMessageDoneEvent(assistantMsgId, { partial: true }))
+        return failLLM(attemptResult.error, 1)
+      }
       // Deterministic failures: a Responses turn that produced no actionable
       // output, or a non-transient 4xx that would just re-hit the same wall.
       // Context-length errors are excluded — they retry with a smaller budget.
@@ -693,12 +726,11 @@ export async function runTopLevelAgentLoop(
         // Already summarizing: the summary request itself is too large, so it
         // has to be rebuilt on a smaller history — resending it verbatim would
         // hit the exact same wall.
-        const reductionTarget = Math.floor(estimateMessagesTokens(requestMessages) / 2)
-        const reduction = reduceHistoryForWindow(requestMessages, reductionTarget)
+        const reductionTarget = Math.floor(estimateAssembled() / 2)
+        const reduction = reduceHistoryForWindow(requestMessages, reductionTarget, getPromptBudget())
         if (historyReductionAttempts < MAX_HISTORY_REDUCTIONS && reduction.changed) {
           historyReductionAttempts += 1
           historyReductionTarget = reductionTarget
-          pendingReducedMessages = reduction.messages
           continue
         }
         // Nothing left to shrink. The raw provider string is jargon to the
@@ -751,6 +783,21 @@ export async function runTopLevelAgentLoop(
         serverT({
           en: 'Compaction did not produce a complete text summary. History was preserved; no automatic retry.',
           fr: 'La compaction n’a pas produit de résumé textuel complet. Historique conservé ; aucune relance automatique.',
+        }),
+        1,
+      )
+    }
+
+    if (
+      config.stopOnStepDone &&
+      finalizingAfterStepDone &&
+      (result.toolCalls.length > 0 || result.finishReason !== 'stop' || result.patternMatch)
+    ) {
+      if (assistantMessageStarted) append(createMessageDoneEvent(assistantMsgId, { partial: true }))
+      return failLLM(
+        serverT({
+          en: 'Workflow tool-result confirmation did not finish safely. No further tool was executed; resume explicitly.',
+          fr: 'La confirmation du résultat d’outil du workflow ne s’est pas terminée correctement. Aucun autre outil exécuté ; reprenez explicitement.',
         }),
         1,
       )
@@ -853,7 +900,7 @@ export async function runTopLevelAgentLoop(
     // Check compaction threshold with fresh promptTokens from LLM.
     // When exceeded, append compaction prompt and let the next iteration
     // handle summarization — same agent, same loop, no nested call.
-    if (!compacting) {
+    if (!compacting && !finalizingAfterStepDone) {
       // Re-read: the call above recorded a fresh measurement. The window stays
       // the one resolved for this turn (see the gate at the top of the loop).
       const measuredState = sessionManager.getContextState(sessionId)
@@ -1003,21 +1050,10 @@ export async function runTopLevelAgentLoop(
           return failLLM(error, malformedToolAttempts)
         }
         if (batchResult.stepDoneCalled) {
-          if (config.stopOnStepDone) {
-            emitDoneAndBreak(
-              assistantMsgId,
-              result.segments,
-              statsIdentity,
-              mode,
-              turnMetrics,
-              append,
-              onMessage,
-              'step_done',
-              agentType,
-            )
-            break
-          }
+          // The workflow owns the business transition, not an exemption from
+          // the assistant -> tool result -> terminal assistant protocol.
           finalizingAfterStepDone = true
+          preflightCompactionPending = false
           retryLimiter.reset()
           continue
         }

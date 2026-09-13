@@ -1200,8 +1200,53 @@ export class SessionManager {
   }
 
   /**
-   * Pause at a user step. Sets status to 'waiting' and records step output.
+   * Journal protocol settlement separately from business step completion.
    */
+  recordWorkflowFinalization(
+    sessionId: string,
+    executionId: string,
+    stepId: string,
+    callId: string,
+    status: 'pending' | 'confirmed',
+  ): void {
+    const row = dbGetLatestWorkflowExecution(sessionId)
+    if (
+      !row ||
+      row.id !== executionId ||
+      row.current_step_id !== stepId ||
+      !(row.status === 'running' || (status === 'confirmed' && row.status === 'blocked')) ||
+      !callId
+    ) {
+      throw new Error('Workflow finalization owner changed')
+    }
+    const output = JSON.parse(row.step_output ?? '{}') as Record<string, string>
+    const old = output['__openfox_finalization']
+      ? (JSON.parse(output['__openfox_finalization']) as { stepId: string; callId: string; status: string })
+      : null
+    if (status === 'confirmed' && (old?.stepId !== stepId || old.callId !== callId))
+      throw new Error('Workflow finalization call changed')
+    if (old?.status === 'pending' && (old.stepId !== stepId || old.callId !== callId))
+      throw new Error('Workflow finalization is still pending')
+    if (old?.stepId === stepId && old.callId === callId && old.status === status) return
+    if (old?.stepId === stepId && old.callId === callId && old.status === 'confirmed')
+      throw new Error('Workflow finalization already confirmed')
+    output['__openfox_finalization'] = JSON.stringify({ stepId, callId, status })
+    updateWorkflowExecutionStatus(executionId, row.status, stepId, undefined, output)
+  }
+
+  getPendingWorkflowFinalization(sessionId: string): { executionId: string; stepId: string; callId: string } | null {
+    const row = dbGetLatestWorkflowExecution(sessionId)
+    if (!row || !['running', 'blocked'].includes(row.status)) return null
+    const output = JSON.parse(row.step_output ?? '{}') as Record<string, string>
+    const text = output['__openfox_finalization']
+    if (!text) return null
+    const saved = JSON.parse(text) as { stepId: string; callId: string; status: string }
+    if (saved.status !== 'pending') return null
+    if (!saved.callId || saved.stepId !== row.current_step_id) throw new Error('Workflow finalization owner changed')
+    return { executionId: row.id, stepId: saved.stepId, callId: saved.callId }
+  }
+
+  /** Pause at a user step and record its output. */
   waitAtStep(
     sessionId: string,
     executionId: string,

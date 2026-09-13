@@ -208,7 +208,30 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
     // Generic: use session mode as the agent ID. Workflow-specific callbacks
     // (kickoff injection, step_done tracking) are handled by the workflow executor
     // which calls runAgentTurn directly — not through runChatTurn.
-    await runAgentTurn(options, turnMetrics, mode, append)
+    // Manual compaction bypasses the workflow executor. Settle its pending
+    // result first, without running transitions, reminders or another tool.
+    // Keep the queued prompt in storage; the settlement uses only its prefix.
+    const pending = sessionManager.getPendingWorkflowFinalization?.(sessionId)
+    let deliveryFailed = false
+    if (pending) {
+      const confirmation = await runAgentTurn(
+        { ...options, initialCompacting: false, skipAgentReminder: true },
+        turnMetrics,
+        mode,
+        append,
+        { stopOnStepDone: true, resumeStepDoneCallId: pending.callId },
+      )
+      deliveryFailed = Boolean(confirmation.failed)
+      if (!deliveryFailed)
+        sessionManager.recordWorkflowFinalization(
+          sessionId,
+          pending.executionId,
+          pending.stepId,
+          pending.callId,
+          'confirmed',
+        )
+    }
+    if (!deliveryFailed) await runAgentTurn(options, turnMetrics, mode, append)
 
     // Create end-of-turn snapshot
     const snapshot = buildSnapshot(sessionManager, sessionId, turnMetrics.buildStats(statsIdentity, mode))
@@ -405,6 +428,7 @@ export async function runAgentTurn(
     injectKickoff?: () => void
     onToolExecuted?: (toolCall: ToolCall, toolResult: ToolResult) => void
     stopOnStepDone?: boolean
+    resumeStepDoneCallId?: string
   },
 ): Promise<{ returnValueContent?: string; returnValueResult?: string; failed?: { error: string } }> {
   const allAgents = await loadAllAgentsDefault(options.sessionManager.getProjectWorkdir(options.sessionId))
@@ -535,6 +559,7 @@ export async function runAgentTurn(
       ...(callbacks?.injectKickoff ? { injectKickoff: callbacks.injectKickoff } : {}),
       ...(callbacks?.onToolExecuted ? { onToolExecuted: callbacks.onToolExecuted } : {}),
       ...(callbacks?.stopOnStepDone ? { stopOnStepDone: true } : {}),
+      ...(callbacks?.resumeStepDoneCallId ? { resumeStepDoneCallId: callbacks.resumeStepDoneCallId } : {}),
       ...(options.llmRetryPolicy ? { llmRetryPolicy: options.llmRetryPolicy } : {}),
       ...(options.warmup ? { warmup: true } : {}),
     },

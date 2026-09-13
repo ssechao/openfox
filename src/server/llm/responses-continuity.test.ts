@@ -231,7 +231,9 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
           data: { messageId: 'compact', role: 'user', content: compact, contextWindowId: windowId },
         })
         const beforeRestart = request()
-        // Harness compaction changes tool choice, invalidating the in-memory chain.
+        // Harness compaction explicitly invalidates the chain. tool_choice
+        // alone is a per-generation control and must not force a cold replay.
+        client.resetResponsesChain?.(session)
         await send(client, { ...beforeRestart, toolChoice: 'none' })
         db.close()
         db = new Database(dbPath)

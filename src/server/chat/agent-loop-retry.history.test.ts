@@ -226,8 +226,15 @@ describe('agent loop retry history (real EventStore)', () => {
 
   // Real HTTP -> parser -> stream consumer -> SQLite -> tool dispatch -> next
   // request. Only model responses and the first controlled tool error are scripted.
-  async function runFixture(bodies: string[], execute = vi.fn()) {
+  async function runFixture(
+    bodies: string[],
+    execute = vi.fn(),
+    overrides: Partial<TopLevelLoopConfig> = {},
+    model = 'qwen3-32b',
+    apiProtocol: 'responses' | 'chat-completions' = 'chat-completions',
+  ) {
     const requests: Array<{ messages: Array<{ role: string; content: string }> }> = []
+    const paths: string[] = []
     const server = createServer((req, res) => {
       let body = ''
       req.on('data', (chunk) => {
@@ -235,6 +242,7 @@ describe('agent loop retry history (real EventStore)', () => {
       })
       req.on('end', () => {
         requests.push(JSON.parse(body))
+        paths.push(req.url ?? '')
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         res.end(bodies[requests.length - 1] ?? frame({}, 'stop'))
       })
@@ -244,7 +252,8 @@ describe('agent loop retry history (real EventStore)', () => {
       const client = createLLMClient({
         llm: {
           baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-          model: 'qwen3-32b',
+          model,
+          apiProtocol,
           backend: 'vllm',
           timeout: 10000,
           idleTimeout: 10000,
@@ -268,6 +277,7 @@ describe('agent loop retry history (real EventStore)', () => {
             getConversationMessages: async () =>
               buildContextMessagesFromStoredEvents(store.getEvents('session-1')) as never,
             assembleRequest: async (input) => ({ systemPrompt: 'local fixture', messages: input.messages, tools: [] }),
+            ...overrides,
           }),
           mockTurnMetrics,
         )
@@ -277,6 +287,7 @@ describe('agent loop retry history (real EventStore)', () => {
       }
       return {
         requests,
+        paths,
         outcome,
         messages: applyEvents<SnapshotMessage>([], store.getEvents('session-1'), { timestampAsNumber: true }),
       }
@@ -297,6 +308,119 @@ describe('agent loop retry history (real EventStore)', () => {
     }
     return parts.join('') + frame({}, 'tool_calls')
   }
+
+  it.each(['gpt-5.6-sol', 'claude-opus-5'])(
+    'delivers workflow step_done once over Responses before done (%s)',
+    async (model) => {
+      const call = { type: 'function_call', id: 'item-step', call_id: 'call-step', name: 'step_done', arguments: '{}' }
+      const response = (id: string, output: unknown[]) =>
+        `data: ${JSON.stringify({ type: 'response.completed', response: { id, status: 'completed', output, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } })}\n\n`
+      const execute = vi.fn(async () => ({
+        success: true,
+        output: 'Step completion signal recorded.',
+        durationMs: 0,
+        truncated: false,
+      }))
+      const result = await runFixture(
+        [
+          `data: ${JSON.stringify({ type: 'response.output_item.added', output_index: 0, item: call })}\n\n${response('resp-step', [call])}`,
+          `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'Confirmed.' })}\n\n${response('resp-confirmed', [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Confirmed.' }] }])}`,
+        ],
+        execute,
+        { stopOnStepDone: true },
+        model,
+        'responses',
+      )
+      expect(result.requests).toHaveLength(2)
+      expect(result.requests[1]).toMatchObject({
+        tool_choice: 'none',
+        previous_response_id: 'resp-step',
+        input: [{ type: 'function_call_output', call_id: 'call-step', output: 'Step completion signal recorded.' }],
+      })
+      expect(execute).toHaveBeenCalledTimes(1)
+      expect(store.getEvents('session-1').filter((event) => event.type === 'chat.done')).toEqual([
+        expect.objectContaining({ data: expect.objectContaining({ reason: 'step_done' }) }),
+      ])
+    },
+  )
+
+  it.each([
+    ['gpt-5.6-sol', 'chat-completions'],
+    ['gpt-5.6-sol', 'responses'],
+    ['gpt-6-astra', 'responses'],
+    ['claude-opus-5', 'responses'],
+  ] as const)(
+    'sends a restored multimodal compaction over HTTP (%s / %s) without rewriting the SQLite history',
+    async (model, protocol) => {
+      const image = {
+        id: 'img',
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        size: 900_000,
+        data: 'data:image/png;base64,' + 'YWJj'.repeat(300_000),
+      }
+      const content = 'const sum = values.reduce((a, b) => a + b, 0);\n'.repeat(5000)
+      store.append('session-1', {
+        type: 'message.start',
+        data: { messageId: 'multimodal', role: 'user', content, attachments: [image] },
+      })
+      store.append('session-1', { type: 'message.done', data: { messageId: 'multimodal' } })
+      const originalEvents = JSON.stringify(store.getEvents('session-1'))
+      mockSessionManager.getContextState.mockReturnValue({
+        currentTokens: 0,
+        currentTokensKnown: false,
+        maxTokens: 1_050_000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: false,
+        dynamicContextChanged: false,
+      })
+      mockSessionManager.getCurrentModelContext.mockReturnValue(1_050_000)
+      const reply =
+        protocol === 'responses'
+          ? [
+              { type: 'response.output_text.delta', delta: 'Summary of the implementation' },
+              {
+                type: 'response.completed',
+                response: {
+                  id: 'resp-summary',
+                  status: 'completed',
+                  output: [],
+                  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+                },
+              },
+            ]
+              .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+              .join('')
+          : frame({ content: 'Summary of the implementation' }, 'stop')
+      const result = await runFixture(
+        [reply],
+        vi.fn(),
+        {
+          initialCompacting: true,
+        },
+        model,
+        protocol,
+      )
+      expect(result.outcome?.failed).toBeUndefined()
+      expect(result.requests).toHaveLength(1)
+      expect(result.paths[0]).toBe(protocol === 'responses' ? '/v1/responses' : '/v1/chat/completions')
+      const first = result.requests[0] as any
+      expect(first.tool_choice).toBe('none')
+      expect(first.max_output_tokens ?? first.max_tokens ?? first.max_completion_tokens).toBe(8192)
+      const parts = (first.input ?? first.messages).flatMap((m: any) => (Array.isArray(m.content) ? m.content : []))
+      expect(parts).toContainEqual(
+        protocol === 'responses'
+          ? { type: 'input_image', image_url: image.data }
+          : { type: 'image_url', image_url: { url: image.data } },
+      )
+      expect(parts).toContainEqual({ type: protocol === 'responses' ? 'input_text' : 'text', text: content })
+      if (protocol === 'responses')
+        expect(mockSessionManager.setCurrentContextSize).toHaveBeenCalledWith('session-1', 10, 5, undefined, 'planner')
+      const kept = store.getEvents('session-1').slice(0, JSON.parse(originalEvents).length)
+      expect(JSON.stringify(kept)).toBe(originalEvents)
+    },
+  )
 
   it('completes a long thinking/tool failure/recovery session with intact arguments and resumable state', async () => {
     const workdir = await mkdtemp(join(tmpdir(), 'openfox-long-session-'))

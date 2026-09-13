@@ -188,6 +188,7 @@ describe('executeWorkflow mode changes', () => {
       addMessage: vi.fn(),
       startWorkflow: vi.fn(),
       updateWorkflowStep: vi.fn(),
+      recordWorkflowFinalization: vi.fn(),
       completeWorkflow: vi.fn(),
       blockWorkflow: vi.fn(),
       waitAtStep: vi.fn((sessionId: string) => {

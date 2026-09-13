@@ -201,7 +201,9 @@ export function createLLMClient(
    * setting is covered by the fingerprint without touching this code.
    */
   function requestSettings(params: Record<string, unknown>): Record<string, unknown> {
-    const { messages: _messages, stream: _stream, ...settings } = params
+    // tool_choice controls this generation, not the stored prefix. It is sent
+    // anew on every request; auto -> none must keep the tool-result delta chain.
+    const { messages: _messages, stream: _stream, tool_choice: _toolChoice, ...settings } = params
     return settings
   }
 

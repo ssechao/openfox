@@ -294,6 +294,74 @@ function createSessionManager(state: Record<string, any>) {
 }
 
 describe('chat orchestrator', () => {
+  it.each([false, true])(
+    'settles a saved workflow result before manual compaction (delivery fails=%s)',
+    async (fails) => {
+      const store = createEventStore()
+      getEventStoreMock.mockReturnValue(store)
+      getAllInstructionsMock.mockResolvedValue({ content: '', files: [] })
+      const execute = vi.fn()
+      getToolRegistryForModeMock.mockReturnValue({ definitions: [], execute })
+      const prefix = [
+        { role: 'user' as const, content: 'Original task' },
+        { role: 'assistant' as const, content: '', toolCalls: [{ id: 'done', name: 'step_done', arguments: {} }] },
+        { role: 'tool' as const, content: 'Step completion signal recorded.', toolCallId: 'done' },
+      ]
+      getConversationMessagesMock.mockReturnValue(
+        [...prefix, { role: 'user' as const, content: 'COMPACTION_INSTRUCTION' }].map((message) => ({
+          ...message,
+          source: 'history' as const,
+        })),
+      )
+      const sm = {
+        ...createSessionManager({
+          current: {
+            id: 's',
+            projectId: 'p',
+            workdir: '/tmp/p',
+            mode: 'planner',
+            phase: 'plan',
+            criteria: [],
+            messages: [],
+          },
+        }),
+        getPendingWorkflowFinalization: vi.fn(() => ({ executionId: 'e', stepId: 'build', callId: 'done' })),
+        recordWorkflowFinalization: vi.fn(),
+      }
+      const completed = {
+        content: 'A complete summary of the implementation, pending tasks and paths for the next turn.',
+        toolCalls: [],
+        segments: [],
+        usage: { promptTokens: 20, completionTokens: 10 },
+        timing: {},
+        aborted: false,
+        finishReason: 'stop',
+      }
+      consumeStreamGeneratorMock
+        .mockResolvedValueOnce(fails ? { ...completed, error: 'connection lost' } : completed)
+        .mockResolvedValue(completed)
+      await runChatTurn({
+        sessionManager: sm as never,
+        sessionId: 's',
+        llmClient: { getModel: () => 'test-model' } as never,
+        initialCompacting: true,
+      })
+      expect(streamLLMPureMock).toHaveBeenCalledTimes(fails ? 1 : 2)
+      expect(streamLLMPureMock.mock.calls[0]![0].messages).toEqual(prefix)
+      expect(execute).not.toHaveBeenCalled()
+      if (fails) {
+        expect(sm.recordWorkflowFinalization).not.toHaveBeenCalled()
+        expect(store.append.mock.calls.some(([, event]) => event.type === 'context.compacted')).toBe(false)
+      } else {
+        expect(sm.recordWorkflowFinalization).toHaveBeenCalledWith('s', 'e', 'build', 'done', 'confirmed')
+        expect(sm.recordWorkflowFinalization.mock.invocationCallOrder[0]).toBeLessThan(
+          streamLLMPureMock.mock.invocationCallOrder[1]!,
+        )
+        expect(streamLLMPureMock.mock.calls[1]![0].tools).toEqual([])
+        expect(store.append.mock.calls.some(([, event]) => event.type === 'context.compacted')).toBe(true)
+      }
+    },
+  )
   beforeEach(() => {
     getEventStoreMock.mockReset()
     getContextMessagesMock.mockReset()

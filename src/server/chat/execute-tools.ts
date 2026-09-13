@@ -262,8 +262,8 @@ export async function executeTools(
     }
 
     // Detected at two levels:
-    //   1. Here in execute-tools: signals the agent loop to break immediately
-    //      (no further LLM calls after step_done).
+    //   1. Here in execute-tools: signals the agent loop to finalize with
+    //      tool_choice none, delivering this result before it returns.
     //   2. In executor.ts via onToolExecuted callback: signals the workflow
     //      orchestrator to evaluate transitions and move to the next step.
     // Both checks are needed — they serve different concerns.

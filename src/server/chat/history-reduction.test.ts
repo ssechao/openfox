@@ -23,6 +23,22 @@ function assistant(content: string) {
 const huge = 'x'.repeat(MIN_REDUCIBLE_TOOL_RESULT_CHARS * 10)
 
 describe('reduceHistoryForWindow', () => {
+  it('uses the same budget as the request guard, including fixed overhead', () => {
+    const messages = [tool('漢字'.repeat(3000)), user('summarize')]
+    const budget = {
+      fixedTokens: 500,
+      estimateMessageTokens: (m: unknown) => Buffer.byteLength((m as { content: string }).content) + 16,
+    }
+    // The old chars/4 measure fits and refuses to shrink. The UTF-8 guard does not.
+    const reduced = reduceHistoryForWindow(messages, 9000, budget)
+    expect(reduced.changed).toBe(true)
+    expect(
+      budget.fixedTokens + reduced.messages.reduce((n, m) => n + budget.estimateMessageTokens(m), 0),
+    ).toBeLessThanOrEqual(9000)
+    expect(messages[0]!.content).toBe('漢字'.repeat(3000))
+    expect(reduced.messages[1]).toBe(messages[1])
+  })
+
   it('leaves a history that already fits untouched', () => {
     const messages = [user('hi'), tool(huge), assistant('done'), user('next')]
     const result = reduceHistoryForWindow(messages, estimateMessagesTokens(messages))

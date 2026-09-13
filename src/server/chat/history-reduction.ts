@@ -13,7 +13,7 @@
  */
 
 import type { RequestContextMessage } from './request-context.js'
-import { CHARS_PER_TOKEN, estimateMessagesTokens } from './token-budget.js'
+import { estimateMessagesTokens, type PromptTokenBudget } from './token-budget.js'
 
 /** Head of a truncated tool result kept verbatim, in characters. */
 export const TOOL_RESULT_KEEP_CHARS = 2_000
@@ -44,8 +44,14 @@ function truncateToolResult(content: string): string {
  * reducible is left. Returns the original array (and `changed: false`) when it
  * already fits or cannot be reduced further, which makes repeated calls safe.
  */
-export function reduceHistoryForWindow(messages: RequestContextMessage[], targetTokens: number): HistoryReduction {
-  let estimate = estimateMessagesTokens(messages)
+export function reduceHistoryForWindow(
+  messages: RequestContextMessage[],
+  targetTokens: number,
+  budget?: PromptTokenBudget,
+): HistoryReduction {
+  const measure =
+    budget?.estimateMessageTokens ?? ((message: unknown) => estimateMessagesTokens([message as RequestContextMessage]))
+  let estimate = (budget?.fixedTokens ?? 0) + messages.reduce((n, message) => n + measure(message), 0)
   if (estimate <= targetTokens) return { messages, changed: false, truncated: 0 }
 
   let reduced: RequestContextMessage[] | undefined
@@ -60,9 +66,12 @@ export function reduceHistoryForWindow(messages: RequestContextMessage[], target
       const content = truncateToolResult(message.content)
       if (content.length >= message.content.length) continue
 
-      estimate -= Math.ceil(message.content.length / CHARS_PER_TOKEN) - Math.ceil(content.length / CHARS_PER_TOKEN)
+      const replacement = { ...message, content }
+      const saved = measure(message) - measure(replacement)
+      if (saved <= 0) continue
+      estimate -= saved
       reduced ??= [...messages]
-      reduced[i] = { ...message, content }
+      reduced[i] = replacement
       truncated += 1
     }
   }

@@ -623,40 +623,64 @@ export async function executeWorkflow(
           return writeEvent(event)
         }
 
-        let stepDoneCalled = false
+        const savedFinalizationText = isResumingCurrentStep ? lastStepOutput['__openfox_finalization'] : undefined
+        const savedFinalization = savedFinalizationText
+          ? (JSON.parse(savedFinalizationText) as { stepId: string; callId: string; status: string })
+          : null
+        const finalization =
+          savedFinalization?.stepId === step.id &&
+          typeof savedFinalization.callId === 'string' &&
+          ['pending', 'confirmed'].includes(savedFinalization.status)
+            ? savedFinalization
+            : null
+        let stepDoneCalled = Boolean(finalization)
+        let stepDoneCallId = finalization?.callId
 
         let agentResult: Awaited<ReturnType<typeof runAgentTurn>>
         try {
-          agentResult = await runAgentTurn(
-            {
-              sessionManager,
-              sessionId,
-              llmClient,
-              ...(options.getSessionLLMClient ? { getSessionLLMClient: options.getSessionLLMClient } : {}),
-              ...(options.statsIdentity ? { statsIdentity: options.statsIdentity } : {}),
-              ...(signal ? { signal } : {}),
-              ...(onMessage ? { onMessage } : {}),
-              ...(options.llmRetryPolicy ? { llmRetryPolicy: options.llmRetryPolicy } : {}),
-              ...(isResumingCurrentStep ? { skipAgentReminder: true } : {}),
-            },
-            turnMetrics,
-            agentStep.agentId ?? resolveDefaultAgentId(),
-            append,
-            {
-              ...(!firstEntryForStep.has(step.id) && !agentStep.prompt && !isResumingCurrentStep
-                ? { injectKickoff: () => injectGenericKickoff(sessionId) }
-                : {}),
-              stopOnStepDone: true,
-              onToolExecuted: (toolCall: ToolCall, toolResult: ToolResult) => {
-                // Also detected in execute-tools.ts (stepDoneCalled flag) to break
-                // the agent loop immediately. This layer handles workflow orchestration
-                // (transition evaluation) after the agent turn returns.
-                if (toolCall.name === 'step_done' && toolResult.success) {
-                  stepDoneCalled = true
-                }
-              },
-            },
-          )
+          agentResult =
+            finalization?.status === 'confirmed'
+              ? {}
+              : await runAgentTurn(
+                  {
+                    sessionManager,
+                    sessionId,
+                    llmClient,
+                    ...(options.getSessionLLMClient ? { getSessionLLMClient: options.getSessionLLMClient } : {}),
+                    ...(options.statsIdentity ? { statsIdentity: options.statsIdentity } : {}),
+                    ...(signal ? { signal } : {}),
+                    ...(onMessage ? { onMessage } : {}),
+                    ...(options.llmRetryPolicy ? { llmRetryPolicy: options.llmRetryPolicy } : {}),
+                    ...(isResumingCurrentStep ? { skipAgentReminder: true } : {}),
+                  },
+                  turnMetrics,
+                  agentStep.agentId ?? resolveDefaultAgentId(),
+                  append,
+                  {
+                    ...(!firstEntryForStep.has(step.id) && !agentStep.prompt && !isResumingCurrentStep
+                      ? { injectKickoff: () => injectGenericKickoff(sessionId) }
+                      : {}),
+                    stopOnStepDone: true,
+                    ...(finalization ? { resumeStepDoneCallId: finalization.callId } : {}),
+                    onToolExecuted: (toolCall: ToolCall, toolResult: ToolResult) => {
+                      // The loop must confirm the persisted tool result before it
+                      // returns. This callback records business completion only;
+                      // a failed confirmation blocks before transition evaluation.
+                      if (toolCall.name === 'step_done' && toolResult.success) {
+                        if (executionId)
+                          sessionManager.recordWorkflowFinalization(
+                            sessionId,
+                            executionId,
+                            step.id,
+                            toolCall.id,
+                            'pending',
+                          )
+                        stepDoneCalled = true
+                        stepDoneCallId = toolCall.id
+                      }
+                    },
+                  },
+                )
         } catch (error) {
           // Controlled aborts are not failures — let them propagate as before.
           if (error instanceof Error && error.message === 'Aborted') {
@@ -679,6 +703,10 @@ export async function executeWorkflow(
         // the execution so the user can retry the step on demand.
         if (agentResult.failed) {
           return blockOnLLMFailure(agentResult.failed.error)
+        }
+
+        if (stepDoneCallId && executionId) {
+          sessionManager.recordWorkflowFinalization(sessionId, executionId, step.id, stepDoneCallId, 'confirmed')
         }
 
         firstEntryForStep.add(step.id)

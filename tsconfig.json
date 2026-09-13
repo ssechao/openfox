@@ -17,6 +17,6 @@
     "noUnusedParameters": true,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "scripts/export-resume-recovery.ts"],
   "exclude": ["node_modules", "dist", "e2e", "src/server/lsp/__fixtures__"]
 }

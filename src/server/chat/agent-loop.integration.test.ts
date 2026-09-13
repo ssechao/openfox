@@ -316,13 +316,13 @@ describe('agentLoop integration', () => {
     )
   })
 
-  it('breaks immediately after step_done when a workflow owns the step', async () => {
+  it('confirms the tool result before completing a workflow step', async () => {
     const append = vi.fn()
     const toolCall: ToolCall = { id: 'call-1', name: 'step_done', arguments: {} }
 
-    ;(consumeStreamGenerator as any).mockResolvedValueOnce(
-      makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }),
-    )
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Confirmed.', finishReason: 'stop' }))
     ;(executeTools as any).mockResolvedValue({
       toolMessages: [
         { role: 'tool', content: 'Step completion signal recorded.', source: 'history', toolCallId: 'call-1' },
@@ -332,11 +332,142 @@ describe('agentLoop integration', () => {
 
     await runTopLevelAgentLoop(makeConfig({ append, stopOnStepDone: true }), turnMetrics)
 
-    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    expect(streamLLMPure).toHaveBeenNthCalledWith(2, expect.objectContaining({ toolChoice: 'none' }))
+    expect(executeTools).toHaveBeenCalledTimes(1)
     expect(append).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'step_done' }) }),
     )
   })
+
+  it.each([true, false])(
+    'resumes pending delivery without kickoff, new user prompt or repeated tool (result present=%s)',
+    async (present) => {
+      const prefix = [
+        { role: 'user' as const, content: 'Original work' },
+        { role: 'assistant' as const, content: '', toolCalls: [{ id: 'done', name: 'step_done', arguments: {} }] },
+        ...(present
+          ? [{ role: 'tool' as const, toolCallId: 'done', content: 'Step completion signal recorded.' }]
+          : []),
+      ]
+      const history = [...prefix, { role: 'user' as const, content: 'NEW_PROMPT_AFTER_RESTART' }]
+      const injectKickoff = vi.fn()
+      const config = makeConfig({
+        stopOnStepDone: true,
+        resumeStepDoneCallId: 'done',
+        injectKickoff,
+        getConversationMessages: vi.fn().mockResolvedValue(history),
+        assembleRequest: vi.fn().mockImplementation(({ messages }) => ({ systemPrompt: 'sys', messages })),
+      })
+      const result = await runTopLevelAgentLoop(config, turnMetrics)
+      expect(injectKickoff).not.toHaveBeenCalled()
+      expect(executeTools).not.toHaveBeenCalled()
+      if (present) {
+        expect(result.failed).toBeUndefined()
+        expect(streamLLMPure).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(streamLLMPure).mock.calls[0]![0].messages).toEqual(prefix)
+      } else {
+        expect(result.failed).toBeDefined()
+        expect(streamLLMPure).not.toHaveBeenCalled()
+      }
+      expect(history.at(-1)?.content).toBe('NEW_PROMPT_AFTER_RESTART')
+    },
+  )
+
+  it('does not execute a tool returned against tool_choice none during workflow confirmation', async () => {
+    const append = vi.fn()
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(
+        makeStreamResult({ toolCalls: [{ id: 'done', name: 'step_done', arguments: {} }], finishReason: 'tool_calls' }),
+      )
+      .mockResolvedValueOnce(
+        makeStreamResult({
+          toolCalls: [{ id: 'late', name: 'run_command', arguments: { command: 'should not execute' } }],
+          finishReason: 'tool_calls',
+        }),
+      )
+    ;(executeTools as any).mockResolvedValue({ toolMessages: [], stepDoneCalled: true })
+    const result = await runTopLevelAgentLoop(makeConfig({ append, stopOnStepDone: true }), turnMetrics)
+    expect(result.failed).toBeDefined()
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    expect(executeTools).toHaveBeenCalledTimes(1)
+    expect(append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'step_done' }) }),
+    )
+  })
+
+  it('does not generate a confirmation after an explicit abort following step_done', async () => {
+    const controller = new AbortController()
+    ;(consumeStreamGenerator as any).mockResolvedValueOnce(
+      makeStreamResult({ toolCalls: [{ id: 'done', name: 'step_done', arguments: {} }], finishReason: 'tool_calls' }),
+    )
+    ;(executeTools as any).mockImplementation(async () => {
+      controller.abort()
+      return { toolMessages: [], stepDoneCalled: true }
+    })
+    await expect(
+      runTopLevelAgentLoop(makeConfig({ stopOnStepDone: true, signal: controller.signal }), turnMetrics),
+    ).rejects.toThrow('Aborted')
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry a failed workflow confirmation or declare the step delivered', async () => {
+    const append = vi.fn()
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(
+        makeStreamResult({ toolCalls: [{ id: 'done', name: 'step_done', arguments: {} }], finishReason: 'tool_calls' }),
+      )
+      .mockResolvedValueOnce(makeStreamResult({ error: 'connection lost after delivery' }))
+    ;(executeTools as any).mockResolvedValue({ toolMessages: [], stepDoneCalled: true })
+    const result = await runTopLevelAgentLoop(makeConfig({ append, stopOnStepDone: true }), turnMetrics)
+    expect(result.failed).toBeDefined()
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    expect(executeTools).toHaveBeenCalledTimes(1)
+    expect(append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'step_done' }) }),
+    )
+  })
+
+  it('keeps an interrupted confirmation unconfirmed without retrying', async () => {
+    const append = vi.fn()
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(
+        makeStreamResult({ toolCalls: [{ id: 'done', name: 'step_done', arguments: {} }], finishReason: 'tool_calls' }),
+      )
+      .mockResolvedValueOnce(makeStreamResult({ aborted: true, content: 'Partial confirmation' }))
+    ;(executeTools as any).mockResolvedValue({ toolMessages: [], stepDoneCalled: true })
+    await expect(runTopLevelAgentLoop(makeConfig({ append, stopOnStepDone: true }), turnMetrics)).rejects.toThrow(
+      'Aborted',
+    )
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    expect(executeTools).toHaveBeenCalledTimes(1)
+    expect(append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'step_done' }) }),
+    )
+  })
+
+  it.each(['content_filter', 'tool_calls', undefined])(
+    'does not confirm a workflow without a successful stop terminal (%s)',
+    async (finishReason) => {
+      const append = vi.fn()
+      ;(consumeStreamGenerator as any)
+        .mockResolvedValueOnce(
+          makeStreamResult({
+            toolCalls: [{ id: 'done', name: 'step_done', arguments: {} }],
+            finishReason: 'tool_calls',
+          }),
+        )
+        .mockResolvedValueOnce(makeStreamResult({ finishReason, content: 'Not a confirmed terminal' }))
+      ;(executeTools as any).mockResolvedValue({ toolMessages: [], stepDoneCalled: true })
+      const result = await runTopLevelAgentLoop(makeConfig({ append, stopOnStepDone: true }), turnMetrics)
+      expect(result.failed).toBeDefined()
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+      expect(executeTools).toHaveBeenCalledTimes(1)
+      expect(append).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'step_done' }) }),
+      )
+    },
+  )
 
   it('continues loop when step_done is not called', async () => {
     const append = vi.fn()
@@ -543,6 +674,78 @@ describe('agentLoop integration', () => {
     expect(request!.toolChoice).toBe('none')
     expect(request!.tools).toEqual([])
     expect(request!.modelSettings?.maxTokens).toBe(8192)
+  })
+
+  it('compacts unknown usage with images without base64 overflow or cached tool overhead', async () => {
+    const data = 'data:image/png;base64,' + 'YWJj'.repeat(100_000)
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'Summarize our work',
+        source: 'history' as const,
+        attachments: [{ id: 'img', filename: 'screen.png', mimeType: 'image/png', size: 300_000, data }],
+      },
+    ]
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 0,
+        currentTokensKnown: false,
+        maxTokens: 128_000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: false,
+        dynamicContextChanged: false,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(128_000),
+    })
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+      makeStreamResult({ content: 'Summary', finishReason: 'stop' }),
+    )
+    const result = await runTopLevelAgentLoop(
+      makeConfig({
+        initialCompacting: true,
+        sessionManager,
+        getConversationMessages: vi.fn().mockResolvedValue(messages),
+        assembleRequest: vi.fn(async ({ messages }) => ({
+          systemPrompt: 'system',
+          messages,
+          tools: [{ type: 'function', function: { name: 'unused', description: 'x'.repeat(200_000) } }] as any,
+        })),
+      }),
+      turnMetrics,
+    )
+    expect(result.failed).toBeUndefined()
+    const request = vi.mocked(streamLLMPure).mock.calls[0]?.[0]
+    expect(request).toBeDefined()
+    expect(request!.tools).toEqual([])
+    expect(request!.messages[0]!.attachments![0]!.data).toBe(data)
+    expect(request!.modelSettings?.maxTokens).toBe(8192)
+  })
+
+  it('refuses a genuinely oversized unknown context once, preserving history and gauge', async () => {
+    const history = [{ role: 'user' as const, content: '\u0001'.repeat(200_000), source: 'history' as const }]
+    const initial = JSON.stringify(history)
+    const append = vi.fn()
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({ currentTokens: 0, currentTokensKnown: false, maxTokens: 128_000 }),
+      getCurrentModelContext: vi.fn().mockReturnValue(128_000),
+    })
+    const result = await runTopLevelAgentLoop(
+      makeConfig({
+        initialCompacting: true,
+        append,
+        sessionManager,
+        llmClient: { getModel: () => 'gpt-5.6-sol' } as any,
+        getConversationMessages: async () => history,
+        assembleRequest: async ({ messages }) => ({ systemPrompt: 'system', messages, tools: [] }),
+      }),
+      turnMetrics,
+    )
+    expect(result.failed?.error).toContain('Not enough context headroom')
+    expect(streamLLMPure).not.toHaveBeenCalled()
+    expect(sessionManager.setCurrentContextSize).not.toHaveBeenCalled()
+    expect(append.mock.calls.some(([e]) => e.type === 'context.compacted')).toBe(false)
+    expect(JSON.stringify(history)).toBe(initial)
   })
 
   it('fails compaction once without replacing history when the summary is incomplete', async () => {
@@ -797,8 +1000,8 @@ describe('agentLoop integration', () => {
     // retry on a reduced history instead of failing the user's /compact.
     expect(result.failed).toBeUndefined()
     expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
-    const firstSize = JSON.stringify(assembleRequest.mock.calls[0]![0].messages).length
-    const secondSize = JSON.stringify(assembleRequest.mock.calls[1]![0].messages).length
+    const firstSize = JSON.stringify(vi.mocked(streamLLMPure).mock.calls[0]![0].messages).length
+    const secondSize = JSON.stringify(vi.mocked(streamLLMPure).mock.calls[1]![0].messages).length
     expect(secondSize).toBeLessThan(firstSize)
   })
 

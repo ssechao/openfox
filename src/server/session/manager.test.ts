@@ -135,6 +135,41 @@ describe('SessionManager', () => {
     expect(getLspManagerMock).toHaveBeenCalledWith(session.id, workdir)
   })
 
+  it('persists workflow finalization across database restart without confirming another step', async () => {
+    const session = manager.createSession(projectId)
+    manager.startWorkflow(session.id, 'exec-1', 'wf', 'Workflow', undefined, {})
+    manager.updateWorkflowStep(session.id, 'exec-1', 'build', 'Build', 'wf', 'Workflow', undefined)
+    manager.recordWorkflowFinalization(session.id, 'exec-1', 'build', 'call-1', 'pending')
+    manager.blockWorkflow(session.id, 'exec-1', 'wf', 'Workflow', undefined)
+    const databasePath = join(workdir, 'workflow-journal.sqlite3')
+    await getDatabase().backup(databasePath)
+    closeDatabase()
+    const config = loadConfig()
+    config.database.path = databasePath
+    initDatabase(config)
+    initEventStore(getDatabase())
+    const restarted = new SessionManager(mockProviderManager as any)
+    expect(restarted.getLatestWorkflowExecution(session.id)?.stepOutput['__openfox_finalization']).toBe(
+      JSON.stringify({ stepId: 'build', callId: 'call-1', status: 'pending' }),
+    )
+    expect(restarted.getPendingWorkflowFinalization(session.id)).toEqual({
+      executionId: 'exec-1',
+      stepId: 'build',
+      callId: 'call-1',
+    })
+    expect(() => restarted.recordWorkflowFinalization(session.id, 'exec-1', 'other', 'call-1', 'confirmed')).toThrow()
+    expect(() =>
+      restarted.recordWorkflowFinalization(session.id, 'exec-1', 'build', 'other-call', 'confirmed'),
+    ).toThrow()
+    expect(() => restarted.recordWorkflowFinalization(session.id, 'exec-1', 'build', 'other-call', 'pending')).toThrow()
+    restarted.recordWorkflowFinalization(session.id, 'exec-1', 'build', 'call-1', 'confirmed')
+    expect(restarted.getLatestWorkflowExecution(session.id)?.stepOutput['__openfox_finalization']).toContain(
+      'confirmed',
+    )
+    expect(restarted.getLatestWorkflowExecution(session.id)?.status).toBe('blocked')
+    expect(restarted.getPendingWorkflowFinalization(session.id)).toBeNull()
+  })
+
   it('getProjectWorkdir returns the project root even when a workspace is active', () => {
     const session = manager.createSession(projectId)
     const wsPath = join(workdir, '.worktrees', 'feature-x')

@@ -126,6 +126,7 @@ function createMockOptions(extra?: Partial<OrchestratorOptions>): OrchestratorOp
       addMessage: vi.fn(),
       startWorkflow: vi.fn(),
       updateWorkflowStep: vi.fn(),
+      recordWorkflowFinalization: vi.fn(),
       completeWorkflow: vi.fn(),
       blockWorkflow: vi.fn(),
       waitAtStep: vi.fn(),
@@ -144,6 +145,45 @@ function createMockOptions(extra?: Partial<OrchestratorOptions>): OrchestratorOp
 // ============================================================================
 
 describe('workflow resume nudge injection', () => {
+  it('does not generate again after confirmed delivery when resuming before the transition', async () => {
+    const options = createMockOptions({
+      resumeFromStep: 'build',
+      initialStepOutput: {
+        __openfox_finalization: JSON.stringify({ stepId: 'build', callId: 'delivered', status: 'confirmed' }),
+      },
+    })
+    const sm = options.sessionManager as any
+    sm.getActiveWorkflowExecution.mockReturnValue({ id: 'exec', stepOutput: options.initialStepOutput })
+    const result = await executeWorkflow(createWorkflow(), options)
+    expect(mockRunAgentTurn).not.toHaveBeenCalled()
+    expect(result.finalAction.type).not.toBe('BLOCKED')
+  })
+  it('resumes only confirmation of a persisted step_done without repeating its tool', async () => {
+    const options = createMockOptions({
+      resumeFromStep: 'build',
+      initialStepOutput: {
+        __openfox_finalization: JSON.stringify({ stepId: 'build', callId: 'already-done', status: 'pending' }),
+      },
+    })
+    const sm = options.sessionManager as any
+    sm.getActiveWorkflowExecution.mockReturnValue({ id: 'exec', stepOutput: options.initialStepOutput })
+    sm.recordWorkflowFinalization = vi.fn()
+    mockRunAgentTurn.mockResolvedValue({})
+    const result = await executeWorkflow(createWorkflow(), options)
+    expect(mockRunAgentTurn).toHaveBeenCalledTimes(1)
+    expect(mockRunAgentTurn.mock.calls[0]![4]).toMatchObject({
+      resumeStepDoneCallId: 'already-done',
+      stopOnStepDone: true,
+    })
+    expect(sm.recordWorkflowFinalization).toHaveBeenCalledWith(
+      'test-session',
+      'exec',
+      'build',
+      'already-done',
+      'confirmed',
+    )
+    expect(result.finalAction.type).not.toBe('BLOCKED')
+  })
   beforeEach(() => {
     vi.clearAllMocks()
   })
