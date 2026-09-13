@@ -1497,6 +1497,14 @@ export class EventStore {
 
 let eventStoreInstance: EventStore | null = null
 
+// Session IDs that were left running when the server stopped (detected at
+// startup). Consumed by the opt-in boot auto-continuation (Settings > Advanced).
+let staleRunningSessionIds: string[] = []
+
+export function getStaleRunningSessionIds(): string[] {
+  return staleRunningSessionIds
+}
+
 export function initEventStore(db: Database.Database): EventStore {
   eventStoreInstance = new EventStore(db)
 
@@ -1597,6 +1605,7 @@ function resetStaleRunningSessions(eventStore: EventStore, db: Database.Database
   const sessions = db.prepare(`SELECT id FROM sessions`).all() as { id: string }[]
 
   let resetCount = 0
+  staleRunningSessionIds = []
 
   for (const { id: sessionId } of sessions) {
     const { snapshot, events } = eventStore.getEventsSinceSnapshot(sessionId)
@@ -1626,6 +1635,8 @@ function resetStaleRunningSessions(eventStore: EventStore, db: Database.Database
       recovery.push({ type: 'running.changed', data: { isRunning: false } })
       // The terminal representation must survive another crash atomically.
       eventStore.appendBatch(sessionId, recovery)
+      // Cleaning up an orphaned stream must not auto-relaunch an idle session.
+      if (isRunning) staleRunningSessionIds.push(sessionId)
       resetCount++
     }
   }

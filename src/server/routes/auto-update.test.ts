@@ -125,6 +125,13 @@ describe('Auto Update Routes', () => {
   })
 
   describe('POST /api/auto-update (no auth required)', () => {
+    it('falls back to the injected current version when successful output has no version', async () => {
+      mockSpawn.mockImplementation(() => makeMockChild({ stdout: 'Done\n' }))
+      const res = await fetch(`${baseUrl}/api/auto-update`, { method: 'POST' })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toMatchObject({ success: true, version: '1.2.3' })
+    })
+
     it('returns a response with success or error and isService', async () => {
       const res = await fetch(`${baseUrl}/api/auto-update`, { method: 'POST' })
       expect(res.status).toBe(200)
@@ -136,6 +143,34 @@ describe('Auto Update Routes', () => {
       } else {
         expect(typeof body.error).toBe('string')
       }
+    })
+
+    it('parses the version from English CLI output', async () => {
+      mockSpawn.mockImplementation((cmd: unknown, args: unknown) => {
+        if (cmd === 'npm view openfox version' || (cmd === 'npm' && Array.isArray(args) && args[0] === 'view')) {
+          return makeMockChild({ stdout: '1.2.3\n' })
+        }
+        return makeMockChild({ stdout: 'Updated: 1.2.3\n' })
+      })
+      const res = await fetch(`${baseUrl}/api/auto-update`, { method: 'POST' })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { success: boolean; version?: string }
+      expect(body.success).toBe(true)
+      expect(body.version).toBe('1.2.3')
+    })
+
+    it('parses the version from French CLI output', async () => {
+      mockSpawn.mockImplementation((cmd: unknown, args: unknown) => {
+        if (cmd === 'npm view openfox version' || (cmd === 'npm' && Array.isArray(args) && args[0] === 'view')) {
+          return makeMockChild({ stdout: '1.2.3\n' })
+        }
+        return makeMockChild({ stdout: 'Mis à jour : 1.2.3\n' })
+      })
+      const res = await fetch(`${baseUrl}/api/auto-update`, { method: 'POST' })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { success: boolean; version?: string }
+      expect(body.success).toBe(true)
+      expect(body.version).toBe('1.2.3')
     })
   })
 })

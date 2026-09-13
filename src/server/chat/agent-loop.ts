@@ -56,6 +56,7 @@ import { settleUnpairedToolCalls } from './unpaired-tool-calls.js'
 import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
+import { CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT } from './prompts.js'
 import { logger } from '../utils/logger.js'
 import type { LLMRetryPolicy } from '../runner/types.js'
 import { DEFAULT_LLM_RETRY_POLICY } from '../runner/types.js'
@@ -222,9 +223,6 @@ const MAX_MALFORMED_TOOL_ATTEMPTS = 3
 const OUTPUT_RESERVE_TOKENS = 2048
 const COMPACTION_OUTPUT_TOKENS = 8192
 const MIN_COMPACTION_OUTPUT_TOKENS = 1024
-const CONTINUE_PROMPT = 'Continue your previous response. Do NOT repeat what you already wrote.'
-const CONTINUE_AFTER_STREAM_ERROR_PROMPT =
-  'The LLM stream was interrupted mid-response. Continue exactly where you left off — do not repeat what was already written.'
 
 /**
  * Key identifying a Responses-API conversation chain. Built in exactly one
@@ -1163,3 +1161,5 @@ export async function runTopLevelAgentLoop(
     ...(returnValueResult ? { returnValueResult } : {}),
   }
 }
+
+export { CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT } from './prompts.js'

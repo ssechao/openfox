@@ -3704,6 +3704,27 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
   queueProcessor.start()
 
+  // Opt-in boot auto-continuation (Settings > Advanced): sessions that were
+  // running when the server stopped get a continuation turn queued through the
+  // standard queue → turn machinery. Mid-generation sessions receive the same
+  // "stream interrupted" reminder as the LLM-drop retry mechanism.
+  const { getSetting, SETTINGS_KEYS } = await import('./db/settings.js')
+  if (getSetting(SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT) === 'true') {
+    const { getStaleRunningSessionIds } = await import('./events/store.js')
+    const { runBootAutoContinuations } = await import('./session/auto-continue.js')
+    const staleIds = getStaleRunningSessionIds()
+    if (staleIds.length > 0) {
+      const continued = runBootAutoContinuations(staleIds, {
+        getEvents: (sessionId) => getEventStore().getEvents(sessionId),
+        hasActiveWorkflow: (sessionId) => sessionManager.getActiveWorkflowExecution(sessionId) !== null,
+        appendEvent: (sessionId, event) => getEventStore().append(sessionId, event),
+        queueMessage: (sessionId, content) =>
+          sessionManager.queueMessage(sessionId, 'asap', content, undefined, 'auto-prompt'),
+      })
+      logger.info('Boot auto-continuation queued', { sessions: staleIds.length, continued })
+    }
+  }
+
   const abortSession = (sessionId: string) => {
     const wsAborted = wssExports.abortSession(sessionId)
     const qpAborted = queueProcessor.abortSession(sessionId)

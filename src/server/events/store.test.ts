@@ -10,10 +10,11 @@ import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync, existsSync, statSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { EventStore, initEventStore } from './store.js'
+import { EventStore, initEventStore, getStaleRunningSessionIds } from './store.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
 import type { TurnEvent, StoredEvent, SessionSnapshot } from './types.js'
 import { applyEvents } from './apply-events.js'
+import { CONTINUE_AFTER_STREAM_ERROR_PROMPT, runBootAutoContinuations } from '../session/auto-continue.js'
 
 describe('EventStore', () => {
   let db: Database.Database
@@ -846,7 +847,9 @@ describe('initEventStore', () => {
         partial: true,
         thinkingContent: 'Thinking before interruption',
       })
+      expect(getStaleRunningSessionIds()).toEqual(['interrupted-session'])
       initEventStore(db)
+      expect(getStaleRunningSessionIds()).toEqual([])
       expect(restarted.getEvents('interrupted-session')).toEqual(events)
       restarted.append('interrupted-session', { type: 'running.changed', data: { isRunning: true } })
       restarted.append('interrupted-session', {
@@ -917,6 +920,119 @@ describe('initEventStore', () => {
 
     db.close()
   })
+
+  it('records stale running session ids for boot auto-continuation', () => {
+    const db = new Database(':memory:')
+
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workdir TEXT NOT NULL,
+        is_running INTEGER NOT NULL DEFAULT 0
+      )
+    `)
+
+    db.prepare(`INSERT INTO sessions (id, project_id, workdir, is_running) VALUES (?, ?, ?, 1)`).run(
+      'session-stale',
+      'project-1',
+      '/tmp/test',
+    )
+    db.prepare(`INSERT INTO sessions (id, project_id, workdir, is_running) VALUES (?, ?, ?, 0)`).run(
+      'session-idle',
+      'project-1',
+      '/tmp/test',
+    )
+
+    const firstStore = new EventStore(db)
+    firstStore.append('session-stale', { type: 'running.changed', data: { isRunning: true } })
+    firstStore.append('session-idle', { type: 'running.changed', data: { isRunning: false } })
+
+    initEventStore(db)
+
+    const staleIds = getStaleRunningSessionIds()
+    expect(staleIds).toContain('session-stale')
+    expect(staleIds).not.toContain('session-idle')
+
+    db.close()
+  })
+
+  it.each([true, false])(
+    'preserves snapshot recovery and only auto-continues originally running sessions (running=%s)',
+    (isRunning) => {
+      const db = new Database(':memory:')
+      try {
+        db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, is_running INTEGER DEFAULT 0)')
+        db.prepare('INSERT INTO sessions (id) VALUES (?)').run('snapshot-session')
+        const store = new EventStore(db)
+        store.append('snapshot-session', {
+          type: 'turn.snapshot',
+          data: {
+            mode: 'builder',
+            phase: 'build',
+            isRunning,
+            messages: [
+              {
+                id: 'partial',
+                role: 'assistant',
+                content: 'Preserved',
+                thinkingContent: 'Also preserved',
+                timestamp: 1,
+                isStreaming: true,
+              },
+            ],
+            criteria: [],
+            metadataEntries: {},
+            todos: [],
+            currentContextWindowId: 'w1',
+            contextState: {
+              currentTokens: 0,
+              maxTokens: 200000,
+              compactionCount: 0,
+              dangerZone: false,
+              canCompact: false,
+              dynamicContextChanged: false,
+            },
+            snapshotSeq: 1,
+            snapshotAt: 1,
+          },
+        })
+        const restarted = initEventStore(db)
+        expect(getStaleRunningSessionIds()).toEqual(isRunning ? ['snapshot-session'] : [])
+        const events = restarted.getEvents('snapshot-session')
+        const queued: string[] = []
+        expect(
+          runBootAutoContinuations(getStaleRunningSessionIds(), {
+            getEvents: (id) => restarted.getEvents(id),
+            hasActiveWorkflow: () => false,
+            appendEvent: (id, event) => {
+              restarted.append(id, event)
+            },
+            queueMessage: (_id, content) => {
+              queued.push(content)
+            },
+          }),
+        ).toBe(isRunning ? 1 : 0)
+        expect(queued).toEqual(isRunning ? [CONTINUE_AFTER_STREAM_ERROR_PROMPT] : [])
+        expect(restarted.getEvents('snapshot-session')).toEqual(events)
+        expect(events.filter((event) => event.type === 'message.done')).toEqual([
+          expect.objectContaining({ data: { messageId: 'partial', partial: true } }),
+        ])
+        const { snapshot, events: tail } = restarted.getEventsSinceSnapshot('snapshot-session')
+        expect(applyEvents(snapshot?.messages ?? [], tail, { timestampAsNumber: true })[0]).toMatchObject({
+          content: 'Preserved',
+          thinkingContent: 'Also preserved',
+          isStreaming: false,
+          partial: true,
+        })
+        initEventStore(db)
+        expect(getStaleRunningSessionIds()).toEqual([])
+        expect(restarted.getEvents('snapshot-session')).toEqual(events)
+      } finally {
+        db.close()
+      }
+    },
+  )
 
   it('should not emit reset event for sessions already not running', () => {
     const db = new Database(':memory:')
