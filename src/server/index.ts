@@ -240,6 +240,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     },
   })
   setMcpManagerForTools(mcpManager)
+  const { setSharedMemoryMcpManager } = await import('./memory/shared-memory-client.js')
+  setSharedMemoryMcpManager(mcpManager)
   const { setGlobalMcpServersProvider } = await import('./mcp/session-overrides.js')
   setGlobalMcpServersProvider(() =>
     mcpManager.getAllServers().map((s) => ({ name: s.name, disabled: s.config.disabled })),
@@ -484,22 +486,62 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   app.put('/api/projects/:id', async (req, res) => {
     const { updateProject } = await import('./db/projects.js')
-    const { name, customInstructions, dangerLevel, defaultAgent } = req.body
+    const { name, customInstructions, dangerLevel, defaultAgent, sharedMemorySettings } = req.body
     const updates: {
       name?: string
       customInstructions?: string | null
       dangerLevel?: 'normal' | 'dangerous' | null
       defaultAgent?: string | null
+      sharedMemorySettings?: import('../shared/types.js').SharedMemorySettings | null
     } = {}
     if (name !== undefined) updates.name = name
     if (customInstructions !== undefined) updates.customInstructions = customInstructions
     if (dangerLevel !== undefined) updates.dangerLevel = dangerLevel as 'normal' | 'dangerous' | null
     if (defaultAgent !== undefined) updates.defaultAgent = defaultAgent as string | null
+    if (sharedMemorySettings !== undefined) updates.sharedMemorySettings = sharedMemorySettings
     const updated = updateProject(req.params.id, updates)
     if (!updated) {
       return res.status(404).json({ error: 'Project not found' })
     }
     res.json({ project: updated })
+  })
+
+  // Shared memory (RAG) settings — criterion 8: activation/collections/
+  // capture/retrieval, resolved per project and optionally per session.
+  app.get('/api/shared-memory/health', async (_req, res) => {
+    const { getSharedMemoryHealth } = await import('./memory/shared-memory-client.js')
+    res.json(getSharedMemoryHealth())
+  })
+
+  app.get('/api/projects/:id/shared-memory', async (req, res) => {
+    const { getProject } = await import('./db/projects.js')
+    if (!getProject(req.params.id)) return res.status(404).json({ error: 'Project not found' })
+    const { resolveSharedMemorySettings } = await import('./memory/settings.js')
+    res.json({ settings: resolveSharedMemorySettings(req.params.id) })
+  })
+
+  app.get('/api/sessions/:id/shared-memory', async (req, res) => {
+    const session = sessionManager.getSession(req.params.id)
+    if (!session) return res.status(404).json({ error: 'Session not found' })
+    const { resolveSharedMemorySettings } = await import('./memory/settings.js')
+    const { getSessionSharedMemoryOverride } = await import('./db/sessions.js')
+    res.json({
+      settings: resolveSharedMemorySettings(session.projectId, req.params.id),
+      sessionOverride: getSessionSharedMemoryOverride(req.params.id),
+    })
+  })
+
+  app.put('/api/sessions/:id/shared-memory', async (req, res) => {
+    const session = sessionManager.getSession(req.params.id)
+    if (!session) return res.status(404).json({ error: 'Session not found' })
+    const { updateSessionSharedMemoryOverride, getSessionSharedMemoryOverride } = await import('./db/sessions.js')
+    const override = (req.body?.override ?? null) as import('../shared/types.js').SharedMemorySettings | null
+    updateSessionSharedMemoryOverride(req.params.id, override)
+    const { resolveSharedMemorySettings } = await import('./memory/settings.js')
+    res.json({
+      settings: resolveSharedMemorySettings(session.projectId, req.params.id),
+      sessionOverride: getSessionSharedMemoryOverride(req.params.id),
+    })
   })
 
   app.delete('/api/projects/:id', async (req, res) => {

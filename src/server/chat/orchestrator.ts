@@ -48,6 +48,9 @@ import { logger } from '../utils/logger.js'
 import type { RetryPatternConfig } from './auto-patterns.js'
 import { getConversationMessages, processEventsForConversation } from './conversation-history.js'
 import { createTurnEventSink } from '../events/turn-event-sink.js'
+import { injectSharedMemoryContext } from './shared-memory-context.js'
+import { runPostTurnMemoryCapture } from '../memory/capture.js'
+import { createLlmMemoryExtractor } from '../memory/extraction.js'
 
 // Re-export for runner orchestrator
 export {
@@ -232,6 +235,20 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
         )
     }
     if (!deliveryFailed) await runAgentTurn(options, turnMetrics, mode, append)
+
+    // Post-turn automatic knowledge capture (criterion 5). Fire-and-forget:
+    // extraction/proposal must never delay the turn's response to the user,
+    // and any failure here is swallowed (bounded, best-effort) — the outbox
+    // makes it safe to retry on the next eligible turn.
+    if (!options.warmup) {
+      const captureClient = options.getSessionLLMClient ? options.getSessionLLMClient() : options.llmClient
+      void runPostTurnMemoryCapture(
+        { projectId: session.projectId, sessionId },
+        createLlmMemoryExtractor(captureClient),
+      ).catch((err) => {
+        logger.debug('post-turn shared memory capture failed', { sessionId, error: String(err) })
+      })
+    }
 
     // Create end-of-turn snapshot
     const snapshot = buildSnapshot(sessionManager, sessionId, turnMetrics.buildStats(statsIdentity, mode))
@@ -479,6 +496,19 @@ export async function runAgentTurn(
       },
       append,
     )
+
+    // Automatic pre-turn shared-memory retrieval (criterion 9). Bounded
+    // latency/budget, ephemeral injection only, never touches the cached
+    // prefix above. Failures/timeouts/being-off are all bounded — this must
+    // never throw and never delay the turn beyond its own internal timeout.
+    try {
+      await injectSharedMemoryContext({ projectId: session.projectId, sessionId: options.sessionId }, append)
+    } catch (err) {
+      logger.debug('shared memory retrieval failed, continuing without it', {
+        sessionId: options.sessionId,
+        error: String(err),
+      })
+    }
   }
 
   return runTopLevelAgentLoop(

@@ -304,7 +304,9 @@ export function renderSystemPromptDiff(oldPrompt: string, newPrompt: string): st
   return `<system-reminder>\nYour system prompt has changed:\n${lines.join('\n')}\n</system-reminder>`
 }
 
-function injectSystemReminder(
+/** Exported for reuse by other ephemeral-reminder producers (e.g. shared-memory-context.ts)
+ *  that need the same "trailing user message, cached prefix untouched" injection shape. */
+export function injectSystemReminder(
   sessionId: string,
   append: (event: TurnEvent) => void,
   content: string,

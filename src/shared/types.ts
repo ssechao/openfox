@@ -12,8 +12,22 @@ export interface Project {
   isStarred?: boolean // Whether the project is starred for quick access
   workspaceRootDir?: string // Custom workspace root directory (user-specific, stored in DB)
   mcpOverrides?: Record<string, { disabled?: boolean; disabledTools?: string[] }> // Project-level MCP server overrides
+  sharedMemorySettings?: SharedMemorySettings // Project-level shared memory (RAG) defaults
   createdAt: string
   updatedAt: string
+}
+
+/**
+ * Shared memory (Aether Memory / RAG) settings, partial by design: a
+ * project's settings fill in defaults, a session's override (also this
+ * shape) only overrides the fields it sets. See src/server/memory/settings.ts
+ * for resolution and defaults.
+ */
+export interface SharedMemorySettings {
+  enabled?: boolean
+  collections?: string[]
+  captureEnabled?: boolean
+  retrievalEnabled?: boolean
 }
 
 // ============================================================================
@@ -120,6 +134,7 @@ export interface Session {
   dangerLevel?: DangerLevel // Controls path confirmation bypass
   messageCount?: number // Cached message count for efficient sidebar display (optional, populated on load)
   activeWorkflowExecution?: WorkflowExecution | null // Currently active workflow execution, if any
+  sharedMemoryOverride?: SharedMemorySettings // Session-level override of the project's shared memory settings
 }
 
 // ============================================================================

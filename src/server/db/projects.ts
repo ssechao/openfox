@@ -1,4 +1,4 @@
-import type { Project } from '../../shared/types.js'
+import type { Project, SharedMemorySettings } from '../../shared/types.js'
 import { getDatabase } from './index.js'
 
 // ============================================================================
@@ -92,6 +92,7 @@ export function updateProject(
     defaultAgent?: string | null
     workspaceRootDir?: string | null
     mcpOverrides?: Record<string, { disabled?: boolean; disabledTools?: string[] }> | null
+    sharedMemorySettings?: SharedMemorySettings | null
   },
 ): Project | null {
   const db = getDatabase()
@@ -128,6 +129,11 @@ export function updateProject(
   if (updates.mcpOverrides !== undefined) {
     sets.push('mcp_overrides = ?')
     values.push(updates.mcpOverrides !== null ? JSON.stringify(updates.mcpOverrides) : null)
+  }
+
+  if (updates.sharedMemorySettings !== undefined) {
+    sets.push('shared_memory_settings = ?')
+    values.push(updates.sharedMemorySettings !== null ? JSON.stringify(updates.sharedMemorySettings) : null)
   }
 
   values.push(id)
@@ -185,6 +191,7 @@ interface ProjectRow {
   is_starred: number
   workspace_root_dir: string | null
   mcp_overrides: string | null
+  shared_memory_settings: string | null
   created_at: string
   updated_at: string
 }
@@ -206,6 +213,9 @@ function rowToProject(row: ProjectRow): Project {
             { disabled?: boolean; disabledTools?: string[] }
           >,
         }
+      : {}),
+    ...(row.shared_memory_settings
+      ? { sharedMemorySettings: JSON.parse(row.shared_memory_settings) as SharedMemorySettings }
       : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

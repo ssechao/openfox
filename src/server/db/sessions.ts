@@ -256,6 +256,29 @@ export function updateSessionMcpDisabledServers(id: string, disabledServers: str
   db.prepare(`UPDATE sessions SET mcp_disabled_servers = ? WHERE id = ?`).run(value, id)
 }
 
+export function getSessionSharedMemoryOverride(
+  id: string,
+): import('../../shared/types.js').SharedMemorySettings | null {
+  const db = getDatabase()
+  const row = db.prepare(`SELECT shared_memory_override FROM sessions WHERE id = ?`).get(id) as
+    { shared_memory_override: string | null } | undefined
+  if (!row?.shared_memory_override) return null
+  try {
+    return JSON.parse(row.shared_memory_override) as import('../../shared/types.js').SharedMemorySettings
+  } catch {
+    return null
+  }
+}
+
+export function updateSessionSharedMemoryOverride(
+  id: string,
+  override: import('../../shared/types.js').SharedMemorySettings | null,
+): void {
+  const db = getDatabase()
+  const value = override ? JSON.stringify(override) : null
+  db.prepare(`UPDATE sessions SET shared_memory_override = ? WHERE id = ?`).run(value, id)
+}
+
 export function updateSessionCachedPrompt(
   id: string,
   systemPrompt: string,

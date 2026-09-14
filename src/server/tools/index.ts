@@ -21,6 +21,7 @@ import { mcpConfigTool } from './mcp-config.js'
 import { webSearchTool } from './web-search.js'
 import { workspaceTool } from './workspace.js'
 import { projectTasksTool } from './project-tasks.js'
+import { sharedMemoryTool } from './shared-memory.js'
 import { computeEffectiveTools } from './tool-policy.js'
 import { logger } from '../utils/logger.js'
 
@@ -60,6 +61,7 @@ function getBuiltInTools(): Tool[] {
       mcpConfigTool,
       workspaceTool,
       projectTasksTool,
+      sharedMemoryTool,
     ]
   }
   return _builtInTools

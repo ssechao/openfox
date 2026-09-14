@@ -295,6 +295,20 @@ export type TurnEvent =
         contextWindowId: string // Scoped to window for cache invalidation
       }
     }
+  | {
+      type: 'memory.context_used'
+      // Audit record for shared-memory automatic pre-turn retrieval
+      // (criterion 9): makes the turn explainable/replayable even though the
+      // retrieved content itself is only injected as an ephemeral reminder,
+      // never persisted into the cached prefix. `skipped`/`error` cover the
+      // "nothing injected" cases so the audit trail is complete either way.
+      data: {
+        query: string
+        items: Array<{ id: string; collection?: string; revision?: number; score?: number }>
+        skipped?: 'disabled' | 'unavailable' | 'no_results'
+        error?: string
+      }
+    }
 
   // ----------------------------------------------------------------------------
   // Builder-specific

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { authFetch } from '../lib/api'
 import { projectsResource, projectResource } from '../lib/resources'
-import type { Project } from '@shared/types.js'
+import type { Project, SharedMemorySettings } from '@shared/types.js'
 
 interface ProjectState {
   /**
@@ -25,6 +25,7 @@ interface ProjectState {
       customInstructions?: string | null
       dangerLevel?: string | null
       defaultAgent?: string | null
+      sharedMemorySettings?: SharedMemorySettings | null
     },
   ) => Promise<Project | null>
   deleteProject: (projectId: string) => Promise<boolean>

@@ -89,7 +89,34 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
   const [mcpDirty, setMcpDirty] = useState(false)
   const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set())
 
-  const isDirty = instructionsDirty || dangerLevelDirty || defaultAgentDirty || setupDirty || rootDirDirty || mcpDirty
+  const [sharedMemoryEnabled, setSharedMemoryEnabled] = useState(project.sharedMemorySettings?.enabled ?? false)
+  const [sharedMemoryCollections, setSharedMemoryCollections] = useState(
+    (project.sharedMemorySettings?.collections ?? []).join(', '),
+  )
+  const [sharedMemoryCaptureEnabled, setSharedMemoryCaptureEnabled] = useState(
+    project.sharedMemorySettings?.captureEnabled ?? true,
+  )
+  const [sharedMemoryRetrievalEnabled, setSharedMemoryRetrievalEnabled] = useState(
+    project.sharedMemorySettings?.retrievalEnabled ?? true,
+  )
+  const [sharedMemoryDirty, setSharedMemoryDirty] = useState(false)
+
+  const resetSharedMemoryFields = useCallback((p: Project) => {
+    setSharedMemoryEnabled(p.sharedMemorySettings?.enabled ?? false)
+    setSharedMemoryCollections((p.sharedMemorySettings?.collections ?? []).join(', '))
+    setSharedMemoryCaptureEnabled(p.sharedMemorySettings?.captureEnabled ?? true)
+    setSharedMemoryRetrievalEnabled(p.sharedMemorySettings?.retrievalEnabled ?? true)
+    setSharedMemoryDirty(false)
+  }, [])
+
+  const isDirty =
+    instructionsDirty ||
+    dangerLevelDirty ||
+    defaultAgentDirty ||
+    setupDirty ||
+    rootDirDirty ||
+    mcpDirty ||
+    sharedMemoryDirty
 
   useEffect(() => {
     if (isOpen) {
@@ -103,8 +130,9 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
       setRootDirDirty(false)
       setMcpDirty(false)
       setExpandedServers(new Set())
+      resetSharedMemoryFields(project)
     }
-  }, [isOpen, project])
+  }, [isOpen, project, resetSharedMemoryFields])
 
   useEffect(() => {
     if (wsConfig?.setup && wsConfig.setup.length > 0) {
@@ -189,12 +217,24 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
       customInstructions: string | null
       dangerLevel: DangerLevel | null
       defaultAgent?: string | null
+      sharedMemorySettings?: import('@shared/types.js').SharedMemorySettings
     } = {
       customInstructions: customInstructions || null,
       dangerLevel: dangerLevelValue,
     }
     if (defaultAgentDirty) {
       projectUpdates.defaultAgent = defaultAgent === '' ? null : defaultAgent
+    }
+    if (sharedMemoryDirty) {
+      projectUpdates.sharedMemorySettings = {
+        enabled: sharedMemoryEnabled,
+        collections: sharedMemoryCollections
+          .split(',')
+          .map((c) => c.trim())
+          .filter(Boolean),
+        captureEnabled: sharedMemoryCaptureEnabled,
+        retrievalEnabled: sharedMemoryRetrievalEnabled,
+      }
     }
     await updateProject(project.id, projectUpdates)
     if (setupDirty || rootDirDirty || mcpDirty) {
@@ -216,6 +256,7 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
     setSetupDirty(false)
     setRootDirDirty(false)
     setMcpDirty(false)
+    setSharedMemoryDirty(false)
     handleClose()
   }, [
     project.id,
@@ -229,6 +270,11 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
     setupDirty,
     rootDirDirty,
     mcpDirty,
+    sharedMemoryDirty,
+    sharedMemoryEnabled,
+    sharedMemoryCollections,
+    sharedMemoryCaptureEnabled,
+    sharedMemoryRetrievalEnabled,
     updateProject,
     project.workdir,
     handleClose,
@@ -401,6 +447,7 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
     setDefaultAgentDirty(false)
     setSetupDirty(false)
     setRootDirDirty(false)
+    resetSharedMemoryFields(project)
     handleClose()
   }
 
@@ -648,6 +695,87 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
             </div>
           </div>
         )}
+
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1 flex-shrink-0">
+            {t({ en: 'Shared Memory', fr: 'Mémoire partagée' })}
+          </label>
+          <p className="text-sm text-text-muted mb-3">
+            {t({
+              en: 'Share and reuse procedures/facts with other sessions via a shared Aether Memory (requires the "llm-aether" MCP server to be configured and connected).',
+              fr: 'Partagez et réutilisez des procédures/faits avec d’autres sessions via une mémoire Aether partagée (nécessite que le serveur MCP « llm-aether » soit configuré et connecté).',
+            })}
+          </p>
+          <label className="flex items-center gap-2 mb-3 text-sm text-text-primary">
+            <input
+              type="checkbox"
+              checked={sharedMemoryEnabled}
+              onChange={(e) => {
+                setSharedMemoryEnabled(e.target.checked)
+                setSharedMemoryDirty(true)
+              }}
+              disabled={saving}
+            />
+            {t({ en: 'Enable shared memory for this project', fr: 'Activer la mémoire partagée pour ce projet' })}
+          </label>
+          {sharedMemoryEnabled && (
+            <div className="space-y-3 pl-1">
+              <div>
+                <label htmlFor="shared-memory-collections" className="block text-xs font-medium text-text-muted mb-1">
+                  {t({ en: 'Collections (comma-separated)', fr: 'Collections (séparées par des virgules)' })}
+                </label>
+                <input
+                  id="shared-memory-collections"
+                  type="text"
+                  value={sharedMemoryCollections}
+                  onChange={(e) => {
+                    setSharedMemoryCollections(e.target.value)
+                    setSharedMemoryDirty(true)
+                  }}
+                  placeholder={t({ en: 'ops, infra', fr: 'ops, infra' })}
+                  className="w-full px-3 py-2 bg-bg-tertiary border border-border rounded text-sm font-mono focus:outline-none focus:ring-1 focus:ring-accent-primary"
+                  disabled={saving}
+                />
+                <p className="text-xs text-text-muted mt-1">
+                  {t({
+                    en: 'Empty = search across every collection you can read; propose uses the first collection listed.',
+                    fr: 'Vide = recherche dans toutes les collections lisibles ; la proposition utilise la première collection listée.',
+                  })}
+                </p>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-text-primary">
+                <input
+                  type="checkbox"
+                  checked={sharedMemoryRetrievalEnabled}
+                  onChange={(e) => {
+                    setSharedMemoryRetrievalEnabled(e.target.checked)
+                    setSharedMemoryDirty(true)
+                  }}
+                  disabled={saving}
+                />
+                {t({
+                  en: 'Automatic retrieval before each turn',
+                  fr: 'Récupération automatique avant chaque tour',
+                })}
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-primary">
+                <input
+                  type="checkbox"
+                  checked={sharedMemoryCaptureEnabled}
+                  onChange={(e) => {
+                    setSharedMemoryCaptureEnabled(e.target.checked)
+                    setSharedMemoryDirty(true)
+                  }}
+                  disabled={saving}
+                />
+                {t({
+                  en: 'Automatic capture after each turn (proposals require human approval before they become visible)',
+                  fr: 'Capture automatique après chaque tour (les propositions nécessitent une approbation humaine avant de devenir visibles)',
+                })}
+              </label>
+            </div>
+          )}
+        </div>
 
         {saveError && (
           <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded px-3 py-2">

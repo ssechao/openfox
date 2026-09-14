@@ -552,5 +552,44 @@ function runMigrations(db: Database.Database): void {
     )
   `)
 
+  // Migration: shared memory (RAG) settings — per-project defaults (JSON:
+  // {enabled, collections, captureEnabled, retrievalEnabled}) with an
+  // optional per-session override (same shape, all fields optional; null/
+  // missing fields inherit the project's value). See src/server/memory/settings.ts.
+  if (!projectColumnNames.includes('shared_memory_settings')) {
+    logger.info('Migrating projects table: adding shared_memory_settings column')
+    db.exec(`ALTER TABLE projects ADD COLUMN shared_memory_settings TEXT`)
+  }
+  if (!columnNames.includes('shared_memory_override')) {
+    logger.info('Migrating sessions table: adding shared_memory_override column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN shared_memory_override TEXT`)
+  }
+
+  // Durable outbox for automatic knowledge extraction (criterion 5): a
+  // candidate is queued here immediately (survives a crash/restart) and only
+  // removed once the hub has accepted the propose call (or it is permanently
+  // rejected, e.g. secrets detected) — never removed on a transient failure,
+  // so a retry can pick it up idempotently.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS shared_memory_outbox (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      project_id TEXT,
+      collection TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      tags TEXT NOT NULL DEFAULT '[]',
+      identifiers TEXT NOT NULL DEFAULT '[]',
+      dedup_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_shared_memory_outbox_status ON shared_memory_outbox(status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_shared_memory_outbox_dedup ON shared_memory_outbox(session_id, dedup_key)`)
+
   logger.info('Database migrations completed')
 }
