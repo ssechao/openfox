@@ -241,6 +241,11 @@ describe('agent loop retry history (real EventStore)', () => {
         body += String(chunk)
       })
       req.on('end', () => {
+        if (req.url === '/v1/responses/input_tokens') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ object: 'response.input_tokens', input_tokens: 100_000 }))
+          return
+        }
         requests.push(JSON.parse(body))
         paths.push(req.url ?? '')
         res.writeHead(200, { 'content-type': 'text/event-stream' })

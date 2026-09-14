@@ -47,6 +47,11 @@ async function startResponsesMock(
     req.on('end', async () => {
       const body = JSON.parse(raw || '{}') as Record<string, unknown>
       requests.push({ path: req.url ?? '', headers: req.headers, body })
+      if (req.url === '/v1/responses/input_tokens') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ object: 'response.input_tokens', input_tokens: 321 }))
+        return
+      }
       const rejection = reject?.(body)
       if (rejection) {
         res.writeHead(rejection.status, { 'Content-Type': 'application/json' })
@@ -135,6 +140,34 @@ describe('Responses API conversation continuity (real HTTP requests)', () => {
   const servers: Server[] = []
   afterAll(() => {
     for (const s of servers) s.close()
+  })
+
+  it.each(['claude-opus-5', 'gpt-5.6-sol'])('%s obtains input usage without starting a generation', async (model) => {
+    const mock = await startResponsesMock([completedEvents('unused')])
+    servers.push(mock.server)
+    const client = makeClient(mock.port, model, 'openai', 'responses')
+
+    await expect(
+      client.countInputTokens?.({
+        messages: [
+          { role: 'system', content: 'Review code.' },
+          { role: 'user', content: 'Inspect src/index.ts.' },
+        ],
+        tools: TOOLS,
+        toolChoice: 'none',
+      }),
+    ).resolves.toBe(321)
+
+    expect(mock.requests).toHaveLength(1)
+    expect(mock.requests[0]!.path).toBe('/v1/responses/input_tokens')
+    expect(mock.requests[0]!.body).toMatchObject({
+      model,
+      instructions: 'Review code.',
+      input: [{ role: 'user', content: 'Inspect src/index.ts.' }],
+    })
+    expect(mock.requests[0]!.body).not.toHaveProperty('stream')
+    expect(mock.requests[0]!.body).not.toHaveProperty('store')
+    expect(mock.requests[0]!.body).not.toHaveProperty('max_output_tokens')
   })
 
   it.each([

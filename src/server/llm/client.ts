@@ -69,6 +69,8 @@ export interface LLMClientWithModel extends LLMClient {
   /** Invalidate the Responses-API conversation chain for a key (e.g. after compaction,
    *  a system-prompt/tool change, or an error that made the last response id unusable). */
   resetResponsesChain?(key: string): void
+  /** Count the input that would be sent, without starting a generation. */
+  countInputTokens?(request: LLMCompletionRequest): Promise<number | null>
 }
 
 /**
@@ -383,6 +385,24 @@ export function createLLMClient(
 
     resetResponsesChain(key: string) {
       responsesChains.delete(key)
+    },
+
+    async countInputTokens(request: LLMCompletionRequest): Promise<number | null> {
+      if (currentApiProtocol() !== 'responses' || backend === 'ollama') return null
+      const resolvedEffort = request.skipClientReasoningEffort
+        ? undefined
+        : ((request.reasoningEffort ?? reasoningEffort) as ReasoningEffort | undefined)
+      const { params } = await buildNonStreamingCreateParams({
+        model,
+        request,
+        profile,
+        capabilities,
+        ...buildExtraParams(resolvedEffort),
+      })
+      return responsesHttpClient.countInputTokens(params, {
+        signal: request.signal,
+        ...(request.sessionId && isOpencode ? { headers: openCodeSessionHeaders(request.sessionId) } : {}),
+      })
     },
 
     getProfile() {

@@ -722,6 +722,73 @@ describe('agentLoop integration', () => {
     expect(request!.modelSettings?.maxTokens).toBe(8192)
   })
 
+  it('uses the wrapper input count to recover an unknown context before manual compaction', async () => {
+    const history = [{ role: 'user' as const, content: '\u0001'.repeat(200_000), source: 'history' as const }]
+    const countInputTokens = vi.fn().mockResolvedValue(60_000)
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 0,
+        currentTokensKnown: false,
+        maxTokens: 128_000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: false,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(128_000),
+    })
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+      makeStreamResult({ content: 'Summary', finishReason: 'stop' }),
+    )
+
+    const result = await runTopLevelAgentLoop(
+      makeConfig({
+        initialCompacting: true,
+        sessionManager,
+        llmClient: { getModel: () => 'claude-opus-5', countInputTokens } as any,
+        getConversationMessages: async () => history,
+        assembleRequest: async ({ messages }) => ({ systemPrompt: 'system', messages, tools: [] }),
+      }),
+      turnMetrics,
+    )
+
+    expect(result.failed).toBeUndefined()
+    expect(countInputTokens).toHaveBeenCalledTimes(1)
+    expect(sessionManager.setCurrentContextSize).toHaveBeenCalledWith('test-session', 60_000, 0, undefined, 'planner')
+    expect(streamLLMPure).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(streamLLMPure).mock.calls[0]![0].modelSettings?.maxTokens).toBe(8192)
+  })
+
+  it('does not add a wrapper count request when the context usage is already known', async () => {
+    const countInputTokens = vi.fn().mockResolvedValue(60_000)
+    const sessionManager = createMockSessionManager({
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 40_000,
+        currentTokensKnown: true,
+        maxTokens: 128_000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: true,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(128_000),
+    })
+    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+      makeStreamResult({ content: 'Summary', finishReason: 'stop' }),
+    )
+
+    const result = await runTopLevelAgentLoop(
+      makeConfig({
+        initialCompacting: true,
+        sessionManager,
+        llmClient: { getModel: () => 'claude-opus-5', countInputTokens } as any,
+      }),
+      turnMetrics,
+    )
+
+    expect(result.failed).toBeUndefined()
+    expect(countInputTokens).not.toHaveBeenCalled()
+    expect(streamLLMPure).toHaveBeenCalledTimes(1)
+  })
+
   it('refuses a genuinely oversized unknown context once, preserving history and gauge', async () => {
     const history = [{ role: 'user' as const, content: '\u0001'.repeat(200_000), source: 'history' as const }]
     const initial = JSON.stringify(history)

@@ -32,7 +32,15 @@ import type {
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
-import { ChatHttpClient, DONE, parseStreamJson, type ChatRequest, type ResponsesChainParams } from './http-shared.js'
+import {
+  ChatHttpClient,
+  DONE,
+  parseStreamJson,
+  postJson,
+  type ChatRequest,
+  type RequestOptions,
+  type ResponsesChainParams,
+} from './http-shared.js'
 
 export interface ResponsesClientOptions {
   baseURL: string
@@ -176,6 +184,13 @@ export function buildResponsesRequest(
     body.reasoning = { effort }
   }
 
+  return body
+}
+
+export function buildResponsesInputTokenCountRequest(
+  params: ChatCompletionCreateParamsNonStreaming,
+): Record<string, unknown> {
+  const { stream: _stream, store: _store, max_output_tokens: _maxOutputTokens, ...body } = buildResponsesRequest(params)
   return body
 }
 
@@ -426,6 +441,24 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
       },
       body: JSON.stringify(buildResponsesRequest(params, chain)),
     }
+  }
+
+  async countInputTokens(params: ChatCompletionCreateParamsNonStreaming, options?: RequestOptions): Promise<number> {
+    const response = await postJson(
+      `${this.baseURL}/responses/input_tokens`,
+      {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey}`,
+        ...options?.headers,
+      },
+      JSON.stringify(buildResponsesInputTokenCountRequest(params)),
+      options,
+    )
+    const payload = (await response.json()) as { input_tokens?: unknown }
+    if (!Number.isSafeInteger(payload.input_tokens) || Number(payload.input_tokens) < 0) {
+      throw new LLMError('Invalid Responses input token count')
+    }
+    return Number(payload.input_tokens)
   }
 
   protected parseNonStreaming(data: unknown): ChatCompletionResponse {

@@ -519,10 +519,43 @@ export async function runTopLevelAgentLoop(
         })
       }
 
+      let wrapperInputTokens: number | null = null
+      if (contextState.currentTokensKnown === false && attemptClient.countInputTokens) {
+        try {
+          wrapperInputTokens = await attemptClient.countInputTokens({
+            sessionId,
+            messages: [{ role: 'system', content: assembledRequest.systemPrompt }, ...assembledRequest.messages],
+            tools: compacting ? [] : assembledRequest.tools,
+            toolChoice: requestToolChoice,
+            ...(signal ? { signal } : {}),
+            ...(config.modelSettings ? { modelSettings: config.modelSettings } : {}),
+            ...(compacting && /^(claude-|gpt-)/i.test(attemptClient.getModel())
+              ? { reasoningEffort: 'low' as const }
+              : {}),
+          })
+          if (wrapperInputTokens !== null) {
+            sessionManager.setCurrentContextSize(
+              sessionId,
+              wrapperInputTokens,
+              0,
+              config.subAgentMetadata?.subAgentId,
+              config.mode,
+            )
+            lastMeasuredState = sessionManager.getContextState(sessionId)
+          }
+        } catch (error) {
+          logger.warn('Wrapper input token count failed; using the local safety estimate', {
+            sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+
       const currentTokensForBudget =
-        contextState.currentTokensKnown === false || historyReductionTarget !== undefined
+        wrapperInputTokens ??
+        (contextState.currentTokensKnown === false || historyReductionTarget !== undefined
           ? estimateAssembled()
-          : contextState.currentTokens
+          : contextState.currentTokens)
       if (!compacting && preflightCompactionPending) {
         preflightCompactionPending = false
         const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
