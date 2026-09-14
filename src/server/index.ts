@@ -251,6 +251,24 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   setMcpOAuthStoreMode(config.mode ?? 'production')
   // OAuth credentials live next to the config they belong to, never inside it.
   setMcpOAuthStorePath(config.globalConfigPath ? join(dirname(config.globalConfigPath), 'mcp-auth.json') : undefined)
+
+  // Remote-agent (headless-agent) hub: enable remote execution routing when a
+  // hub is configured. Absent → all tool execution stays local.
+  try {
+    const { loadGlobalConfig } = await import('../cli/config.js')
+    const { setHubClient } = await import('./remote-agent/client.js')
+    const globalConfig = await loadGlobalConfig(config.mode ?? 'production', config.globalConfigPath)
+    const ra = globalConfig.remoteAgent
+    if (ra?.hubUrl && ra?.hubToken) {
+      setHubClient({ hubUrl: ra.hubUrl, hubToken: ra.hubToken, callTimeoutMs: ra.callTimeoutMs })
+      logger.info('remote-agent hub configured', { hubUrl: ra.hubUrl })
+    } else {
+      setHubClient(null)
+    }
+  } catch (err) {
+    logger.warn('Failed to configure remote-agent hub', { error: String(err) })
+  }
+
   const mcpServers = (config.mcpServers ?? {}) as Record<string, import('./mcp/types.js').McpServerConfig>
   // Connect configured MCP servers only once the HTTP server is listening:
   // a self-referencing server (OpenFox as its own MCP client) would otherwise

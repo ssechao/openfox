@@ -1,0 +1,186 @@
+import { describe, it, expect } from 'vitest'
+import { AgentIdentity, verifyHubSignature, canonicalEnvelopePayload } from './identity.js'
+import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
+import { withRemoteParam, REMOTE_TOOL_NAMES } from './remote-param.js'
+import { toSerializedToolResult, fromSerializedToolResult, normalizeHubBase } from './types.js'
+import { RemoteAgentDaemon } from './daemon.js'
+import { runCommandTool } from '../tools/shell.js'
+import { askUserTool } from '../tools/ask.js'
+import type { Tool } from '../tools/types.js'
+
+describe('remote-agent identity (Ed25519)', () => {
+  it('generates a keypair and signs a nonce', () => {
+    const id = AgentIdentity.generate()
+    expect(id.publicKeyB64).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    const sig = id.sign('hub-nonce-123')
+    expect(sig).toMatch(/^[A-Za-z0-9_-]{86}$/)
+  })
+
+  it('verifies a signature against the raw public key (hub-side roundtrip)', () => {
+    const id = AgentIdentity.generate()
+    const msg = 'nonce-abc'
+    const sig = id.sign(msg)
+    // The hub verifies with the raw 32-byte public key (base64url).
+    expect(verifyHubSignature(id.publicKeyB64, msg, sig)).toBe(true)
+    expect(verifyHubSignature(id.publicKeyB64, 'other-msg', sig)).toBe(false)
+  })
+
+  it('rejects a signature for a different key', () => {
+    const a = AgentIdentity.generate()
+    const b = AgentIdentity.generate()
+    const sig = a.sign('msg')
+    expect(verifyHubSignature(b.publicKeyB64, 'msg', sig)).toBe(false)
+  })
+
+  it('canonical payload joins fields with 0x1f', () => {
+    const payload = canonicalEnvelopePayload('req-1', 'agent-1', 'sess-1', 'run_command', '{"a":1}')
+    expect(payload.subarray(0, 5).toString()).toBe('req-1')
+    expect(payload.subarray(5, 6).toString()).toBe('\x1f')
+    expect(payload.toString()).toContain('run_command')
+    expect(payload.toString()).toContain('{"a":1}')
+  })
+})
+
+describe('remote-agent context', () => {
+  it('builds a minimal context anchored on the workdir', () => {
+    const ctx = createRemoteAgentContext({ workdir: '/tmp/remote-work' })
+    expect(ctx.workdir).toBe('/tmp/remote-work')
+    expect(ctx.dangerLevel).toBe('dangerous')
+    expect(ctx.sessionManager).toBeDefined()
+  })
+
+  it('the stub session manager resolves workdir and caches reads', () => {
+    const ctx = createRemoteAgentContext({ workdir: '/tmp/remote-work' })
+    const sm = ctx.sessionManager as unknown as MinimalSessionManager
+    expect(sm.getEffectiveWorkdir('x')).toBe('/tmp/remote-work')
+    expect(sm.getProjectWorkdir('x')).toBe('/tmp/remote-work')
+    sm.recordFileRead('x', '/tmp/remote-work/a.ts', 'hash-1')
+    expect(sm.getReadFiles('x')['/tmp/remote-work/a.ts']?.hash).toBe('hash-1')
+  })
+
+  it('control-plane tools are excluded from the daemon', () => {
+    expect(CONTROL_PLANE_TOOLS.has('ask_user')).toBe(true)
+    expect(CONTROL_PLANE_TOOLS.has('session_metadata')).toBe(true)
+    expect(CONTROL_PLANE_TOOLS.has('mcp_config')).toBe(true)
+    expect(CONTROL_PLANE_TOOLS.has('call_sub_agent')).toBe(true)
+    expect(CONTROL_PLANE_TOOLS.has('workspace')).toBe(true)
+    expect(CONTROL_PLANE_TOOLS.has('project_tasks')).toBe(true)
+    expect(CONTROL_PLANE_TOOLS.has('step_done')).toBe(true)
+    expect(CONTROL_PLANE_TOOLS.has('remote_agents')).toBe(true)
+    // Environment tools are NOT excluded.
+    expect(CONTROL_PLANE_TOOLS.has('run_command')).toBe(false)
+    expect(CONTROL_PLANE_TOOLS.has('read_file')).toBe(false)
+    expect(CONTROL_PLANE_TOOLS.has('write_file')).toBe(false)
+    expect(CONTROL_PLANE_TOOLS.has('edit_file')).toBe(false)
+    expect(CONTROL_PLANE_TOOLS.has('background_process')).toBe(false)
+  })
+})
+
+describe('remote param injection', () => {
+  it('adds the `remote` param to environment tools', () => {
+    const tool = withRemoteParam(runCommandTool as Tool)
+    const props = (tool.definition.function.parameters as Record<string, unknown>)['properties'] as Record<
+      string,
+      unknown
+    >
+    expect(props['remote']).toBeDefined()
+    expect((props['remote'] as { type: string }).type).toBe('string')
+  })
+
+  it('does not add `remote` to control-plane tools', () => {
+    const tool = withRemoteParam(askUserTool as Tool)
+    const props = (tool.definition.function.parameters as Record<string, unknown>)['properties'] as Record<
+      string,
+      unknown
+    >
+    expect(props['remote']).toBeUndefined()
+  })
+
+  it('is idempotent (does not duplicate the param)', () => {
+    const once = withRemoteParam(runCommandTool as Tool)
+    const twice = withRemoteParam(once)
+    expect(twice).toBe(once)
+  })
+
+  it('covers the expected environment tool set', () => {
+    expect(REMOTE_TOOL_NAMES.has('run_command')).toBe(true)
+    expect(REMOTE_TOOL_NAMES.has('read_file')).toBe(true)
+    expect(REMOTE_TOOL_NAMES.has('write_file')).toBe(true)
+    expect(REMOTE_TOOL_NAMES.has('edit_file')).toBe(true)
+    expect(REMOTE_TOOL_NAMES.has('background_process')).toBe(true)
+    expect(REMOTE_TOOL_NAMES.has('ask_user')).toBe(false)
+    expect(REMOTE_TOOL_NAMES.has('remote_agents')).toBe(false)
+  })
+})
+
+describe('remote-agent daemon tool exposure', () => {
+  it('exposes environment tools and excludes control-plane tools', () => {
+    const daemon = new RemoteAgentDaemon({
+      workdir: '/tmp/remote-agent-test',
+      hubUrl: 'http://127.0.0.1:1/mcp',
+      hubToken: 'tok',
+    })
+    const names = new Set(daemon.toolNames)
+    // Environment tools are exposed.
+    for (const t of [
+      'run_command',
+      'read_file',
+      'write_file',
+      'edit_file',
+      'background_process',
+      'dev_server',
+      'web_fetch',
+      'web_search',
+      'load_skill',
+      'describe_image',
+      'return_value',
+    ]) {
+      expect(names.has(t), `expected ${t} to be exposed`).toBe(true)
+    }
+    // Control-plane tools are excluded.
+    for (const t of [
+      'ask_user',
+      'session_metadata',
+      'mcp_config',
+      'call_sub_agent',
+      'workspace',
+      'project_tasks',
+      'step_done',
+      'remote_agents',
+    ]) {
+      expect(names.has(t), `expected ${t} to be excluded`).toBe(false)
+    }
+  })
+})
+
+describe('hub url normalization', () => {
+  it('strips a trailing /mcp and trailing slashes', () => {
+    expect(normalizeHubBase('http://h:1/mcp')).toBe('http://h:1')
+    expect(normalizeHubBase('http://h:1/mcp/')).toBe('http://h:1')
+    expect(normalizeHubBase('http://h:1')).toBe('http://h:1')
+  })
+})
+
+describe('tool result serialization', () => {
+  it('roundtrips a successful result', () => {
+    const original = { success: true, output: 'hello', durationMs: 42, truncated: false }
+    const round = fromSerializedToolResult(toSerializedToolResult(original))
+    expect(round.success).toBe(true)
+    expect(round.output).toBe('hello')
+    expect(round.durationMs).toBe(42)
+    expect(round.truncated).toBe(false)
+  })
+
+  it('roundtrips an error result', () => {
+    const original = { success: false, error: 'boom', durationMs: 0, truncated: false }
+    const round = fromSerializedToolResult(toSerializedToolResult(original))
+    expect(round.success).toBe(false)
+    expect(round.error).toBe('boom')
+  })
+
+  it('handles malformed input', () => {
+    const round = fromSerializedToolResult('not-an-object')
+    expect(round.success).toBe(false)
+    expect(round.error).toBeDefined()
+  })
+})

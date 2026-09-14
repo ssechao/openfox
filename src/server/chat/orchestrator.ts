@@ -19,6 +19,7 @@ import { getEventStore, getCurrentContextWindowId, getCurrentWindowMessageOption
 import { buildSnapshotFromSessionState } from '../events/folding.js'
 import type { SessionManager } from '../session/index.js'
 import { getToolRegistryForAgent, PathAccessDeniedError } from '../tools/index.js'
+import { getHubClient } from '../remote-agent/client.js'
 import { buildAgentReminder, buildAgentSmallReminder, buildTopLevelSystemPrompt } from './prompts.js'
 import { serverT } from '../i18n.js'
 import {
@@ -464,6 +465,15 @@ export async function runAgentTurn(
   const agentLlmClient = resolveAgentClient()
   const statsIdentity = resolveStatsIdentity({ ...options, llmClient: agentLlmClient })
 
+  // Remote-agent routing: when a hub is configured, tool calls carrying a
+  // non-empty `remote` argument are executed on that headless-agent (via the
+  // hub) instead of locally. Absent → all execution stays local.
+  const hubClient = getHubClient()
+  const remoteExecutor = hubClient
+    ? (sessionId: string, remote: string, tool: string, args: Record<string, unknown>) =>
+        hubClient.executeTool(sessionId, remote, tool, args)
+    : undefined
+
   if (!options.warmup && !options.skipAgentReminder) {
     injectAgentReminder(options.sessionId, agentDef)
   }
@@ -592,6 +602,7 @@ export async function runAgentTurn(
       ...(callbacks?.resumeStepDoneCallId ? { resumeStepDoneCallId: callbacks.resumeStepDoneCallId } : {}),
       ...(options.llmRetryPolicy ? { llmRetryPolicy: options.llmRetryPolicy } : {}),
       ...(options.warmup ? { warmup: true } : {}),
+      ...(remoteExecutor ? { remoteExecutor } : {}),
     },
     turnMetrics,
   )

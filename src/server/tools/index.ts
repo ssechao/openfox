@@ -22,8 +22,10 @@ import { webSearchTool } from './web-search.js'
 import { workspaceTool } from './workspace.js'
 import { projectTasksTool } from './project-tasks.js'
 import { sharedMemoryTool } from './shared-memory.js'
+import { remoteAgentsTool } from './remote-agents.js'
 import { computeEffectiveTools } from './tool-policy.js'
 import { logger } from '../utils/logger.js'
+import { withRemoteParam } from '../remote-agent/remote-param.js'
 
 // ============================================================================
 // Built-in Tool Registry
@@ -40,7 +42,7 @@ import { logger } from '../utils/logger.js'
  */
 let _builtInTools: Tool[] | undefined
 
-function getBuiltInTools(): Tool[] {
+export function getBuiltInTools(): Tool[] {
   if (!_builtInTools) {
     _builtInTools = [
       readFileTool,
@@ -62,6 +64,7 @@ function getBuiltInTools(): Tool[] {
       workspaceTool,
       projectTasksTool,
       sharedMemoryTool,
+      remoteAgentsTool,
     ]
   }
   return _builtInTools
@@ -417,7 +420,9 @@ export function getToolRegistryForAgent(agentDef: AgentDefinition, sessionId?: s
         if (disabledMcpServers.has(serverName)) continue
       }
     }
-    tools.push(tool)
+    // Environment tools expose the optional `remote` argument so the agent can
+    // drive a headless-agent (remote-agent) via the hub.
+    tools.push(withRemoteParam(tool))
   }
 
   const allowedTools = agentDef.metadata.allowedTools
