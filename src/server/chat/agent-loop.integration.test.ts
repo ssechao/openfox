@@ -565,32 +565,41 @@ describe('agentLoop integration', () => {
     expect(consumeStreamGenerator).toHaveBeenCalledTimes(4)
   })
 
-  it('compacts an already-full session before the next model request', async () => {
-    const append = vi.fn()
-    const sessionManager = createMockSessionManager({
-      getContextState: vi.fn().mockReturnValue({
-        currentTokens: 180000,
-        maxTokens: 200000,
-        compactionCount: 0,
-        dangerZone: true,
-        canCompact: true,
-        dynamicContextChanged: false,
-      }),
-    })
-    vi.mocked(consumeStreamGenerator)
-      .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
-      .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
-    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
-    vi.mocked(shouldCompact).mockReturnValueOnce(true).mockReturnValue(false)
+  it.each(['claude-opus-5', 'gpt-5.6-sol'])(
+    'compacts an already-full %s session without overriding the client effort',
+    async (model) => {
+      const append = vi.fn()
+      const sessionManager = createMockSessionManager({
+        getContextState: vi.fn().mockReturnValue({
+          currentTokens: 180000,
+          maxTokens: 200000,
+          compactionCount: 0,
+          dangerZone: true,
+          canCompact: true,
+          dynamicContextChanged: false,
+        }),
+      })
+      vi.mocked(consumeStreamGenerator)
+        .mockResolvedValueOnce(makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }))
+        .mockResolvedValueOnce(makeStreamResult({ content: 'Done', finishReason: 'stop' }))
+      const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+      vi.mocked(shouldCompact).mockReturnValueOnce(true).mockReturnValue(false)
 
-    await runTopLevelAgentLoop(makeConfig({ append, sessionManager }), turnMetrics)
+      await runTopLevelAgentLoop(
+        makeConfig({ append, sessionManager, llmClient: { getModel: () => model } as any }),
+        turnMetrics,
+      )
 
-    expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[0]!,
-    )
-    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
-  })
+      expect(appendCompactionPrompt).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(appendCompactionPrompt).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(consumeStreamGenerator).mock.invocationCallOrder[0]!,
+      )
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+      for (const [request] of vi.mocked(streamLLMPure).mock.calls) {
+        expect(request).not.toHaveProperty('reasoningEffort')
+      }
+    },
+  )
 
   it('estimates unknown restored usage before the first request and compacts when near the limit', async () => {
     const append = vi.fn()
@@ -649,32 +658,37 @@ describe('agentLoop integration', () => {
     expect(vi.mocked(streamLLMPure).mock.calls[0]?.[0].toolChoice).toBe('none')
   })
 
-  it('uses a tool-free request and a dedicated output budget for compaction', async () => {
-    const definitions = [{ type: 'function', function: { name: 'read_file', parameters: {} } }]
-    const assembleRequest = vi.fn(async ({ promptTools }) => ({
-      systemPrompt: 'test-prompt',
-      messages: [],
-      tools: promptTools,
-    }))
-    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
-      makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }),
-    )
+  it.each(['claude-opus-5', 'gpt-5.6-sol', 'qwen3.8-27b'])(
+    'uses a tool-free request and bounded output without overriding the %s client effort',
+    async (model) => {
+      const definitions = [{ type: 'function', function: { name: 'read_file', parameters: {} } }]
+      const assembleRequest = vi.fn(async ({ promptTools }) => ({
+        systemPrompt: 'test-prompt',
+        messages: [],
+        tools: promptTools,
+      }))
+      vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+        makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }),
+      )
 
-    await runTopLevelAgentLoop(
-      makeConfig({
-        initialCompacting: true,
-        assembleRequest,
-        getToolRegistry: () => ({ definitions, execute: vi.fn() }) as any,
-      }),
-      turnMetrics,
-    )
+      await runTopLevelAgentLoop(
+        makeConfig({
+          initialCompacting: true,
+          llmClient: { getModel: () => model } as any,
+          assembleRequest,
+          getToolRegistry: () => ({ definitions, execute: vi.fn() }) as any,
+        }),
+        turnMetrics,
+      )
 
-    const request = vi.mocked(streamLLMPure).mock.calls[0]?.[0]
-    expect(request).toBeDefined()
-    expect(request!.toolChoice).toBe('none')
-    expect(request!.tools).toEqual([])
-    expect(request!.modelSettings?.maxTokens).toBe(8192)
-  })
+      const request = vi.mocked(streamLLMPure).mock.calls[0]?.[0]
+      expect(request).toBeDefined()
+      expect(request!.toolChoice).toBe('none')
+      expect(request!.tools).toEqual([])
+      expect(request!.modelSettings?.maxTokens).toBe(8192)
+      expect(request).not.toHaveProperty('reasoningEffort')
+    },
+  )
 
   it('compacts unknown usage with images without base64 overflow or cached tool overhead', async () => {
     const data = 'data:image/png;base64,' + 'YWJj'.repeat(100_000)
@@ -722,41 +736,45 @@ describe('agentLoop integration', () => {
     expect(request!.modelSettings?.maxTokens).toBe(8192)
   })
 
-  it('uses the wrapper input count to recover an unknown context before manual compaction', async () => {
-    const history = [{ role: 'user' as const, content: '\u0001'.repeat(200_000), source: 'history' as const }]
-    const countInputTokens = vi.fn().mockResolvedValue(60_000)
-    const sessionManager = createMockSessionManager({
-      getContextState: vi.fn().mockReturnValue({
-        currentTokens: 0,
-        currentTokensKnown: false,
-        maxTokens: 128_000,
-        compactionCount: 0,
-        dangerZone: false,
-        canCompact: false,
-      }),
-      getCurrentModelContext: vi.fn().mockReturnValue(128_000),
-    })
-    vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
-      makeStreamResult({ content: 'Summary', finishReason: 'stop' }),
-    )
+  it.each(['claude-opus-5', 'gpt-5.6-sol'])(
+    'counts an unknown %s context without overriding the client effort before compaction',
+    async (model) => {
+      const history = [{ role: 'user' as const, content: '\u0001'.repeat(200_000), source: 'history' as const }]
+      const countInputTokens = vi.fn().mockResolvedValue(60_000)
+      const sessionManager = createMockSessionManager({
+        getContextState: vi.fn().mockReturnValue({
+          currentTokens: 0,
+          currentTokensKnown: false,
+          maxTokens: 128_000,
+          compactionCount: 0,
+          dangerZone: false,
+          canCompact: false,
+        }),
+        getCurrentModelContext: vi.fn().mockReturnValue(128_000),
+      })
+      vi.mocked(consumeStreamGenerator).mockResolvedValueOnce(
+        makeStreamResult({ content: 'Summary', finishReason: 'stop' }),
+      )
 
-    const result = await runTopLevelAgentLoop(
-      makeConfig({
-        initialCompacting: true,
-        sessionManager,
-        llmClient: { getModel: () => 'claude-opus-5', countInputTokens } as any,
-        getConversationMessages: async () => history,
-        assembleRequest: async ({ messages }) => ({ systemPrompt: 'system', messages, tools: [] }),
-      }),
-      turnMetrics,
-    )
+      const result = await runTopLevelAgentLoop(
+        makeConfig({
+          initialCompacting: true,
+          sessionManager,
+          llmClient: { getModel: () => model, countInputTokens } as any,
+          getConversationMessages: async () => history,
+          assembleRequest: async ({ messages }) => ({ systemPrompt: 'system', messages, tools: [] }),
+        }),
+        turnMetrics,
+      )
 
-    expect(result.failed).toBeUndefined()
-    expect(countInputTokens).toHaveBeenCalledTimes(1)
-    expect(sessionManager.setCurrentContextSize).toHaveBeenCalledWith('test-session', 60_000, 0, undefined, 'planner')
-    expect(streamLLMPure).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(streamLLMPure).mock.calls[0]![0].modelSettings?.maxTokens).toBe(8192)
-  })
+      expect(result.failed).toBeUndefined()
+      expect(countInputTokens).toHaveBeenCalledTimes(1)
+      expect(countInputTokens.mock.calls[0]![0]).not.toHaveProperty('reasoningEffort')
+      expect(sessionManager.setCurrentContextSize).toHaveBeenCalledWith('test-session', 60_000, 0, undefined, 'planner')
+      expect(streamLLMPure).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(streamLLMPure).mock.calls[0]![0].modelSettings?.maxTokens).toBe(8192)
+    },
+  )
 
   it('does not add a wrapper count request when the context usage is already known', async () => {
     const countInputTokens = vi.fn().mockResolvedValue(60_000)

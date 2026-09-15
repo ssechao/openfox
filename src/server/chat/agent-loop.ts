@@ -522,6 +522,8 @@ export async function runTopLevelAgentLoop(
       let wrapperInputTokens: number | null = null
       if (contextState.currentTokensKnown === false && attemptClient.countInputTokens) {
         try {
+          // Inherit the client's effort here, as generation does below. Forcing
+          // a compaction-only effort can invalidate the provider's prompt cache.
           wrapperInputTokens = await attemptClient.countInputTokens({
             sessionId,
             messages: [{ role: 'system', content: assembledRequest.systemPrompt }, ...assembledRequest.messages],
@@ -529,9 +531,6 @@ export async function runTopLevelAgentLoop(
             toolChoice: requestToolChoice,
             ...(signal ? { signal } : {}),
             ...(config.modelSettings ? { modelSettings: config.modelSettings } : {}),
-            ...(compacting && /^(claude-|gpt-)/i.test(attemptClient.getModel())
-              ? { reasoningEffort: 'low' as const }
-              : {}),
           })
           if (wrapperInputTokens !== null) {
             sessionManager.setCurrentContextSize(
@@ -652,6 +651,8 @@ export async function runTopLevelAgentLoop(
       const subAgentAliases = new Set(getSubAgents(allAgents).map((a) => a.metadata.id))
 
       const attemptAbort = new AbortController()
+      // Keep the selected client effort during compaction: changing global
+      // effort can invalidate cached history even when a native session resumes.
       const streamGen = streamLLMPure({
         messageId: assistantMsgId,
         systemPrompt: assembledRequest.systemPrompt,
@@ -660,7 +661,6 @@ export async function runTopLevelAgentLoop(
         messages: assembledRequest.messages,
         tools: compacting ? [] : assembledRequest.tools,
         toolChoice: requestToolChoice,
-        ...(compacting && /^(claude-|gpt-)/i.test(attemptClient.getModel()) ? { reasoningEffort: 'low' as const } : {}),
         signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
         subAgentAliases,
         responsesChainKey: chainKey,

@@ -176,7 +176,10 @@ describe('replay before compaction', () => {
       backend: 'openai',
       apiKey: 'test-key',
       apiProtocol: 'responses',
-      models: [{ id: model, contextWindow: 200_000, source: 'user' }],
+      models: [
+        { id: model, contextWindow: 200_000, source: 'user' },
+        { id: 'claude-opus-5', contextWindow: 200_000, source: 'user' },
+      ],
       isActive: true,
       createdAt: new Date().toISOString(),
     }
@@ -185,7 +188,7 @@ describe('replay before compaction', () => {
       id: 'fake-chat',
       name: 'Fake Chat',
       apiProtocol: 'chat-completions',
-      models: [{ id: 'chat-model', contextWindow: 200_000, source: 'user' }],
+      models: [...fakeProvider.models, { id: 'chat-model', contextWindow: 200_000, source: 'user' }],
       isActive: false,
     }
     config = {
@@ -225,6 +228,69 @@ describe('replay before compaction', () => {
     await new Promise<void>((resolve) => provider?.server.close(() => resolve()))
     await rm(directory, { recursive: true, force: true })
   })
+
+  it.each(
+    ['fake-responses', 'fake-chat'].flatMap((providerId) =>
+      ['claude-opus-5', 'gpt-5.6-sol'].flatMap((model) =>
+        ['xhigh', 'low'].map((reasoningEffort) => ({ providerId, model, reasoningEffort })),
+      ),
+    ),
+  )(
+    'preserves effective $model effort $reasoningEffort across compaction over $providerId',
+    async ({ providerId, model, reasoningEffort }) => {
+      const sessionId = await createSession(baseUrl, projectId)
+      const selection = await postJson(`${baseUrl}/api/sessions/${sessionId}/provider`, {
+        providerId,
+        model,
+        reasoningEffort,
+      })
+      expect(selection.status).toBe(200)
+      const responses = providerId === 'fake-responses'
+      const assertEffort = (request: CapturedRequest) => {
+        // GPT-5 Chat Completions forces "none" when tools are present; the
+        // tool-free summary must still inherit the selected client effort.
+        const hasTools = Array.isArray(request.body['tools']) && request.body['tools'].length > 0
+        const effectiveEffort = !responses && model.startsWith('gpt-') && hasTools ? 'none' : reasoningEffort
+        expect(request.path).toBe(responses ? '/v1/responses' : '/v1/chat/completions')
+        expect(request.body['model']).toBe(model)
+        expect(responses ? request.body['reasoning'] : request.body['reasoning_effort']).toEqual(
+          responses ? { effort: effectiveEffort } : effectiveEffort,
+        )
+      }
+
+      let requestCount = provider.requests.length
+      const initial = await postJson(`${baseUrl}/api/sessions/${sessionId}/message`, {
+        content: 'EFFORT_BEFORE_COMPACTION',
+      })
+      expect(initial.ok).toBe(true)
+      await waitForIdle(baseUrl, sessionId, () => provider.requests.length, requestCount + 1)
+      assertEffort(provider.requests.at(-1)!)
+
+      requestCount = provider.requests.length
+      await compact(baseUrl, sessionId)
+      await waitForIdle(baseUrl, sessionId, () => provider.requests.length, requestCount + 1)
+      const summaryRequest = provider.requests[requestCount]!
+      assertEffort(summaryRequest)
+      expect(JSON.stringify(summaryRequest.body)).toContain('summarizing conversations for continuation')
+      expect(summaryRequest.body['tool_choice']).toBe('none')
+      expect(summaryRequest.body['tools'] ?? []).toEqual([])
+      expect(responses ? summaryRequest.body['max_output_tokens'] : summaryRequest.body['max_completion_tokens']).toBe(
+        8192,
+      )
+
+      requestCount = provider.requests.length
+      const continuation = await postJson(`${baseUrl}/api/sessions/${sessionId}/message`, {
+        content: 'EFFORT_AFTER_COMPACTION',
+      })
+      expect(continuation.ok).toBe(true)
+      await waitForIdle(baseUrl, sessionId, () => provider.requests.length, requestCount + 1)
+      const nextRequest = provider.requests[requestCount]!
+      assertEffort(nextRequest)
+      expect(JSON.stringify(nextRequest.body)).toContain(SUMMARY)
+      expect(JSON.stringify(nextRequest.body)).not.toContain('EFFORT_BEFORE_COMPACTION')
+      expect(nextRequest.body).not.toHaveProperty('previous_response_id')
+    },
+  )
 
   it('sends the preserved prefix and replacement after replaying before a compaction', async () => {
     const sessionId = await createSession(baseUrl, projectId)
