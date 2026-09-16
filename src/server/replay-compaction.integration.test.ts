@@ -248,7 +248,8 @@ describe('replay before compaction', () => {
       const responses = providerId === 'fake-responses'
       const assertEffort = (request: CapturedRequest) => {
         // GPT-5 Chat Completions forces "none" when tools are present; the
-        // tool-free summary must still inherit the selected client effort.
+        // summary keeps the tool catalogue (the resident wrapper keys native
+        // context identity on it), so the forced downgrade applies to it too.
         const hasTools = Array.isArray(request.body['tools']) && request.body['tools'].length > 0
         const effectiveEffort = !responses && model.startsWith('gpt-') && hasTools ? 'none' : reasoningEffort
         expect(request.path).toBe(responses ? '/v1/responses' : '/v1/chat/completions')
@@ -273,7 +274,7 @@ describe('replay before compaction', () => {
       assertEffort(summaryRequest)
       expect(JSON.stringify(summaryRequest.body)).toContain('summarizing conversations for continuation')
       expect(summaryRequest.body['tool_choice']).toBe('none')
-      expect(summaryRequest.body['tools'] ?? []).toEqual([])
+      expect((summaryRequest.body['tools'] as unknown[] | undefined)?.length).toBeGreaterThan(0)
       expect(responses ? summaryRequest.body['max_output_tokens'] : summaryRequest.body['max_completion_tokens']).toBe(
         8192,
       )

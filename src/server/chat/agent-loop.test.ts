@@ -512,6 +512,71 @@ describe('runTopLevelAgentLoop compaction', () => {
     expect(compactedEvents).toHaveLength(1)
     expect(rebuildCachedContext).toHaveBeenCalledTimes(1)
   })
+
+  it('keeps the session tool catalogue on the compaction request (tool_choice none only)', async () => {
+    const toolDefs = [
+      { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: {} } },
+      { name: 'write', description: 'Write a file', parameters: { type: 'object', properties: {} } },
+    ]
+    mockSessionManager = {
+      enterPauseGate: vi.fn().mockResolvedValue('released'),
+      requireSession: vi.fn().mockReturnValue({
+        workdir: '/test',
+        projectId: 'test-project',
+        executionState: null,
+        criteria: [],
+        isRunning: false,
+      }),
+      getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
+      getProjectWorkdir: vi.fn().mockReturnValue('/test'),
+      getContextState: vi.fn().mockReturnValue({
+        currentTokens: 0,
+        maxTokens: 200000,
+        compactionCount: 0,
+        dangerZone: false,
+        canCompact: false,
+        dynamicContextChanged: false,
+      }),
+      getCurrentModelContext: vi.fn().mockReturnValue(200000),
+      getCurrentModelSettings: vi.fn().mockReturnValue({}),
+      getModelCompactionThreshold: vi.fn().mockReturnValue(undefined),
+      setCurrentContextSize: vi.fn(),
+      getDynamicContextChanged: vi.fn().mockReturnValue(false),
+      setDynamicContextChanged: vi.fn(),
+      getCachedPrompt: vi.fn().mockReturnValue(undefined),
+      setCachedPrompt: vi.fn(),
+      getLspManager: vi.fn(),
+      drainAsapMessages: vi.fn().mockReturnValue([]),
+      getCurrentWindowMessages: vi.fn().mockReturnValue([]),
+      updateMessage: vi.fn(),
+    } as any
+
+    assembleRequestMock.mockImplementation(({ promptTools }: { promptTools: unknown }) => ({
+      systemPrompt: 'test-system-prompt',
+      messages: [],
+      tools: promptTools,
+    }))
+
+    await runTopLevelAgentLoop(
+      makeConfig({
+        append: vi.fn(),
+        initialCompacting: true,
+        rebuildCachedContext: vi.fn().mockResolvedValue(undefined),
+        getToolRegistry: () => ({ tools: [], definitions: toolDefs, execute: vi.fn() }) as any,
+      }),
+      mockTurnMetrics,
+    )
+
+    // The resident wrapper keys native context identity on the tool catalogue.
+    // Sending `tools: []` during compaction changes that identity, forcing a
+    // cold rebuild of the full history — refused beyond the replay limit.
+    expect(assembleRequestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ promptTools: toolDefs, toolChoice: 'none' }),
+    )
+    const streamArgs = (streamLLMPure as any).mock.calls[0]?.[0]
+    expect(streamArgs?.toolChoice).toBe('none')
+    expect(streamArgs?.tools).toEqual(toolDefs)
+  })
 })
 
 // ============================================================================
@@ -546,10 +611,11 @@ describe('maxTokens clamping', () => {
       buildStats: vi.fn().mockReturnValue({}),
     } as unknown as TurnMetrics
 
-    assembleRequestMock = vi.fn().mockReturnValue({
+    assembleRequestMock = vi.fn().mockImplementation(({ promptTools }: { promptTools?: unknown }) => ({
       systemPrompt: 'test-system-prompt',
       messages: [],
-    })
+      tools: promptTools,
+    }))
     ;(getAllInstructions as any).mockResolvedValue({ content: 'test instructions', files: [] })
     ;(getEnabledSkillMetadata as any).mockResolvedValue([])
 
@@ -1614,9 +1680,10 @@ describe('maxTokens clamping', () => {
 
     const calls = (streamLLMPure as any).mock.calls
     // 1 initial + 1 halving: a second refusal proves the INPUT is what does not
-    // fit, so the third request is the (tool-free) summarization, not a third
-    // halving that could never help. It overflows too and nothing is left to
-    // shrink in an empty history, so the turn fails there.
+    // fit, so the third request is the compaction summarization (tool_choice
+    // none; the tool catalogue is retained to preserve native context identity),
+    // not a third halving that could never help. It overflows too and nothing is
+    // left to shrink in an empty history, so the turn fails there.
     expect(calls.length).toBe(3)
     expect(calls[0]?.[0].modelSettings?.maxTokens).toBe(16384)
     expect(calls[1]?.[0].modelSettings?.maxTokens).toBe(8192)

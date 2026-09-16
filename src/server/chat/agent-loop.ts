@@ -480,12 +480,18 @@ export async function runTopLevelAgentLoop(
       if (signal?.aborted) throw new Error('Aborted')
 
       const requestToolChoice = compacting || finalizingAfterStepDone ? 'none' : 'auto'
+      // Compaction keeps the full tool catalogue on the wire. The resident
+      // wrapper keys native context identity on it: dropping the tools would
+      // change the invariant, lose the confirmed native context, and force a
+      // cold replay of the whole history — refused beyond the replay limit.
+      // tool_choice 'none' already forbids any actual tool call.
+      const requestTools = toolRegistry.definitions
       const assemble = (messages: RequestContextMessage[]) =>
         config.assembleRequest({
           workdir: session.workdir,
           messages,
           injectedFiles,
-          promptTools: compacting ? [] : toolRegistry.definitions,
+          promptTools: requestTools,
           toolChoice: requestToolChoice,
           ...(instructionContent ? { customInstructions: instructionContent } : {}),
           ...(skills.length > 0 ? { skills } : {}),
@@ -495,14 +501,14 @@ export async function runTopLevelAgentLoop(
       const getPromptBudget = () =>
         (promptBudget ??= createPromptTokenBudget(
           assembledRequest.systemPrompt,
-          compacting ? [] : assembledRequest.tools,
+          assembledRequest.tools,
           attemptClient.getModel(),
         ))
       const estimateAssembled = () =>
         estimatePromptTokensForSafety(
           assembledRequest.systemPrompt,
           assembledRequest.messages,
-          compacting ? [] : assembledRequest.tools,
+          assembledRequest.tools,
           attemptClient.getModel(),
         )
       // Recompute from this attempt's history/model, never reuse a reduced array
@@ -527,7 +533,7 @@ export async function runTopLevelAgentLoop(
           wrapperInputTokens = await attemptClient.countInputTokens({
             sessionId,
             messages: [{ role: 'system', content: assembledRequest.systemPrompt }, ...assembledRequest.messages],
-            tools: compacting ? [] : assembledRequest.tools,
+            tools: assembledRequest.tools,
             toolChoice: requestToolChoice,
             ...(signal ? { signal } : {}),
             ...(config.modelSettings ? { modelSettings: config.modelSettings } : {}),
@@ -659,7 +665,7 @@ export async function runTopLevelAgentLoop(
         llmClient: attemptClient,
         sessionId,
         messages: assembledRequest.messages,
-        tools: compacting ? [] : assembledRequest.tools,
+        tools: assembledRequest.tools,
         toolChoice: requestToolChoice,
         signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
         subAgentAliases,

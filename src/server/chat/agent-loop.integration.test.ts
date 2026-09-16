@@ -140,10 +140,11 @@ function makeConfig(overrides?: Partial<TopLevelLoopConfig>): TopLevelLoopConfig
     sessionId: 'test-session',
     llmClient: { getModel: vi.fn().mockReturnValue('test-model') } as any,
     statsIdentity: { providerId: 'test', providerName: 'Test', backend: 'unknown' as const, model: 'test-model' },
-    assembleRequest: vi.fn().mockReturnValue({
+    assembleRequest: vi.fn(async ({ promptTools }: any) => ({
       systemPrompt: 'test-prompt',
       messages: [],
-    }),
+      tools: promptTools,
+    })),
     getToolRegistry: () => ({ definitions: [], execute: vi.fn() }) as any,
     getConversationMessages: vi.fn().mockResolvedValue([]),
     ...overrides,
@@ -561,7 +562,7 @@ describe('agentLoop integration', () => {
     expect(requests[1]?.toolChoice).toBe('auto')
     expect(requests[1]?.tools).toEqual(definitions)
     expect(requests[2]?.toolChoice).toBe('none')
-    expect(requests[2]?.tools).toEqual([])
+    expect(requests[2]?.tools).toEqual(definitions)
     expect(consumeStreamGenerator).toHaveBeenCalledTimes(4)
   })
 
@@ -659,7 +660,7 @@ describe('agentLoop integration', () => {
   })
 
   it.each(['claude-opus-5', 'gpt-5.6-sol', 'qwen3.8-27b'])(
-    'uses a tool-free request and bounded output without overriding the %s client effort',
+    'keeps the tool catalogue with tool_choice none and bounded output without overriding the %s client effort',
     async (model) => {
       const definitions = [{ type: 'function', function: { name: 'read_file', parameters: {} } }]
       const assembleRequest = vi.fn(async ({ promptTools }) => ({
@@ -684,13 +685,13 @@ describe('agentLoop integration', () => {
       const request = vi.mocked(streamLLMPure).mock.calls[0]?.[0]
       expect(request).toBeDefined()
       expect(request!.toolChoice).toBe('none')
-      expect(request!.tools).toEqual([])
+      expect(request!.tools).toEqual(definitions)
       expect(request!.modelSettings?.maxTokens).toBe(8192)
       expect(request).not.toHaveProperty('reasoningEffort')
     },
   )
 
-  it('compacts unknown usage with images without base64 overflow or cached tool overhead', async () => {
+  it('compacts unknown usage with images without base64 overflow', async () => {
     const data = 'data:image/png;base64,' + 'YWJj'.repeat(100_000)
     const messages = [
       {
@@ -720,10 +721,10 @@ describe('agentLoop integration', () => {
         initialCompacting: true,
         sessionManager,
         getConversationMessages: vi.fn().mockResolvedValue(messages),
-        assembleRequest: vi.fn(async ({ messages }) => ({
+        assembleRequest: vi.fn(async ({ messages, promptTools }) => ({
           systemPrompt: 'system',
           messages,
-          tools: [{ type: 'function', function: { name: 'unused', description: 'x'.repeat(200_000) } }] as any,
+          tools: promptTools,
         })),
       }),
       turnMetrics,
