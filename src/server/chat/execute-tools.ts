@@ -33,6 +33,14 @@ export interface ToolBatchContext {
   providerManager?: ProviderManager | undefined
   onToolExecuted?: ((toolCall: ToolCall, result: ToolResult) => void) | undefined
   agentTimeout?: number
+  /**
+   * Route a tool call to a headless-agent (remote-agent) via the hub. When
+   * present and a tool call carries a non-empty `remote` argument, the call is
+   * executed on that remote agent instead of locally. Absent → all local.
+   */
+  remoteExecutor?:
+    | ((sessionId: string, remote: string, tool: string, args: Record<string, unknown>) => Promise<ToolResult>)
+    | undefined
 }
 
 export interface ToolBatchResult {
@@ -248,10 +256,45 @@ export async function executeTools(
 
     const startTime = Date.now()
     let toolResult: ToolResult
-    try {
-      toolResult = await ctx.toolRegistry.execute(toolCall.name, toolCall.arguments, toolContext)
-    } catch (error) {
-      toolResult = await handleToolExecutionError(error, ctx.sessionId, startTime)
+    // Remote routing: if the call carries a non-empty `remote` argument and a
+    // remote executor is configured, execute on that headless-agent (via the
+    // hub) instead of locally. Same tool name, same result shape.
+    const remoteTarget = toolCall.arguments['remote']
+    const remoteRequested = typeof remoteTarget === 'string' && remoteTarget.trim().length > 0
+    if (remoteRequested && ctx.remoteExecutor) {
+      try {
+        toolResult = await ctx.remoteExecutor(ctx.sessionId, remoteTarget.trim(), toolCall.name, toolCall.arguments)
+      } catch (error) {
+        toolResult = {
+          success: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : serverT({ en: 'Remote execution failed', fr: 'Échec de l’exécution à distance' }),
+          durationMs: Date.now() - startTime,
+          truncated: false,
+        }
+      }
+    } else if (remoteRequested) {
+      // `remote` was provided but no remote executor is configured (no hub).
+      toolResult = {
+        success: false,
+        error: serverT(
+          {
+            en: 'Remote agent requested ({{remote}}) but no remote-agent hub is configured. Set remoteAgent.hubUrl and remoteAgent.hubToken in the global config.',
+            fr: 'Agent distant demandé ({{remote}}) mais aucun hub remote-agent n’est configuré. Définissez remoteAgent.hubUrl et remoteAgent.hubToken dans la config globale.',
+          },
+          { remote: String(remoteTarget) },
+        ),
+        durationMs: Date.now() - startTime,
+        truncated: false,
+      }
+    } else {
+      try {
+        toolResult = await ctx.toolRegistry.execute(toolCall.name, toolCall.arguments, toolContext)
+      } catch (error) {
+        toolResult = await handleToolExecutionError(error, ctx.sessionId, startTime)
+      }
     }
 
     ctx.onToolExecuted?.(toolCall, toolResult)

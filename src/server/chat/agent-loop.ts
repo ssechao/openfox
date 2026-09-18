@@ -175,6 +175,12 @@ export interface TopLevelLoopConfig {
   }>
   getToolRegistry: () => ToolRegistry
   onToolExecuted?: ((toolCall: ToolCall, result: ToolResult) => void) | undefined
+  /** Route a tool call to a headless-agent (remote-agent) via the hub. When a
+   *  tool call carries a non-empty `remote` argument, it is executed on that
+   *  remote agent instead of locally. Absent → all execution is local. */
+  remoteExecutor?:
+    | ((sessionId: string, remote: string, tool: string, args: Record<string, unknown>) => Promise<ToolResult>)
+    | undefined
   stopOnStepDone?: boolean
   /** Durable workflow outbox: confirm this result, never execute its tool again. */
   resumeStepDoneCallId?: string
@@ -1063,6 +1069,7 @@ export async function runTopLevelAgentLoop(
           llmClient: resolveClient(),
           statsIdentity,
           onToolExecuted: config.onToolExecuted,
+          remoteExecutor: config.remoteExecutor,
         }
         if (session.dangerLevel) {
           batchContext.dangerLevel = session.dangerLevel

@@ -104,6 +104,21 @@ const workspaceSchema = z.object({
   workdir: z.string().default(process.cwd()),
 })
 
+// Remote-agent (headless-agent) hub configuration. The OpenFox server uses
+// this to enumerate and drive headless-agents registered on the aether hub.
+const remoteAgentSchema = z.object({
+  hubUrl: z.string().optional(),
+  hubToken: z.string().optional(),
+  /**
+   * Control-plane credential for the remote-agent control routes
+   * (`/ra/execute`, `/ra/await`, `/ra/agents`). When the hub has a control
+   * token configured, ONLY this credential is accepted on those routes.
+   */
+  controlToken: z.string().optional(),
+  /** Per-call execution timeout in ms (default 120000). */
+  callTimeoutMs: z.number().positive().optional(),
+})
+
 const visionFallbackSchema = z.object({
   enabled: z.boolean().default(false),
   url: z.string().default('http://localhost:11434'),
@@ -164,6 +179,7 @@ const configSchema = z
     visionFallback: visionFallbackSchema.optional(),
     disableAutoSessionTitle: z.boolean().optional(),
     defaultAgent: z.string().optional(),
+    remoteAgent: remoteAgentSchema.optional(),
   })
   .transform((data) => ({
     providers: data.providers ?? [],
@@ -179,6 +195,7 @@ const configSchema = z
     visionFallback: data.visionFallback ?? defaultVisionFallback,
     ...(data.disableAutoSessionTitle !== undefined ? { disableAutoSessionTitle: data.disableAutoSessionTitle } : {}),
     ...(data.defaultAgent !== undefined ? { defaultAgent: data.defaultAgent } : {}),
+    ...(data.remoteAgent !== undefined ? { remoteAgent: data.remoteAgent } : {}),
   }))
 
 // ============================================================================

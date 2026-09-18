@@ -25,6 +25,7 @@ Commands:
   service          Manage the systemd service (install, start, stop, status, logs, uninstall)
   pwa              Manage the PWA installation (install, uninstall, launch, update, status)
   mcp              Print a paste-ready MCP client config for this server (asks for the password if set)
+  remote-agent     Run a headless-agent daemon (remote tool executor) or configure the remote-agent hub
   install          Install a persistent OpenFox launcher (use --check to inspect)
   update           Update OpenFox to the latest version
 
@@ -200,6 +201,13 @@ export async function runCli(options: { mode: Mode }): Promise<void> {
       service: { type: 'boolean' },
       follow: { type: 'boolean', short: 'f' },
       check: { type: 'boolean' },
+      workdir: { type: 'string' },
+      'hub-url': { type: 'string' },
+      'hub-token': { type: 'string' },
+      'control-token': { type: 'string' },
+      name: { type: 'string' },
+      'mcp-config': { type: 'string' },
+      'print-config': { type: 'boolean' },
     },
     allowPositionals: true,
     strict: true,
@@ -280,6 +288,20 @@ export async function runCli(options: { mode: Mode }): Promise<void> {
       if (code !== 0) {
         process.exit(code)
       }
+      break
+    }
+    case 'remote-agent': {
+      const { runRemoteAgentCommand } = await import('./remote-agent.js')
+      await runRemoteAgentCommand(mode, {
+        workdir: values.workdir,
+        hubUrl: values['hub-url'],
+        hubToken: values['hub-token'],
+        controlToken: values['control-token'],
+        name: values.name,
+        mcpConfig: values['mcp-config'],
+        printConfig: values['print-config'] === true,
+        port: values.port ? parseInt(values.port) : undefined,
+      })
       break
     }
 

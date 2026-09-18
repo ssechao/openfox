@@ -499,3 +499,111 @@ describe('executeTools', () => {
     expect(result.returnValueResult).toBe('completed')
   })
 })
+
+describe('executeTools remote routing', () => {
+  const mockToolRegistry = {
+    tools: [] as Array<{ name: string }>,
+    execute: vi.fn(),
+    definitions: [],
+  } as unknown as ToolRegistry
+
+  const mockTurnMetrics = {
+    addToolTime: vi.fn(),
+  } as unknown as TurnMetrics
+
+  function makeCtx(overrides?: Record<string, unknown>) {
+    return {
+      toolRegistry: mockToolRegistry,
+      sessionManager: {
+        getLspManager: vi.fn(),
+        getEffectiveWorkdir: vi.fn().mockReturnValue('/test'),
+        getProjectWorkdir: vi.fn().mockReturnValue('/test'),
+      } as any,
+      sessionId: 'test-session',
+      workdir: '/test',
+      turnMetrics: mockTurnMetrics,
+      signal: undefined,
+      onMessage: undefined,
+      llmClient: undefined,
+      statsIdentity: undefined,
+      ...overrides,
+    }
+  }
+
+  it('routes a call with a `remote` arg to the remote executor, not locally', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'should-not-run-locally',
+      durationMs: 1,
+      truncated: false,
+    })
+    const remoteExecutor = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'remote-output',
+      durationMs: 5,
+      truncated: false,
+    })
+
+    const toolCalls: ToolCall[] = [
+      { id: 'call-1', name: 'run_command', arguments: { command: 'echo hi', remote: 'agent-a' } },
+    ]
+
+    await executeTools('msg-1', toolCalls, makeCtx({ remoteExecutor }), append)
+
+    expect(remoteExecutor).toHaveBeenCalledTimes(1)
+    expect(remoteExecutor).toHaveBeenCalledWith('test-session', 'agent-a', 'run_command', {
+      command: 'echo hi',
+      remote: 'agent-a',
+    })
+    expect(mockToolRegistry.execute).not.toHaveBeenCalled()
+  })
+
+  it('executes locally when `remote` is absent or empty', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'local-output',
+      durationMs: 1,
+      truncated: false,
+    })
+    const remoteExecutor = vi.fn()
+
+    const toolCalls: ToolCall[] = [
+      { id: 'call-1', name: 'run_command', arguments: { command: 'echo hi' } },
+      { id: 'call-2', name: 'run_command', arguments: { command: 'echo hi', remote: '   ' } },
+    ]
+
+    await executeTools('msg-1', toolCalls, makeCtx({ remoteExecutor }), append)
+
+    expect(remoteExecutor).not.toHaveBeenCalled()
+    expect(mockToolRegistry.execute).toHaveBeenCalledTimes(2)
+  })
+
+  it('returns an error when `remote` is set but no executor is configured', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn()
+
+    const toolCalls: ToolCall[] = [
+      { id: 'call-1', name: 'run_command', arguments: { command: 'echo hi', remote: 'agent-a' } },
+    ]
+
+    const result = await executeTools('msg-1', toolCalls, makeCtx(), append)
+
+    expect(mockToolRegistry.execute).not.toHaveBeenCalled()
+    expect(result.toolMessages[0]?.content).toMatch(/no remote-agent hub is configured/i)
+  })
+
+  it('returns the remote executor error when it throws', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn()
+    const remoteExecutor = vi.fn().mockRejectedValue(new Error('Unknown remote agent "ghost"'))
+
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'read_file', arguments: { path: 'a.ts', remote: 'ghost' } }]
+
+    const result = await executeTools('msg-1', toolCalls, makeCtx({ remoteExecutor }), append)
+
+    expect(mockToolRegistry.execute).not.toHaveBeenCalled()
+    expect(result.toolMessages[0]?.content).toMatch(/Unknown remote agent/)
+  })
+})
