@@ -7,7 +7,14 @@ import { McpManager } from '../mcp/manager.js'
 import type { McpServerConfig } from '../mcp/types.js'
 import { createMcpTools } from '../mcp/tool-adapter.js'
 import { logger } from '../utils/logger.js'
-import { AgentIdentity, verifyHubSignature, canonicalEnvelopePayload } from './identity.js'
+import {
+  AgentIdentity,
+  verifyHubSignature,
+  canonicalEnvelopePayload,
+  canonicalCapabilities,
+  enrollPayload,
+  agentProofPayload,
+} from './identity.js'
 import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
 import { toSerializedToolResult, normalizeHubBase } from './types.js'
 import type { ExecutionEnvelope } from './types.js'
@@ -68,6 +75,18 @@ export class RemoteAgentDaemon {
 
   get publicWorkdir(): string {
     return this.opts.workdir
+  }
+
+  /** The daemon's Ed25519 public key (base64url). Exposed for tests that
+   * need to impersonate / verify the agent's proofs. */
+  get publicKeyB64(): string {
+    return this.identity.publicKeyB64
+  }
+
+  /** Sign an agent proof (op, nonce, extra) with the daemon's private key.
+   * Exposed for tests (e.g. cross-agent impersonation). */
+  signAgentProof(op: string, nonce: string, extra: string): string {
+    return this.identity.sign(agentProofPayload(op, this.identity.publicKeyB64, nonce, extra))
   }
 
   get toolNames(): string[] {
@@ -159,10 +178,21 @@ export class RemoteAgentDaemon {
   }
 
   private async enroll(): Promise<void> {
-    // Request a fresh nonce from the hub (the hub issues one per enroll; we
-    // use a client-generated nonce that the hub echoes back for signing).
+    // A fresh, unguessable nonce. The signature covers the FULL enrollment
+    // payload (title, key, workdir, hostname, capabilities + nonce), so a
+    // captured enrollment cannot be replayed with modified metadata; the hub
+    // also consumes the nonce (single-use).
     const nonce = `enroll-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const signature = this.identity.sign(nonce)
+    const caps = this.capabilities()
+    const payload = enrollPayload(
+      this.opts.name ?? this.opts.workdir,
+      this.identity.publicKeyB64,
+      this.opts.workdir,
+      this.hostname(),
+      canonicalCapabilities(caps),
+      nonce,
+    )
+    const signature = this.identity.sign(payload)
     const res = await this.http<{ peer_id: string; hub_public_key: string }>('POST', '/ra/enroll', {
       title: this.opts.name ?? this.opts.workdir,
       public_key: this.identity.publicKeyB64,
@@ -170,19 +200,25 @@ export class RemoteAgentDaemon {
       signature,
       workdir: this.opts.workdir,
       hostname: this.hostname(),
-      capabilities: this.capabilities(),
+      capabilities: caps,
     })
     this.peerId = res.peer_id
     this.hubPublicKeyB64 = res.hub_public_key
   }
 
   private async heartbeat(): Promise<void> {
+    // Agent-signed proof (fresh nonce) so only the key holder can refresh
+    // this agent's liveness.
+    const nonce = `hb-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const payload = agentProofPayload('heartbeat', this.identity.publicKeyB64, nonce, '')
     await this.http('POST', '/ra/heartbeat', {
       public_key: this.identity.publicKeyB64,
       title: this.opts.name ?? this.opts.workdir,
       workdir: this.opts.workdir,
       hostname: this.hostname(),
       capabilities: this.capabilities(),
+      nonce,
+      signature: this.identity.sign(payload),
     })
   }
 
@@ -201,8 +237,14 @@ export class RemoteAgentDaemon {
     // would otherwise both fetch the same envelope and execute it twice.
     this.inFlight = true
     try {
+      // Agent-signed proof (fresh nonce): only the key holder may drain this
+      // agent's queue.
+      const nonce = `poll-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      const payload = agentProofPayload('poll', this.identity.publicKeyB64, nonce, '')
       const res = await this.http<{ envelope: ExecutionEnvelope | null }>('POST', '/ra/poll', {
         public_key: this.identity.publicKeyB64,
+        nonce,
+        signature: this.identity.sign(payload),
       })
       if (!res.envelope) return
       await this.handleEnvelope(res.envelope)
@@ -309,12 +351,18 @@ export class RemoteAgentDaemon {
     // the result is acknowledged, so a failed submission would otherwise lead
     // to a re-delivered (and re-executed) envelope on the next poll. The hub
     // treats a retried submission of an already-resolved request as idempotent.
+    // Each attempt presents a FRESH agent proof (the hub consumes the nonce),
+    // binding the request_id so the proof cannot be reused for another request.
     let lastError: unknown
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
+        const nonce = `res-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const payload = agentProofPayload('result', this.identity.publicKeyB64, nonce, requestId)
         await this.http('POST', '/ra/result', {
           public_key: this.identity.publicKeyB64,
           request_id: requestId,
+          nonce,
+          signature: this.identity.sign(payload),
           ...(token ? { token } : {}),
           result,
         })

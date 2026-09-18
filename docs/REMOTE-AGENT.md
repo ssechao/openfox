@@ -30,28 +30,45 @@ difference is the `peer_type` and the channel.
 
 - **Ed25519 identity per agent.** Each headless-agent generates an Ed25519
   keypair at first start. The private key never leaves the machine; the public
-  key is registered with the hub.
-- **Signed enrollment.** To register, the agent signs a hub-issued **nonce**
-  with its private key. The hub verifies the signature against the supplied
-  public key before storing anything. Re-enrollment with the same key resumes
-  the same peer.
+  key is registered with the hub. The peer id is **stable** — derived from the
+  public key (SHA-256), so the same key resumes the same identity across
+  prunes and hub restarts.
+- **Signed enrollment.** To register, the agent signs a **full enrollment
+  payload** (title, public key, workdir, hostname, canonical capabilities +
+  a fresh nonce) with its private key. The hub verifies the signature against
+  the supplied public key before storing anything, then **consumes the nonce**
+  (single-use) — a captured enrollment cannot be replayed, nor with modified
+  metadata.
 - **Mutual authentication.** The hub signs every execution envelope it relays
   to an agent (hub's Ed25519). The agent verifies the signature with the hub's
   public key (received at enrollment) before executing anything.
+- **Agent-signed proofs (anti-impersonation).** The hub Bearer is a shared
+  secret, so every _agent_ request (`/ra/poll`, `/ra/heartbeat`, `/ra/result`)
+  additionally carries a **proof signed by the agent** (its private key over
+  `agent_proof_payload(op, public_key, fresh nonce, extra)`, where `extra` is
+  the `request_id` for `/ra/result`). The hub verifies the proof against the
+  **stored** public key and consumes the nonce. A holder of the Bearer who
+  does not possess the agent's private key cannot poll another agent's queue
+  or submit results for it.
 - **Scoped ephemeral tokens.** Each execution call is bound to a
   `(session, agent)` pair by a hub-issued, single-use, short-lived token. The
   agent must present the token when it submits the result
   (`POST /ra/result`); the hub validates it against the session the request
   was actually queued for (its own binding, not a session the agent claims)
-  and consumes it. A token cannot be replayed, and cannot be used against a
-  different session or agent. A retried submission of an already-resolved
-  request is acknowledged idempotently (the original result is preserved).
+  and consumes it. The hub also compares `bound_agent == agent.peer_id`
+  strictly before consuming. A token cannot be replayed, and cannot be used
+  against a different session or agent. A retried submission of an
+  already-resolved request is acknowledged idempotently (the original result
+  is preserved), and the result is kept until its TTL so a retried `/ra/await`
+  after a lost response still recovers it.
 - **Principal auth.** The OpenFox server authenticates to the hub with a Bearer
   token (its own principal), distinct from the agents' keys.
 - **Single gateway.** The OpenFox server never contacts a headless-agent
   directly. All traffic flows through the hub. The agent is only reachable via
   the hub (it polls the hub; nothing is inbound to it), so the hub is the only
   control point.
+- **Transport.** In production the hub must be exposed over **TLS** — the
+  Bearer and the proofs are plaintext over HTTP.
 
 ## How a tool call is routed
 
@@ -65,10 +82,12 @@ difference is the `peer_type` and the channel.
    - `POST /ra/execute` — the hub signs the envelope, issues a scoped token,
      queues the envelope, and returns a `request_id`.
    - `POST /ra/await` — the client long-polls for the result (bounded timeout).
-4. The headless-agent daemon polls the hub (`POST /ra/poll`), verifies the hub
-   signature, executes the tool locally (anchored on its `--workdir`), and posts
-   the result back (`POST /ra/result`) **presenting the scoped token** it
-   received in the envelope. The hub validates the token against the (session,
+4. The headless-agent daemon polls the hub (`POST /ra/poll`, **with an
+   agent-signed proof**), verifies the hub signature, executes the tool locally
+   (anchored on its `--workdir`), and posts the result back (`POST /ra/result`,
+   **with an agent-signed proof binding the request_id + the scoped token**).
+   The hub verifies the proof against the stored key, compares
+   `bound_agent == agent` strictly, validates the token against the (session,
    agent) pair it issued and consumes it (single-use, anti-replay).
 5. The result is returned to the session in the **same shape** as a local tool
    result (streaming/fetch parity).
@@ -125,17 +144,19 @@ remotely.
 
 ## Hub endpoints (aether hub)
 
-| Route           | Method | Purpose                                                      |
-| --------------- | ------ | ------------------------------------------------------------ |
-| `/ra/enroll`    | POST   | Enroll/resume a headless-agent (nonce + signature).          |
-| `/ra/heartbeat` | POST   | Refresh liveness + metadata.                                 |
-| `/ra/agents`    | GET    | List headless-agents (enumeration).                          |
-| `/ra/execute`   | POST   | Queue a signed execution for an agent; returns `request_id`. |
-| `/ra/await`     | POST   | Long-poll for a queued execution's result.                   |
-| `/ra/poll`      | POST   | An agent polls for its next pending execution.               |
-| `/ra/result`    | POST   | An agent submits an execution result.                        |
+| Route           | Method | Purpose                                                                   |
+| --------------- | ------ | ------------------------------------------------------------------------- |
+| `/ra/enroll`    | POST   | Enroll/resume a headless-agent (full-payload signature + nonce).          |
+| `/ra/heartbeat` | POST   | Refresh liveness + metadata (agent-signed proof).                         |
+| `/ra/agents`    | GET    | List headless-agents (enumeration).                                       |
+| `/ra/execute`   | POST   | Queue a signed execution for an agent; returns `request_id`.              |
+| `/ra/await`     | POST   | Long-poll for a queued execution's result.                                |
+| `/ra/poll`      | POST   | An agent polls for its next pending execution (agent-signed proof).       |
+| `/ra/result`    | POST   | An agent submits an execution result (agent-signed proof + scoped token). |
 
-All `/ra/*` routes require the hub Bearer token.
+All `/ra/*` routes require the hub Bearer token; the agent-facing routes
+(`/ra/enroll`, `/ra/heartbeat`, `/ra/poll`, `/ra/result`) additionally require
+an agent-signed proof (see the security model).
 
 ## Tool availability on the daemon
 

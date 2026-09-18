@@ -68,3 +68,47 @@ export function canonicalEnvelopePayload(
   const sep = Buffer.from([0x1f])
   return Buffer.concat(parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([sep, Buffer.from(p)]))))
 }
+
+/**
+ * Canonical capabilities string (sorted, compact JSON array of strings).
+ * Must match the hub's `canonical_capabilities` so the enrollment signature
+ * binds the capabilities deterministically on both sides.
+ */
+export function canonicalCapabilities(capabilities: string[]): string {
+  const sorted = [...capabilities].sort()
+  return `[${sorted.map((c) => JSON.stringify(c)).join(',')}]`
+}
+
+/**
+ * Canonical enrollment payload. The agent signs this with its private key;
+ * the hub verifies it against the supplied public key. Binds ALL enrollment
+ * metadata (title, key, workdir, hostname, capabilities) + a fresh nonce, so
+ * a captured enrollment cannot be replayed with modified metadata.
+ * Must match the hub's `enroll_payload` byte-for-byte.
+ */
+export function enrollPayload(
+  title: string,
+  publicKeyB64: string,
+  workdir: string,
+  hostname: string,
+  capabilitiesCanonical: string,
+  nonce: string,
+): Buffer {
+  const parts = ['ra-enroll', title, publicKeyB64, workdir, hostname, capabilitiesCanonical, nonce]
+  return Buffer.concat(
+    parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([Buffer.from([0x1f]), Buffer.from(p)]))),
+  )
+}
+
+/**
+ * Canonical agent-proof payload (poll / heartbeat / result). The agent signs
+ * this with its private key; the hub verifies it against the STORED public
+ * key and consumes the nonce (single-use). `extra` binds the request_id for
+ * /ra/result. Must match the hub's `agent_proof_payload` byte-for-byte.
+ */
+export function agentProofPayload(op: string, publicKeyB64: string, nonce: string, extra: string): Buffer {
+  const parts = [op, publicKeyB64, nonce, extra]
+  return Buffer.concat(
+    parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([Buffer.from([0x1f]), Buffer.from(p)]))),
+  )
+}

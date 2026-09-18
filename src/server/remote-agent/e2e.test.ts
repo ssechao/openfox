@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RemoteAgentDaemon } from './daemon.js'
 import { HubClient } from './client.js'
+import { AgentIdentity, agentProofPayload } from './identity.js'
 
 /**
  * End-to-end integration: real Rust hub (subprocess) + real headless-agent
@@ -144,6 +145,96 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     await expect(client.executeTool('e2e-session', 'ghost', 'run_command', { command: 'echo x' })).rejects.toThrow(
       /Unknown remote agent/,
     )
+  })
+
+  it('enforces agent authentication (no Bearer / no proof / forged / replayed)', async () => {
+    const base = `http://127.0.0.1:${hubPort}`
+    const post = (path: string, body: Record<string, unknown>, auth?: string) =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
+        },
+        body: JSON.stringify(body),
+      })
+
+    // 1. No Bearer token -> 401 (principal auth).
+    const noBearer = await post('/ra/poll', { public_key: daemon.publicKeyB64, nonce: 'x', signature: 'y' })
+    expect(noBearer.status).toBe(401)
+
+    // 2. Bearer but missing proof fields (no nonce) -> 400 (proof required).
+    const noProof = await post('/ra/poll', { public_key: daemon.publicKeyB64 }, HUB_TOKEN)
+    expect(noProof.status).toBe(400)
+
+    // 3. A forged proof (wrong key) -> 401.
+    const attacker = AgentIdentity.generate()
+    const forged = agentProofPayload('poll', daemon.publicKeyB64, 'forged-nonce', '')
+    const badSig = await post(
+      '/ra/poll',
+      { public_key: daemon.publicKeyB64, nonce: 'forged-nonce', signature: attacker.sign(forged) },
+      HUB_TOKEN,
+    )
+    expect(badSig.status).toBe(401)
+
+    // 4. A valid proof but a REPLAYED nonce -> 401 (nonce is consumed).
+    const nonce = `replay-${Math.random().toString(36).slice(2)}`
+    const sig = daemon.signAgentProof('poll', nonce, '')
+    const first = await post('/ra/poll', { public_key: daemon.publicKeyB64, nonce, signature: sig }, HUB_TOKEN)
+    expect(first.status).toBe(200)
+    const replayed = await post('/ra/poll', { public_key: daemon.publicKeyB64, nonce, signature: sig }, HUB_TOKEN)
+    expect(replayed.status).toBe(401)
+
+    // 5. A valid heartbeat proof works (the daemon's own key).
+    const hbNonce = `hb-${Math.random().toString(36).slice(2)}`
+    const hb = await post(
+      '/ra/heartbeat',
+      {
+        public_key: daemon.publicKeyB64,
+        title: 'e2e-agent',
+        workdir: workdir,
+        hostname: 'host',
+        capabilities: [],
+        nonce: hbNonce,
+        signature: daemon.signAgentProof('heartbeat', hbNonce, ''),
+      },
+      HUB_TOKEN,
+    )
+    expect(hb.status).toBe(200)
+  })
+
+  it('rejects a cross-agent poll (agent B cannot drain agent A queue)', async () => {
+    const base = `http://127.0.0.1:${hubPort}`
+    // An attacker (agent B) claiming agent A's public key but signing with
+    // B's own key cannot drain agent A's queue: the hub verifies the proof
+    // against the STORED key (agent A's), so the forged signature fails.
+    const attacker = AgentIdentity.generate()
+    const nonce = `imp-${Math.random().toString(36).slice(2)}`
+    const payload = agentProofPayload('poll', daemon.publicKeyB64, nonce, '')
+    const res = await fetch(`${base}/ra/poll`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${HUB_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: daemon.publicKeyB64, nonce, signature: attacker.sign(payload) }),
+    })
+    // The proof is over agent A's key but signed by B's key -> invalid.
+    expect(res.status).toBe(401)
+    // The legitimate agent is unaffected and still executes normally.
+    const exec = await client.executeTool('e2e-session', 'e2e-agent', 'run_command', { command: 'echo ok' })
+    expect(exec.success).toBe(true)
+  })
+
+  it('exposes public_key_b64 in the agent list (spec conformance)', async () => {
+    const agents = await client.listAgents()
+    const agent = agents.find((a) => a.title === 'e2e-agent')
+    expect(agent).toBeDefined()
+    // The raw hub response must carry the public key (the client maps it).
+    const raw = await fetch(`http://127.0.0.1:${hubPort}/ra/agents`, {
+      headers: { Authorization: `Bearer ${HUB_TOKEN}` },
+    }).then((r) => r.json() as Promise<{ agents: Array<Record<string, unknown>> }>)
+    const rawAgent = raw.agents.find((a) => a['title'] === 'e2e-agent')
+    expect(rawAgent).toBeDefined()
+    expect(typeof rawAgent!['public_key_b64']).toBe('string')
+    expect((rawAgent!['public_key_b64'] as string).length).toBeGreaterThan(0)
   })
 
   it('drives a second agent simultaneously (multi-remote)', async () => {
