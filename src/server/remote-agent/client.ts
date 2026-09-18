@@ -7,8 +7,23 @@ import type { RemoteAgentInfo } from './types.js'
 export interface HubClientConfig {
   hubUrl: string
   hubToken: string
+  /**
+   * Control-plane credential for the remote-agent control routes
+   * (`/ra/execute`, `/ra/await`, `/ra/agents`). When the hub has a control
+   * token configured (`AETHER_RA_CONTROL_TOKEN`), ONLY this credential is
+   * accepted on those routes — the shared `hubToken` is rejected (401). When
+   * unset here, the `hubToken` is used (backward-compatible default).
+   */
+  controlToken?: string | undefined
   callTimeoutMs?: number | undefined
 }
+
+/**
+ * The remote-agent CONTROL routes (the RCE surface). These authenticate with
+ * the control credential, not the shared hub Bearer, so a peer/agent holding
+ * the hub token cannot enumerate or drive remote execution.
+ */
+const CONTROL_ROUTES = new Set(['/ra/execute', '/ra/await', '/ra/agents'])
 
 /**
  * Client for the aether hub's headless-agent (remote-agent) API. The OpenFox
@@ -26,11 +41,14 @@ export class HubClient {
   private async http<T>(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs?: number): Promise<T> {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs ?? this.config.callTimeoutMs ?? 120_000)
+    // Control routes authenticate with the control credential (when set);
+    // everything else uses the shared hub Bearer.
+    const token = CONTROL_ROUTES.has(path) && this.config.controlToken ? this.config.controlToken : this.config.hubToken
     try {
       const res = await fetch(new URL(path, normalizeHubBase(this.config.hubUrl)).toString(), {
         method,
         headers: {
-          Authorization: `Bearer ${this.config.hubToken}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: body === undefined ? null : JSON.stringify(body),

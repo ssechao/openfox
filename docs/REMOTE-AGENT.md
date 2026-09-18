@@ -46,10 +46,20 @@ difference is the `peer_type` and the channel.
   secret, so every _agent_ request (`/ra/poll`, `/ra/heartbeat`, `/ra/result`)
   additionally carries a **proof signed by the agent** (its private key over
   `agent_proof_payload(op, public_key, fresh nonce, extra)`, where `extra` is
-  the `request_id` for `/ra/result`). The hub verifies the proof against the
-  **stored** public key and consumes the nonce. A holder of the Bearer who
-  does not possess the agent's private key cannot poll another agent's queue
-  or submit results for it.
+  the operation's **full mutable body**: empty for `/ra/poll`;
+  `title|workdir|hostname|capabilities` for `/ra/heartbeat`;
+  `request_id|token|result_canonical` for `/ra/result`). The hub verifies the
+  proof against the **stored** public key and consumes the nonce. A holder of
+  the Bearer who does not possess the agent's private key cannot poll another
+  agent's queue, submit results for it, or refresh its liveness with modified
+  metadata. The hub stores/delivers `result_canonical` (the signed string), not
+  a re-serialized field.
+- **Timestamped nonces + replay window.** Nonces are `<unix_ms>-<random>`
+  (random via `crypto.randomBytes`, not `Math.random`). The hub accepts a nonce
+  only while its timestamp is within a 5-minute replay window, and the
+  consumed-nonce cache covers the full window — so a captured request is
+  rejected once the window has elapsed, even after a cache prune or a hub
+  restart (empty cache). The same window applies to enrollment nonces.
 - **Scoped ephemeral tokens.** Each execution call is bound to a
   `(session, agent)` pair by a hub-issued, single-use, short-lived token. The
   agent must present the token when it submits the result
@@ -61,8 +71,16 @@ difference is the `peer_type` and the channel.
   already-resolved request is acknowledged idempotently (the original result
   is preserved), and the result is kept until its TTL so a retried `/ra/await`
   after a lost response still recovers it.
-- **Principal auth.** The OpenFox server authenticates to the hub with a Bearer
-  token (its own principal), distinct from the agents' keys.
+- **Principal auth + control-plane credential.** The OpenFox server
+  authenticates to the hub with a Bearer token (its own principal), distinct
+  from the agents' keys. The **control routes** (`/ra/execute`, `/ra/await`,
+  `/ra/agents`) — the RCE surface — authenticate with a **distinct control
+  credential** (`AETHER_RA_CONTROL_TOKEN` on the hub, `controlToken` in the
+  OpenFox config). When the hub has a control token configured, ONLY that
+  credential is accepted on those routes: the shared hub Bearer is rejected
+  (401), so a peer or headless-agent holding the hub token cannot enumerate
+  remote-execution targets or drive executions. When unset, the hub Bearer is
+  accepted (backward-compatible default).
 - **Single gateway.** The OpenFox server never contacts a headless-agent
   directly. All traffic flows through the hub. The agent is only reachable via
   the hub (it polls the hub; nothing is inbound to it), so the hub is the only
@@ -106,17 +124,24 @@ session calls it first to discover which machines it can drive.
 ### Local OpenFox server (enable remote execution)
 
 Add to the global config (`~/.config/openfox/config.json`), or run
-`openfox remote-agent add --hub-url <url> --hub-token <token>`:
+`openfox remote-agent add --hub-url <url> --hub-token <token> [--control-token <c>]`:
 
 ```json
 {
   "remoteAgent": {
     "hubUrl": "http://192.168.71.132:4175/mcp",
     "hubToken": "<hub-bearer-token>",
+    "controlToken": "<ra-control-token>",
     "callTimeoutMs": 120000
   }
 }
 ```
+
+- `hubToken` = the shared hub Bearer (agent routes + peer messaging).
+- `controlToken` = the control-plane credential (the hub's
+  `AETHER_RA_CONTROL_TOKEN`); used on `/ra/execute`, `/ra/await`, `/ra/agents`.
+  When the hub has a control token configured, remote execution fails (401)
+  without it.
 
 Restart the OpenFox server to apply. Without this, `remote` arguments produce a
 clear error (no remote-agent hub configured).
@@ -144,19 +169,21 @@ remotely.
 
 ## Hub endpoints (aether hub)
 
-| Route           | Method | Purpose                                                                   |
-| --------------- | ------ | ------------------------------------------------------------------------- |
-| `/ra/enroll`    | POST   | Enroll/resume a headless-agent (full-payload signature + nonce).          |
-| `/ra/heartbeat` | POST   | Refresh liveness + metadata (agent-signed proof).                         |
-| `/ra/agents`    | GET    | List headless-agents (enumeration).                                       |
-| `/ra/execute`   | POST   | Queue a signed execution for an agent; returns `request_id`.              |
-| `/ra/await`     | POST   | Long-poll for a queued execution's result.                                |
-| `/ra/poll`      | POST   | An agent polls for its next pending execution (agent-signed proof).       |
-| `/ra/result`    | POST   | An agent submits an execution result (agent-signed proof + scoped token). |
+| Route           | Method | Purpose                                                                              |
+| --------------- | ------ | ------------------------------------------------------------------------------------ |
+| `/ra/enroll`    | POST   | Enroll/resume a headless-agent (full-payload signature + nonce).                     |
+| `/ra/heartbeat` | POST   | Refresh liveness + metadata (agent-signed proof over the full body).                 |
+| `/ra/agents`    | GET    | List headless-agents (enumeration). **Control credential.**                          |
+| `/ra/execute`   | POST   | Queue a signed execution for an agent; returns `request_id`. **Control credential.** |
+| `/ra/await`     | POST   | Long-poll for a queued execution's result. **Control credential.**                   |
+| `/ra/poll`      | POST   | An agent polls for its next pending execution (agent-signed proof).                  |
+| `/ra/result`    | POST   | An agent submits a result (agent-signed proof over request_id + token + result).     |
 
-All `/ra/*` routes require the hub Bearer token; the agent-facing routes
-(`/ra/enroll`, `/ra/heartbeat`, `/ra/poll`, `/ra/result`) additionally require
-an agent-signed proof (see the security model).
+The **agent routes** (`/ra/enroll`, `/ra/heartbeat`, `/ra/poll`, `/ra/result`)
+require the hub Bearer **plus** an agent-signed proof (see the security model).
+The **control routes** (`/ra/agents`, `/ra/execute`, `/ra/await`) require the
+control credential (`AETHER_RA_CONTROL_TOKEN`); when it is configured on the
+hub, the shared hub Bearer is rejected (401) there.
 
 ## Tool availability on the daemon
 

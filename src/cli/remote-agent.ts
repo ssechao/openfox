@@ -7,6 +7,8 @@ export interface RemoteAgentCommandOptions {
   workdir?: string | undefined
   hubUrl?: string | undefined
   hubToken?: string | undefined
+  /** Control-plane credential for the hub's control routes (config `add`). */
+  controlToken?: string | undefined
   name?: string | undefined
   mcpConfig?: string | undefined
   printConfig?: boolean
@@ -169,7 +171,11 @@ async function runConfigSubcommand(
   }
   await saveGlobalConfig(mode, {
     ...globalConfig,
-    remoteAgent: { hubUrl: options.hubUrl, hubToken: options.hubToken },
+    remoteAgent: {
+      hubUrl: options.hubUrl,
+      hubToken: options.hubToken,
+      ...(options.controlToken ? { controlToken: options.controlToken } : {}),
+    },
   })
   console.log(
     cliT({
@@ -182,23 +188,26 @@ async function runConfigSubcommand(
 function printConfigSnippet(options: RemoteAgentCommandOptions): void {
   const hubUrl = options.hubUrl ?? '<hub-url>'
   const hubToken = options.hubToken ?? '<hub-token>'
+  const controlTokenLine = options.controlToken
+    ? `\n    "controlToken": "${options.controlToken}"`
+    : '\n    "controlToken": "<ra-control-token>  // optional: hub AETHER_RA_CONTROL_TOKEN'
   console.log(
     cliT({
-      en: `Add this to your OpenFox global config (or run: openfox remote-agent add --hub-url ${hubUrl} --hub-token ${hubToken}):
+      en: `Add this to your OpenFox global config (or run: openfox remote-agent add --hub-url ${hubUrl} --hub-token ${hubToken}${options.controlToken ? ` --control-token ${options.controlToken}` : ''}):
 
 {
   "remoteAgent": {
     "hubUrl": "${hubUrl}",
-    "hubToken": "${hubToken}"
+    "hubToken": "${hubToken}"${controlTokenLine}
   }
 }
 `,
-      fr: `Ajoutez ceci à votre config globale OpenFox (ou exécutez : openfox remote-agent add --hub-url ${hubUrl} --hub-token ${hubToken}) :
+      fr: `Ajoutez ceci à votre config globale OpenFox (ou exécutez : openfox remote-agent add --hub-url ${hubUrl} --hub-token ${hubToken}${options.controlToken ? ` --control-token ${options.controlToken}` : ''}) :
 
 {
   "remoteAgent": {
     "hubUrl": "${hubUrl}",
-    "hubToken": "${hubToken}"
+    "hubToken": "${hubToken}"${controlTokenLine}
   }
 }
 `,

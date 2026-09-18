@@ -14,6 +14,9 @@ import {
   canonicalCapabilities,
   enrollPayload,
   agentProofPayload,
+  heartbeatProofExtra,
+  resultProofExtra,
+  freshNonce,
 } from './identity.js'
 import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
 import { toSerializedToolResult, normalizeHubBase } from './types.js'
@@ -85,7 +88,7 @@ export class RemoteAgentDaemon {
 
   /** Sign an agent proof (op, nonce, extra) with the daemon's private key.
    * Exposed for tests (e.g. cross-agent impersonation). */
-  signAgentProof(op: string, nonce: string, extra: string): string {
+  signAgentProof(op: string, nonce: string, extra: string | Buffer): string {
     return this.identity.sign(agentProofPayload(op, this.identity.publicKeyB64, nonce, extra))
   }
 
@@ -178,11 +181,12 @@ export class RemoteAgentDaemon {
   }
 
   private async enroll(): Promise<void> {
-    // A fresh, unguessable nonce. The signature covers the FULL enrollment
-    // payload (title, key, workdir, hostname, capabilities + nonce), so a
-    // captured enrollment cannot be replayed with modified metadata; the hub
-    // also consumes the nonce (single-use).
-    const nonce = `enroll-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    // A fresh, timestamped, unguessable nonce (randomBytes, not Math.random).
+    // The signature covers the FULL enrollment payload (title, key, workdir,
+    // hostname, capabilities + nonce), so a captured enrollment cannot be
+    // replayed with modified metadata; the hub also consumes the nonce
+    // (single-use) and rejects it outside the replay window.
+    const nonce = freshNonce()
     const caps = this.capabilities()
     const payload = enrollPayload(
       this.opts.name ?? this.opts.workdir,
@@ -207,16 +211,21 @@ export class RemoteAgentDaemon {
   }
 
   private async heartbeat(): Promise<void> {
-    // Agent-signed proof (fresh nonce) so only the key holder can refresh
-    // this agent's liveness.
-    const nonce = `hb-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const payload = agentProofPayload('heartbeat', this.identity.publicKeyB64, nonce, '')
+    // Agent-signed proof (fresh timestamped nonce) so only the key holder can
+    // refresh this agent's liveness. The proof binds the FULL mutable body
+    // (title, workdir, hostname, canonical capabilities) so a captured
+    // heartbeat cannot be replayed with modified metadata.
+    const nonce = freshNonce()
+    const caps = this.capabilities()
+    const title = this.opts.name ?? this.opts.workdir
+    const extra = heartbeatProofExtra(title, this.opts.workdir, this.hostname(), canonicalCapabilities(caps))
+    const payload = agentProofPayload('heartbeat', this.identity.publicKeyB64, nonce, extra)
     await this.http('POST', '/ra/heartbeat', {
       public_key: this.identity.publicKeyB64,
-      title: this.opts.name ?? this.opts.workdir,
+      title,
       workdir: this.opts.workdir,
       hostname: this.hostname(),
-      capabilities: this.capabilities(),
+      capabilities: caps,
       nonce,
       signature: this.identity.sign(payload),
     })
@@ -237,9 +246,9 @@ export class RemoteAgentDaemon {
     // would otherwise both fetch the same envelope and execute it twice.
     this.inFlight = true
     try {
-      // Agent-signed proof (fresh nonce): only the key holder may drain this
-      // agent's queue.
-      const nonce = `poll-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      // Agent-signed proof (fresh timestamped nonce): only the key holder may
+      // drain this agent's queue.
+      const nonce = freshNonce()
       const payload = agentProofPayload('poll', this.identity.publicKeyB64, nonce, '')
       const res = await this.http<{ envelope: ExecutionEnvelope | null }>('POST', '/ra/poll', {
         public_key: this.identity.publicKeyB64,
@@ -351,20 +360,24 @@ export class RemoteAgentDaemon {
     // the result is acknowledged, so a failed submission would otherwise lead
     // to a re-delivered (and re-executed) envelope on the next poll. The hub
     // treats a retried submission of an already-resolved request as idempotent.
-    // Each attempt presents a FRESH agent proof (the hub consumes the nonce),
-    // binding the request_id so the proof cannot be reused for another request.
+    // Each attempt presents a FRESH timestamped agent proof (the hub consumes
+    // the nonce); the proof binds request_id + token + the canonical result
+    // JSON, so none of them can be tampered with after signing. The hub
+    // stores/delivers `resultCanonical` — exactly the signed string.
+    const resultCanonical = JSON.stringify(result)
     let lastError: unknown
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const nonce = `res-${Date.now()}-${Math.random().toString(36).slice(2)}`
-        const payload = agentProofPayload('result', this.identity.publicKeyB64, nonce, requestId)
+        const nonce = freshNonce()
+        const extra = resultProofExtra(requestId, token ?? '', resultCanonical)
+        const payload = agentProofPayload('result', this.identity.publicKeyB64, nonce, extra)
         await this.http('POST', '/ra/result', {
           public_key: this.identity.publicKeyB64,
           request_id: requestId,
           nonce,
           signature: this.identity.sign(payload),
           ...(token ? { token } : {}),
-          result,
+          result_canonical: resultCanonical,
         })
         return
       } catch (error) {

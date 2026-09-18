@@ -1,4 +1,4 @@
-import { createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto'
+import { createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto'
 
 /**
  * Ed25519 identity for a headless-agent. The private key never leaves the
@@ -64,9 +64,7 @@ export function canonicalEnvelopePayload(
   tool: string,
   argsJson: string,
 ): Buffer {
-  const parts = [requestId, agentPeerId, sessionId, tool, argsJson]
-  const sep = Buffer.from([0x1f])
-  return Buffer.concat(parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([sep, Buffer.from(p)]))))
+  return canonicalBody([requestId, agentPeerId, sessionId, tool, argsJson])
 }
 
 /**
@@ -101,14 +99,59 @@ export function enrollPayload(
 }
 
 /**
+ * Fields joined with a unit separator (0x1f) — the shared canonical body
+ * format for agent-proof extras. Must match the hub's `canonical_body`.
+ */
+export function canonicalBody(parts: string[]): Buffer {
+  const sep = Buffer.from([0x1f])
+  return Buffer.concat(parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([sep, Buffer.from(p)]))))
+}
+
+/**
+ * The `extra` of a **heartbeat** proof: binds the full mutable heartbeat body
+ * (title, workdir, hostname, canonical capabilities) so a captured heartbeat
+ * cannot be replayed with modified metadata. Must match the hub's
+ * `heartbeat_proof_extra` byte-for-byte.
+ */
+export function heartbeatProofExtra(
+  title: string,
+  workdir: string,
+  hostname: string,
+  capabilitiesCanonical: string,
+): Buffer {
+  return canonicalBody([title, workdir, hostname, capabilitiesCanonical])
+}
+
+/**
+ * The `extra` of a **result** proof: binds the request id, the scoped token,
+ * and the canonical result JSON so none of them can be tampered with. The hub
+ * stores/delivers `resultCanonical` (the signed string). Must match the hub's
+ * `result_proof_extra` byte-for-byte.
+ */
+export function resultProofExtra(requestId: string, token: string, resultCanonical: string): Buffer {
+  return canonicalBody([requestId, token, resultCanonical])
+}
+
+/**
+ * A fresh timestamped nonce: `<unix_ms>-<random>`. The timestamp gives the
+ * hub a replay window (a captured nonce is only acceptable while its
+ * timestamp is within the window, so replay resistance survives a cache
+ * prune or hub restart). The random part uses `crypto.randomBytes` (NOT
+ * `Math.random`) so it is unguessable. Must match the hub's `parse_nonce_ts`.
+ */
+export function freshNonce(): string {
+  return `${Date.now()}-${randomBytes(16).toString('hex')}`
+}
+
+/**
  * Canonical agent-proof payload (poll / heartbeat / result). The agent signs
  * this with its private key; the hub verifies it against the STORED public
- * key and consumes the nonce (single-use). `extra` binds the request_id for
- * /ra/result. Must match the hub's `agent_proof_payload` byte-for-byte.
+ * key and consumes the nonce (single-use). `extra` binds the operation's FULL
+ * mutable body (see `heartbeatProofExtra` / `resultProofExtra`), so nothing
+ * can be tampered between signing and first consumption. Must match the hub's
+ * `agent_proof_payload` byte-for-byte.
  */
-export function agentProofPayload(op: string, publicKeyB64: string, nonce: string, extra: string): Buffer {
-  const parts = [op, publicKeyB64, nonce, extra]
-  return Buffer.concat(
-    parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([Buffer.from([0x1f]), Buffer.from(p)]))),
-  )
+export function agentProofPayload(op: string, publicKeyB64: string, nonce: string, extra: string | Buffer): Buffer {
+  const extraStr = Buffer.isBuffer(extra) ? extra.toString('latin1') : extra
+  return canonicalBody([op, publicKeyB64, nonce, extraStr])
 }

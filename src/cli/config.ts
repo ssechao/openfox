@@ -109,6 +109,12 @@ const workspaceSchema = z.object({
 const remoteAgentSchema = z.object({
   hubUrl: z.string().optional(),
   hubToken: z.string().optional(),
+  /**
+   * Control-plane credential for the remote-agent control routes
+   * (`/ra/execute`, `/ra/await`, `/ra/agents`). When the hub has a control
+   * token configured, ONLY this credential is accepted on those routes.
+   */
+  controlToken: z.string().optional(),
   /** Per-call execution timeout in ms (default 120000). */
   callTimeoutMs: z.number().positive().optional(),
 })

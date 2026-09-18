@@ -260,7 +260,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const globalConfig = await loadGlobalConfig(config.mode ?? 'production', config.globalConfigPath)
     const ra = globalConfig.remoteAgent
     if (ra?.hubUrl && ra?.hubToken) {
-      setHubClient({ hubUrl: ra.hubUrl, hubToken: ra.hubToken, callTimeoutMs: ra.callTimeoutMs })
+      setHubClient({
+        hubUrl: ra.hubUrl,
+        hubToken: ra.hubToken,
+        controlToken: ra.controlToken,
+        callTimeoutMs: ra.callTimeoutMs,
+      })
       logger.info('remote-agent hub configured', { hubUrl: ra.hubUrl })
     } else {
       setHubClient(null)

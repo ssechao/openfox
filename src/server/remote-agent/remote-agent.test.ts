@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest'
-import { AgentIdentity, verifyHubSignature, canonicalEnvelopePayload } from './identity.js'
+import {
+  AgentIdentity,
+  verifyHubSignature,
+  canonicalEnvelopePayload,
+  agentProofPayload,
+  heartbeatProofExtra,
+  resultProofExtra,
+  freshNonce,
+  canonicalCapabilities,
+} from './identity.js'
 import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
 import { withRemoteParam, REMOTE_TOOL_NAMES } from './remote-param.js'
 import { toSerializedToolResult, fromSerializedToolResult, normalizeHubBase } from './types.js'
@@ -38,6 +47,100 @@ describe('remote-agent identity (Ed25519)', () => {
     expect(payload.subarray(5, 6).toString()).toBe('\x1f')
     expect(payload.toString()).toContain('run_command')
     expect(payload.toString()).toContain('{"a":1}')
+  })
+
+  it('freshNonce is timestamped and unique (randomBytes, not Math.random)', () => {
+    const before = Date.now()
+    const n1 = freshNonce()
+    const n2 = freshNonce()
+    const after = Date.now()
+    const [ts, rand] = n1.split('-')!
+    expect(Number(ts)).toBeGreaterThanOrEqual(before)
+    expect(Number(ts)).toBeLessThanOrEqual(after)
+    // 16 random bytes -> 32 hex chars.
+    expect(rand).toMatch(/^[0-9a-f]{32}$/)
+    expect(n1).not.toBe(n2)
+  })
+
+  it('heartbeat proof binds the full mutable body (tampering fails)', () => {
+    const id = AgentIdentity.generate()
+    const nonce = freshNonce()
+    const extra = heartbeatProofExtra('title', '/work', 'host', '["a","b"]')
+    const payload = agentProofPayload('heartbeat', id.publicKeyB64, nonce, extra)
+    const sig = id.sign(payload)
+    expect(verifyHubSignature(id.publicKeyB64, payload, sig)).toBe(true)
+    // Tampered title -> invalid.
+    const badTitle = agentProofPayload(
+      'heartbeat',
+      id.publicKeyB64,
+      nonce,
+      heartbeatProofExtra('other', '/work', 'host', '["a","b"]'),
+    )
+    expect(verifyHubSignature(id.publicKeyB64, badTitle, sig)).toBe(false)
+    // Tampered workdir -> invalid.
+    const badWorkdir = agentProofPayload(
+      'heartbeat',
+      id.publicKeyB64,
+      nonce,
+      heartbeatProofExtra('title', '/other', 'host', '["a","b"]'),
+    )
+    expect(verifyHubSignature(id.publicKeyB64, badWorkdir, sig)).toBe(false)
+    // Tampered capabilities -> invalid.
+    const badCaps = agentProofPayload(
+      'heartbeat',
+      id.publicKeyB64,
+      nonce,
+      heartbeatProofExtra('title', '/work', 'host', '["a","b","c"]'),
+    )
+    expect(verifyHubSignature(id.publicKeyB64, badCaps, sig)).toBe(false)
+  })
+
+  it('result proof binds request_id + token + canonical result (tampering fails)', () => {
+    const id = AgentIdentity.generate()
+    const nonce = freshNonce()
+    const extra = resultProofExtra('req-1', 'tok-1', '{"success":true}')
+    const payload = agentProofPayload('result', id.publicKeyB64, nonce, extra)
+    const sig = id.sign(payload)
+    expect(verifyHubSignature(id.publicKeyB64, payload, sig)).toBe(true)
+    // Tampered request_id -> invalid.
+    const badReq = agentProofPayload(
+      'result',
+      id.publicKeyB64,
+      nonce,
+      resultProofExtra('req-2', 'tok-1', '{"success":true}'),
+    )
+    expect(verifyHubSignature(id.publicKeyB64, badReq, sig)).toBe(false)
+    // Tampered token -> invalid.
+    const badTok = agentProofPayload(
+      'result',
+      id.publicKeyB64,
+      nonce,
+      resultProofExtra('req-1', 'tok-2', '{"success":true}'),
+    )
+    expect(verifyHubSignature(id.publicKeyB64, badTok, sig)).toBe(false)
+    // Tampered result -> invalid.
+    const badRes = agentProofPayload(
+      'result',
+      id.publicKeyB64,
+      nonce,
+      resultProofExtra('req-1', 'tok-1', '{"success":false}'),
+    )
+    expect(verifyHubSignature(id.publicKeyB64, badRes, sig)).toBe(false)
+  })
+
+  it('agent proof payload accepts Buffer extras (byte-for-byte with string extras)', () => {
+    const id = AgentIdentity.generate()
+    const nonce = freshNonce()
+    const asString = agentProofPayload('result', id.publicKeyB64, nonce, 'req-1|tok|res')
+    const asBuffer = agentProofPayload('result', id.publicKeyB64, nonce, Buffer.from('req-1|tok|res'))
+    expect(asString.equals(asBuffer)).toBe(true)
+    const sig = id.sign(asString)
+    expect(verifyHubSignature(id.publicKeyB64, asBuffer, sig)).toBe(true)
+  })
+
+  it('canonicalCapabilities is sorted and deterministic', () => {
+    expect(canonicalCapabilities(['b', 'a', 'c'])).toBe(canonicalCapabilities(['c', 'a', 'b']))
+    expect(canonicalCapabilities(['b', 'a', 'c'])).toBe('["a","b","c"]')
   })
 })
 

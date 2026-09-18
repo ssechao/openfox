@@ -91,4 +91,39 @@ describe('HubClient', () => {
     mockFetch(() => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }))
     await expect(client.listAgents()).rejects.toMatchObject({ name: 'HubClientError', status: 401 })
   })
+
+  it('uses the control token on control routes and the hub token elsewhere', async () => {
+    const controlClient = new HubClient({
+      hubUrl: 'http://hub:8848/mcp',
+      hubToken: 'hub-tok',
+      controlToken: 'control-tok',
+      callTimeoutMs: 5000,
+    })
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.includes('/ra/agents')) return Response.json(AGENTS_RESPONSE)
+      if (url.includes('/ra/execute')) return Response.json({ request_id: 'req-1' })
+      if (url.includes('/ra/await'))
+        return Response.json({ success: true, output: 'out', durationMs: 1, truncated: false })
+      return new Response('x', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await controlClient.executeTool('sess-1', 'build-box', 'run_command', {})
+    // /ra/agents (control) -> control token.
+    const agentsAuth = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<string, string>
+    expect(agentsAuth['Authorization']).toBe('Bearer control-tok')
+    // /ra/execute (control) -> control token.
+    const execAuth = (fetchMock.mock.calls[1]![1] as RequestInit).headers as Record<string, string>
+    expect(execAuth['Authorization']).toBe('Bearer control-tok')
+    // /ra/await (control) -> control token.
+    const awaitAuth = (fetchMock.mock.calls[2]![1] as RequestInit).headers as Record<string, string>
+    expect(awaitAuth['Authorization']).toBe('Bearer control-tok')
+  })
+
+  it('falls back to the hub token on control routes when no control token is set', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json(AGENTS_RESPONSE))
+    vi.stubGlobal('fetch', fetchMock)
+    await client.listAgents()
+    const init = fetchMock.mock.calls[0]![1] as RequestInit
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer tok')
+  })
 })

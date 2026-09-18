@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RemoteAgentDaemon } from './daemon.js'
 import { HubClient } from './client.js'
-import { AgentIdentity, agentProofPayload } from './identity.js'
+import { AgentIdentity, agentProofPayload, heartbeatProofExtra, canonicalCapabilities, freshNonce } from './identity.js'
 
 /**
  * End-to-end integration: real Rust hub (subprocess) + real headless-agent
@@ -31,6 +31,7 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
   let workdir: string
   let hubPort: number
   const HUB_TOKEN = 'e2e-hub-token'
+  const CONTROL_TOKEN = 'e2e-control-token'
 
   beforeAll(async () => {
     // realpath: on macOS /var is a symlink to /private/var, and `pwd` (and the
@@ -50,7 +51,7 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
       srv.on('error', reject)
     })
     hub = spawn(HUB_BIN, ['--transport', 'http', '--http-port', String(hubPort), '--http-bind', '127.0.0.1'], {
-      env: { ...process.env, AETHER_HUB_TOKEN: HUB_TOKEN },
+      env: { ...process.env, AETHER_HUB_TOKEN: HUB_TOKEN, AETHER_RA_CONTROL_TOKEN: CONTROL_TOKEN },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     // Wait for the hub to listen.
@@ -79,7 +80,12 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     })
     await daemon.start()
 
-    client = new HubClient({ hubUrl: `http://127.0.0.1:${hubPort}/mcp`, hubToken: HUB_TOKEN, callTimeoutMs: 15000 })
+    client = new HubClient({
+      hubUrl: `http://127.0.0.1:${hubPort}/mcp`,
+      hubToken: HUB_TOKEN,
+      controlToken: CONTROL_TOKEN,
+      callTimeoutMs: 15000,
+    })
 
     // Wait for the agent to enroll and appear.
     await new Promise<void>((resolve, reject) => {
@@ -169,24 +175,27 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
 
     // 3. A forged proof (wrong key) -> 401.
     const attacker = AgentIdentity.generate()
-    const forged = agentProofPayload('poll', daemon.publicKeyB64, 'forged-nonce', '')
+    const forgedNonce = freshNonce()
+    const forged = agentProofPayload('poll', daemon.publicKeyB64, forgedNonce, '')
     const badSig = await post(
       '/ra/poll',
-      { public_key: daemon.publicKeyB64, nonce: 'forged-nonce', signature: attacker.sign(forged) },
+      { public_key: daemon.publicKeyB64, nonce: forgedNonce, signature: attacker.sign(forged) },
       HUB_TOKEN,
     )
     expect(badSig.status).toBe(401)
 
     // 4. A valid proof but a REPLAYED nonce -> 401 (nonce is consumed).
-    const nonce = `replay-${Math.random().toString(36).slice(2)}`
+    const nonce = freshNonce()
     const sig = daemon.signAgentProof('poll', nonce, '')
     const first = await post('/ra/poll', { public_key: daemon.publicKeyB64, nonce, signature: sig }, HUB_TOKEN)
     expect(first.status).toBe(200)
     const replayed = await post('/ra/poll', { public_key: daemon.publicKeyB64, nonce, signature: sig }, HUB_TOKEN)
     expect(replayed.status).toBe(401)
 
-    // 5. A valid heartbeat proof works (the daemon's own key).
-    const hbNonce = `hb-${Math.random().toString(36).slice(2)}`
+    // 5. A valid heartbeat proof works (the daemon's own key). The proof binds
+    // the FULL mutable body (title, workdir, hostname, canonical capabilities).
+    const hbNonce = freshNonce()
+    const hbExtra = heartbeatProofExtra('e2e-agent', workdir, 'host', canonicalCapabilities([]))
     const hb = await post(
       '/ra/heartbeat',
       {
@@ -196,11 +205,29 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
         hostname: 'host',
         capabilities: [],
         nonce: hbNonce,
-        signature: daemon.signAgentProof('heartbeat', hbNonce, ''),
+        signature: daemon.signAgentProof('heartbeat', hbNonce, hbExtra),
       },
       HUB_TOKEN,
     )
     expect(hb.status).toBe(200)
+
+    // 6. A heartbeat proof with a TAMPERED body (different workdir) -> 401:
+    // the proof no longer covers the submitted metadata.
+    const hbTamperNonce = freshNonce()
+    const hbTamper = await post(
+      '/ra/heartbeat',
+      {
+        public_key: daemon.publicKeyB64,
+        title: 'e2e-agent',
+        workdir: '/tampered',
+        hostname: 'host',
+        capabilities: [],
+        nonce: hbTamperNonce,
+        signature: daemon.signAgentProof('heartbeat', hbTamperNonce, hbExtra),
+      },
+      HUB_TOKEN,
+    )
+    expect(hbTamper.status).toBe(401)
   })
 
   it('rejects a cross-agent poll (agent B cannot drain agent A queue)', async () => {
@@ -209,7 +236,7 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     // B's own key cannot drain agent A's queue: the hub verifies the proof
     // against the STORED key (agent A's), so the forged signature fails.
     const attacker = AgentIdentity.generate()
-    const nonce = `imp-${Math.random().toString(36).slice(2)}`
+    const nonce = freshNonce()
     const payload = agentProofPayload('poll', daemon.publicKeyB64, nonce, '')
     const res = await fetch(`${base}/ra/poll`, {
       method: 'POST',
@@ -228,13 +255,58 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     const agent = agents.find((a) => a.title === 'e2e-agent')
     expect(agent).toBeDefined()
     // The raw hub response must carry the public key (the client maps it).
+    // /ra/agents is a CONTROL route: it requires the control credential.
     const raw = await fetch(`http://127.0.0.1:${hubPort}/ra/agents`, {
-      headers: { Authorization: `Bearer ${HUB_TOKEN}` },
+      headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
     }).then((r) => r.json() as Promise<{ agents: Array<Record<string, unknown>> }>)
     const rawAgent = raw.agents.find((a) => a['title'] === 'e2e-agent')
     expect(rawAgent).toBeDefined()
     expect(typeof rawAgent!['public_key_b64']).toBe('string')
     expect((rawAgent!['public_key_b64'] as string).length).toBeGreaterThan(0)
+  })
+
+  it('isolates the control plane: hub Bearer is 401 on control routes, control token works', async () => {
+    const base = `http://127.0.0.1:${hubPort}`
+    // The shared hub Bearer must be REJECTED on the control routes (the RCE
+    // surface): a peer/agent holding the hub token cannot enumerate or drive
+    // remote execution.
+    const agentsWithHub = await fetch(`${base}/ra/agents`, {
+      headers: { Authorization: `Bearer ${HUB_TOKEN}` },
+    })
+    expect(agentsWithHub.status).toBe(401)
+
+    const execWithHub = await fetch(`${base}/ra/execute`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${HUB_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: 's', agent_peer_id: 'x', tool: 'run_command', args: {} }),
+    })
+    expect(execWithHub.status).toBe(401)
+
+    const awaitWithHub = await fetch(`${base}/ra/await`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${HUB_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: 'nope' }),
+    })
+    expect(awaitWithHub.status).toBe(401)
+
+    // The control credential IS accepted on the control routes.
+    const agentsWithControl = await fetch(`${base}/ra/agents`, {
+      headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
+    })
+    expect(agentsWithControl.status).toBe(200)
+
+    // The control token must NOT authenticate the AGENT routes (the daemon
+    // uses the hub Bearer there).
+    const pollWithControl = await fetch(`${base}/ra/poll`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${CONTROL_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: daemon.publicKeyB64, nonce: freshNonce(), signature: 'x' }),
+    })
+    expect(pollWithControl.status).toBe(401)
+
+    // And the daemon (hub Bearer + agent proof) still works end-to-end.
+    const exec = await client.executeTool('e2e-session', 'e2e-agent', 'run_command', { command: 'echo ctl' })
+    expect(exec.success).toBe(true)
   })
 
   it('drives a second agent simultaneously (multi-remote)', async () => {
