@@ -95,8 +95,12 @@ export function canonicalCapabilities(capabilities: string[]): string {
 /**
  * Canonical enrollment payload. The agent signs this with its private key;
  * the hub verifies it against the supplied public key. Binds ALL enrollment
- * metadata (title, key, workdir, hostname, capabilities) + a fresh nonce, so
- * a captured enrollment cannot be replayed with modified metadata.
+ * metadata (title, key, workdir, hostname, capabilities) + a fresh nonce +
+ * the hub's **startup epoch** (fetched via `GET /ra/epoch` before enrolling),
+ * so a captured enrollment cannot be replayed with modified metadata AND is
+ * invalid after a hub restart (the restarted hub reconstructs the payload
+ * with its OWN epoch, so the old signature no longer matches — even with an
+ * empty nonce cache and a nonce still inside the replay window).
  * Must match the hub's `enroll_payload` byte-for-byte.
  */
 export function enrollPayload(
@@ -106,9 +110,10 @@ export function enrollPayload(
   hostname: string,
   capabilitiesCanonical: string,
   nonce: string,
+  epoch: string,
 ): Buffer {
   const out: Buffer[] = []
-  for (const p of ['ra-enroll', title, publicKeyB64, workdir, hostname, capabilitiesCanonical, nonce])
+  for (const p of ['ra-enroll', title, publicKeyB64, workdir, hostname, capabilitiesCanonical, nonce, epoch])
     pushField(out, Buffer.from(p))
   return Buffer.concat(out)
 }

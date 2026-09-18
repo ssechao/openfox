@@ -202,9 +202,14 @@ export class RemoteAgentDaemon {
   private async enroll(): Promise<void> {
     // A fresh, timestamped, unguessable nonce (randomBytes, not Math.random).
     // The signature covers the FULL enrollment payload (title, key, workdir,
-    // hostname, capabilities + nonce), so a captured enrollment cannot be
-    // replayed with modified metadata; the hub also consumes the nonce
-    // (single-use) and rejects it outside the replay window.
+    // hostname, capabilities + nonce + the hub's startup epoch), so a
+    // captured enrollment cannot be replayed with modified metadata; the hub
+    // also consumes the nonce (single-use) and rejects it outside the replay
+    // window. The epoch is fetched from the hub FIRST (GET /ra/epoch) and
+    // bound into the signature: after a hub restart the epoch changes, so a
+    // captured enrollment (old epoch) is rejected even with an empty nonce
+    // cache and a nonce still inside the window.
+    const epoch = (await this.http<{ hub_epoch: string }>('GET', '/ra/epoch')).hub_epoch
     const nonce = freshNonce()
     const caps = this.capabilities()
     const payload = enrollPayload(
@@ -214,6 +219,7 @@ export class RemoteAgentDaemon {
       this.hostname(),
       canonicalCapabilities(caps),
       nonce,
+      epoch,
     )
     const signature = this.identity.sign(payload)
     const res = await this.http<{ peer_id: string; hub_public_key: string; hub_epoch: string }>('POST', '/ra/enroll', {

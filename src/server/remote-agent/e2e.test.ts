@@ -5,7 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RemoteAgentDaemon } from './daemon.js'
 import { HubClient } from './client.js'
-import { AgentIdentity, agentProofPayload, heartbeatProofExtra, canonicalCapabilities, freshNonce } from './identity.js'
+import {
+  AgentIdentity,
+  agentProofPayload,
+  heartbeatProofExtra,
+  canonicalCapabilities,
+  freshNonce,
+  enrollPayload,
+} from './identity.js'
 
 /**
  * End-to-end integration: real Rust hub (subprocess) + real headless-agent
@@ -428,6 +435,158 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     } finally {
       await daemon2.stop()
       rmSync(workdir2, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a captured enrollment replayed after a hub restart (epoch, within window)', async () => {
+    // Finding 10 (enroll): /ra/enroll must be protected by the hub epoch too.
+    // A captured enrollment (same signed body + same nonce) must be rejected
+    // after a hub restart even though the nonce is still inside the 5-minute
+    // replay window and the restarted hub has an EMPTY nonce cache. The
+    // restarted hub reconstructs the payload with its OWN (new) epoch, so the
+    // old signature no longer matches.
+    // A fresh hub on its own port (the main hub keeps running for other tests).
+    const net = await import('node:net')
+    const port2 = await new Promise<number>((resolve, reject) => {
+      const srv = net.createServer()
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address()
+        if (addr && typeof addr === 'object') resolve(addr.port)
+        else reject(new Error('no port'))
+        srv.close(() => undefined)
+      })
+      srv.on('error', reject)
+    })
+    const base2 = `http://127.0.0.1:${port2}`
+    const post = (path: string, body: Record<string, unknown>, auth?: string) =>
+      fetch(`${base2}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
+        },
+        body: JSON.stringify(body),
+      })
+    const env = { ...process.env, AETHER_HUB_TOKEN: HUB_TOKEN, AETHER_RA_CONTROL_TOKEN: CONTROL_TOKEN }
+    const spawnHub = () =>
+      spawn(HUB_BIN, ['--transport', 'http', '--http-port', String(port2), '--http-bind', '127.0.0.1'], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    const waitReady = async (b: string) => {
+      const started = Date.now()
+      for (;;) {
+        try {
+          const r = await fetch(`${b}/ra/epoch`, { headers: { Authorization: `Bearer ${HUB_TOKEN}` } })
+          if (r.ok) return
+        } catch {
+          // not up yet
+        }
+        if (Date.now() - started > 15000) throw new Error('hub did not start')
+        await new Promise((r) => setTimeout(r, 200))
+      }
+    }
+
+    let hubA = spawnHub()
+    try {
+      await waitReady(base2)
+      // Enroll a brand-new identity on hub A.
+      const id = AgentIdentity.generate()
+      const epochA = (await (
+        await fetch(`${base2}/ra/epoch`, { headers: { Authorization: `Bearer ${HUB_TOKEN}` } })
+      ).json()) as {
+        hub_epoch: string
+      }
+      const nonce = freshNonce()
+      const caps = ['run_command']
+      const payload = enrollPayload(
+        'e2e-restart',
+        id.publicKeyB64,
+        '/srv/restart',
+        'host',
+        canonicalCapabilities(caps),
+        nonce,
+        epochA.hub_epoch,
+      )
+      const signature = id.sign(payload)
+      const first = await post(
+        '/ra/enroll',
+        {
+          public_key: id.publicKeyB64,
+          title: 'e2e-restart',
+          workdir: '/srv/restart',
+          hostname: 'host',
+          capabilities: caps,
+          nonce,
+          signature,
+        },
+        HUB_TOKEN,
+      )
+      expect(first.status).toBe(200)
+
+      // RESTART the hub (fresh process: new epoch + empty nonce cache).
+      hubA.kill('SIGTERM')
+      await new Promise((r) => setTimeout(r, 300))
+      let hubB = spawnHub()
+      try {
+        await waitReady(base2)
+        const epochB = (await (
+          await fetch(`${base2}/ra/epoch`, { headers: { Authorization: `Bearer ${HUB_TOKEN}` } })
+        ).json()) as {
+          hub_epoch: string
+        }
+        expect(epochB.hub_epoch).not.toBe(epochA.hub_epoch)
+
+        // REPLAY the captured enrollment (same signed body + same nonce) —
+        // still inside the replay window, empty nonce cache on hub B.
+        const replay = await post(
+          '/ra/enroll',
+          {
+            public_key: id.publicKeyB64,
+            title: 'e2e-restart',
+            workdir: '/srv/restart',
+            hostname: 'host',
+            capabilities: caps,
+            nonce,
+            signature,
+          },
+          HUB_TOKEN,
+        )
+        // A captured enrollment replayed after a restart must be rejected (epoch mismatch).
+        expect(replay.status).toBe(401)
+
+        // A FRESH enrollment signed with the NEW epoch (re-fetched) is
+        // accepted and resumes the same stable peer id.
+        const nonce2 = freshNonce()
+        const payload2 = enrollPayload(
+          'e2e-restart',
+          id.publicKeyB64,
+          '/srv/restart',
+          'host',
+          canonicalCapabilities(caps),
+          nonce2,
+          epochB.hub_epoch,
+        )
+        const signature2 = id.sign(payload2)
+        const fresh = await post(
+          '/ra/enroll',
+          {
+            public_key: id.publicKeyB64,
+            title: 'e2e-restart',
+            workdir: '/srv/restart',
+            hostname: 'host',
+            capabilities: caps,
+            nonce: nonce2,
+            signature: signature2,
+          },
+          HUB_TOKEN,
+        )
+        expect(fresh.status).toBe(200)
+      } finally {
+        hubB.kill('SIGTERM')
+      }
+    } finally {
+      hubA.kill('SIGTERM')
     }
   })
 })

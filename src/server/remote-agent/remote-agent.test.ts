@@ -9,6 +9,7 @@ import {
   freshNonce,
   canonicalCapabilities,
   canonicalBody,
+  enrollPayload,
 } from './identity.js'
 import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
 import { withRemoteParam, REMOTE_TOOL_NAMES } from './remote-param.js'
@@ -188,6 +189,24 @@ describe('remote-agent identity (Ed25519)', () => {
     // verify against the current-epoch payload.
     const otherEpoch = agentProofPayload('poll', id.publicKeyB64, nonce, 'epoch-2', '')
     expect(verifyHubSignature(id.publicKeyB64, otherEpoch, sig)).toBe(false)
+  })
+
+  it('enroll payload binds the epoch (restart robustness for /ra/enroll)', () => {
+    const id = AgentIdentity.generate()
+    const nonce = freshNonce()
+    const caps = canonicalCapabilities(['run_command'])
+    const payload = enrollPayload('agent-x', id.publicKeyB64, '/work', 'host', caps, nonce, 'epoch-1')
+    const sig = id.sign(payload)
+    expect(verifyHubSignature(id.publicKeyB64, payload, sig)).toBe(true)
+    // A captured enrollment signed for a DIFFERENT epoch (previous hub
+    // process) must not verify against the current-epoch payload: this is
+    // what makes /ra/enroll single-use robust across a hub restart (empty
+    // nonce cache, nonce still inside the replay window).
+    const otherEpoch = enrollPayload('agent-x', id.publicKeyB64, '/work', 'host', caps, nonce, 'epoch-2')
+    expect(verifyHubSignature(id.publicKeyB64, otherEpoch, sig)).toBe(false)
+    // Tampered metadata still fails.
+    const tampered = enrollPayload('agent-y', id.publicKeyB64, '/work', 'host', caps, nonce, 'epoch-1')
+    expect(verifyHubSignature(id.publicKeyB64, tampered, sig)).toBe(false)
   })
 
   it('canonicalCapabilities is sorted and deterministic', () => {
