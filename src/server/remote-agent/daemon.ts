@@ -56,6 +56,10 @@ export class RemoteAgentDaemon {
   private mcpManager: McpManager | null = null
   private mcpStatus: Record<string, string> = {}
   private hubPublicKeyB64: string | null = null
+  /** The hub's startup epoch (received at enrollment). Bound into every
+   * agent-proof; a hub restart changes it, so the daemon re-enrolls to pick
+   * up the new epoch (a captured proof from the previous process is invalid). */
+  private _hubEpoch: string | null = null
   private peerId: string | null = null
   private pollTimer: NodeJS.Timeout | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
@@ -86,10 +90,23 @@ export class RemoteAgentDaemon {
     return this.identity.publicKeyB64
   }
 
-  /** Sign an agent proof (op, nonce, extra) with the daemon's private key.
-   * Exposed for tests (e.g. cross-agent impersonation). */
+  /** The hub's startup epoch (received at enrollment). Exposed for tests that
+   * must build agent-proof payloads the way the hub reconstructs them. */
+  get hubEpoch(): string {
+    return this._hubEpoch ?? ''
+  }
+
+  /** Sign an agent proof (op, nonce, epoch, extra) with the daemon's private
+   * key. Exposed for tests (e.g. cross-agent impersonation). */
   signAgentProof(op: string, nonce: string, extra: string | Buffer): string {
-    return this.identity.sign(agentProofPayload(op, this.identity.publicKeyB64, nonce, extra))
+    return this.identity.sign(agentProofPayload(op, this.identity.publicKeyB64, nonce, this._hubEpoch ?? '', extra))
+  }
+
+  /** Sign an already-built payload with the daemon's private key. Exposed for
+   * tests that build a custom proof payload (e.g. Unicode metadata) and need
+   * the daemon's key to sign it. */
+  identitySign(payload: Buffer): string {
+    return this.identity.sign(payload)
   }
 
   get toolNames(): string[] {
@@ -171,7 +188,9 @@ export class RemoteAgentDaemon {
     const json = text ? JSON.parse(text) : {}
     if (!res.ok) {
       const msg = (json as { error?: string }).error ?? `HTTP ${res.status}`
-      throw new Error(`${method} ${path} -> ${res.status}: ${msg}`)
+      const err = new Error(`${method} ${path} -> ${res.status}: ${msg}`)
+      ;(err as { status?: number }).status = res.status
+      throw err
     }
     return json as T
   }
@@ -197,7 +216,7 @@ export class RemoteAgentDaemon {
       nonce,
     )
     const signature = this.identity.sign(payload)
-    const res = await this.http<{ peer_id: string; hub_public_key: string }>('POST', '/ra/enroll', {
+    const res = await this.http<{ peer_id: string; hub_public_key: string; hub_epoch: string }>('POST', '/ra/enroll', {
       title: this.opts.name ?? this.opts.workdir,
       public_key: this.identity.publicKeyB64,
       nonce,
@@ -208,27 +227,58 @@ export class RemoteAgentDaemon {
     })
     this.peerId = res.peer_id
     this.hubPublicKeyB64 = res.hub_public_key
+    this._hubEpoch = res.hub_epoch
   }
 
   private async heartbeat(): Promise<void> {
     // Agent-signed proof (fresh timestamped nonce) so only the key holder can
     // refresh this agent's liveness. The proof binds the FULL mutable body
-    // (title, workdir, hostname, canonical capabilities) so a captured
-    // heartbeat cannot be replayed with modified metadata.
+    // (title, workdir, hostname, canonical capabilities) AND the hub's
+    // startup epoch, so a captured heartbeat cannot be replayed with modified
+    // metadata and is invalid after a hub restart (epoch changed).
     const nonce = freshNonce()
     const caps = this.capabilities()
     const title = this.opts.name ?? this.opts.workdir
     const extra = heartbeatProofExtra(title, this.opts.workdir, this.hostname(), canonicalCapabilities(caps))
-    const payload = agentProofPayload('heartbeat', this.identity.publicKeyB64, nonce, extra)
-    await this.http('POST', '/ra/heartbeat', {
-      public_key: this.identity.publicKeyB64,
-      title,
-      workdir: this.opts.workdir,
-      hostname: this.hostname(),
-      capabilities: caps,
-      nonce,
-      signature: this.identity.sign(payload),
-    })
+    const payload = agentProofPayload('heartbeat', this.identity.publicKeyB64, nonce, this._hubEpoch ?? '', extra)
+    try {
+      await this.http('POST', '/ra/heartbeat', {
+        public_key: this.identity.publicKeyB64,
+        title,
+        workdir: this.opts.workdir,
+        hostname: this.hostname(),
+        capabilities: caps,
+        nonce,
+        signature: this.identity.sign(payload),
+      })
+    } catch (error) {
+      // 401 = the hub no longer accepts our proof: most likely the hub
+      // RESTARTED (new epoch) and our consumed-nonce cache / epoch are stale.
+      // Re-enroll to pick up the new epoch + public key, then retry once.
+      if ((error as { status?: number }).status === 401) {
+        logger.warn('heartbeat rejected (401) — re-enrolling to sync hub epoch')
+        await this.enroll()
+        const retryNonce = freshNonce()
+        const retryPayload = agentProofPayload(
+          'heartbeat',
+          this.identity.publicKeyB64,
+          retryNonce,
+          this._hubEpoch ?? '',
+          extra,
+        )
+        await this.http('POST', '/ra/heartbeat', {
+          public_key: this.identity.publicKeyB64,
+          title,
+          workdir: this.opts.workdir,
+          hostname: this.hostname(),
+          capabilities: caps,
+          nonce: retryNonce,
+          signature: this.identity.sign(retryPayload),
+        })
+        return
+      }
+      throw error
+    }
   }
 
   private hostname(): string {
@@ -246,15 +296,41 @@ export class RemoteAgentDaemon {
     // would otherwise both fetch the same envelope and execute it twice.
     this.inFlight = true
     try {
-      // Agent-signed proof (fresh timestamped nonce): only the key holder may
-      // drain this agent's queue.
+      // Agent-signed proof (fresh timestamped nonce + hub epoch): only the
+      // key holder may drain this agent's queue.
       const nonce = freshNonce()
-      const payload = agentProofPayload('poll', this.identity.publicKeyB64, nonce, '')
-      const res = await this.http<{ envelope: ExecutionEnvelope | null }>('POST', '/ra/poll', {
-        public_key: this.identity.publicKeyB64,
-        nonce,
-        signature: this.identity.sign(payload),
-      })
+      const payload = agentProofPayload('poll', this.identity.publicKeyB64, nonce, this._hubEpoch ?? '', '')
+      let res: { envelope: ExecutionEnvelope | null }
+      try {
+        res = await this.http<{ envelope: ExecutionEnvelope | null }>('POST', '/ra/poll', {
+          public_key: this.identity.publicKeyB64,
+          nonce,
+          signature: this.identity.sign(payload),
+        })
+      } catch (error) {
+        // 401 = the hub no longer accepts our proof: the hub most likely
+        // RESTARTED (new epoch). Re-enroll to pick up the new epoch, then
+        // retry the poll once.
+        if ((error as { status?: number }).status === 401) {
+          logger.warn('poll rejected (401) — re-enrolling to sync hub epoch')
+          await this.enroll()
+          const retryNonce = freshNonce()
+          const retryPayload = agentProofPayload(
+            'poll',
+            this.identity.publicKeyB64,
+            retryNonce,
+            this._hubEpoch ?? '',
+            '',
+          )
+          res = await this.http<{ envelope: ExecutionEnvelope | null }>('POST', '/ra/poll', {
+            public_key: this.identity.publicKeyB64,
+            nonce: retryNonce,
+            signature: this.identity.sign(retryPayload),
+          })
+        } else {
+          throw error
+        }
+      }
       if (!res.envelope) return
       await this.handleEnvelope(res.envelope)
     } finally {
@@ -370,7 +446,7 @@ export class RemoteAgentDaemon {
       try {
         const nonce = freshNonce()
         const extra = resultProofExtra(requestId, token ?? '', resultCanonical)
-        const payload = agentProofPayload('result', this.identity.publicKeyB64, nonce, extra)
+        const payload = agentProofPayload('result', this.identity.publicKeyB64, nonce, this._hubEpoch ?? '', extra)
         await this.http('POST', '/ra/result', {
           public_key: this.identity.publicKeyB64,
           request_id: requestId,
@@ -382,6 +458,13 @@ export class RemoteAgentDaemon {
         return
       } catch (error) {
         lastError = error
+        // 401 = the hub no longer accepts our proof (most likely a hub
+        // RESTART changed the epoch). Re-enroll to pick up the new epoch,
+        // then retry.
+        if ((error as { status?: number }).status === 401) {
+          logger.warn('result rejected (401) — re-enrolling to sync hub epoch')
+          await this.enroll().catch(() => undefined)
+        }
         if (attempt < 2) {
           await new Promise((r) => setTimeout(r, 250 * (attempt + 1)))
         }

@@ -53,9 +53,22 @@ export function verifyHubSignature(hubPublicKeyB64: string, message: string | Bu
 }
 
 /**
+ * Append a length-prefixed (u32 big-endian) field to an array of buffers.
+ * This makes the canonical encoding **injective**: field boundaries are
+ * unambiguous, so a delimiter byte (0x1f) inside a field can never be
+ * confused with a field separator — `["a","b\x1fc"] != ["a\x1fb","c"]`.
+ * Must match the hub's `push_field` byte-for-byte.
+ */
+function pushField(out: Buffer[], field: Buffer): void {
+  const len = Buffer.allocUnsafe(4)
+  len.writeUInt32BE(field.length, 0)
+  out.push(len, field)
+}
+
+/**
  * Canonical serialization of the envelope payload (everything except the
- * signature). Must match the hub's `canonical_payload` byte-for-byte:
- * fields joined with 0x1f, args as their JSON string.
+ * signature). Must match the hub's `canonical_payload` byte-for-byte: each
+ * field is length-prefixed (u32 BE) then its UTF-8 bytes (injective).
  */
 export function canonicalEnvelopePayload(
   requestId: string,
@@ -64,7 +77,9 @@ export function canonicalEnvelopePayload(
   tool: string,
   argsJson: string,
 ): Buffer {
-  return canonicalBody([requestId, agentPeerId, sessionId, tool, argsJson])
+  const out: Buffer[] = []
+  for (const p of [requestId, agentPeerId, sessionId, tool, argsJson]) pushField(out, Buffer.from(p))
+  return Buffer.concat(out)
 }
 
 /**
@@ -92,19 +107,21 @@ export function enrollPayload(
   capabilitiesCanonical: string,
   nonce: string,
 ): Buffer {
-  const parts = ['ra-enroll', title, publicKeyB64, workdir, hostname, capabilitiesCanonical, nonce]
-  return Buffer.concat(
-    parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([Buffer.from([0x1f]), Buffer.from(p)]))),
-  )
+  const out: Buffer[] = []
+  for (const p of ['ra-enroll', title, publicKeyB64, workdir, hostname, capabilitiesCanonical, nonce])
+    pushField(out, Buffer.from(p))
+  return Buffer.concat(out)
 }
 
 /**
- * Fields joined with a unit separator (0x1f) — the shared canonical body
- * format for agent-proof extras. Must match the hub's `canonical_body`.
+ * Injective canonical body: each part is length-prefixed (u32 BE) then its
+ * UTF-8 bytes. Field boundaries are unambiguous (no delimiter collision).
+ * Must match the hub's `canonical_body` byte-for-byte.
  */
 export function canonicalBody(parts: string[]): Buffer {
-  const sep = Buffer.from([0x1f])
-  return Buffer.concat(parts.map((p, i) => (i === 0 ? Buffer.from(p) : Buffer.concat([sep, Buffer.from(p)]))))
+  const out: Buffer[] = []
+  for (const p of parts) pushField(out, Buffer.from(p))
+  return Buffer.concat(out)
 }
 
 /**
@@ -146,12 +163,29 @@ export function freshNonce(): string {
 /**
  * Canonical agent-proof payload (poll / heartbeat / result). The agent signs
  * this with its private key; the hub verifies it against the STORED public
- * key and consumes the nonce (single-use). `extra` binds the operation's FULL
- * mutable body (see `heartbeatProofExtra` / `resultProofExtra`), so nothing
- * can be tampered between signing and first consumption. Must match the hub's
- * `agent_proof_payload` byte-for-byte.
+ * key and consumes the nonce (single-use). `epoch` binds the hub's startup
+ * epoch (a captured proof from a previous hub process is invalid after a
+ * restart, so single-use is robust to a lost nonce cache). `extra` binds the
+ * operation's FULL mutable body (see `heartbeatProofExtra` /
+ * `resultProofExtra`).
+ *
+ * **Unicode-safe**: `extra` is used as RAW BYTES (no string round-trip), so
+ * non-ASCII bytes (e.g. `é` = `c3 a9`) are preserved exactly — matching the
+ * hub, which treats `extra` as `&[u8]`. All fields are length-prefixed
+ * (injective). Must match the hub's `agent_proof_payload` byte-for-byte.
  */
-export function agentProofPayload(op: string, publicKeyB64: string, nonce: string, extra: string | Buffer): Buffer {
-  const extraStr = Buffer.isBuffer(extra) ? extra.toString('latin1') : extra
-  return canonicalBody([op, publicKeyB64, nonce, extraStr])
+export function agentProofPayload(
+  op: string,
+  publicKeyB64: string,
+  nonce: string,
+  epoch: string,
+  extra: string | Buffer,
+): Buffer {
+  const out: Buffer[] = []
+  pushField(out, Buffer.from(op))
+  pushField(out, Buffer.from(publicKeyB64))
+  pushField(out, Buffer.from(nonce))
+  pushField(out, Buffer.from(epoch))
+  pushField(out, Buffer.isBuffer(extra) ? extra : Buffer.from(extra))
+  return Buffer.concat(out)
 }

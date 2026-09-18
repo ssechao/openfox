@@ -45,8 +45,8 @@ difference is the `peer_type` and the channel.
 - **Agent-signed proofs (anti-impersonation).** The hub Bearer is a shared
   secret, so every _agent_ request (`/ra/poll`, `/ra/heartbeat`, `/ra/result`)
   additionally carries a **proof signed by the agent** (its private key over
-  `agent_proof_payload(op, public_key, fresh nonce, extra)`, where `extra` is
-  the operation's **full mutable body**: empty for `/ra/poll`;
+  `agent_proof_payload(op, public_key, fresh nonce, hub_epoch, extra)`, where
+  `extra` is the operation's **full mutable body**: empty for `/ra/poll`;
   `title|workdir|hostname|capabilities` for `/ra/heartbeat`;
   `request_id|token|result_canonical` for `/ra/result`). The hub verifies the
   proof against the **stored** public key and consumes the nonce. A holder of
@@ -54,12 +54,32 @@ difference is the `peer_type` and the channel.
   agent's queue, submit results for it, or refresh its liveness with modified
   metadata. The hub stores/delivers `result_canonical` (the signed string), not
   a re-serialized field.
+- **Injective canonical encoding.** Every canonical payload (enrollment,
+  agent-proof, heartbeat/result `extra`, execution envelope) is built by
+  **length-prefixing each field** (u32 big-endian) before its UTF-8 bytes —
+  never by joining with a delimiter byte. Field boundaries are therefore
+  unambiguous: a `0x1f` (or any other byte) inside a field can never be
+  confused with a field separator, so two distinct field lists can never
+  produce the same canonical bytes. The hub and the daemon implement the same
+  byte-for-byte encoding.
+- **Unicode-safe `extra`.** The proof's `extra` is handled as **raw bytes** on
+  both sides (no string round-trip on the agent side). Non-ASCII metadata
+  (e.g. `é` = UTF-8 `c3 a9`) is preserved exactly, so heartbeats and results
+  with Unicode titles/workdirs/paths/outputs verify and round-trip intact.
+- **Hub epoch (replay-proof across hub restarts).** Each hub process generates
+  a random **startup epoch** (UUID v4) at boot and binds it into every
+  agent-proof payload (the daemon receives it at enrollment). The hub
+  reconstructs the proof with **its own** epoch, so a proof captured from a
+  previous hub process fails verification after a restart — even though the
+  nonce is still inside the replay window and the nonce cache is empty. The
+  daemon re-enrolls on a 401 to pick up the new epoch.
 - **Timestamped nonces + replay window.** Nonces are `<unix_ms>-<random>`
   (random via `crypto.randomBytes`, not `Math.random`). The hub accepts a nonce
   only while its timestamp is within a 5-minute replay window, and the
   consumed-nonce cache covers the full window — so a captured request is
-  rejected once the window has elapsed, even after a cache prune or a hub
-  restart (empty cache). The same window applies to enrollment nonces.
+  rejected once the window has elapsed, even after a cache prune. (A hub
+  restart is additionally covered by the **hub epoch** above.) The same window
+  applies to enrollment nonces.
 - **Scoped ephemeral tokens.** Each execution call is bound to a
   `(session, agent)` pair by a hub-issued, single-use, short-lived token. The
   agent must present the token when it submits the result
@@ -76,11 +96,13 @@ difference is the `peer_type` and the channel.
   from the agents' keys. The **control routes** (`/ra/execute`, `/ra/await`,
   `/ra/agents`) — the RCE surface — authenticate with a **distinct control
   credential** (`AETHER_RA_CONTROL_TOKEN` on the hub, `controlToken` in the
-  OpenFox config). When the hub has a control token configured, ONLY that
-  credential is accepted on those routes: the shared hub Bearer is rejected
-  (401), so a peer or headless-agent holding the hub token cannot enumerate
-  remote-execution targets or drive executions. When unset, the hub Bearer is
-  accepted (backward-compatible default).
+  OpenFox config). ONLY that credential is accepted on those routes: the
+  shared hub Bearer is rejected (401), so a peer or headless-agent holding the
+  hub token cannot enumerate remote-execution targets or drive executions.
+  The routes **fail closed**: when no control token is configured, EVERY
+  request is rejected (401) — the hub Bearer is never a fallback, so an
+  unconfigured hub cannot be driven by any agent holding the shared hub
+  token.
 - **Single gateway.** The OpenFox server never contacts a headless-agent
   directly. All traffic flows through the hub. The agent is only reachable via
   the hub (it polls the hub; nothing is inbound to it), so the hub is the only
@@ -182,8 +204,9 @@ remotely.
 The **agent routes** (`/ra/enroll`, `/ra/heartbeat`, `/ra/poll`, `/ra/result`)
 require the hub Bearer **plus** an agent-signed proof (see the security model).
 The **control routes** (`/ra/agents`, `/ra/execute`, `/ra/await`) require the
-control credential (`AETHER_RA_CONTROL_TOKEN`); when it is configured on the
-hub, the shared hub Bearer is rejected (401) there.
+control credential (`AETHER_RA_CONTROL_TOKEN`); the shared hub Bearer is
+rejected (401) there, and the routes **fail closed** — with no control token
+configured, every request is rejected (401).
 
 ## Tool availability on the daemon
 
@@ -202,14 +225,20 @@ signed envelopes), not per-path confirmation.
 ## Tests
 
 - **OpenFoxFork** — `src/server/remote-agent/remote-agent.test.ts` (identity,
-  context, `remote` param, serialization), `client.test.ts` (hub client, target
-  validation), `e2e.test.ts` (real hub + daemon + client loop; run with
-  `E2E_HUB_BIN=<cargo build output>`), and the remote-routing cases in
+  context, `remote` param, serialization, injective length-prefix encoding,
+  Unicode raw-byte `extra`, epoch binding), `client.test.ts` (hub client,
+  target validation), `e2e.test.ts` (real hub + daemon + client loop,
+  including a full-loop **Unicode round-trip** of metadata and results; run
+  with `E2E_HUB_BIN=<cargo build output>`), and the remote-routing cases in
   `src/server/chat/execute-tools.test.ts`.
 - **llm-aether** — `cargo test` covers Ed25519 sign/verify, envelope
   sign/verify, scoped-token single-use/scoping, headless-agent enrollment,
-  liveness, the execution relay, the (session, agent) request binding, and
-  single-resolution (a retried result cannot overwrite the first).
+  liveness, the execution relay, the (session, agent) request binding,
+  single-resolution (a retried result cannot overwrite the first), the
+  **injective canonical encoding** (no delimiter collision), the **hub epoch**
+  (a replayed proof is rejected after a hub restart even with an empty nonce
+  cache), and **fail-closed control routes** (no control token → 401 for
+  everything).
 
 ## Deployment
 

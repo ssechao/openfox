@@ -176,7 +176,7 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     // 3. A forged proof (wrong key) -> 401.
     const attacker = AgentIdentity.generate()
     const forgedNonce = freshNonce()
-    const forged = agentProofPayload('poll', daemon.publicKeyB64, forgedNonce, '')
+    const forged = agentProofPayload('poll', daemon.publicKeyB64, forgedNonce, daemon.hubEpoch, '')
     const badSig = await post(
       '/ra/poll',
       { public_key: daemon.publicKeyB64, nonce: forgedNonce, signature: attacker.sign(forged) },
@@ -237,7 +237,7 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     // against the STORED key (agent A's), so the forged signature fails.
     const attacker = AgentIdentity.generate()
     const nonce = freshNonce()
-    const payload = agentProofPayload('poll', daemon.publicKeyB64, nonce, '')
+    const payload = agentProofPayload('poll', daemon.publicKeyB64, nonce, daemon.hubEpoch, '')
     const res = await fetch(`${base}/ra/poll`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${HUB_TOKEN}`, 'Content-Type': 'application/json' },
@@ -307,6 +307,91 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
     // And the daemon (hub Bearer + agent proof) still works end-to-end.
     const exec = await client.executeTool('e2e-session', 'e2e-agent', 'run_command', { command: 'echo ctl' })
     expect(exec.success).toBe(true)
+  })
+
+  it('round-trips Unicode through the full loop (metadata + result)', async () => {
+    // Finding 17: the hub treats `extra` as raw bytes. A latin1 string
+    // round-trip on the agent side would corrupt `é` (UTF-8 c3 a9) into
+    // c3 83 c2 a9, so the hub's signature verification would fail. This test
+    // proves Unicode survives both the heartbeat metadata (extra) and the
+    // result (result_canonical) end-to-end against the real Rust hub.
+    const base = `http://127.0.0.1:${hubPort}`
+    const post = (path: string, body: Record<string, unknown>, auth?: string) =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
+        },
+        body: JSON.stringify(body),
+      })
+
+    // 1. A Unicode RESULT must round-trip: write a file with Unicode content
+    // on the remote, read it back, and confirm the result (result_canonical,
+    // signed as raw bytes) is delivered intact. (Done BEFORE the Unicode
+    // heartbeat below, which renames the agent.)
+    const write = await client.executeTool('e2e-session', 'e2e-agent', 'write_file', {
+      path: 'unicode.txt',
+      content: 'héllo wörld ünïcode\n',
+    })
+    expect(write.success).toBe(true)
+    const read = await client.executeTool('e2e-session', 'e2e-agent', 'read_file', { path: 'unicode.txt' })
+    expect(read.success).toBe(true)
+    expect(read.output).toContain('héllo wörld ünïcode')
+    // Confirm the file actually landed on disk with the exact Unicode bytes.
+    expect(readFileSync(join(workdir, 'unicode.txt'), 'utf-8')).toContain('héllo wörld ünïcode')
+
+    // 2. A heartbeat with Unicode METADATA (title/workdir/hostname) must be
+    // accepted: the proof's extra (UTF-8 bytes) matches the hub's
+    // reconstruction from the body fields.
+    const unicodeTitle = 'agent-é-ünï'
+    const unicodeWorkdir = '/srv/wörk-é'
+    const unicodeHost = 'hôte-é'
+    const caps = ['run_command', 'read_file']
+    const hbExtra = heartbeatProofExtra(unicodeTitle, unicodeWorkdir, unicodeHost, canonicalCapabilities(caps))
+    const hbNonce = freshNonce()
+    const hbPayload = agentProofPayload('heartbeat', daemon.publicKeyB64, hbNonce, daemon.hubEpoch, hbExtra)
+    const hb = await post(
+      '/ra/heartbeat',
+      {
+        public_key: daemon.publicKeyB64,
+        title: unicodeTitle,
+        workdir: unicodeWorkdir,
+        hostname: unicodeHost,
+        capabilities: caps,
+        nonce: hbNonce,
+        signature: daemon.identitySign(hbPayload),
+      },
+      HUB_TOKEN,
+    )
+    // A Unicode-metadata heartbeat must be accepted (raw-byte extra).
+    expect(hb.status).toBe(200)
+
+    // Restore the agent's original metadata (the Unicode heartbeat above
+    // updated the stored title/workdir) so later tests see the expected values.
+    const restoreExtra = heartbeatProofExtra('e2e-agent', workdir, 'host', canonicalCapabilities([]))
+    const restoreNonce = freshNonce()
+    const restorePayload = agentProofPayload(
+      'heartbeat',
+      daemon.publicKeyB64,
+      restoreNonce,
+      daemon.hubEpoch,
+      restoreExtra,
+    )
+    const restore = await post(
+      '/ra/heartbeat',
+      {
+        public_key: daemon.publicKeyB64,
+        title: 'e2e-agent',
+        workdir: workdir,
+        hostname: 'host',
+        capabilities: [],
+        nonce: restoreNonce,
+        signature: daemon.identitySign(restorePayload),
+      },
+      HUB_TOKEN,
+    )
+    expect(restore.status).toBe(200)
   })
 
   it('drives a second agent simultaneously (multi-remote)', async () => {

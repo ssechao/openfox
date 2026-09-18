@@ -8,6 +8,7 @@ import {
   resultProofExtra,
   freshNonce,
   canonicalCapabilities,
+  canonicalBody,
 } from './identity.js'
 import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
 import { withRemoteParam, REMOTE_TOOL_NAMES } from './remote-param.js'
@@ -41,10 +42,14 @@ describe('remote-agent identity (Ed25519)', () => {
     expect(verifyHubSignature(b.publicKeyB64, 'msg', sig)).toBe(false)
   })
 
-  it('canonical payload joins fields with 0x1f', () => {
+  it('canonical payload length-prefixes each field (u32 BE)', () => {
     const payload = canonicalEnvelopePayload('req-1', 'agent-1', 'sess-1', 'run_command', '{"a":1}')
-    expect(payload.subarray(0, 5).toString()).toBe('req-1')
-    expect(payload.subarray(5, 6).toString()).toBe('\x1f')
+    // First field: 4-byte BE length (5) then the raw bytes.
+    expect(payload.subarray(0, 4).readUInt32BE(0)).toBe(5)
+    expect(payload.subarray(4, 9).toString()).toBe('req-1')
+    // Second field: 4-byte BE length (7) then 'agent-1'.
+    expect(payload.subarray(9, 13).readUInt32BE(0)).toBe(7)
+    expect(payload.subarray(13, 20).toString()).toBe('agent-1')
     expect(payload.toString()).toContain('run_command')
     expect(payload.toString()).toContain('{"a":1}')
   })
@@ -66,7 +71,7 @@ describe('remote-agent identity (Ed25519)', () => {
     const id = AgentIdentity.generate()
     const nonce = freshNonce()
     const extra = heartbeatProofExtra('title', '/work', 'host', '["a","b"]')
-    const payload = agentProofPayload('heartbeat', id.publicKeyB64, nonce, extra)
+    const payload = agentProofPayload('heartbeat', id.publicKeyB64, nonce, 'epoch-1', extra)
     const sig = id.sign(payload)
     expect(verifyHubSignature(id.publicKeyB64, payload, sig)).toBe(true)
     // Tampered title -> invalid.
@@ -74,6 +79,7 @@ describe('remote-agent identity (Ed25519)', () => {
       'heartbeat',
       id.publicKeyB64,
       nonce,
+      'epoch-1',
       heartbeatProofExtra('other', '/work', 'host', '["a","b"]'),
     )
     expect(verifyHubSignature(id.publicKeyB64, badTitle, sig)).toBe(false)
@@ -82,6 +88,7 @@ describe('remote-agent identity (Ed25519)', () => {
       'heartbeat',
       id.publicKeyB64,
       nonce,
+      'epoch-1',
       heartbeatProofExtra('title', '/other', 'host', '["a","b"]'),
     )
     expect(verifyHubSignature(id.publicKeyB64, badWorkdir, sig)).toBe(false)
@@ -90,6 +97,7 @@ describe('remote-agent identity (Ed25519)', () => {
       'heartbeat',
       id.publicKeyB64,
       nonce,
+      'epoch-1',
       heartbeatProofExtra('title', '/work', 'host', '["a","b","c"]'),
     )
     expect(verifyHubSignature(id.publicKeyB64, badCaps, sig)).toBe(false)
@@ -99,7 +107,7 @@ describe('remote-agent identity (Ed25519)', () => {
     const id = AgentIdentity.generate()
     const nonce = freshNonce()
     const extra = resultProofExtra('req-1', 'tok-1', '{"success":true}')
-    const payload = agentProofPayload('result', id.publicKeyB64, nonce, extra)
+    const payload = agentProofPayload('result', id.publicKeyB64, nonce, 'epoch-1', extra)
     const sig = id.sign(payload)
     expect(verifyHubSignature(id.publicKeyB64, payload, sig)).toBe(true)
     // Tampered request_id -> invalid.
@@ -107,6 +115,7 @@ describe('remote-agent identity (Ed25519)', () => {
       'result',
       id.publicKeyB64,
       nonce,
+      'epoch-1',
       resultProofExtra('req-2', 'tok-1', '{"success":true}'),
     )
     expect(verifyHubSignature(id.publicKeyB64, badReq, sig)).toBe(false)
@@ -115,6 +124,7 @@ describe('remote-agent identity (Ed25519)', () => {
       'result',
       id.publicKeyB64,
       nonce,
+      'epoch-1',
       resultProofExtra('req-1', 'tok-2', '{"success":true}'),
     )
     expect(verifyHubSignature(id.publicKeyB64, badTok, sig)).toBe(false)
@@ -123,6 +133,7 @@ describe('remote-agent identity (Ed25519)', () => {
       'result',
       id.publicKeyB64,
       nonce,
+      'epoch-1',
       resultProofExtra('req-1', 'tok-1', '{"success":false}'),
     )
     expect(verifyHubSignature(id.publicKeyB64, badRes, sig)).toBe(false)
@@ -131,11 +142,52 @@ describe('remote-agent identity (Ed25519)', () => {
   it('agent proof payload accepts Buffer extras (byte-for-byte with string extras)', () => {
     const id = AgentIdentity.generate()
     const nonce = freshNonce()
-    const asString = agentProofPayload('result', id.publicKeyB64, nonce, 'req-1|tok|res')
-    const asBuffer = agentProofPayload('result', id.publicKeyB64, nonce, Buffer.from('req-1|tok|res'))
+    const asString = agentProofPayload('result', id.publicKeyB64, nonce, 'epoch-1', 'req-1|tok|res')
+    const asBuffer = agentProofPayload('result', id.publicKeyB64, nonce, 'epoch-1', Buffer.from('req-1|tok|res'))
     expect(asString.equals(asBuffer)).toBe(true)
     const sig = id.sign(asString)
     expect(verifyHubSignature(id.publicKeyB64, asBuffer, sig)).toBe(true)
+  })
+
+  it('agent proof payload preserves non-ASCII extra bytes (Unicode interop)', () => {
+    // The hub treats `extra` as raw bytes (&[u8]). A latin1 string round-trip
+    // would corrupt `é` (UTF-8 c3 a9) into c3 83 c2 a9. The payload must keep
+    // the exact UTF-8 bytes so the signature matches the hub's reconstruction.
+    const id = AgentIdentity.generate()
+    const nonce = freshNonce()
+    const extra = heartbeatProofExtra('titre-é', '/work-é', 'host-é', '["a","b"]')
+    // The extra must contain the raw UTF-8 bytes for `é` (c3 a9), NOT the
+    // double-encoded c3 83 c2 a9.
+    expect(extra.includes(Buffer.from([0xc3, 0xa9]))).toBe(true)
+    expect(extra.includes(Buffer.from([0xc3, 0x83, 0xc2, 0xa9]))).toBe(false)
+    const payload = agentProofPayload('heartbeat', id.publicKeyB64, nonce, 'epoch-1', extra)
+    const sig = id.sign(payload)
+    // Reconstructing the payload from the SAME bytes must verify (this is
+    // exactly what the hub does: it rebuilds extra from the body fields).
+    expect(verifyHubSignature(id.publicKeyB64, payload, sig)).toBe(true)
+  })
+
+  it('canonicalBody is injective (no 0x1f delimiter collision)', () => {
+    // A naive 0x1f join would collide: ["a","b\x1fc"] == ["a\x1fb","c"].
+    // The length-prefix encoding must not.
+    const a = canonicalBody(['a', 'b\x1fc'])
+    const b = canonicalBody(['a\x1fb', 'c'])
+    expect(a.equals(b)).toBe(false)
+    expect(canonicalBody(['', 'x']).equals(canonicalBody(['x']))).toBe(false)
+    expect(canonicalBody(['x', '']).equals(canonicalBody(['x']))).toBe(false)
+    expect(canonicalBody(['ab', 'c']).equals(canonicalBody(['a', 'bc']))).toBe(false)
+  })
+
+  it('agent proof payload binds the epoch (restart robustness)', () => {
+    const id = AgentIdentity.generate()
+    const nonce = freshNonce()
+    const payload = agentProofPayload('poll', id.publicKeyB64, nonce, 'epoch-1', '')
+    const sig = id.sign(payload)
+    expect(verifyHubSignature(id.publicKeyB64, payload, sig)).toBe(true)
+    // A proof signed for a DIFFERENT epoch (previous hub process) must not
+    // verify against the current-epoch payload.
+    const otherEpoch = agentProofPayload('poll', id.publicKeyB64, nonce, 'epoch-2', '')
+    expect(verifyHubSignature(id.publicKeyB64, otherEpoch, sig)).toBe(false)
   })
 
   it('canonicalCapabilities is sorted and deterministic', () => {
