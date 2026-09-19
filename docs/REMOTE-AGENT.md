@@ -186,10 +186,11 @@ downloads the matching GitHub Release asset (`remote-agent-linux-x64`,
 command (do not assume `remote-agent` is already on PATH). It installs to
 `~/.local/bin` when that directory is on PATH; as root, or when
 `~/.local/bin` is not on PATH, it prefers `/usr/local/bin` (so the two-liner
-as root is `/usr/local/bin/remote-agent --help`). Linux x64 artifacts are
-musl/static (glibc 2.35-compatible), built on `ubuntu-22.04` — not
-`ubuntu-latest`. Releases are tagged `remote-agent-v*`. The script contains
-no hub tokens.
+as root is `/usr/local/bin/remote-agent --help`). Linux artifacts are glibc binaries built on `ubuntu-22.04`
+(glibc 2.35-compatible) — not `ubuntu-latest`, and not bun's musl target
+(dynamically linked to `/lib/ld-musl-*.so.1`, which typical Ubuntu hosts
+lack). Releases are tagged `remote-agent-v*`. The script contains no hub
+tokens.
 
 Then start the daemon with the path the installer printed:
 

@@ -21,7 +21,7 @@ afterEach(() => {
 })
 
 describe('release-remote-agent workflow', () => {
-  it('builds four targets from ubuntu-22.04 / musl, not ubuntu-latest', () => {
+  it('builds four targets on ubuntu-22.04 glibc, not ubuntu-latest or musl', () => {
     const yml = readFileSync(workflow, 'utf8')
     expect(yml).toMatch(/remote-agent-v\*/)
     expect(yml).toMatch(/workflow_dispatch/)
@@ -31,7 +31,9 @@ describe('release-remote-agent workflow', () => {
     expect(yml).toContain('remote-agent-linux-arm64')
     expect(yml).toContain('remote-agent-darwin-arm64')
     expect(yml).toContain('remote-agent-darwin-x64')
-    expect(yml).toContain('bun-linux-x64-musl')
+    expect(yml).toContain('bun-linux-x64')
+    expect(yml).toContain('bun-linux-arm64')
+    expect(yml).not.toMatch(/musl/)
     expect(yml).toMatch(/--help/)
     expect(yml).toMatch(/--version/)
     expect(yml).toMatch(/file_re:/)
