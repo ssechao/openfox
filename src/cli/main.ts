@@ -291,8 +291,19 @@ export async function runCli(options: { mode: Mode }): Promise<void> {
       break
     }
     case 'remote-agent': {
+      if (values.help) {
+        const { printRemoteAgentHelp } = await import('./remote-agent-args.js')
+        printRemoteAgentHelp('cli')
+        break
+      }
+      if (values.version) {
+        const { printRemoteAgentVersion } = await import('./remote-agent-args.js')
+        printRemoteAgentVersion()
+        break
+      }
       const { runRemoteAgentCommand } = await import('./remote-agent.js')
-      await runRemoteAgentCommand(mode, {
+      const remoteSub = positionals[1]
+      const options = {
         workdir: values.workdir,
         hubUrl: values['hub-url'],
         hubToken: values['hub-token'],
@@ -301,7 +312,12 @@ export async function runCli(options: { mode: Mode }): Promise<void> {
         mcpConfig: values['mcp-config'],
         printConfig: values['print-config'] === true,
         port: values.port ? parseInt(values.port) : undefined,
-      })
+      }
+      if (remoteSub === 'add' || remoteSub === 'remove') {
+        await runRemoteAgentCommand(mode, options, remoteSub)
+      } else {
+        await runRemoteAgentCommand(mode, options)
+      }
       break
     }
 

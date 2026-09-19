@@ -1,6 +1,13 @@
-import Database from 'better-sqlite3'
+import { createRequire } from 'node:module'
+import type Database from 'better-sqlite3'
 import type { Config } from '../config.js'
 import { logger } from '../utils/logger.js'
+
+const requireSqlite = createRequire(import.meta.url)
+
+function loadSqlite(): typeof import('better-sqlite3') {
+  return requireSqlite('better-sqlite3') as typeof import('better-sqlite3')
+}
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
@@ -13,7 +20,8 @@ export function initDatabase(config: Config): Database.Database {
 
   logger.info('Initializing database', { path: config.database.path })
 
-  db = new Database(config.database.path)
+  const Sqlite = loadSqlite()
+  db = new Sqlite(config.database.path)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
 

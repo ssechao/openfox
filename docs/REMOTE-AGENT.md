@@ -172,15 +172,38 @@ clear error (no remote-agent hub configured).
 
 ### Headless-agent daemon (on the remote machine)
 
-Install the `openfox` binary on the remote machine and run:
+Install the standalone `remote-agent` binary (no Node on PATH):
 
 ```bash
-openfox remote-agent \
+curl -fsSL https://raw.githubusercontent.com/ssechao/openfox/main/scripts/install-remote-agent.sh | sh
+~/.local/bin/remote-agent --help
+```
+
+The installer is non-interactive (`curl | sh` has no TTY). It detects OS/arch,
+downloads the matching GitHub Release asset (`remote-agent-linux-x64`,
+`remote-agent-linux-arm64`, `remote-agent-darwin-arm64`,
+`remote-agent-darwin-x64`), and prints the full installed path as the next
+command (do not assume `remote-agent` is already on PATH). It installs to
+`~/.local/bin` when that directory is on PATH; as root, or when
+`~/.local/bin` is not on PATH, it prefers `/usr/local/bin` (so the two-liner
+as root is `/usr/local/bin/remote-agent --help`). Linux x64 artifacts are
+musl/static (glibc 2.35-compatible), built on `ubuntu-22.04` — not
+`ubuntu-latest`. Releases are tagged `remote-agent-v*`. The script contains
+no hub tokens.
+
+Then start the daemon with the path the installer printed:
+
+```bash
+~/.local/bin/remote-agent \
   --workdir /path/to/remote/project \
   --hub-url http://192.168.71.132:4175/mcp \
   --hub-token <hub-bearer-token> \
   --name build-box
 ```
+
+`openfox remote-agent …` still works on a machine that already has the full
+OpenFox CLI. The standalone binary is the supported install path for a remote
+box (no LLM, no UI, no session server, no 6–8 GiB heap).
 
 The daemon enrolls with the hub, heartbeats to stay enumerable, and polls for
 signed execution envelopes. It exposes a local `GET /healthz` for operators.
@@ -250,8 +273,10 @@ signed envelopes), not per-path confirmation.
 
 1. Build/deploy the new aether hub (`llm-aether`) to the hub host
    (`192.168.71.132:4175`).
-2. On each remote machine, install the `openfox` binary and start the
-   headless-agent daemon (`openfox remote-agent …`).
+2. On each remote machine, install the standalone `remote-agent` binary
+   (`curl -fsSL https://raw.githubusercontent.com/ssechao/openfox/main/scripts/install-remote-agent.sh | sh`)
+   and start the daemon with the full path the installer printed
+   (`~/.local/bin/remote-agent --workdir …` or `/usr/local/bin/remote-agent --workdir …`).
 3. On the local machine, configure `remoteAgent` in the global config and
    restart the OpenFox server.
 4. In a session, call `remote_agents` to discover agents, then use the `remote`

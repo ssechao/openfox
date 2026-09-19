@@ -1,0 +1,128 @@
+name: Release remote-agent
+
+on:
+  push:
+    tags:
+      - 'remote-agent-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag (e.g. remote-agent-v1.0.0). Empty = remote-agent-v<package.json version>'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            bun_target: bun-linux-x64-musl
+            asset: remote-agent-linux-x64
+            smoke: true
+            file_re: 'ELF 64-bit LSB .*x86-64'
+            lipo_arch: ''
+          - runner: ubuntu-22.04
+            bun_target: bun-linux-arm64-musl
+            asset: remote-agent-linux-arm64
+            smoke: false
+            file_re: 'ELF 64-bit LSB .*aarch64'
+            lipo_arch: ''
+          - runner: macos-14
+            bun_target: bun-darwin-arm64
+            asset: remote-agent-darwin-arm64
+            smoke: true
+            file_re: 'Mach-O 64-bit executable arm64'
+            lipo_arch: arm64
+          - runner: macos-14
+            bun_target: bun-darwin-x64
+            asset: remote-agent-darwin-x64
+            smoke: false
+            file_re: 'Mach-O 64-bit executable x86_64'
+            lipo_arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - name: Compile remote-agent
+        env:
+          REMOTE_AGENT_BUN_TARGET: ${{ matrix.bun_target }}
+        run: |
+          mkdir -p dist-bin
+          sh scripts/build-remote-agent.sh "dist-bin/${{ matrix.asset }}"
+      - name: Assert binary architecture
+        run: |
+          set -euo pipefail
+          bin="dist-bin/${{ matrix.asset }}"
+          info=$(file "$bin")
+          printf '%s\n' "$info"
+          printf '%s\n' "$info" | grep -E "${{ matrix.file_re }}"
+          if [ -n "${{ matrix.lipo_arch }}" ]; then
+            lipo -info "$bin"
+            lipo -archs "$bin" | tr ' ' '\n' | grep -Fx "${{ matrix.lipo_arch }}"
+          fi
+      - name: Smoke --help/--version
+        if: ${{ matrix.smoke }}
+        run: |
+          bin="dist-bin/${{ matrix.asset }}"
+          "$bin" --help
+          "$bin" --version
+          "$bin" --help | grep -q -- '--workdir'
+          "$bin" --help | grep -q -- '--hub-url'
+          "$bin" --help | grep -q -- '--hub-token'
+          "$bin" --help | grep -q -- '--name'
+          "$bin" --help | grep -q -- '--mcp-config'
+          "$bin" --help | grep -q healthz
+          test ! -f "$HOME/.openfox/sessions.db"
+          test ! -f sessions.db
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist-bin/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-bin
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -e
+          if [ -n "$INPUT_VERSION" ]; then
+            TAG="$INPUT_VERSION"
+          elif [ "${GITHUB_REF_TYPE}" = tag ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            VER=$(node -p "require('./package.json').version")
+            TAG="remote-agent-v${VER}"
+          fi
+          case "$TAG" in
+            remote-agent-v*) ;;
+            *) TAG="remote-agent-v${TAG}" ;;
+          esac
+          cd dist-bin
+          ls -la
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" remote-agent-* --clobber
+          else
+            gh release create "$TAG" remote-agent-* --title "$TAG" --notes "Standalone remote-agent binaries for ${TAG}."
+          fi

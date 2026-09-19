@@ -1,7 +1,9 @@
-import Database from 'better-sqlite3'
+import { createRequire } from 'node:module'
 import { t, getLocale, setLocale, type Locale, type Translation } from '../shared/i18n/index.js'
 import { getDatabasePath } from './paths.js'
 import type { Mode } from './main.js'
+
+const requireSqlite = createRequire(import.meta.url)
 
 let mode: Mode | null = null
 let resolved: Locale | null = null
@@ -25,6 +27,7 @@ function resolveLocale(): Locale {
   let locale: Locale = 'en'
   try {
     if (!mode) return 'en'
+    const Database = requireSqlite('better-sqlite3') as typeof import('better-sqlite3')
     const db = new Database(getDatabasePath(mode), { readonly: true })
     try {
       const row = db.prepare(`SELECT value FROM settings WHERE key = 'display.locale'`).get() as

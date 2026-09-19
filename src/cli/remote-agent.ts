@@ -30,11 +30,15 @@ export interface RemoteAgentCommandOptions {
  *   - `openfox remote-agent remove`: disable it.
  *   - `--print-config`: print the paste-ready config snippet.
  */
-export async function runRemoteAgentCommand(mode: Mode, options: RemoteAgentCommandOptions): Promise<void> {
-  // argv: [node, script, 'remote-agent', <sub>?] — the subcommand (add/remove)
-  // is the first positional after 'remote-agent'.
-  const positionals = process.argv.slice(3)
-  const sub = positionals[0]
+export async function runRemoteAgentCommand(
+  mode: Mode,
+  options: RemoteAgentCommandOptions,
+  subcommand?: 'add' | 'remove',
+): Promise<void> {
+  // argv: [node, script, 'remote-agent', <sub>?] — add/remove is the first
+  // positional after 'remote-agent'. The slim binary rejects those subcommands.
+  const positional = process.argv.slice(3)[0]
+  const sub = subcommand ?? (positional === 'add' || positional === 'remove' ? positional : undefined)
 
   if (sub === 'add' || sub === 'remove') {
     await runConfigSubcommand(mode, sub, options)

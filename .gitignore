@@ -3,6 +3,8 @@ node_modules/
 
 # Build outputs
 dist/
+dist-bin/
+*.bun-build
 dist-sea/
 dist-sea-bundle/
 out/
