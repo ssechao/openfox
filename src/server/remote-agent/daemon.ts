@@ -50,6 +50,22 @@ export interface DaemonOptions {
  * hub, so the hub is the single gateway (the OpenFox server never reaches the
  * agent directly).
  */
+/**
+ * Whether a hub response means "you are not (or no longer) enrolled" and the
+ * daemon must re-enroll.
+ *
+ * After a hub RESTART the registry (in-memory) is empty, so the agent is
+ * UNKNOWN to the hub: every agent route answers **404** ("unknown
+ * headless-agent"), never 401. The 401 (stale epoch / rejected proof) is only
+ * reachable when the agent is still enrolled. Both must trigger a re-enroll —
+ * a 404 is the common case in practice, so checking only 401 left the
+ * re-enrollment branch structurally unreachable.
+ */
+export function needsReenroll(error: unknown): boolean {
+  const status = (error as { status?: number } | null | undefined)?.status
+  return status === 401 || status === 404
+}
+
 export class RemoteAgentDaemon {
   private identity: AgentIdentity
   private tools: Tool[]
@@ -258,11 +274,12 @@ export class RemoteAgentDaemon {
         signature: this.identity.sign(payload),
       })
     } catch (error) {
-      // 401 = the hub no longer accepts our proof: most likely the hub
-      // RESTARTED (new epoch) and our consumed-nonce cache / epoch are stale.
-      // Re-enroll to pick up the new epoch + public key, then retry once.
-      if ((error as { status?: number }).status === 401) {
-        logger.warn('heartbeat rejected (401) — re-enrolling to sync hub epoch')
+      // The hub no longer knows us (404 — its registry is in-memory, so a
+      // RESTART empties it) or no longer accepts our proof (401, stale epoch).
+      // Either way: re-enroll to (re)register and pick up the current epoch,
+      // then retry once.
+      if (needsReenroll(error)) {
+        logger.warn('heartbeat rejected (not enrolled / stale epoch) — re-enrolling')
         await this.enroll()
         const retryNonce = freshNonce()
         const retryPayload = agentProofPayload(
@@ -314,11 +331,11 @@ export class RemoteAgentDaemon {
           signature: this.identity.sign(payload),
         })
       } catch (error) {
-        // 401 = the hub no longer accepts our proof: the hub most likely
-        // RESTARTED (new epoch). Re-enroll to pick up the new epoch, then
-        // retry the poll once.
-        if ((error as { status?: number }).status === 401) {
-          logger.warn('poll rejected (401) — re-enrolling to sync hub epoch')
+        // The hub no longer knows us (404 after a RESTART — in-memory
+        // registry) or no longer accepts our proof (401, stale epoch).
+        // Re-enroll in both cases, then retry the poll once.
+        if (needsReenroll(error)) {
+          logger.warn('poll rejected (not enrolled / stale epoch) — re-enrolling')
           await this.enroll()
           const retryNonce = freshNonce()
           const retryPayload = agentProofPayload(
@@ -464,11 +481,11 @@ export class RemoteAgentDaemon {
         return
       } catch (error) {
         lastError = error
-        // 401 = the hub no longer accepts our proof (most likely a hub
-        // RESTART changed the epoch). Re-enroll to pick up the new epoch,
-        // then retry.
-        if ((error as { status?: number }).status === 401) {
-          logger.warn('result rejected (401) — re-enrolling to sync hub epoch')
+        // The hub no longer knows us (404 after a RESTART) or no longer
+        // accepts our proof (401, stale epoch). Re-enroll in both cases, then
+        // retry.
+        if (needsReenroll(error)) {
+          logger.warn('result rejected (not enrolled / stale epoch) — re-enrolling')
           await this.enroll().catch(() => undefined)
         }
         if (attempt < 2) {
