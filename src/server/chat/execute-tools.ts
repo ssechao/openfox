@@ -14,6 +14,7 @@ import { createToolCallEvent, createToolResultEvent, createChatDoneEvent } from 
 import { PathAccessDeniedError, AskUserInterrupt } from '../tools/index.js'
 import { loadAllAgentsDefault, findAgentById } from '../agents/registry.js'
 import { REMOTE_TOOL_NAMES } from '../remote-agent/remote-param.js'
+import { normalizeRemoteTarget } from '../remote-agent/session-target.js'
 import { serverT } from '../i18n.js'
 import { logger } from '../utils/logger.js'
 import { sanitizeUtf8 } from '../utils/utf8.js'
@@ -36,12 +37,18 @@ export interface ToolBatchContext {
   agentTimeout?: number
   /**
    * Route a tool call to a headless-agent (remote-agent) via the hub. When
-   * present and a tool call carries a non-empty `remote` argument, the call is
-   * executed on that remote agent instead of locally. Absent → all local.
+   * present, calls are executed on that remote agent instead of locally.
+   * Absent → all local.
    */
   remoteExecutor?:
     | ((sessionId: string, remote: string, tool: string, args: Record<string, unknown>) => Promise<ToolResult>)
     | undefined
+  /**
+   * The session's effective remote-agent pin (session pin, else project
+   * default). Used when a tool call has no explicit `remote` argument. `null`/
+   * unset → local; an empty string is normalized to local too.
+   */
+  remoteAgentTarget?: string | null | undefined
 }
 
 export interface ToolBatchResult {
@@ -257,30 +264,42 @@ export async function executeTools(
 
     const startTime = Date.now()
     let toolResult: ToolResult
-    // Remote routing: if the call carries a non-empty `remote` argument and a
-    // remote executor is configured, execute on that headless-agent (via the
-    // hub) instead of locally. Same tool name, same result shape.
-    const remoteTarget = toolCall.arguments['remote']
-    // Only environment tools (REMOTE_TOOL_NAMES) may take `remote`. A stray
-    // `remote` on a control-plane tool must run locally, never be routed.
-    const remoteRequested =
-      typeof remoteTarget === 'string' && remoteTarget.trim().length > 0 && REMOTE_TOOL_NAMES.has(toolCall.name)
+    // Remote routing: execute on a headless-agent (via the hub) instead of
+    // locally. Target precedence:
+    //   1. an explicit non-empty `remote` argument on the call,
+    //   2. the session's pinned target (ctx.remoteAgentTarget),
+    //   3. nothing → local.
+    // An explicit EMPTY `remote` ("" ) forces local, overriding a session pin.
+    // Only environment tools (REMOTE_TOOL_NAMES) may be routed: a stray
+    // `remote` on a control-plane tool must run locally.
+    const explicitRemote = toolCall.arguments['remote']
+    const remoteCapable = REMOTE_TOOL_NAMES.has(toolCall.name)
+    let effectiveRemote: string | null = null
+    if (remoteCapable) {
+      if (typeof explicitRemote === 'string') {
+        // Explicit argument wins, including "" (empty) which means "force local".
+        effectiveRemote = normalizeRemoteTarget(explicitRemote)
+      } else {
+        effectiveRemote = normalizeRemoteTarget(ctx.remoteAgentTarget)
+      }
+    }
+    const remoteRequested = effectiveRemote !== null
     // Enforce the SAME policy gate as local execution BEFORE routing, so a
     // read-only agent (e.g. Planner, whose allowedTools exclude write_file)
     // cannot bypass it by passing `remote`.
     const remotePermissionError = remoteRequested
       ? ctx.toolRegistry.checkPermission?.(toolCall.name, toolCall.arguments)
       : undefined
-    if (remoteRequested && remotePermissionError) {
+    if (effectiveRemote !== null && remotePermissionError) {
       toolResult = {
         success: false,
         error: remotePermissionError,
         durationMs: Date.now() - startTime,
         truncated: false,
       }
-    } else if (remoteRequested && ctx.remoteExecutor) {
+    } else if (effectiveRemote !== null && ctx.remoteExecutor) {
       try {
-        toolResult = await ctx.remoteExecutor(ctx.sessionId, remoteTarget.trim(), toolCall.name, toolCall.arguments)
+        toolResult = await ctx.remoteExecutor(ctx.sessionId, effectiveRemote, toolCall.name, toolCall.arguments)
       } catch (error) {
         toolResult = {
           success: false,
@@ -292,8 +311,8 @@ export async function executeTools(
           truncated: false,
         }
       }
-    } else if (remoteRequested) {
-      // `remote` was provided but no remote executor is configured (no hub).
+    } else if (effectiveRemote !== null) {
+      // A remote target is set but no remote executor is configured (no hub).
       toolResult = {
         success: false,
         error: serverT(
@@ -301,7 +320,7 @@ export async function executeTools(
             en: 'Remote agent requested ({{remote}}) but no remote-agent hub is configured. Set remoteAgent.hubUrl and remoteAgent.hubToken in the global config.',
             fr: 'Agent distant demandé ({{remote}}) mais aucun hub remote-agent n’est configuré. Définissez remoteAgent.hubUrl et remoteAgent.hubToken dans la config globale.',
           },
-          { remote: String(remoteTarget) },
+          { remote: effectiveRemote },
         ),
         durationMs: Date.now() - startTime,
         truncated: false,
@@ -311,7 +330,7 @@ export async function executeTools(
       // (e.g. a hallucinated `remote` on `remote_agents`), drop it so the local
       // tool never sees an unexpected argument.
       const localArgs =
-        typeof remoteTarget === 'string' && remoteTarget.trim().length > 0
+        typeof explicitRemote === 'string'
           ? Object.fromEntries(Object.entries(toolCall.arguments).filter(([k]) => k !== 'remote'))
           : toolCall.arguments
       try {

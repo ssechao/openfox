@@ -93,6 +93,7 @@ export function updateProject(
     workspaceRootDir?: string | null
     mcpOverrides?: Record<string, { disabled?: boolean; disabledTools?: string[] }> | null
     sharedMemorySettings?: SharedMemorySettings | null
+    remoteAgentTarget?: string | null
   },
 ): Project | null {
   const db = getDatabase()
@@ -134,6 +135,11 @@ export function updateProject(
   if (updates.sharedMemorySettings !== undefined) {
     sets.push('shared_memory_settings = ?')
     values.push(updates.sharedMemorySettings !== null ? JSON.stringify(updates.sharedMemorySettings) : null)
+  }
+
+  if (updates.remoteAgentTarget !== undefined) {
+    sets.push('remote_agent_target = ?')
+    values.push(updates.remoteAgentTarget)
   }
 
   values.push(id)
@@ -192,6 +198,7 @@ interface ProjectRow {
   workspace_root_dir: string | null
   mcp_overrides: string | null
   shared_memory_settings: string | null
+  remote_agent_target: string | null
   created_at: string
   updated_at: string
 }
@@ -217,6 +224,8 @@ function rowToProject(row: ProjectRow): Project {
     ...(row.shared_memory_settings
       ? { sharedMemorySettings: JSON.parse(row.shared_memory_settings) as SharedMemorySettings }
       : {}),
+    // An empty string is meaningful ("force local"), so keep it distinct from unset.
+    ...(row.remote_agent_target !== null ? { remoteAgentTarget: row.remote_agent_target } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }

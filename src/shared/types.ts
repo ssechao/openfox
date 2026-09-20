@@ -13,6 +13,9 @@ export interface Project {
   workspaceRootDir?: string // Custom workspace root directory (user-specific, stored in DB)
   mcpOverrides?: Record<string, { disabled?: boolean; disabledTools?: string[] }> // Project-level MCP server overrides
   sharedMemorySettings?: SharedMemorySettings // Project-level shared memory (RAG) defaults
+  /** Project-level default remote-agent (headless-agent) id/title: new sessions
+   *  inherit it as their remote target unless they set their own pin. */
+  remoteAgentTarget?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -135,6 +138,11 @@ export interface Session {
   messageCount?: number // Cached message count for efficient sidebar display (optional, populated on load)
   activeWorkflowExecution?: WorkflowExecution | null // Currently active workflow execution, if any
   sharedMemoryOverride?: SharedMemorySettings // Session-level override of the project's shared memory settings
+  /** Pin this session to a remote-agent (headless-agent) id/title: environment
+   *  tools without an explicit `remote` argument execute there. An empty string
+   *  forces local execution (explicit opt-out); unset inherits the project
+   *  default. See src/server/remote-agent/session-target.ts. */
+  remoteAgentTarget?: string | null
 }
 
 // ============================================================================

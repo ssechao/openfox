@@ -674,4 +674,93 @@ describe('executeTools remote routing', () => {
     expect(remoteExecutor).not.toHaveBeenCalled()
     expect(localExecute).toHaveBeenCalledWith('remote_agents', {}, expect.anything())
   })
+
+  it('routes to the session pin when no explicit `remote` is given', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn()
+    const remoteExecutor = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'pinned-remote',
+      durationMs: 1,
+      truncated: false,
+    })
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'run_command', arguments: { command: 'pwd' } }]
+
+    await executeTools('msg-1', toolCalls, makeCtx({ remoteExecutor, remoteAgentTarget: 'sse-essentiel' }), append)
+
+    expect(remoteExecutor).toHaveBeenCalledTimes(1)
+    expect(remoteExecutor).toHaveBeenCalledWith('test-session', 'sse-essentiel', 'run_command', { command: 'pwd' })
+  })
+
+  it('an explicit `remote` wins over the session pin', async () => {
+    const append = vi.fn()
+    const remoteExecutor = vi.fn().mockResolvedValue({ success: true, output: 'x', durationMs: 1, truncated: false })
+    const toolCalls: ToolCall[] = [
+      { id: 'call-1', name: 'run_command', arguments: { command: 'pwd', remote: 'other-agent' } },
+    ]
+
+    await executeTools('msg-1', toolCalls, makeCtx({ remoteExecutor, remoteAgentTarget: 'sse-essentiel' }), append)
+
+    expect(remoteExecutor).toHaveBeenCalledWith('test-session', 'other-agent', 'run_command', expect.anything())
+  })
+
+  it('an explicit empty `remote` forces local even with a session pin', async () => {
+    const append = vi.fn()
+    const localExecute = vi.fn().mockResolvedValue({ success: true, output: 'local', durationMs: 1, truncated: false })
+    const registry = { tools: [], definitions: [], execute: localExecute } as unknown as ToolRegistry
+    const remoteExecutor = vi.fn()
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'run_command', arguments: { command: 'pwd', remote: '   ' } }]
+
+    await executeTools(
+      'msg-1',
+      toolCalls,
+      makeCtx({ toolRegistry: registry, remoteExecutor, remoteAgentTarget: 'sse-essentiel' }),
+      append,
+    )
+
+    expect(remoteExecutor).not.toHaveBeenCalled()
+    expect(localExecute).toHaveBeenCalledWith('run_command', { command: 'pwd' }, expect.anything())
+  })
+
+  it('does not apply the pin to a non-remote-capable tool', async () => {
+    const append = vi.fn()
+    const localExecute = vi.fn().mockResolvedValue({ success: true, output: 'local', durationMs: 1, truncated: false })
+    const registry = { tools: [], definitions: [], execute: localExecute } as unknown as ToolRegistry
+    const remoteExecutor = vi.fn()
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'remote_agents', arguments: {} }]
+
+    await executeTools(
+      'msg-1',
+      toolCalls,
+      makeCtx({ toolRegistry: registry, remoteExecutor, remoteAgentTarget: 'sse-essentiel' }),
+      append,
+    )
+
+    expect(remoteExecutor).not.toHaveBeenCalled()
+    expect(localExecute).toHaveBeenCalledWith('remote_agents', {}, expect.anything())
+  })
+
+  it('blocks a pinned remote call denied by the permission gate', async () => {
+    const append = vi.fn()
+    const localExecute = vi.fn()
+    const registry = {
+      tools: [],
+      definitions: [],
+      execute: localExecute,
+      checkPermission: vi.fn().mockReturnValue("Tool 'write_file' is not available in 'planner' mode."),
+    } as unknown as ToolRegistry
+    const remoteExecutor = vi.fn()
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'write_file', arguments: { path: 'x', content: 'y' } }]
+
+    const result = await executeTools(
+      'msg-1',
+      toolCalls,
+      makeCtx({ toolRegistry: registry, remoteExecutor, remoteAgentTarget: 'sse-essentiel' }),
+      append,
+    )
+
+    expect(remoteExecutor).not.toHaveBeenCalled()
+    expect(localExecute).not.toHaveBeenCalled()
+    expect(result.toolMessages[0]?.content).toMatch(/not available/i)
+  })
 })

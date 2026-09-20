@@ -374,6 +374,71 @@ describe('ProjectSettingsModal — default agent', () => {
   })
 })
 
+describe('ProjectSettingsModal — remote agent target', () => {
+  it('renders an empty remote-agent field when the project has no target', () => {
+    render(<ProjectSettingsModal isOpen={true} onClose={vi.fn()} project={defaultProject} />)
+    expect((screen.getByLabelText('Remote agent (headless-agent)') as HTMLInputElement).value).toBe('')
+  })
+
+  it('pre-fills the field from the project remote-agent target', () => {
+    render(
+      <ProjectSettingsModal
+        isOpen={true}
+        onClose={vi.fn()}
+        project={{ ...defaultProject, remoteAgentTarget: 'build-box' }}
+      />,
+    )
+    expect((screen.getByLabelText('Remote agent (headless-agent)') as HTMLInputElement).value).toBe('build-box')
+  })
+
+  it('saves a typed remote-agent target', async () => {
+    const user = userEvent.setup()
+
+    render(<ProjectSettingsModal isOpen={true} onClose={vi.fn()} project={defaultProject} />)
+
+    await user.type(screen.getByLabelText('Remote agent (headless-agent)'), 'sse-essentiel')
+    await user.click(screen.getByTestId('save-btn'))
+
+    expect(mockUpdateProject).toHaveBeenCalledWith(
+      defaultProject.id,
+      expect.objectContaining({ remoteAgentTarget: 'sse-essentiel' }),
+    )
+  })
+
+  it('clears the target (null) when the field is emptied', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <ProjectSettingsModal
+        isOpen={true}
+        onClose={vi.fn()}
+        project={{ ...defaultProject, remoteAgentTarget: 'build-box' }}
+      />,
+    )
+
+    await user.clear(screen.getByLabelText('Remote agent (headless-agent)'))
+    await user.click(screen.getByTestId('save-btn'))
+
+    expect(mockUpdateProject).toHaveBeenCalledWith(
+      defaultProject.id,
+      expect.objectContaining({ remoteAgentTarget: null }),
+    )
+  })
+
+  it('does not send remoteAgentTarget when the field is untouched', async () => {
+    const user = userEvent.setup()
+
+    render(<ProjectSettingsModal isOpen={true} onClose={vi.fn()} project={defaultProject} />)
+
+    // Change something else so a save happens, without touching the remote field.
+    await user.type(screen.getByPlaceholderText('Enter project-specific instructions...'), 'hello')
+    await user.click(screen.getByTestId('save-btn'))
+
+    const call = mockUpdateProject.mock.calls.at(-1)?.[1] as Record<string, unknown>
+    expect(call).not.toHaveProperty('remoteAgentTarget')
+  })
+})
+
 describe('ProjectSettingsModal — rootDir validation (Criterion 0 & 1)', () => {
   it('calls validate endpoint before saving when rootDir has changed', async () => {
     mockAuthFetch.mockImplementation(async (url: string) => {

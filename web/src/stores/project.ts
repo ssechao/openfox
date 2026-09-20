@@ -26,6 +26,7 @@ interface ProjectState {
       dangerLevel?: string | null
       defaultAgent?: string | null
       sharedMemorySettings?: SharedMemorySettings | null
+      remoteAgentTarget?: string | null
     },
   ) => Promise<Project | null>
   deleteProject: (projectId: string) => Promise<boolean>
