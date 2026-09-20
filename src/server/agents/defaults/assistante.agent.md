@@ -16,6 +16,7 @@ allowedTools:
   - session_metadata
   - load_skill
   - project_tasks
+  - remote_agents
   - __mcp_none__
 ---
 

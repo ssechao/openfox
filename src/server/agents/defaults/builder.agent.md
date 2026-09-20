@@ -21,6 +21,7 @@ allowedTools:
   - mcp_config
   - workspace
   - project_tasks
+  - remote_agents
 ---
 
 # Build Mode
