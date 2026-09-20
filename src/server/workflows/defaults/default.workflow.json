@@ -59,7 +59,7 @@
       "agentId": "builder",
       "subGroup": "build",
       "prompt": "Implement the task and make sure you fulfil the {{criteriaCount}} criteria. Mark each criterion as complete using session_metadata with action update and status completed.\n\nNote: **Do not** call the `code_reviewer` or `verifier` sub-agents yourself via `call_sub_agent` — both run automatically later in this workflow (verify → code review) with the full diff in context; doing it here duplicates work.",
-      "nudgePrompt": "Continue working on the acceptance criteria. {{reason}}.\n\n{{verifierFindings}}\nFix the issues above, then mark each failed criterion as **completed** using session_metadata with action update and status completed. Do not use \"verified\" — that status is set by the verifier, not by you.\n\nReminder: don't self-invoke `code_reviewer`/`verifier` — the workflow runs them later.",
+      "nudgePrompt": "Continue working on the acceptance criteria. {{reason}}.\n\n{{verifierFindings}}\nFix the issues above, then mark each failed criterion as **completed** using session_metadata with action update and status completed. Do not use \"verified\" — that status is set by the verifier, not by you.\n\nReminder: don't self-invoke `code_reviewer`/`verifier` — the workflow runs them later.\n\nCurrent mode: {{mode}}. Only the rules of the current mode apply — if an earlier message describes a different mode (e.g. a previous read-only \"Plan Mode\"), that instruction is superseded.",
       "transitions": [
         {
           "when": {

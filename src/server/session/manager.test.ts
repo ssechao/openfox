@@ -211,6 +211,33 @@ describe('SessionManager', () => {
     expect(sessionEvents).toContain('phase_changed')
   })
 
+  it('persists the mode so the DB row and the session list agree with the detail', () => {
+    // Regression: setMode() only emitted an event, so `sessions.mode` stayed at
+    // the creation value. The list (reads the DB row) then disagreed with the
+    // detail (event-sourced) — the session looked read-only while it was not.
+    const session = manager.createSession(projectId, 'Mode persistence')
+    expect(getSession(session.id)?.mode).toBe('planner')
+
+    manager.setMode(session.id, 'builder')
+
+    // 1) the DB column follows the live mode
+    expect(getSession(session.id)?.mode).toBe('builder')
+    // 2) the detail (event-sourced) agrees
+    expect(manager.getSession(session.id)?.mode).toBe('builder')
+    // 3) the list (DB-backed summary) agrees — this is the divergence to kill
+    expect(manager.listSessions().find((s) => s.id === session.id)?.mode).toBe('builder')
+  })
+
+  it('keeps DB, detail and list aligned when switching back to planner', () => {
+    const session = manager.createSession(projectId, 'Mode roundtrip')
+    manager.setMode(session.id, 'builder')
+    manager.setMode(session.id, 'planner')
+
+    expect(getSession(session.id)?.mode).toBe('planner')
+    expect(manager.getSession(session.id)?.mode).toBe('planner')
+    expect(manager.listSessions().find((s) => s.id === session.id)?.mode).toBe('planner')
+  })
+
   it('inherits project MCP overrides on createSession and cleans up on deleteSession', async () => {
     const { updateProject } = await import('../db/projects.js')
     const { getSessionDisabledServers } = await import('../mcp/session-overrides.js')

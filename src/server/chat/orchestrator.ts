@@ -409,7 +409,11 @@ function injectAgentReminder(sessionId: string, agentDef: AgentDefinition): void
   const currentAgentName = agentDef.metadata.name ?? agentDef.metadata.id
 
   const isSmallReminder = latestAgentName === currentAgentName
-  const content = isSmallReminder ? buildAgentSmallReminder(currentAgentName) : buildAgentReminder(agentDef)
+  // Pass the agent id so the reminder can explicitly supersede the previous
+  // mode's instruction still present in the conversation (see prompts.ts).
+  const content = isSmallReminder
+    ? buildAgentSmallReminder(currentAgentName, agentDef.metadata.id)
+    : buildAgentReminder(agentDef)
 
   const reminderMsgId = crypto.randomUUID()
   const currentWindowMessageOptions = currentWindowId ? { contextWindowId: currentWindowId } : undefined

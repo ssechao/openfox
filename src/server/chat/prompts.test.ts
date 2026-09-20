@@ -4,6 +4,7 @@ import {
   buildTopLevelSystemPrompt,
   buildSubAgentSystemPrompt,
   buildAgentReminder,
+  buildAgentSmallReminder,
   buildSubAgentsSection,
 } from './prompts.js'
 import type { AgentDefinition } from '../agents/types.js'
@@ -295,5 +296,38 @@ describe('caveman thinking option (llm.cavemanThinking)', () => {
     expect(prompt).toContain('## THINKING STYLE')
     expect(prompt).toContain('caveman style')
     expect(prompt).toContain('Same meaning, far fewer tokens.')
+  })
+})
+
+describe('buildAgentSmallReminder', () => {
+  // The per-turn reminder used to be a bare "Reminder: you are in 'X' mode.",
+  // which never cancelled the previous mode's instruction still present in the
+  // conversation (a long Planner history keeps a CRITICAL "read-only / MUST NOT
+  // make any edits" block). The agent obeyed the stale block and looped.
+  it('explicitly supersedes the read-only instruction when in builder', () => {
+    const reminder = buildAgentSmallReminder('Builder', 'builder')
+    expect(reminder).toContain("you are in 'Builder' mode")
+    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
+    expect(reminder.toLowerCase()).toMatch(/read-only|plan mode/)
+    expect(reminder).toMatch(/write_file|edit_file/)
+  })
+
+  it('explicitly supersedes the build-mode instruction when in planner', () => {
+    const reminder = buildAgentSmallReminder('Planner', 'planner')
+    expect(reminder).toContain("you are in 'Planner' mode")
+    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
+    expect(reminder.toLowerCase()).toMatch(/build mode|implementation/)
+  })
+
+  it('still supersedes generically for a custom agent', () => {
+    const reminder = buildAgentSmallReminder('Architect', 'architect')
+    expect(reminder).toContain("you are in 'Architect' mode")
+    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
+  })
+
+  it('supersedes even when no agent id is provided (backwards compatible)', () => {
+    const reminder = buildAgentSmallReminder('Builder')
+    expect(reminder).toContain("you are in 'Builder' mode")
+    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
   })
 })

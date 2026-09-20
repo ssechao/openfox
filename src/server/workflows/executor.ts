@@ -47,6 +47,8 @@ export interface TemplateContext {
   previousStepOutput: string
   criteriaCount: number
   pendingCount: number
+  /** Current session mode (planner | builder | custom agent id). */
+  mode: string
   criteriaList: string
   modifiedFiles: string
   stepOutput: Record<string, string>
@@ -72,6 +74,7 @@ export const TEMPLATE_VARIABLES: Array<{ name: string; description: string }> = 
   },
   { name: 'criteriaCount', description: 'Total number of criteria' },
   { name: 'pendingCount', description: 'Number of pending/failed criteria' },
+  { name: 'mode', description: 'Current session mode (planner | builder | custom agent id)' },
   { name: 'criteriaList', description: 'Formatted list of all criteria with status' },
   { name: 'modifiedFiles', description: 'List of modified files' },
 ]
@@ -499,6 +502,7 @@ export async function executeWorkflow(
       previousStepOutput: lastStepOutput['stdout'] ?? '',
       criteriaCount: criteriaEntries.length,
       pendingCount: criteriaEntries.filter((e) => e.status !== 'passed').length,
+      mode: session.mode,
       criteriaList: formatCriteriaList(criteriaEntries),
       modifiedFiles: await formatModifiedFiles(sessionManager.getEffectiveWorkdir(sessionId)),
       stepOutput: lastStepOutput,
