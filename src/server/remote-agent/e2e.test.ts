@@ -589,4 +589,96 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
       hubA.kill('SIGTERM')
     }
   })
+
+  it('re-enrolls automatically after a hub restart (404 → re-enroll)', async () => {
+    // The hub registry is in-memory: a restart wipes every enrolled agent, so
+    // the daemon gets 404 ("unknown headless-agent") — NOT 401. The daemon must
+    // re-enroll on 404 too, otherwise it stays invisible forever (the bug).
+    const net = await import('node:net')
+    const port = await new Promise<number>((resolve, reject) => {
+      const srv = net.createServer()
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address()
+        if (addr && typeof addr === 'object') resolve(addr.port)
+        else reject(new Error('no port'))
+        srv.close(() => undefined)
+      })
+      srv.on('error', reject)
+    })
+    const base = `http://127.0.0.1:${port}`
+    const env = { ...process.env, AETHER_HUB_TOKEN: HUB_TOKEN, AETHER_RA_CONTROL_TOKEN: CONTROL_TOKEN }
+    const spawnHub = () =>
+      spawn(HUB_BIN, ['--transport', 'http', '--http-port', String(port), '--http-bind', '127.0.0.1'], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    const waitReady = async () => {
+      const started = Date.now()
+      for (;;) {
+        try {
+          const r = await fetch(`${base}/ra/epoch`, { headers: { Authorization: `Bearer ${HUB_TOKEN}` } })
+          if (r.ok) return
+        } catch {
+          // not up yet
+        }
+        if (Date.now() - started > 15000) throw new Error('hub did not start')
+        await new Promise((r) => setTimeout(r, 200))
+      }
+    }
+    const titles = async (): Promise<string[]> => {
+      const res = await fetch(`${base}/ra/agents`, { headers: { Authorization: `Bearer ${CONTROL_TOKEN}` } })
+      const body = (await res.json()) as { agents: Array<{ title: string; alive: boolean }> }
+      return body.agents.map((a) => a.title)
+    }
+    const waitForTitle = async (title: string, timeoutMs: number): Promise<boolean> => {
+      const started = Date.now()
+      for (;;) {
+        if ((await titles().catch((): string[] => [])).includes(title)) return true
+        if (Date.now() - started > timeoutMs) return false
+        await new Promise((r) => setTimeout(r, 200))
+      }
+    }
+
+    const reenrollWorkdir = realpathSync(mkdtempSync(join(tmpdir(), 'remote-agent-reenroll-')))
+    let hub = spawnHub()
+    const daemonX = new RemoteAgentDaemon({
+      workdir: reenrollWorkdir,
+      hubUrl: `${base}/mcp`,
+      hubToken: HUB_TOKEN,
+      name: 'reenroll-agent',
+      pollIntervalMs: 200,
+      heartbeatIntervalMs: 500,
+      callTimeoutMs: 15000,
+    })
+    try {
+      await waitReady()
+      const epochBefore = (await (
+        await fetch(`${base}/ra/epoch`, { headers: { Authorization: `Bearer ${HUB_TOKEN}` } })
+      ).json()) as {
+        hub_epoch: string
+      }
+      await daemonX.start()
+      expect(await waitForTitle('reenroll-agent', 10000)).toBe(true)
+
+      // Restart the hub on the SAME port: the in-memory registry is wiped.
+      hub.kill('SIGTERM')
+      await new Promise((r) => setTimeout(r, 400))
+      hub = spawnHub()
+      await waitReady()
+      const epochAfter = (await (
+        await fetch(`${base}/ra/epoch`, { headers: { Authorization: `Bearer ${HUB_TOKEN}` } })
+      ).json()) as {
+        hub_epoch: string
+      }
+      // A different epoch proves this is a fresh hub process (empty registry):
+      // the agent can only be listed again if the daemon re-enrolled on its own.
+      expect(epochAfter.hub_epoch).not.toBe(epochBefore.hub_epoch)
+
+      expect(await waitForTitle('reenroll-agent', 15000)).toBe(true)
+    } finally {
+      await daemonX.stop()
+      hub.kill('SIGTERM')
+      rmSync(reenrollWorkdir, { recursive: true, force: true })
+    }
+  })
 })

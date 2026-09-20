@@ -14,7 +14,7 @@ import {
 import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
 import { withRemoteParam, REMOTE_TOOL_NAMES } from './remote-param.js'
 import { toSerializedToolResult, fromSerializedToolResult, normalizeHubBase } from './types.js'
-import { RemoteAgentDaemon } from './daemon.js'
+import { RemoteAgentDaemon, needsReenroll } from './daemon.js'
 import { runCommandTool } from '../tools/shell.js'
 import { askUserTool } from '../tools/ask.js'
 import type { Tool } from '../tools/types.js'
@@ -356,5 +356,28 @@ describe('tool result serialization', () => {
     const round = fromSerializedToolResult('not-an-object')
     expect(round.success).toBe(false)
     expect(round.error).toBeDefined()
+  })
+})
+
+describe('remote-agent re-enrollment trigger', () => {
+  const err = (status?: number) => Object.assign(new Error('hub error'), status === undefined ? {} : { status })
+
+  it('re-enrolls on 404 (hub restarted: in-memory registry is empty)', () => {
+    // The bug: after a hub restart the agent is UNKNOWN → 404, never 401, so
+    // checking only 401 left the re-enrollment branch unreachable.
+    expect(needsReenroll(err(404))).toBe(true)
+  })
+
+  it('re-enrolls on 401 (still enrolled but the proof/epoch is rejected)', () => {
+    expect(needsReenroll(err(401))).toBe(true)
+  })
+
+  it('does not re-enroll on unrelated statuses or a missing status', () => {
+    expect(needsReenroll(err(403))).toBe(false)
+    expect(needsReenroll(err(500))).toBe(false)
+    expect(needsReenroll(err(400))).toBe(false)
+    expect(needsReenroll(err())).toBe(false)
+    expect(needsReenroll(new Error('network down'))).toBe(false)
+    expect(needsReenroll(undefined)).toBe(false)
   })
 })
