@@ -4,9 +4,10 @@
 
 import { describe, it, expect } from 'vitest'
 import { execSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import type { MetadataEntry } from '../../shared/types.js'
 import type { TransitionCondition, Transition } from './types.js'
 import { TERMINAL_BLOCKED, TERMINAL_DONE } from './types.js'
@@ -38,6 +39,7 @@ function makeTemplateContext(overrides: Partial<TemplateContext> = {}): Template
     previousStepOutput: 'exit 0',
     criteriaCount: 3,
     pendingCount: 2,
+    mode: 'builder',
     criteriaList: '- c1 [PASSED]: do thing',
     modifiedFiles: '- src/index.ts',
     stepOutput: { content: 'Some findings', stdout: 'exit 0' },
@@ -350,6 +352,20 @@ describe('resolveTemplate', () => {
     const ctx = makeTemplateContext()
     const template = 'Just a plain string with no variables'
     expect(resolveTemplate(template, ctx)).toBe(template)
+  })
+
+  it('resolves {{mode}} so a nudge can carry the current session mode', () => {
+    const ctx = makeTemplateContext({ mode: 'builder' })
+    expect(resolveTemplate('Current mode: {{mode}}.', ctx)).toBe('Current mode: builder.')
+  })
+
+  it('the default workflow build nudge carries {{mode}} (state-aware, not a static repeat)', () => {
+    const path = join(dirname(fileURLToPath(import.meta.url)), 'defaults', 'default.workflow.json')
+    const def = JSON.parse(readFileSync(path, 'utf-8')) as {
+      steps: Array<{ id: string; nudgePrompt?: string }>
+    }
+    const build = def.steps.find((s) => s.id === 'build')
+    expect(build?.nudgePrompt).toContain('{{mode}}')
   })
 
   it('handles multiple occurrences of the same variable', () => {

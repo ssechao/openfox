@@ -86,6 +86,7 @@ describe('buildAgentNudge', () => {
     previousStepOutput: '',
     criteriaCount: 2,
     pendingCount: 2,
+    mode: 'builder',
     criteriaList: '- c1 [PENDING]',
     modifiedFiles: '- src/index.ts',
     stepOutput: { content: 'Previous attempt failed' },

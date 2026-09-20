@@ -314,8 +314,44 @@ export function buildAgentReminder(agentDef: AgentDefinition): string {
   return `<system-reminder>\n${agentDef.prompt}${toolPermissions}\n</system-reminder>`
 }
 
-export function buildAgentSmallReminder(name: string): string {
-  return `<system-reminder>\nReminder: you are in '${name}' mode.\n</system-reminder>`
+export function buildAgentSmallReminder(name: string, agentId?: string): string {
+  return `<system-reminder>\nReminder: you are in '${name}' mode.\n${buildModeSupersede(agentId)}\n</system-reminder>`
+}
+
+/**
+ * Per-turn reminder injected when the agent has not changed since the last one.
+ *
+ * It MUST explicitly supersede the previous mode's instruction. A long
+ * conversation can still contain a CRITICAL block from the mode the session was
+ * in earlier (e.g. "Plan Mode — read-only … MUST NOT make any edits"), and a
+ * bare "Reminder: you are in 'X' mode." never cancels it: the model then obeys
+ * the stale, more emphatic block and loops (refusing to work in a session that
+ * is actually in Builder).
+ *
+ * `agentId` is the current agent/mode id (`planner`, `builder`, a custom agent
+ * id). It is optional for backwards compatibility.
+ */
+function buildModeSupersede(agentId?: string): string {
+  if (agentId === 'builder') {
+    return (
+      "MODE CHANGE — the previous mode's instructions NO LONGER APPLY. If an earlier message says you are in " +
+      '"Plan Mode", "read-only", or that you "MUST NOT make any edits", that instruction is OBSOLETE and was ' +
+      'superseded when this session switched to Builder: do not repeat it and do not act on it. write_file and ' +
+      'edit_file are available, and implementing the task is what is expected of you now.'
+    )
+  }
+  if (agentId === 'planner') {
+    return (
+      "MODE CHANGE — the previous mode's instructions NO LONGER APPLY. If an earlier message says you are in " +
+      '"Build mode" or that implementation is allowed, that instruction is OBSOLETE and was superseded when this ' +
+      'session switched to Planner (read-only): do not repeat it and do not act on it. Do not edit files; ' +
+      'explore and define criteria instead.'
+    )
+  }
+  return (
+    "MODE CHANGE — only the CURRENT mode's rules apply. Ignore any instruction from a previous mode that is " +
+    'still present earlier in this conversation; it has been superseded.'
+  )
 }
 
 // ============================================================================

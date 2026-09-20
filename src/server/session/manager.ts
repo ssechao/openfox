@@ -44,6 +44,7 @@ import {
   getActiveWorkflowExecution as dbGetActiveWorkflowExecution,
   getLatestWorkflowExecution as dbGetLatestWorkflowExecution,
   clearWorkflowExecution,
+  updateSessionMode,
   type DangerLevel,
 } from '../db/sessions.js'
 import { getProject } from '../db/projects.js'
@@ -851,6 +852,11 @@ export class SessionManager {
     logger.debug('Changing session mode', { sessionId, from: fromMode, to: toMode })
 
     emitModeChanged(sessionId, toMode, false)
+    // Persist the mode so the DB row — and therefore the session LIST — agrees
+    // with the event-sourced detail. Without this, `sessions.mode` stayed at
+    // the creation value and the UI showed e.g. "planner" for a builder
+    // session, which made the agent look read-only when it was not.
+    updateSessionMode(sessionId, toMode)
 
     // The agent's override is the label truth: selecting an agent with an
     // override deactivates the manual pick (so the override wins); selecting a
