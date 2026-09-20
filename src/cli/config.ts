@@ -300,6 +300,7 @@ export async function saveGlobalConfig(
       ? { disableAutoSessionTitle: config.disableAutoSessionTitle }
       : {}),
     ...(config.defaultAgent !== undefined ? { defaultAgent: config.defaultAgent } : {}),
+    ...(config.remoteAgent !== undefined ? { remoteAgent: config.remoteAgent } : {}),
   }
   await mkdir(dirname(configPath), { recursive: true })
   await writeFile(configPath, JSON.stringify(fullConfig, null, 2))
