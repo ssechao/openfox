@@ -20,6 +20,7 @@ allowedTools:
   - workspace
   - project_tasks
   - remote_agents
+  - session_remote_agent
 ---
 
 # Plan Mode

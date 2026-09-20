@@ -23,6 +23,7 @@ import { workspaceTool } from './workspace.js'
 import { projectTasksTool } from './project-tasks.js'
 import { sharedMemoryTool } from './shared-memory.js'
 import { remoteAgentsTool } from './remote-agents.js'
+import { sessionRemoteAgentTool } from './session-remote-agent.js'
 import { computeEffectiveTools } from './tool-policy.js'
 import { logger } from '../utils/logger.js'
 import { withRemoteParam } from '../remote-agent/remote-param.js'
@@ -65,6 +66,7 @@ export function getBuiltInTools(): Tool[] {
       projectTasksTool,
       sharedMemoryTool,
       remoteAgentsTool,
+      sessionRemoteAgentTool,
     ]
   }
   return _builtInTools

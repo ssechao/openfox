@@ -22,6 +22,7 @@ allowedTools:
   - workspace
   - project_tasks
   - remote_agents
+  - session_remote_agent
 ---
 
 # Build Mode
