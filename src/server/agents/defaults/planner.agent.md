@@ -19,6 +19,7 @@ allowedTools:
   - dev_server
   - workspace
   - project_tasks
+  - remote_agents
 ---
 
 # Plan Mode
