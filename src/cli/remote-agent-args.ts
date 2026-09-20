@@ -12,6 +12,9 @@ const DAEMON_OPTIONS = `Options:
   --hub-url <url>        Aether hub URL (required)
   --hub-token <token>    Hub bearer token (required)
   --name <name>          Agent display name
+  --identity-key <path>  Identity key file (default: ~/.config/openfox/remote-agent/<name>.key)
+                         Also honoured via OPENFOX_RA_IDENTITY_KEY.
+  --rotate-identity      Replace the persisted identity key with a fresh one
   --mcp-config <file>    JSON file with mcpServers to run on the daemon
   -h, --help             Show this help
   -v, --version          Show version
@@ -69,6 +72,8 @@ export type ParsedRemoteAgentArgs = {
   hubToken?: string | undefined
   controlToken?: string | undefined
   name?: string | undefined
+  identityKey?: string | undefined
+  rotateIdentity?: boolean | undefined
   mcpConfig?: string | undefined
   port?: number | undefined
   subcommand?: 'add' | 'remove' | undefined
@@ -81,6 +86,8 @@ const OPTIONS = {
   'hub-token': { type: 'string' },
   'control-token': { type: 'string' },
   name: { type: 'string' },
+  'identity-key': { type: 'string' },
+  'rotate-identity': { type: 'boolean' },
   'mcp-config': { type: 'string' },
   'print-config': { type: 'boolean' },
   port: { type: 'string', short: 'p' },
@@ -106,6 +113,10 @@ export function parseRemoteAgentArgs(argv: string[]): ParsedRemoteAgentArgs {
     if (values['hub-token']) parsed.hubToken = values['hub-token']
     if (values['control-token']) parsed.controlToken = values['control-token']
     if (values.name) parsed.name = values.name
+    // Explicit key path: flag wins, else the env var.
+    const identityKey = values['identity-key'] ?? process.env['OPENFOX_RA_IDENTITY_KEY']
+    if (identityKey) parsed.identityKey = identityKey
+    if (values['rotate-identity'] === true) parsed.rotateIdentity = true
     if (values['mcp-config']) parsed.mcpConfig = values['mcp-config']
     if (values.port) {
       const port = Number.parseInt(values.port, 10)

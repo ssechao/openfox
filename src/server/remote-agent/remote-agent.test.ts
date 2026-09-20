@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   AgentIdentity,
   verifyHubSignature,
@@ -293,6 +296,8 @@ describe('remote-agent daemon tool exposure', () => {
       workdir: '/tmp/remote-agent-test',
       hubUrl: 'http://127.0.0.1:1/mcp',
       hubToken: 'tok',
+      // Keep the durable identity out of the real user config.
+      identityKeyPath: join(mkdtempSync(join(tmpdir(), 'ra-daemon-')), 'identity.key'),
     })
     const names = new Set(daemon.toolNames)
     // Environment tools are exposed.

@@ -1,9 +1,14 @@
-import { createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto'
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto'
 
 /**
  * Ed25519 identity for a headless-agent. The private key never leaves the
  * machine; the public key is registered with the hub and used to verify the
  * hub's signatures on execution envelopes.
+ *
+ * PERSISTENCE: this key is a durable SECRET (see identity-store.ts). Once
+ * persisted, whoever holds it can answer `/ra/poll` and execute commands as
+ * this agent — the hub epoch and nonces do not help (a thief signs fresh
+ * nonces). It must be stored 0600 and never committed.
  */
 export class AgentIdentity {
   private constructor(
@@ -14,6 +19,18 @@ export class AgentIdentity {
   static generate(): AgentIdentity {
     const { publicKey, privateKey } = generateKeyPairSync('ed25519')
     return new AgentIdentity(privateKey, publicKey)
+  }
+
+  /** Rebuild an identity from a persisted PKCS8 DER private key. */
+  static fromPrivateKeyDer(der: Buffer): AgentIdentity {
+    const privateKey = createPrivateKey({ key: der, format: 'der', type: 'pkcs8' })
+    const publicKey = createPublicKey(privateKey)
+    return new AgentIdentity(privateKey, publicKey)
+  }
+
+  /** PKCS8 DER of the private key — the durable secret to persist (0600). */
+  get privateKeyDer(): Buffer {
+    return this.privateKey.export({ type: 'pkcs8', format: 'der' }) as Buffer
   }
 
   /** Base64url-encoded raw 32-byte public key (matches the hub's encoding). */

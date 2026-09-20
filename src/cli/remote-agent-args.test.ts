@@ -99,4 +99,39 @@ describe('remote-agent help/version text', () => {
     const src = readFileSync(join(here, 'remote-agent-args.ts'), 'utf8')
     expect(src).not.toMatch(/i18n|better-sqlite3|sessions\.db|serve\.js|max-old-space/)
   })
+
+  it('parses --identity-key and --rotate-identity', () => {
+    const parsed = parseRemoteAgentArgs([
+      '--workdir',
+      '/w',
+      '--hub-url',
+      'http://h/mcp',
+      '--hub-token',
+      't',
+      '--identity-key',
+      '/keys/my.key',
+      '--rotate-identity',
+    ])
+    expect(parsed.error).toBeUndefined()
+    expect(parsed.identityKey).toBe('/keys/my.key')
+    expect(parsed.rotateIdentity).toBe(true)
+  })
+
+  it('falls back to OPENFOX_RA_IDENTITY_KEY, with the flag taking precedence', () => {
+    const previous = process.env['OPENFOX_RA_IDENTITY_KEY']
+    process.env['OPENFOX_RA_IDENTITY_KEY'] = '/env/key'
+    try {
+      expect(parseRemoteAgentArgs([]).identityKey).toBe('/env/key')
+      expect(parseRemoteAgentArgs(['--identity-key', '/flag/key']).identityKey).toBe('/flag/key')
+    } finally {
+      if (previous === undefined) delete process.env['OPENFOX_RA_IDENTITY_KEY']
+      else process.env['OPENFOX_RA_IDENTITY_KEY'] = previous
+    }
+  })
+
+  it('leaves identity options undefined when not provided', () => {
+    const parsed = parseRemoteAgentArgs([])
+    expect(parsed.identityKey).toBeUndefined()
+    expect(parsed.rotateIdentity).toBeUndefined()
+  })
 })

@@ -84,6 +84,9 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
       pollIntervalMs: 200,
       heartbeatIntervalMs: 2000,
       callTimeoutMs: 15000,
+      // Durable identity kept out of the real user config (and out of the
+      // remote workdir, which is exposed to tool execution).
+      identityKeyPath: join(mkdtempSync(join(tmpdir(), 'ra-ident-')), 'e2e-agent.key'),
     })
     await daemon.start()
 
@@ -412,6 +415,7 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
       pollIntervalMs: 200,
       heartbeatIntervalMs: 2000,
       callTimeoutMs: 15000,
+      identityKeyPath: join(mkdtempSync(join(tmpdir(), 'ra-ident-')), 'e2e-agent-2.key'),
     })
     await daemon2.start()
     try {
@@ -649,6 +653,7 @@ describe('remote-agent e2e (hub + daemon + client)', () => {
       pollIntervalMs: 200,
       heartbeatIntervalMs: 500,
       callTimeoutMs: 15000,
+      identityKeyPath: join(mkdtempSync(join(tmpdir(), 'ra-ident-')), 'reenroll-agent.key'),
     })
     try {
       await waitReady()

@@ -10,6 +10,10 @@ export interface RemoteAgentCommandOptions {
   /** Control-plane credential for the hub's control routes (config `add`). */
   controlToken?: string | undefined
   name?: string | undefined
+  /** Explicit identity key path (`--identity-key` / `OPENFOX_RA_IDENTITY_KEY`). */
+  identityKey?: string | undefined
+  /** Replace the persisted identity key with a fresh one (`--rotate-identity`). */
+  rotateIdentity?: boolean | undefined
   mcpConfig?: string | undefined
   printConfig?: boolean
   port?: number | undefined
@@ -115,6 +119,8 @@ export async function runRemoteAgentCommand(
     hubToken: options.hubToken,
     name: options.name,
     mcpServers,
+    ...(options.identityKey !== undefined ? { identityKeyPath: options.identityKey } : {}),
+    ...(options.rotateIdentity !== undefined ? { rotateIdentity: options.rotateIdentity } : {}),
   })
 
   const shutdown = async () => {
