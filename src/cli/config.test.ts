@@ -15,6 +15,10 @@ describe('config', () => {
   let saveGlobalConfig: typeof import('./config.js').saveGlobalConfig
   let getActiveProvider: typeof import('./config.js').getActiveProvider
   let getDefaultModel: typeof import('./config.js').getDefaultModel
+  let setDefaultModelSelection: typeof import('./config.js').setDefaultModelSelection
+  let addProvider: typeof import('./config.js').addProvider
+  let removeProvider: typeof import('./config.js').removeProvider
+  let activateProvider: typeof import('./config.js').activateProvider
 
   beforeEach(async () => {
     vi.resetModules()
@@ -23,6 +27,10 @@ describe('config', () => {
     saveGlobalConfig = configModule.saveGlobalConfig
     getActiveProvider = configModule.getActiveProvider
     getDefaultModel = configModule.getDefaultModel
+    setDefaultModelSelection = configModule.setDefaultModelSelection
+    addProvider = configModule.addProvider
+    removeProvider = configModule.removeProvider
+    activateProvider = configModule.activateProvider
 
     await mkdir(join(TEST_DIR, 'production'), { recursive: true })
     await mkdir(join(TEST_DIR, 'development'), { recursive: true })
@@ -152,6 +160,51 @@ describe('config', () => {
         controlToken: 'control-token-test',
         callTimeoutMs: 120000,
       })
+    })
+
+    it('preserves remoteAgent across provider-helper rebuilds (no silent drop)', async () => {
+      const remoteAgent = {
+        hubUrl: 'http://192.168.71.132:4175/mcp',
+        hubToken: 'hub-token-test',
+        controlToken: 'control-token-test',
+        callTimeoutMs: 120000,
+      }
+      const provider = {
+        id: 'p1',
+        name: 'P1',
+        url: 'http://localhost:8000/v1',
+        backend: 'vllm' as const,
+        models: [],
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      }
+      const base = {
+        providers: [provider],
+        defaultModelSelection: 'p1/m1',
+        activeProviderId: 'p1',
+        server: { port: 10369, host: '127.0.0.1', openBrowser: true },
+        logging: { level: 'error' as const },
+        database: { path: '' },
+        workspace: { workdir: process.cwd() },
+        remoteAgent,
+      }
+
+      // Each helper rebuilds the config object from scratch; remoteAgent must
+      // survive every one of them (the bug: they silently dropped it).
+      expect(setDefaultModelSelection(base, 'p1', 'm2').remoteAgent).toEqual(remoteAgent)
+      expect(
+        addProvider(base, { name: 'P2', url: 'u', backend: 'vllm', models: [], isActive: false }).remoteAgent,
+      ).toEqual(remoteAgent)
+      expect(removeProvider(base, 'nonexistent').remoteAgent).toEqual(remoteAgent)
+      expect(activateProvider(base, 'p1').remoteAgent).toEqual(remoteAgent)
+      // activateProvider also has an early-return branch (unknown provider id).
+      expect(activateProvider(base, 'unknown').remoteAgent).toEqual(remoteAgent)
+
+      // The exact disk round-trip the bug reproduced: save -> model switch -> save.
+      await saveGlobalConfig('production', base)
+      const afterModelSwitch = setDefaultModelSelection(await loadGlobalConfig('production'), 'p1', 'm2')
+      await saveGlobalConfig('production', afterModelSwitch)
+      expect((await loadGlobalConfig('production')).remoteAgent).toEqual(remoteAgent)
     })
   })
 

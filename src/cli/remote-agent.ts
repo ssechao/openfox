@@ -189,12 +189,19 @@ async function runConfigSubcommand(
   )
 }
 
-function printConfigSnippet(options: RemoteAgentCommandOptions): void {
+export function printConfigSnippet(options: RemoteAgentCommandOptions): void {
   const hubUrl = options.hubUrl ?? '<hub-url>'
   const hubToken = options.hubToken ?? '<hub-token>'
+  // Leading comma: `controlToken` follows `hubToken`, so the JSON stays valid.
   const controlTokenLine = options.controlToken
-    ? `\n    "controlToken": "${options.controlToken}"`
-    : '\n    "controlToken": "<ra-control-token>  // optional: hub AETHER_RA_CONTROL_TOKEN'
+    ? `,\n    "controlToken": "${options.controlToken}"`
+    : `,\n    "controlToken": "<ra-control-token>"`
+  const controlTokenNote = options.controlToken
+    ? ''
+    : cliT({
+        en: '\nNote: "controlToken" is optional — set it to the hub’s AETHER_RA_CONTROL_TOKEN when the hub enforces a control credential.',
+        fr: '\nNote : "controlToken" est optionnel — mettez la valeur de AETHER_RA_CONTROL_TOKEN du hub quand celui-ci impose un credential de contrôle.',
+      })
   console.log(
     cliT({
       en: `Add this to your OpenFox global config (or run: openfox remote-agent add --hub-url ${hubUrl} --hub-token ${hubToken}${options.controlToken ? ` --control-token ${options.controlToken}` : ''}):
@@ -205,6 +212,7 @@ function printConfigSnippet(options: RemoteAgentCommandOptions): void {
     "hubToken": "${hubToken}"${controlTokenLine}
   }
 }
+${controlTokenNote}
 `,
       fr: `Ajoutez ceci à votre config globale OpenFox (ou exécutez : openfox remote-agent add --hub-url ${hubUrl} --hub-token ${hubToken}${options.controlToken ? ` --control-token ${options.controlToken}` : ''}) :
 
@@ -214,6 +222,7 @@ function printConfigSnippet(options: RemoteAgentCommandOptions): void {
     "hubToken": "${hubToken}"${controlTokenLine}
   }
 }
+${controlTokenNote}
 `,
     }),
   )

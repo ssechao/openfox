@@ -164,88 +164,49 @@ export function createRegistryFromTools(
     toolMap.set(tool.name, tool)
   }
 
+  const permissionError = (name: string, args: Record<string, unknown>): string | undefined => {
+    const isMcpTool = !getBuiltInToolNames().has(name)
+    // allowedTools === undefined → no restrictions (all tools allowed)
+    const hasRestrictions = allowedTools !== undefined
+    if (isMcpTool && hasRestrictions) {
+      const hasMcpNone = allowedTools!.includes('__mcp_none__')
+      const hasMcpSpecific = allowedTools!.some((t) => !getBuiltInToolNames().has(t) && t !== '__mcp_none__')
+      if (hasMcpNone || (hasMcpSpecific && !allowedTools!.includes(name))) {
+        return createPermissionErrorMessage(name, allowedTools, agentId, isSubAgent)
+      }
+    }
+    if (!isMcpTool && hasRestrictions) {
+      const effectiveTools = computeEffectiveTools(allowedTools!, isSubAgent ? 'sub-agent' : 'agent')
+      if (!effectiveTools.has(name)) return createPermissionErrorMessage(name, allowedTools, agentId, isSubAgent)
+    }
+    if (toolPermissions) {
+      const action = args['action'] as string | undefined
+      if (action) {
+        const actionError = validateToolAction(name, action, toolPermissions)
+        if (actionError) return actionError
+      }
+    }
+    return undefined
+  }
+
   return {
     tools,
     definitions: tools.map((t) => t.definition),
+
+    checkPermission: (name: string, args: Record<string, unknown>) => permissionError(name, args),
 
     async execute(name: string, args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
       const tool = toolMap.get(name)
 
       if (tool) {
-        const isMcpTool = !getBuiltInToolNames().has(name)
-
-        // allowedTools === undefined → no restrictions (all tools allowed)
-        const hasRestrictions = allowedTools !== undefined
-
-        if (isMcpTool && hasRestrictions) {
-          // Check if MCP tools are explicitly restricted
-          const hasMcpNone = allowedTools!.includes('__mcp_none__')
-          const hasMcpSpecific = allowedTools!.some((t) => !getBuiltInToolNames().has(t) && t !== '__mcp_none__')
-
-          if (hasMcpNone) {
-            // __mcp_none__ → all MCP tools denied
-            logger.debug('Permission denied: MCP tools disabled for this agent', {
-              tool: name,
-              allowedTools,
-            })
-            return {
-              success: false,
-              error: createPermissionErrorMessage(name, allowedTools, agentId, isSubAgent),
-              durationMs: 0,
-              truncated: false,
-            }
-          }
-
-          if (hasMcpSpecific && !allowedTools!.includes(name)) {
-            // Specific MCP tools listed → only those are allowed
-            logger.debug('Permission denied: MCP tool not in allowed list', {
-              tool: name,
-              allowedTools,
-            })
-            return {
-              success: false,
-              error: createPermissionErrorMessage(name, allowedTools, agentId, isSubAgent),
-              durationMs: 0,
-              truncated: false,
-            }
-          }
-          // No MCP restrictions → all MCP tools allowed (default)
-        }
-
-        if (!isMcpTool && hasRestrictions) {
-          const effectiveTools = computeEffectiveTools(allowedTools!, isSubAgent ? 'sub-agent' : 'agent')
-          if (!effectiveTools.has(name)) {
-            logger.debug('Permission denied: tool not in allowed list', {
-              tool: name,
-              allowedTools,
-            })
-            return {
-              success: false,
-              error: createPermissionErrorMessage(name, allowedTools, agentId, isSubAgent),
-              durationMs: 0,
-              truncated: false,
-            }
-          }
-        }
-
-        // Check granular action permission if applicable
-        if (toolPermissions) {
-          const action = args['action'] as string | undefined
-          if (action) {
-            const actionError = validateToolAction(name, action, toolPermissions)
-            if (actionError) {
-              logger.debug('Permission denied: action not allowed', {
-                tool: name,
-                action,
-                toolPermissions,
-              })
-              return {
-                success: false,
-                error: actionError,
-                durationMs: 0,
-                truncated: false,
-              }
-            }
+        const permErr = permissionError(name, args)
+        if (permErr) {
+          logger.debug('Permission denied', { tool: name, allowedTools })
+          return {
+            success: false,
+            error: permErr,
+            durationMs: 0,
+            truncated: false,
           }
         }
 

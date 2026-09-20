@@ -348,6 +348,7 @@ export function setDefaultModelSelection(
     llm: config.llm,
     visionFallback: config.visionFallback ?? defaultVisionFallback,
     ...(config.defaultAgent !== undefined ? { defaultAgent: config.defaultAgent } : {}),
+    ...(config.remoteAgent !== undefined ? { remoteAgent: config.remoteAgent } : {}),
   }
 }
 
@@ -380,6 +381,7 @@ export function addProvider(config: Partial<GlobalConfig>, provider: Omit<Provid
     llm: config.llm,
     visionFallback: config.visionFallback ?? defaultVisionFallback,
     ...(config.defaultAgent !== undefined ? { defaultAgent: config.defaultAgent } : {}),
+    ...(config.remoteAgent !== undefined ? { remoteAgent: config.remoteAgent } : {}),
   }
 }
 
@@ -430,6 +432,7 @@ export function removeProvider(config: Partial<GlobalConfig>, providerId: string
     llm: config.llm,
     visionFallback: config.visionFallback ?? defaultVisionFallback,
     ...(config.defaultAgent !== undefined ? { defaultAgent: config.defaultAgent } : {}),
+    ...(config.remoteAgent !== undefined ? { remoteAgent: config.remoteAgent } : {}),
   }
 }
 
@@ -469,6 +472,8 @@ export function activateProvider(config: Partial<GlobalConfig>, providerId: stri
       workspace: config.workspace ?? { workdir: process.cwd() },
       llm: config.llm,
       visionFallback: config.visionFallback ?? defaultVisionFallback,
+      ...(config.defaultAgent !== undefined ? { defaultAgent: config.defaultAgent } : {}),
+      ...(config.remoteAgent !== undefined ? { remoteAgent: config.remoteAgent } : {}),
     }
   }
 
@@ -485,5 +490,6 @@ export function activateProvider(config: Partial<GlobalConfig>, providerId: stri
     llm: config.llm,
     visionFallback: config.visionFallback ?? defaultVisionFallback,
     ...(config.defaultAgent !== undefined ? { defaultAgent: config.defaultAgent } : {}),
+    ...(config.remoteAgent !== undefined ? { remoteAgent: config.remoteAgent } : {}),
   }
 }
