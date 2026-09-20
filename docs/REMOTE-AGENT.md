@@ -143,6 +143,41 @@ The `remote_agents` tool (control-plane, always local) lists the headless-agents
 registered on the hub with their liveness, workdir, host, and capabilities. A
 session calls it first to discover which machines it can drive.
 
+## Pinning a session to a remote agent
+
+Passing `remote:<id>` on every call is tedious when a session mostly runs on one
+machine. A session (or a whole project) can be **pinned** to a default target,
+so environment tools execute there whenever no explicit `remote` is given.
+
+Precedence for each environment-tool call:
+
+1. an explicit `remote:<id>` argument on the call — always wins;
+2. the session pin (`sessions.remote_agent_target`);
+3. the project default (`projects.remote_agent_target`);
+4. nothing → execute locally.
+
+An explicit **empty** `remote` (`remote: ""`) forces local execution, overriding
+a pin. `remote_agents` is never routed, so discovery always works regardless of
+the pin.
+
+A pin is a **default, not a restriction**: the session can still drive several
+agents by passing `remote:<other>` per call.
+
+### Setting a pin
+
+- **UI** — Project Settings → "Remote agent (headless-agent)" sets the project
+  default (inherited by its sessions).
+- **API** —
+  - `GET /api/sessions/:id/remote-agent` → `{ target, projectTarget, effective }`
+  - `PUT /api/sessions/:id/remote-agent` `{ target: string | null }`
+    (`""` = force local, `null` = inherit the project default)
+  - `DELETE /api/sessions/:id/remote-agent` → clear the session pin
+  - `PUT /api/projects/:id/remote-agent` `{ target: string | null }`
+- **On request (agent tool)** — the `session_remote_agent` tool (control-plane,
+  always local) lets the model set/clear the pin itself, e.g. when the user says
+  "lock this session to sse-essentiel". Actions: `set`, `local`, `clear`,
+  `project`, `status`.
+
 ## Configuration
 
 ### Local OpenFox server (enable remote execution)
@@ -241,7 +276,7 @@ configured, every request is rejected (401).
 The daemon exposes the real built-in tool registry **minus** the control-plane
 tools that require a full session server (LLM, DB, EventStore, interactive UI):
 `ask_user`, `session_metadata`, `mcp_config`, `call_sub_agent`, `workspace`,
-`project_tasks`, `step_done`, `remote_agents`. Everything else
+`project_tasks`, `step_done`, `remote_agents`, `session_remote_agent`. Everything else
 (`read_file`, `describe_image`, `write_file`, `edit_file`, `run_command`,
 `load_skill`, `web_fetch`, `web_search`, `dev_server`, `background_process`,
 `return_value`) runs on the remote machine.

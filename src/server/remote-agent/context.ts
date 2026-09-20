@@ -16,6 +16,7 @@ export const CONTROL_PLANE_TOOLS: ReadonlySet<string> = new Set([
   'project_tasks',
   'step_done',
   'remote_agents',
+  'session_remote_agent',
 ])
 
 /**
