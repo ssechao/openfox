@@ -244,6 +244,42 @@ box (no LLM, no UI, no session server, no 6–8 GiB heap).
 The daemon enrolls with the hub, heartbeats to stay enumerable, and polls for
 signed execution envelopes. It exposes a local `GET /healthz` for operators.
 
+### Identity key (durable, per agent)
+
+The daemon's Ed25519 identity is **persisted**, so a restart resumes the **same
+peer id** (the hub derives it from the public key). It used to be regenerated at
+every start, which changed the peer id on each restart.
+
+| Resolution order | Path                                                                                          |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| 1. explicit      | `--identity-key <path>` or `OPENFOX_RA_IDENTITY_KEY`                                          |
+| 2. persisted     | `~/.config/openfox/remote-agent/<name>.key` (`<name>` = `--name`, default = workdir basename) |
+| 3. otherwise     | generated and persisted at (2)                                                                |
+
+The path is scoped **per agent**, never per user: two daemons on the same host
+with different names must not share a key (they would collide on one peer id).
+
+**The key is a durable remote-execution credential.** Whoever holds it can
+answer `/ra/poll` and execute commands as this agent; the hub epoch and the
+nonces do not help (a thief signs fresh nonces). Treat it like an SSH key:
+
+- stored `0600`, directory `0700`, owned by the daemon's user;
+- **fail closed**: a key readable by group/others — or owned by another user —
+  is **refused** at startup (with the exact `chmod` to apply), never used
+  silently;
+- never committed, never shared between agents.
+
+**Rotation** (documented revocation path): `--rotate-identity` generates a new
+key, replaces the file and logs the change. The previous key simply stops
+beating and the hub prunes its entry (it is not evicted by title/workdir, which
+would be triggerable by observable values). Deleting the key file has the same
+effect (a fresh one is generated at the next start).
+
+On an **ephemeral deployment** (container, scale-out, immutable filesystem), do
+not rely on the generated file: inject the key instead (`--identity-key` / env,
+e.g. a mounted secret) — a durable key on a writable volume is worse than a
+fresh one there.
+
 ### MCP on the daemon
 
 Pass `--mcp-config <file>` (a JSON file with a `mcpServers` record, same schema

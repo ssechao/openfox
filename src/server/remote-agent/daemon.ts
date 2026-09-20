@@ -19,6 +19,7 @@ import {
   freshNonce,
 } from './identity.js'
 import { createRemoteAgentContext, CONTROL_PLANE_TOOLS, MinimalSessionManager } from './context.js'
+import { loadOrCreateIdentity } from './identity-store.js'
 import { toSerializedToolResult, normalizeHubBase } from './types.js'
 import type { ExecutionEnvelope } from './types.js'
 
@@ -35,6 +36,14 @@ export interface DaemonOptions {
   heartbeatIntervalMs?: number
   /** MCP servers config (record of name -> mcpServerSchema) to run on the daemon. */
   mcpServers?: Record<string, unknown> | undefined
+  /**
+   * Explicit identity key path (`--identity-key` / `OPENFOX_RA_IDENTITY_KEY`).
+   * Takes precedence over the per-agent persisted default. If absent, the key
+   * is created there.
+   */
+  identityKeyPath?: string | undefined
+  /** Replace the persisted key with a fresh one (`--rotate-identity`). */
+  rotateIdentity?: boolean | undefined
 }
 
 /**
@@ -68,6 +77,7 @@ export function needsReenroll(error: unknown): boolean {
 
 export class RemoteAgentDaemon {
   private identity: AgentIdentity
+  private identityPath: string
   private tools: Tool[]
   private mcpManager: McpManager | null = null
   private mcpStatus: Record<string, string> = {}
@@ -90,10 +100,32 @@ export class RemoteAgentDaemon {
   private sessionStubs = new Map<string, MinimalSessionManager>()
 
   constructor(private readonly opts: DaemonOptions) {
-    this.identity = AgentIdentity.generate()
+    // Durable, per-agent identity: same key across restarts → same peer id.
+    // Fails closed on unsafe permissions/ownership (see identity-store.ts).
+    const loaded = loadOrCreateIdentity({
+      name: opts.name ?? opts.workdir,
+      ...(opts.identityKeyPath !== undefined ? { explicitPath: opts.identityKeyPath } : {}),
+      ...(opts.rotateIdentity !== undefined ? { rotate: opts.rotateIdentity } : {}),
+    })
+    this.identity = loaded.identity
+    this.identityPath = loaded.path
+    if (loaded.rotated) {
+      logger.warn('remote-agent identity ROTATED (new key persisted)', { path: loaded.path })
+    } else if (loaded.created) {
+      logger.info('remote-agent identity generated and persisted (durable remote-execution credential)', {
+        path: loaded.path,
+      })
+    } else {
+      logger.info('remote-agent identity loaded (stable peer id across restarts)', { path: loaded.path })
+    }
     // Expose the real built-in tools minus the control-plane tools that need a
     // full session server.
     this.tools = getBuiltInTools().filter((t) => !CONTROL_PLANE_TOOLS.has(t.name))
+  }
+
+  /** Path of the persisted identity key (0600, per agent). */
+  get identityKeyPath(): string {
+    return this.identityPath
   }
 
   get publicWorkdir(): string {
