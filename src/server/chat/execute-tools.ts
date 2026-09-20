@@ -13,6 +13,7 @@ import { createToolProgressHandler } from './tool-streaming.js'
 import { createToolCallEvent, createToolResultEvent, createChatDoneEvent } from './stream-pure.js'
 import { PathAccessDeniedError, AskUserInterrupt } from '../tools/index.js'
 import { loadAllAgentsDefault, findAgentById } from '../agents/registry.js'
+import { REMOTE_TOOL_NAMES } from '../remote-agent/remote-param.js'
 import { serverT } from '../i18n.js'
 import { logger } from '../utils/logger.js'
 import { sanitizeUtf8 } from '../utils/utf8.js'
@@ -260,8 +261,24 @@ export async function executeTools(
     // remote executor is configured, execute on that headless-agent (via the
     // hub) instead of locally. Same tool name, same result shape.
     const remoteTarget = toolCall.arguments['remote']
-    const remoteRequested = typeof remoteTarget === 'string' && remoteTarget.trim().length > 0
-    if (remoteRequested && ctx.remoteExecutor) {
+    // Only environment tools (REMOTE_TOOL_NAMES) may take `remote`. A stray
+    // `remote` on a control-plane tool must run locally, never be routed.
+    const remoteRequested =
+      typeof remoteTarget === 'string' && remoteTarget.trim().length > 0 && REMOTE_TOOL_NAMES.has(toolCall.name)
+    // Enforce the SAME policy gate as local execution BEFORE routing, so a
+    // read-only agent (e.g. Planner, whose allowedTools exclude write_file)
+    // cannot bypass it by passing `remote`.
+    const remotePermissionError = remoteRequested
+      ? ctx.toolRegistry.checkPermission?.(toolCall.name, toolCall.arguments)
+      : undefined
+    if (remoteRequested && remotePermissionError) {
+      toolResult = {
+        success: false,
+        error: remotePermissionError,
+        durationMs: Date.now() - startTime,
+        truncated: false,
+      }
+    } else if (remoteRequested && ctx.remoteExecutor) {
       try {
         toolResult = await ctx.remoteExecutor(ctx.sessionId, remoteTarget.trim(), toolCall.name, toolCall.arguments)
       } catch (error) {
@@ -290,8 +307,15 @@ export async function executeTools(
         truncated: false,
       }
     } else {
+      // Local execution. If a stray `remote` was supplied on a non-remote tool
+      // (e.g. a hallucinated `remote` on `remote_agents`), drop it so the local
+      // tool never sees an unexpected argument.
+      const localArgs =
+        typeof remoteTarget === 'string' && remoteTarget.trim().length > 0
+          ? Object.fromEntries(Object.entries(toolCall.arguments).filter(([k]) => k !== 'remote'))
+          : toolCall.arguments
       try {
-        toolResult = await ctx.toolRegistry.execute(toolCall.name, toolCall.arguments, toolContext)
+        toolResult = await ctx.toolRegistry.execute(toolCall.name, localArgs, toolContext)
       } catch (error) {
         toolResult = await handleToolExecutionError(error, ctx.sessionId, startTime)
       }

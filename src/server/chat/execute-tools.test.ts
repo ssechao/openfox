@@ -606,4 +606,72 @@ describe('executeTools remote routing', () => {
     expect(mockToolRegistry.execute).not.toHaveBeenCalled()
     expect(result.toolMessages[0]?.content).toMatch(/Unknown remote agent/)
   })
+
+  it('does NOT route remotely when the permission gate denies the tool', async () => {
+    const append = vi.fn()
+    const localExecute = vi.fn()
+    const registry = {
+      tools: [],
+      definitions: [],
+      execute: localExecute,
+      checkPermission: vi.fn().mockReturnValue("Tool 'write_file' is not available in 'planner' mode. Available: …"),
+    } as unknown as ToolRegistry
+    const remoteExecutor = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'remote-should-not-run',
+      durationMs: 1,
+      truncated: false,
+    })
+
+    // The Planner's allowedTools exclude write_file, but it gets the full tool
+    // catalogue. Passing `remote` must NOT bypass that gate.
+    const toolCalls: ToolCall[] = [
+      { id: 'call-1', name: 'write_file', arguments: { path: 'x.ts', content: 'y', remote: 'agent-a' } },
+    ]
+
+    const result = await executeTools('msg-1', toolCalls, makeCtx({ toolRegistry: registry, remoteExecutor }), append)
+
+    expect(remoteExecutor).not.toHaveBeenCalled()
+    expect(localExecute).not.toHaveBeenCalled()
+    expect(result.toolMessages[0]?.content).toMatch(/not available/i)
+  })
+
+  it('routes remotely when the permission gate allows the tool', async () => {
+    const append = vi.fn()
+    const registry = {
+      tools: [],
+      definitions: [],
+      execute: vi.fn(),
+      checkPermission: vi.fn().mockReturnValue(undefined),
+    } as unknown as ToolRegistry
+    const remoteExecutor = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'remote-ok',
+      durationMs: 1,
+      truncated: false,
+    })
+    const toolCalls: ToolCall[] = [
+      { id: 'call-1', name: 'run_command', arguments: { command: 'pwd', remote: 'agent-a' } },
+    ]
+
+    await executeTools('msg-1', toolCalls, makeCtx({ toolRegistry: registry, remoteExecutor }), append)
+
+    expect(remoteExecutor).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs a control-plane tool locally and strips a stray `remote`', async () => {
+    const append = vi.fn()
+    const localExecute = vi.fn().mockResolvedValue({ success: true, output: 'local', durationMs: 1, truncated: false })
+    const registry = { tools: [], definitions: [], execute: localExecute } as unknown as ToolRegistry
+    const remoteExecutor = vi.fn()
+
+    // `remote_agents` is not in REMOTE_TOOL_NAMES: a hallucinated `remote` must
+    // fall back to local execution (with the stray arg removed), not be routed.
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'remote_agents', arguments: { remote: 'agent-a' } }]
+
+    await executeTools('msg-1', toolCalls, makeCtx({ toolRegistry: registry, remoteExecutor }), append)
+
+    expect(remoteExecutor).not.toHaveBeenCalled()
+    expect(localExecute).toHaveBeenCalledWith('remote_agents', {}, expect.anything())
+  })
 })

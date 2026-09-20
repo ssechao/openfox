@@ -37,6 +37,14 @@ export interface ToolRegistry {
   tools: Tool[]
   definitions: LLMToolDefinition[]
   execute: (name: string, args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>
+  /**
+   * Evaluate the same policy checks as `execute` (agent `allowedTools`, MCP
+   * restrictions, granular `tool:action` permissions) WITHOUT running the
+   * tool. Returns an error message when the tool/action is not permitted,
+   * `undefined` when allowed. Optional so lightweight test doubles can omit
+   * it; the real registry (createRegistryFromTools) always provides it.
+   */
+  checkPermission?: (name: string, args: Record<string, unknown>) => string | undefined
 }
 
 // Output limits to prevent context overflow
