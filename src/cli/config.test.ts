@@ -127,6 +127,32 @@ describe('config', () => {
       expect(loaded.providers[0]?.name).toBe('Test Provider')
       expect(loaded.activeProviderId).toBe('test-123')
     })
+
+    it('persists remoteAgent hub config across save/load', async () => {
+      const config = {
+        providers: [],
+        server: { port: 10369, host: '127.0.0.1', openBrowser: true },
+        logging: { level: 'error' as const },
+        database: { path: '' },
+        workspace: { workdir: process.cwd() },
+        remoteAgent: {
+          hubUrl: 'http://192.168.71.132:4175/mcp',
+          hubToken: 'hub-token-test',
+          controlToken: 'control-token-test',
+          callTimeoutMs: 120000,
+        },
+      }
+
+      await saveGlobalConfig('production', config)
+      const loaded = await loadGlobalConfig('production')
+
+      expect(loaded.remoteAgent).toEqual({
+        hubUrl: 'http://192.168.71.132:4175/mcp',
+        hubToken: 'hub-token-test',
+        controlToken: 'control-token-test',
+        callTimeoutMs: 120000,
+      })
+    })
   })
 
   describe('user-defined model context preservation', () => {
