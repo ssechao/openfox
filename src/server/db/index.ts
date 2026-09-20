@@ -260,6 +260,18 @@ function runMigrations(db: Database.Database): void {
     db.exec(`ALTER TABLE projects ADD COLUMN mcp_overrides TEXT`)
   }
 
+  // Migration: Add remote_agent_target column to projects (default remote-agent)
+  if (!projectColumnNames.includes('remote_agent_target')) {
+    logger.info('Migrating projects table: adding remote_agent_target column')
+    db.exec(`ALTER TABLE projects ADD COLUMN remote_agent_target TEXT`)
+  }
+
+  // Migration: Add remote_agent_target column to sessions (session pin)
+  if (!columnNames.includes('remote_agent_target')) {
+    logger.info('Migrating sessions table: adding remote_agent_target column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN remote_agent_target TEXT`)
+  }
+
   // Migration: Add mcp_disabled_servers column to sessions table
   if (!columnNames.includes('mcp_disabled_servers')) {
     logger.info('Migrating sessions table: adding mcp_disabled_servers column')

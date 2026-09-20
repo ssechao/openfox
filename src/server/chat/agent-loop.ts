@@ -18,6 +18,7 @@ import type { SessionManager } from '../session/index.js'
 import type { ToolRegistry } from '../tools/types.js'
 import type { RequestContextMessage, MinimalMessage } from './request-context.js'
 import type { RetryPatternConfig } from './auto-patterns.js'
+import { resolveRemoteAgentTarget } from '../remote-agent/session-target.js'
 import {
   streamLLMPure,
   consumeStreamGenerator,
@@ -1079,6 +1080,12 @@ export async function runTopLevelAgentLoop(
         }
         if (config.providerManager) {
           batchContext.providerManager = config.providerManager
+        }
+        // Resolve the session's remote-agent pin once per turn (session pin,
+        // else project default) so environment tools execute there without an
+        // explicit `remote` argument. Only when a hub is configured.
+        if (config.remoteExecutor) {
+          batchContext.remoteAgentTarget = resolveRemoteAgentTarget(session.projectId, sessionId)
         }
         batchContext.agentTimeout = getRuntimeConfig().agent.toolTimeout
         const batchResult = await executeTools(assistantMsgId, result.toolCalls, batchContext, append)

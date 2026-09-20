@@ -101,12 +101,20 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
   )
   const [sharedMemoryDirty, setSharedMemoryDirty] = useState(false)
 
+  const [remoteAgentTarget, setRemoteAgentTarget] = useState(project.remoteAgentTarget ?? '')
+  const [remoteAgentDirty, setRemoteAgentDirty] = useState(false)
+
   const resetSharedMemoryFields = useCallback((p: Project) => {
     setSharedMemoryEnabled(p.sharedMemorySettings?.enabled ?? false)
     setSharedMemoryCollections((p.sharedMemorySettings?.collections ?? []).join(', '))
     setSharedMemoryCaptureEnabled(p.sharedMemorySettings?.captureEnabled ?? true)
     setSharedMemoryRetrievalEnabled(p.sharedMemorySettings?.retrievalEnabled ?? true)
     setSharedMemoryDirty(false)
+  }, [])
+
+  const resetRemoteAgentFields = useCallback((p: Project) => {
+    setRemoteAgentTarget(p.remoteAgentTarget ?? '')
+    setRemoteAgentDirty(false)
   }, [])
 
   const isDirty =
@@ -116,7 +124,8 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
     setupDirty ||
     rootDirDirty ||
     mcpDirty ||
-    sharedMemoryDirty
+    sharedMemoryDirty ||
+    remoteAgentDirty
 
   useEffect(() => {
     if (isOpen) {
@@ -131,8 +140,9 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
       setMcpDirty(false)
       setExpandedServers(new Set())
       resetSharedMemoryFields(project)
+      resetRemoteAgentFields(project)
     }
-  }, [isOpen, project, resetSharedMemoryFields])
+  }, [isOpen, project, resetSharedMemoryFields, resetRemoteAgentFields])
 
   useEffect(() => {
     if (wsConfig?.setup && wsConfig.setup.length > 0) {
@@ -218,12 +228,16 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
       dangerLevel: DangerLevel | null
       defaultAgent?: string | null
       sharedMemorySettings?: import('@shared/types.js').SharedMemorySettings
+      remoteAgentTarget?: string | null
     } = {
       customInstructions: customInstructions || null,
       dangerLevel: dangerLevelValue,
     }
     if (defaultAgentDirty) {
       projectUpdates.defaultAgent = defaultAgent === '' ? null : defaultAgent
+    }
+    if (remoteAgentDirty) {
+      projectUpdates.remoteAgentTarget = remoteAgentTarget.trim() === '' ? null : remoteAgentTarget.trim()
     }
     if (sharedMemoryDirty) {
       projectUpdates.sharedMemorySettings = {
@@ -257,6 +271,7 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
     setRootDirDirty(false)
     setMcpDirty(false)
     setSharedMemoryDirty(false)
+    setRemoteAgentDirty(false)
     handleClose()
   }, [
     project.id,
@@ -264,6 +279,8 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
     customInstructions,
     defaultAgent,
     defaultAgentDirty,
+    remoteAgentDirty,
+    remoteAgentTarget,
     setupCmd,
     rootDir,
     mcpOverrides,
@@ -775,6 +792,42 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
               </label>
             </div>
           )}
+        </div>
+
+        <div>
+          <label
+            htmlFor="project-remote-agent"
+            className="block text-sm font-medium text-text-primary mb-1 flex-shrink-0"
+          >
+            {t({ en: 'Remote agent (headless-agent)', fr: 'Agent distant (headless-agent)' })}
+          </label>
+          <p className="text-sm text-text-muted mb-3">
+            {t({
+              en: 'Default remote machine for this project: environment tools (run_command, read_file, write_file, …) execute there when no explicit `remote` argument is given. Requires a configured remote-agent hub; list agents with the remote_agents tool.',
+              fr: 'Machine distante par défaut de ce projet : les outils d’environnement (run_command, read_file, write_file, …) s’y exécutent quand aucun argument `remote` explicite n’est fourni. Nécessite un hub remote-agent configuré ; listez les agents avec l’outil remote_agents.',
+            })}
+          </p>
+          <input
+            id="project-remote-agent"
+            type="text"
+            value={remoteAgentTarget}
+            onChange={(e) => {
+              setRemoteAgentTarget(e.target.value)
+              setRemoteAgentDirty(true)
+            }}
+            placeholder={t({
+              en: 'agent id or title (e.g. build-box)',
+              fr: 'id ou titre de l’agent (ex. build-box)',
+            })}
+            className="w-full px-3 py-2 bg-bg-tertiary border border-border rounded text-sm font-mono focus:outline-none focus:ring-1 focus:ring-accent-primary"
+            disabled={saving}
+          />
+          <p className="text-xs text-text-muted mt-1">
+            {t({
+              en: 'Empty = run locally. A session can override this (its own pin, or force local).',
+              fr: 'Vide = exécution locale. Une session peut surcharger ceci (son propre pin, ou forcer le local).',
+            })}
+          </p>
         </div>
 
         {saveError && (

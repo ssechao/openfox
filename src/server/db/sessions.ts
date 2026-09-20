@@ -279,6 +279,23 @@ export function updateSessionSharedMemoryOverride(
   db.prepare(`UPDATE sessions SET shared_memory_override = ? WHERE id = ?`).run(value, id)
 }
 
+/**
+ * The session's pinned remote-agent target. `null` = unset (inherit the project
+ * default); an empty string is a meaningful pin meaning "force local".
+ */
+export function getSessionRemoteAgentTarget(id: string): string | null {
+  const db = getDatabase()
+  const row = db.prepare(`SELECT remote_agent_target FROM sessions WHERE id = ?`).get(id) as
+    { remote_agent_target: string | null } | undefined
+  if (!row || row.remote_agent_target === null) return null
+  return row.remote_agent_target
+}
+
+export function updateSessionRemoteAgentTarget(id: string, target: string | null): void {
+  const db = getDatabase()
+  db.prepare(`UPDATE sessions SET remote_agent_target = ? WHERE id = ?`).run(target, id)
+}
+
 export function updateSessionCachedPrompt(
   id: string,
   systemPrompt: string,

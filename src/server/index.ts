@@ -509,19 +509,21 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   app.put('/api/projects/:id', async (req, res) => {
     const { updateProject } = await import('./db/projects.js')
-    const { name, customInstructions, dangerLevel, defaultAgent, sharedMemorySettings } = req.body
+    const { name, customInstructions, dangerLevel, defaultAgent, sharedMemorySettings, remoteAgentTarget } = req.body
     const updates: {
       name?: string
       customInstructions?: string | null
       dangerLevel?: 'normal' | 'dangerous' | null
       defaultAgent?: string | null
       sharedMemorySettings?: import('../shared/types.js').SharedMemorySettings | null
+      remoteAgentTarget?: string | null
     } = {}
     if (name !== undefined) updates.name = name
     if (customInstructions !== undefined) updates.customInstructions = customInstructions
     if (dangerLevel !== undefined) updates.dangerLevel = dangerLevel as 'normal' | 'dangerous' | null
     if (defaultAgent !== undefined) updates.defaultAgent = defaultAgent as string | null
     if (sharedMemorySettings !== undefined) updates.sharedMemorySettings = sharedMemorySettings
+    if (remoteAgentTarget !== undefined) updates.remoteAgentTarget = remoteAgentTarget as string | null
     const updated = updateProject(req.params.id, updates)
     if (!updated) {
       return res.status(404).json({ error: 'Project not found' })
@@ -565,6 +567,62 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       settings: resolveSharedMemorySettings(session.projectId, req.params.id),
       sessionOverride: getSessionSharedMemoryOverride(req.params.id),
     })
+  })
+
+  /**
+   * Remote-agent pin. `target` is the session's own pin (null = inherit the
+   * project default, "" = force local); `effective` is what will actually be
+   * used (session pin, else project default).
+   */
+  app.get('/api/sessions/:id/remote-agent', async (req, res) => {
+    const session = sessionManager.getSession(req.params.id)
+    if (!session) return res.status(404).json({ error: 'Session not found' })
+    const { getSessionRemoteAgentTarget } = await import('./db/sessions.js')
+    const { getProject } = await import('./db/projects.js')
+    const { resolveRemoteAgentTarget } = await import('./remote-agent/session-target.js')
+    res.json({
+      target: getSessionRemoteAgentTarget(req.params.id),
+      projectTarget: getProject(session.projectId)?.remoteAgentTarget ?? null,
+      effective: resolveRemoteAgentTarget(session.projectId, req.params.id),
+    })
+  })
+
+  app.put('/api/sessions/:id/remote-agent', async (req, res) => {
+    const session = sessionManager.getSession(req.params.id)
+    if (!session) return res.status(404).json({ error: 'Session not found' })
+    const raw = req.body?.target
+    if (raw !== null && raw !== undefined && typeof raw !== 'string') {
+      return res.status(400).json({ error: 'target must be a string or null' })
+    }
+    const { updateSessionRemoteAgentTarget, getSessionRemoteAgentTarget } = await import('./db/sessions.js')
+    const { resolveRemoteAgentTarget } = await import('./remote-agent/session-target.js')
+    // A string (possibly empty = force local) pins the session; null clears it.
+    updateSessionRemoteAgentTarget(req.params.id, typeof raw === 'string' ? raw.trim() : null)
+    res.json({
+      target: getSessionRemoteAgentTarget(req.params.id),
+      effective: resolveRemoteAgentTarget(session.projectId, req.params.id),
+    })
+  })
+
+  app.delete('/api/sessions/:id/remote-agent', async (req, res) => {
+    const session = sessionManager.getSession(req.params.id)
+    if (!session) return res.status(404).json({ error: 'Session not found' })
+    const { updateSessionRemoteAgentTarget } = await import('./db/sessions.js')
+    const { resolveRemoteAgentTarget } = await import('./remote-agent/session-target.js')
+    updateSessionRemoteAgentTarget(req.params.id, null)
+    res.json({ target: null, effective: resolveRemoteAgentTarget(session.projectId, req.params.id) })
+  })
+
+  /** Project-level default remote-agent target (inherited by its sessions). */
+  app.put('/api/projects/:id/remote-agent', async (req, res) => {
+    const { getProject, updateProject } = await import('./db/projects.js')
+    if (!getProject(req.params.id)) return res.status(404).json({ error: 'Project not found' })
+    const raw = req.body?.target
+    if (raw !== null && raw !== undefined && typeof raw !== 'string') {
+      return res.status(400).json({ error: 'target must be a string or null' })
+    }
+    const project = updateProject(req.params.id, { remoteAgentTarget: typeof raw === 'string' ? raw.trim() : null })
+    res.json({ project })
   })
 
   app.delete('/api/projects/:id', async (req, res) => {
