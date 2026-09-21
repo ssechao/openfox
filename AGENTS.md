@@ -245,7 +245,3 @@ Need to trace through a session, understand why the agent did something, or find
 | **Database**   | `~/.local/share/openfox/sessions.db` | `~/.local/share/openfox-dev/sessions.db` |
 
 **Port-based distinction:** Port **10369** is always production. Dev servers start at **10370** and increment (10371, 10372, ...) depending on project startup order (prod proxifies the dev server on its own port + N).
-
-## Production Config
-
-NEVER modify production configuration files (e.g., `~/.config/openfox/`). These are user-specific and should only be changed by the user.
