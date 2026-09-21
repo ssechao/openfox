@@ -331,27 +331,22 @@ export function buildAgentSmallReminder(name: string, agentId?: string): string 
  * `agentId` is the current agent/mode id (`planner`, `builder`, a custom agent
  * id). It is optional for backwards compatibility.
  */
+/**
+ * Steady-state supersede line appended to the per-turn reminder.
+ *
+ * It must be SHORT (it is appended on every turn) and it must not claim a mode
+ * change happened — the reminder is re-injected for the whole life of the
+ * session, long after the switch. It only needs to keep the stale block from a
+ * previous mode from being obeyed.
+ */
 function buildModeSupersede(agentId?: string): string {
   if (agentId === 'builder') {
-    return (
-      "MODE CHANGE — the previous mode's instructions NO LONGER APPLY. If an earlier message says you are in " +
-      '"Plan Mode", "read-only", or that you "MUST NOT make any edits", that instruction is OBSOLETE and was ' +
-      'superseded when this session switched to Builder: do not repeat it and do not act on it. write_file and ' +
-      'edit_file are available, and implementing the task is what is expected of you now.'
-    )
+    return 'Any earlier "Plan Mode / read-only / MUST NOT edit" instruction is superseded: write_file and edit_file are available.'
   }
   if (agentId === 'planner') {
-    return (
-      "MODE CHANGE — the previous mode's instructions NO LONGER APPLY. If an earlier message says you are in " +
-      '"Build mode" or that implementation is allowed, that instruction is OBSOLETE and was superseded when this ' +
-      'session switched to Planner (read-only): do not repeat it and do not act on it. Do not edit files; ' +
-      'explore and define criteria instead.'
-    )
+    return 'Any earlier "Build mode / implementation allowed" instruction is superseded: do not edit files.'
   }
-  return (
-    "MODE CHANGE — only the CURRENT mode's rules apply. Ignore any instruction from a previous mode that is " +
-    'still present earlier in this conversation; it has been superseded.'
-  )
+  return "Instructions from a previous mode are superseded; only the current mode's rules apply."
 }
 
 // ============================================================================

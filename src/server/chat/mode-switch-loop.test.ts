@@ -337,7 +337,7 @@ describe('mode-switch loop: a stale read-only history must not block a builder t
     consumeStreamGeneratorMock.mockImplementation(() => {
       llmCall += 1
       const staleBlockPresent = /Plan Mode/i.test(contextText) && /read-only/i.test(contextText)
-      const superseded = /NO LONGER APPLY/i.test(contextText)
+      const superseded = /superseded/i.test(contextText)
       if (staleBlockPresent && !superseded) {
         return makeTurnResponse(REFUSAL_TEXT, [])
       }
@@ -380,7 +380,7 @@ describe('mode-switch loop: a stale read-only history must not block a builder t
     )
 
     // 1) The injected reminder must explicitly supersede the stale instruction.
-    expect(contextText).toMatch(/NO LONGER APPLY/)
+    expect(contextText).toMatch(/superseded/i)
     // 2) The model therefore attempted the write instead of repeating a refusal.
     const appendedEvents = append.mock.calls.map((call: unknown[]) => call[0] as { type: string; data?: unknown })
     expect(appendedEvents.map((e) => e.type)).toContain('tool.call')

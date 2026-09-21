@@ -829,6 +829,36 @@ describe('SessionManager', () => {
       expect(forked.messages[1]?.content).toBe('Second message')
     })
 
+    it('persists the forked session mode (DB row, list and detail agree)', () => {
+      const original = manager.createSession(projectId)
+      const msg = manager.addMessage(original.id, { role: 'user', content: 'Hello', tokenCount: 10 })
+      manager.setMode(original.id, 'builder')
+
+      const forked = manager.forkSession(original.id, msg.id)
+
+      // The fork snapshot carries the source mode; the DB row must carry it too,
+      // otherwise the list shows the creation default and
+      // resolveEffectiveProviderModel() may fall back to the wrong agent's
+      // model override.
+      expect(getSession(forked.id)?.mode).toBe('builder')
+      expect(manager.getSession(forked.id)?.mode).toBe('builder')
+      expect(manager.listSessions().find((s) => s.id === forked.id)?.mode).toBe('builder')
+    })
+
+    it('self-heals a stale DB mode when the same agent is re-selected', async () => {
+      const { updateSessionMode } = await import('../db/sessions.js')
+      const session = manager.createSession(projectId)
+      manager.setMode(session.id, 'builder')
+
+      // Simulate a fork/import that left the column at the creation default.
+      updateSessionMode(session.id, 'planner')
+      expect(getSession(session.id)?.mode).toBe('planner')
+
+      // fromMode === toMode (the detail is event-sourced) — it must still persist.
+      manager.setMode(session.id, 'builder')
+      expect(getSession(session.id)?.mode).toBe('builder')
+    })
+
     it('copies cached system prompt to the forked session', async () => {
       const { updateSessionCachedPrompt, getSessionCachedPrompt } = await import('../db/sessions.js')
       const original = manager.createSession(projectId)
