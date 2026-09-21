@@ -148,6 +148,7 @@ const mcpServerSchema = z.object({
   cachedTools: z.array(cachedToolSchema).optional(),
   timeout: z.number().positive().optional(),
   disabled: z.boolean().optional(),
+  perSession: z.boolean().optional(),
 })
 
 const llmConfigSchema = z.object({

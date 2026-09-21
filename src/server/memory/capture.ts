@@ -32,12 +32,16 @@ async function safeExtract(sessionId: string, extractor: MemoryExtractor): Promi
 }
 
 async function trySendOutboxItem(item: OutboxItem): Promise<void> {
-  const result = await callSharedMemory('propose', {
-    collection: item.collection,
-    payload: item.payload,
-    tags: item.tags,
-    identifiers: item.identifiers,
-  })
+  const result = await callSharedMemory(
+    'propose',
+    {
+      collection: item.collection,
+      payload: item.payload,
+      tags: item.tags,
+      identifiers: item.identifiers,
+    },
+    item.sessionId,
+  )
   if (result.success) {
     markOutboxItemSent(item.id)
   } else {

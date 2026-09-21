@@ -83,6 +83,7 @@ export async function injectSharedMemoryContext(
   const result = await searchSharedMemoryBounded(query, {
     topK: options.topK ?? DEFAULT_TOP_K,
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    sessionId: options.sessionId,
     ...(settings.collections.length > 0 ? { collections: settings.collections } : {}),
   })
 

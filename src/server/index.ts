@@ -239,6 +239,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         logger.warn('Failed to persist MCP tool cache', { name, error: String(err) })
       }
     },
+    // A per-session server's catalogue is seeded from its first session
+    // client, so the registered tool set must be refreshed when that happens.
+    onServersChanged: () => {
+      void rebuildMcpTools()
+    },
   })
   setMcpManagerForTools(mcpManager)
   const { setSharedMemoryMcpManager } = await import('./memory/shared-memory-client.js')
@@ -252,6 +257,19 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   setMcpOAuthStoreMode(config.mode ?? 'production')
   // OAuth credentials live next to the config they belong to, never inside it.
   setMcpOAuthStorePath(config.globalConfigPath ? join(dirname(config.globalConfigPath), 'mcp-auth.json') : undefined)
+
+  // Per-session MCP servers: one dedicated child process per OpenFox session,
+  // spawned when the session appears and torn down when it goes away. This is
+  // what makes "1 session = 1 peer = 1 process" hold — each child is handed
+  // its session's id and owns exactly one identity on the far side, so a call
+  // issued by one session is never attributed to a sibling.
+  sessionManager.subscribe((event) => {
+    if (event.type === 'session_created') {
+      void mcpManager.ensureSessionClients(event.session.id).then(() => rebuildMcpTools())
+    } else if (event.type === 'session_deleted') {
+      void mcpManager.releaseSessionClients(event.sessionId)
+    }
+  })
 
   // Remote-agent (headless-agent) hub: enable remote execution routing when a
   // hub is configured. Absent → all tool execution stays local.
@@ -287,6 +305,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         }),
       ),
     )
+    // Per-session servers: spawn the dedicated child for every session that
+    // already exists, so each session's identity exists from startup — a
+    // session is reachable without having called any tool first.
+    for (const session of sessionManager.listSessions()) {
+      await mcpManager.ensureSessionClients(session.id)
+    }
     const mcpTools = createMcpTools(mcpManager)
     if (mcpTools.length > 0) {
       setMcpTools(mcpTools)

@@ -20,6 +20,16 @@ export interface McpServerConfig {
   cachedTools?: CachedToolInfo[]
   timeout?: number
   disabled?: boolean
+  /**
+   * Stdio only. When true, OpenFox spawns one dedicated child process of this
+   * server per OpenFox session instead of a single shared one, and hands each
+   * child its session id in `OPENFOX_SESSION_ID`. The child then owns exactly
+   * one identity on the far side (for Aether: one hub peer per session), so a
+   * call issued by session B is attributed to B and never to a sibling. No
+   * shared client is connected for a per-session server; the tool catalogue
+   * comes from `cachedTools` and is (re)seeded from the first session client.
+   */
+  perSession?: boolean
 }
 
 export interface McpServerState {

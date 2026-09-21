@@ -26,14 +26,16 @@ export function createMcpTools(mcpManager: McpManager): Tool[] {
         name: prefixedName,
         definition,
         mcpServer: server.name,
-        execute: async (args: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> => {
+        execute: async (args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> => {
           const start = Date.now()
           const normalizedArgs = { ...args }
           if ('props' in normalizedArgs && !('properties' in normalizedArgs)) {
             normalizedArgs['properties'] = normalizedArgs['props']
             delete normalizedArgs['props']
           }
-          const result = await mcpManager.callTool(server.name, mcpTool.name, normalizedArgs)
+          // The calling session is threaded through so a per-session server
+          // can route the call to that session's own child process.
+          const result = await mcpManager.callTool(server.name, mcpTool.name, normalizedArgs, context.sessionId)
           return {
             success: result.success,
             ...(result.output ? { output: result.output } : {}),

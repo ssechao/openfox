@@ -78,7 +78,7 @@ export const sharedMemoryTool = createTool<SharedMemoryArgs>(
       },
     },
   },
-  async (args, _context, helpers) => {
+  async (args, context, helpers) => {
     if (!ACTIONS.includes(args.action)) {
       return helpers.error(
         serverT(
@@ -98,7 +98,7 @@ export const sharedMemoryTool = createTool<SharedMemoryArgs>(
         }),
       )
     }
-    const result = await callSharedMemory(args.action, buildArgs(args))
+    const result = await callSharedMemory(args.action, buildArgs(args), context.sessionId)
     if (!result.success) {
       return helpers.error(
         result.error ?? serverT({ en: 'shared_memory call failed', fr: 'Échec de l’appel à shared_memory' }),

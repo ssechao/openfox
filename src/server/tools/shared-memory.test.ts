@@ -67,11 +67,15 @@ describe('shared_memory tool', () => {
 
   it('forwards a search action with query/topK/collections', async () => {
     await sharedMemoryTool.execute({ action: 'search', query: 'deploy', topK: 3, collections: ['ops'] }, baseContext)
-    expect(mockClient.callSharedMemory).toHaveBeenCalledWith('search', {
-      query: 'deploy',
-      topK: 3,
-      collections: ['ops'],
-    })
+    expect(mockClient.callSharedMemory).toHaveBeenCalledWith(
+      'search',
+      {
+        query: 'deploy',
+        topK: 3,
+        collections: ['ops'],
+      },
+      'test-session',
+    )
   })
 
   it('forwards a propose action with collection/payload/tags/identifiers', async () => {
@@ -80,17 +84,25 @@ describe('shared_memory tool', () => {
       { action: 'propose', collection: 'ops', payload, tags: ['a'], identifiers: ['host-x'] },
       baseContext,
     )
-    expect(mockClient.callSharedMemory).toHaveBeenCalledWith('propose', {
-      collection: 'ops',
-      payload,
-      tags: ['a'],
-      identifiers: ['host-x'],
-    })
+    expect(mockClient.callSharedMemory).toHaveBeenCalledWith(
+      'propose',
+      {
+        collection: 'ops',
+        payload,
+        tags: ['a'],
+        identifiers: ['host-x'],
+      },
+      'test-session',
+    )
   })
 
   it('forwards a feedback action', async () => {
     await sharedMemoryTool.execute({ action: 'feedback', entryId: 'e1', outcome: 'confirmed' }, baseContext)
-    expect(mockClient.callSharedMemory).toHaveBeenCalledWith('feedback', { entryId: 'e1', outcome: 'confirmed' })
+    expect(mockClient.callSharedMemory).toHaveBeenCalledWith(
+      'feedback',
+      { entryId: 'e1', outcome: 'confirmed' },
+      'test-session',
+    )
   })
 
   it('returns the underlying error when the client call fails', async () => {

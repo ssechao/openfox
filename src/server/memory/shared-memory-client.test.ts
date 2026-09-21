@@ -62,7 +62,14 @@ describe('callSharedMemory', () => {
     const callTool = vi.fn(async () => ({ success: true, output: '{"results":[]}' }))
     setSharedMemoryMcpManager(fakeManager({ callTool }))
     await callSharedMemory('search', { query: 'deploy docker' })
-    expect(callTool).toHaveBeenCalledWith('llm-aether', 'rag_search', { query: 'deploy docker' })
+    expect(callTool).toHaveBeenCalledWith('llm-aether', 'rag_search', { query: 'deploy docker' }, undefined)
+  })
+
+  it('forwards the calling session so a per-session aether server can route it', async () => {
+    const callTool = vi.fn(async () => ({ success: true, output: '{"results":[]}' }))
+    setSharedMemoryMcpManager(fakeManager({ callTool }))
+    await callSharedMemory('search', { query: 'deploy docker' }, 'session-7')
+    expect(callTool).toHaveBeenCalledWith('llm-aether', 'rag_search', { query: 'deploy docker' }, 'session-7')
   })
 
   it('parses a JSON string output into data', async () => {

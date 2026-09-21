@@ -419,6 +419,43 @@ describe('config', () => {
       expect(loaded.mcpServers!['test']!.disabledTools).toEqual(['tool_a', 'tool_b'])
     })
 
+    it('should preserve perSession through save and load cycle', async () => {
+      const raw = {
+        providers: [],
+        mcpServers: {
+          'llm-aether': {
+            transport: 'stdio' as const,
+            command: 'llm-aether',
+            perSession: true,
+          },
+        },
+      }
+
+      await writeFile(join(TEST_DIR, 'production', 'config.json'), JSON.stringify(raw))
+      const loaded = await loadGlobalConfig('production')
+
+      expect(loaded.mcpServers!['llm-aether']!.perSession).toBe(true)
+
+      await saveGlobalConfig('production', loaded)
+      const reloaded = await loadGlobalConfig('production')
+
+      expect(reloaded.mcpServers!['llm-aether']!.perSession).toBe(true)
+    })
+
+    it('should leave perSession undefined when the server does not opt in', async () => {
+      const raw = {
+        providers: [],
+        mcpServers: {
+          shared: { transport: 'stdio' as const, command: 'node' },
+        },
+      }
+
+      await writeFile(join(TEST_DIR, 'production', 'config.json'), JSON.stringify(raw))
+      const loaded = await loadGlobalConfig('production')
+
+      expect(loaded.mcpServers!['shared']!.perSession).toBeUndefined()
+    })
+
     it('should handle missing mcpServers', async () => {
       const loaded = await loadGlobalConfig('production')
       expect(loaded.mcpServers).toBeUndefined()

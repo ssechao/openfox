@@ -39,12 +39,38 @@ interface ServerEntry {
   client: Client | undefined
   transport: Transport | null
   state: McpServerState
+  /**
+   * Bumped on every disconnect. A per-session spawn captures it before
+   * connecting and refuses to publish a stale child, which is what makes a
+   * disconnect that lands mid-connect still reap the process it raced.
+   */
+  generation: number
+}
+
+/** NUL keeps the two halves unambiguous: neither id nor server name can contain it. */
+function sessionConnectKey(sessionId: string, serverName: string): string {
+  return `${sessionId}\u0000${serverName}`
 }
 
 export class McpManager {
   private servers = new Map<string, ServerEntry>()
   private onServersChanged: (() => void) | undefined
   private onToolsDiscovered: ((serverName: string, tools: CachedToolInfo[]) => void) | undefined
+  /**
+   * One client per (sessionId, serverName) for per-session servers — see
+   * `McpServerConfig.perSession`. A per-session server has no shared client
+   * at all: this map is its only connection, and each entry is spawned with
+   * that session's id in the child's environment.
+   */
+  private sessionClients = new Map<string, Map<string, Client>>()
+  /**
+   * In-flight connections, keyed by `(sessionId, serverName)`. Two concurrent
+   * `ensureSessionClients` for the same session must share one attempt: storing
+   * the client only after `connect()` resolved would let both spawn a child and
+   * leave the loser unreferenced — an orphan process, and on the Aether side a
+   * ghost peer that no release can ever reap.
+   */
+  private sessionConnects = new Map<string, Promise<Client>>()
 
   constructor(options?: McpManagerOptions) {
     this.onServersChanged = options?.onServersChanged
@@ -56,7 +82,7 @@ export class McpManager {
       throw new Error(`MCP server '${name}' already exists`)
     }
     const state: McpServerState = { name, config, status: 'disconnected', tools: [], estimatedTokens: 0 }
-    this.servers.set(name, { config, client: undefined, transport: null, state })
+    this.servers.set(name, { config, client: undefined, transport: null, state, generation: 0 })
     await this.connectServer(name)
   }
 
@@ -71,6 +97,15 @@ export class McpManager {
   async connectServer(name: string): Promise<void> {
     const entry = this.servers.get(name)
     if (!entry) return
+
+    // A per-session server never gets a shared client: its connections are
+    // spawned one per OpenFox session (see `ensureSessionClients`). Its
+    // catalogue comes from the persisted cache, and is (re)seeded by the
+    // first session client, so there is nothing to connect here.
+    if (entry.config.perSession) {
+      this.applyCachedTools(name, entry)
+      return
+    }
 
     try {
       await this.disconnectServer(name)
@@ -137,32 +172,13 @@ export class McpManager {
 
       const { tools: mcpTools } = await client.listTools()
 
-      const disabledSet = new Set(entry.config.disabledTools ?? [])
-      const tools: McpToolInfo[] = mcpTools.map((t) => {
-        const inputSchema = t.inputSchema as Record<string, unknown>
-        return {
-          name: t.name,
-          description: t.description ?? '',
-          inputSchema,
-          enabled: !disabledSet.has(t.name),
-          estimatedTokens: estimateToolTokens(t.name, t.description, inputSchema),
-        }
-      })
-      const totalTokens = tools.filter((t) => t.enabled).reduce((sum, t) => sum + t.estimatedTokens, 0)
+      const { tools, estimatedTokens } = this.describeTools(entry, mcpTools)
 
       entry.client = client
       entry.transport = transport
-      entry.state = { name, config: entry.config, status: 'connected', tools, estimatedTokens: totalTokens }
+      entry.state = { name, config: entry.config, status: 'connected', tools, estimatedTokens }
 
-      // Update cache with raw tool definitions (without enabled state)
-      const cachedTools: CachedToolInfo[] = tools.map((t) => ({
-        name: t.name,
-        ...(t.description ? { description: t.description } : {}),
-        inputSchema: t.inputSchema,
-        estimatedTokens: t.estimatedTokens,
-      }))
-      entry.config.cachedTools = cachedTools
-      this.onToolsDiscovered?.(name, cachedTools)
+      this.cacheDiscoveredTools(name, entry, tools)
 
       logger.info('Connected to MCP server', { name, toolCount: tools.length })
       this.onServersChanged?.()
@@ -173,16 +189,8 @@ export class McpManager {
       // Fall back to cached tools if available
       const cachedTools = entry.config.cachedTools
       if (cachedTools && cachedTools.length > 0) {
-        const disabledSet = new Set(entry.config.disabledTools ?? [])
-        const tools: McpToolInfo[] = cachedTools.map((t) => ({
-          name: t.name,
-          description: t.description ?? '',
-          inputSchema: t.inputSchema,
-          enabled: !disabledSet.has(t.name),
-          estimatedTokens: t.estimatedTokens,
-        }))
-        const totalTokens = tools.filter((t) => t.enabled).reduce((sum, t) => sum + t.estimatedTokens, 0)
-        entry.state = { name, config: entry.config, status: 'error', tools, estimatedTokens: totalTokens, error: msg }
+        const { tools, estimatedTokens } = this.describeTools(entry, cachedTools)
+        entry.state = { name, config: entry.config, status: 'error', tools, estimatedTokens, error: msg }
       } else {
         entry.state = { name, config: entry.config, status: 'error', tools: [], estimatedTokens: 0, error: msg }
       }
@@ -190,9 +198,257 @@ export class McpManager {
     }
   }
 
+  /**
+   * Seed a per-session server's state from its persisted cache, so its tool
+   * definitions are available before any session client has connected.
+   */
+  private applyCachedTools(name: string, entry: ServerEntry): void {
+    const { tools, estimatedTokens } = this.describeTools(entry, entry.config.cachedTools ?? [])
+    entry.state = {
+      name,
+      config: entry.config,
+      status: tools.length > 0 ? 'connected' : 'disconnected',
+      tools,
+      estimatedTokens,
+    }
+    this.onServersChanged?.()
+  }
+
+  /**
+   * Project a catalogue onto `McpToolInfo`, applying the server's disabled set.
+   * Cached entries already carry a token estimate; live ones are measured here.
+   */
+  private describeTools(
+    entry: ServerEntry,
+    source: ReadonlyArray<{
+      name: string
+      description?: string | undefined
+      inputSchema: unknown
+      estimatedTokens?: number | undefined
+    }>,
+  ): { tools: McpToolInfo[]; estimatedTokens: number } {
+    const disabledSet = new Set(entry.config.disabledTools ?? [])
+    const tools: McpToolInfo[] = source.map((t) => {
+      const inputSchema = t.inputSchema as Record<string, unknown>
+      return {
+        name: t.name,
+        description: t.description ?? '',
+        inputSchema,
+        enabled: !disabledSet.has(t.name),
+        estimatedTokens: t.estimatedTokens ?? estimateToolTokens(t.name, t.description, inputSchema),
+      }
+    })
+    const estimatedTokens = tools.filter((t) => t.enabled).reduce((sum, t) => sum + t.estimatedTokens, 0)
+    return { tools, estimatedTokens }
+  }
+
+  /** Persist a freshly discovered catalogue, without the per-server enabled state. */
+  private cacheDiscoveredTools(name: string, entry: ServerEntry, tools: McpToolInfo[]): void {
+    const cachedTools: CachedToolInfo[] = tools.map((t) => ({
+      name: t.name,
+      ...(t.description ? { description: t.description } : {}),
+      inputSchema: t.inputSchema,
+      estimatedTokens: t.estimatedTokens,
+    }))
+    entry.config.cachedTools = cachedTools
+    this.onToolsDiscovered?.(name, cachedTools)
+  }
+
+  private perSessionServerNames(): string[] {
+    return [...this.servers.entries()]
+      .filter(([, e]) => e.config.perSession === true && !e.config.disabled)
+      .map(([name]) => name)
+  }
+
+  /** Names of per-session servers with a live client for `sessionId`. */
+  sessionServerNames(sessionId: string): string[] {
+    const bySession = this.sessionClients.get(sessionId)
+    return bySession ? [...bySession.keys()] : []
+  }
+
+  /**
+   * Ensure one dedicated child process exists for `sessionId` on every
+   * per-session server. Idempotent: an already-live client is reused, so a
+   * duplicate `session_created` never spawns a second process. Failures are
+   * logged and swallowed — a missing child degrades that session to "no
+   * Aether peer", never a crash.
+   */
+  async ensureSessionClients(sessionId: string): Promise<void> {
+    for (const name of this.perSessionServerNames()) {
+      try {
+        await this.connectSessionClient(name, sessionId)
+      } catch (err) {
+        logger.warn('Failed to start per-session MCP client', {
+          name,
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+  }
+
+  /**
+   * Spawn (or reuse) the child for `(serverName, sessionId)`. The child's
+   * environment carries `OPENFOX_SESSION_ID`, which is what lets it own
+   * exactly one identity on the far side.
+   */
+  private async connectSessionClient(serverName: string, sessionId: string): Promise<Client> {
+    const entry = this.servers.get(serverName)
+    if (!entry) throw new Error(`MCP server '${serverName}' not found`)
+    if (!entry.config.perSession) throw new Error(`MCP server '${serverName}' is not per-session`)
+    if (entry.config.transport !== 'stdio') {
+      throw new Error(`per-session MCP server '${serverName}' must use the stdio transport`)
+    }
+    if (!entry.config.command) throw new Error(`command is required for stdio transport`)
+
+    let bySession = this.sessionClients.get(sessionId)
+    if (!bySession) {
+      bySession = new Map<string, Client>()
+      this.sessionClients.set(sessionId, bySession)
+    }
+    const existing = bySession.get(serverName)
+    if (existing?.transport) return existing
+
+    const key = sessionConnectKey(sessionId, serverName)
+    const pending = this.sessionConnects.get(key)
+    if (pending) return pending
+
+    const attempt = this.spawnSessionClient(
+      serverName,
+      sessionId,
+      entry,
+      entry.generation,
+      entry.config.command,
+      bySession,
+    )
+    this.sessionConnects.set(key, attempt)
+    try {
+      return await attempt
+    } finally {
+      this.sessionConnects.delete(key)
+    }
+  }
+
+  /**
+   * The spawn half of `connectSessionClient`, run at most once per
+   * `(sessionId, serverName)` thanks to the in-flight map.
+   */
+  private async spawnSessionClient(
+    serverName: string,
+    sessionId: string,
+    entry: ServerEntry,
+    generation: number,
+    command: string,
+    bySession: Map<string, Client>,
+  ): Promise<Client> {
+    const client = new Client({ name: `openfox-mcp/${serverName}/${sessionId}`, version: '2.0.0' })
+    const transport = new StdioClientTransport({
+      command,
+      ...(entry.config.args ? { args: entry.config.args } : {}),
+      env: { ...(entry.config.env ?? {}), OPENFOX_SESSION_ID: sessionId },
+      stderr: 'pipe',
+    })
+
+    client.onclose = () => {
+      const live = this.sessionClients.get(sessionId)
+      if (live?.get(serverName) === client) live.delete(serverName)
+    }
+
+    await client.connect(transport)
+
+    // The session may have been released, or the server disconnected or
+    // removed, while this connect was in flight. Adopting the child in any of
+    // those cases would strand it — a disconnect only closes what the map
+    // already holds — so close it instead of handing back a client nobody
+    // will ever reap.
+    const sessionGone = this.sessionClients.get(sessionId) !== bySession
+    const serverGone = this.servers.get(serverName) !== entry || entry.generation !== generation
+    if (sessionGone || serverGone) {
+      await client.close().catch(() => undefined)
+      const what = sessionGone ? `session '${sessionId}' was released` : `server '${serverName}' was disconnected`
+      throw new Error(`${what} while connecting to '${serverName}'`)
+    }
+    bySession.set(serverName, client)
+
+    // The first client for this server also seeds the shared catalogue, so a
+    // fresh install with no cache still discovers the tools (they are only
+    // ever callable from within a session anyway).
+    if (entry.state.tools.length === 0) {
+      try {
+        const { tools: mcpTools } = await client.listTools()
+        const { tools, estimatedTokens } = this.describeTools(entry, mcpTools)
+        entry.state = {
+          name: serverName,
+          config: entry.config,
+          status: 'connected',
+          tools,
+          estimatedTokens,
+        }
+        this.cacheDiscoveredTools(serverName, entry, tools)
+        this.onServersChanged?.()
+      } catch (err) {
+        logger.warn('Failed to seed per-session MCP catalogue', {
+          name: serverName,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    return client
+  }
+
+  /**
+   * Close and forget every per-session client belonging to `sessionId`.
+   * Dropping the session map first is what tells an in-flight spawn that its
+   * child is no longer wanted; awaiting those attempts afterwards is what
+   * guarantees none of them outlives the release.
+   */
+  async releaseSessionClients(sessionId: string): Promise<void> {
+    const bySession = this.sessionClients.get(sessionId)
+    this.sessionClients.delete(sessionId)
+
+    const prefix = sessionConnectKey(sessionId, '')
+    await this.settleWhere((key) => key.startsWith(prefix))
+
+    if (!bySession) return
+    for (const client of bySession.values()) {
+      await client.close().catch(() => undefined)
+    }
+  }
+
+  /** Wait for the in-flight spawns of one server, across every session. */
+  private async settleSessionConnects(serverName: string): Promise<void> {
+    const suffix = sessionConnectKey('', serverName)
+    await this.settleWhere((key) => key.endsWith(suffix))
+  }
+
+  /**
+   * Await the matching in-flight spawns. Their own guards decide whether to
+   * publish or self-close; we only need them finished before we look at the
+   * maps, so a settled rejection is a normal outcome here.
+   */
+  private async settleWhere(match: (key: string) => boolean): Promise<void> {
+    const inFlight = [...this.sessionConnects.entries()].filter(([key]) => match(key)).map(([, attempt]) => attempt)
+    if (inFlight.length > 0) await Promise.allSettled(inFlight)
+  }
+
   async disconnectServer(name: string): Promise<void> {
     const entry = this.servers.get(name)
     if (!entry) return
+    // Synchronous, and before any await: an in-flight spawn must see the bump
+    // even when the caller never awaits us (removeServer does not).
+    entry.generation += 1
+    if (entry.config.perSession) {
+      await this.settleSessionConnects(name)
+      for (const [sessionId, bySession] of [...this.sessionClients.entries()]) {
+        const client = bySession.get(name)
+        if (!client) continue
+        bySession.delete(name)
+        if (bySession.size === 0) this.sessionClients.delete(sessionId)
+        await client.close().catch(() => undefined)
+      }
+      entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
+      return
+    }
     try {
       await entry.client?.close()
     } catch {
@@ -256,11 +512,31 @@ export class McpManager {
     serverName: string,
     toolName: string,
     args: Record<string, unknown>,
+    sessionId?: string,
   ): Promise<{ success: boolean; output?: string; error?: string }> {
     const entry = this.servers.get(serverName)
     if (!entry) return { success: false, error: `MCP server '${serverName}' not found` }
 
-    if (!entry.client) return { success: false, error: `MCP server '${serverName}' is not connected` }
+    // A per-session server has no shared client: resolve (or spawn) the one
+    // dedicated to the calling session. Without a session id there is no
+    // correct client to use, and guessing one would misattribute the call —
+    // so it is refused explicitly rather than silently routed to a sibling.
+    let client: Client | undefined = entry.client
+    if (entry.config.perSession) {
+      if (!sessionId) {
+        return {
+          success: false,
+          error: `MCP server '${serverName}' is per-session: a session id is required to call it`,
+        }
+      }
+      try {
+        client = await this.connectSessionClient(serverName, sessionId)
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+
+    if (!client) return { success: false, error: `MCP server '${serverName}' is not connected` }
     try {
       const timeout = entry.config.timeout
       const requestOptions = timeout !== undefined && timeout > 0 ? { timeout: timeout * 1000 } : undefined
@@ -274,14 +550,14 @@ export class McpManager {
         })
         try {
           result = await Promise.race([
-            entry.client.callTool({ name: toolName, arguments: args }, undefined, requestOptions),
+            client.callTool({ name: toolName, arguments: args }, undefined, requestOptions),
             timeoutPromise,
           ])
         } finally {
           if (timer) clearTimeout(timer)
         }
       } else {
-        result = await entry.client.callTool({ name: toolName, arguments: args })
+        result = await client.callTool({ name: toolName, arguments: args })
       }
       const content = result.content as Array<{ type: string; text?: string }>
       const textParts = content.filter((c) => c.type === 'text').map((c) => c.text)

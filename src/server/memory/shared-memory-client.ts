@@ -41,12 +41,13 @@ export interface SharedMemoryResult {
 export async function callSharedMemory(
   action: SharedMemoryAction,
   args: Record<string, unknown>,
+  sessionId?: string,
 ): Promise<SharedMemoryResult> {
   if (!mcpManager) {
     return { success: false, error: 'shared memory is not configured (no llm-aether MCP server)' }
   }
   const toolName = ACTION_TO_TOOL[action]
-  const result = await mcpManager.callTool(LLM_AETHER_SERVER_NAME, toolName, args)
+  const result = await mcpManager.callTool(LLM_AETHER_SERVER_NAME, toolName, args, sessionId)
   if (!result.success) {
     return { success: false, error: result.error ?? 'shared memory call failed' }
   }
@@ -64,6 +65,7 @@ export interface SharedMemorySearchOptions {
   topK?: number
   timeoutMs?: number
   collections?: string[]
+  sessionId?: string
 }
 
 // Bounded local cache of previously-approved search results (criterion 12:
@@ -124,7 +126,7 @@ export async function searchSharedMemoryBounded(
   if (opts.collections && opts.collections.length > 0) {
     args['collections'] = opts.collections
   }
-  const call = callSharedMemory('search', args)
+  const call = callSharedMemory('search', args, opts.sessionId)
   const timeout = new Promise<SharedMemoryResult>((resolvePromise) => {
     setTimeout(() => resolvePromise({ success: false, error: 'shared memory search timed out' }), timeoutMs)
   })
