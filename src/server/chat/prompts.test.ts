@@ -307,7 +307,7 @@ describe('buildAgentSmallReminder', () => {
   it('explicitly supersedes the read-only instruction when in builder', () => {
     const reminder = buildAgentSmallReminder('Builder', 'builder')
     expect(reminder).toContain("you are in 'Builder' mode")
-    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
+    expect(reminder.toLowerCase()).toContain('superseded')
     expect(reminder.toLowerCase()).toMatch(/read-only|plan mode/)
     expect(reminder).toMatch(/write_file|edit_file/)
   })
@@ -315,19 +315,27 @@ describe('buildAgentSmallReminder', () => {
   it('explicitly supersedes the build-mode instruction when in planner', () => {
     const reminder = buildAgentSmallReminder('Planner', 'planner')
     expect(reminder).toContain("you are in 'Planner' mode")
-    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
+    expect(reminder.toLowerCase()).toContain('superseded')
     expect(reminder.toLowerCase()).toMatch(/build mode|implementation/)
   })
 
   it('still supersedes generically for a custom agent', () => {
     const reminder = buildAgentSmallReminder('Architect', 'architect')
     expect(reminder).toContain("you are in 'Architect' mode")
-    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
+    expect(reminder.toLowerCase()).toContain('superseded')
   })
 
   it('supersedes even when no agent id is provided (backwards compatible)', () => {
     const reminder = buildAgentSmallReminder('Builder')
     expect(reminder).toContain("you are in 'Builder' mode")
-    expect(reminder.toLowerCase()).toMatch(/no longer applies|obsolete|superseded/)
+    expect(reminder.toLowerCase()).toContain('superseded')
+  })
+
+  it('stays short and does not claim a mode change on every turn', () => {
+    const reminder = buildAgentSmallReminder('Builder', 'builder')
+    // Appended on every turn: keep it compact, and do not announce a "MODE
+    // CHANGE" when nothing changed (the reminder is steady-state).
+    expect(reminder.length).toBeLessThan(260)
+    expect(reminder).not.toMatch(/MODE CHANGE/)
   })
 })

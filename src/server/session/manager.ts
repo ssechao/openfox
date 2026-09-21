@@ -577,6 +577,11 @@ export class SessionManager {
     const eventStore = getEventStore()
     eventStore.append(newSession.id, { type: 'turn.snapshot', data: snapshot })
     updateSessionMessageCount(newSession.id, messages.length)
+    // The snapshot carries the forked mode (event-sourced detail), but the DB
+    // row was created with the default agent. Persist it so the column, the
+    // list and the detail agree — and so resolveEffectiveProviderModel() does
+    // not fall back to the wrong agent's model override.
+    updateSessionMode(newSession.id, state.mode)
 
     const cached = getSessionCachedPrompt(originalSessionId)
     if (cached) {
@@ -677,6 +682,10 @@ export class SessionManager {
     const restoredMode = getSessionState(session.id)?.mode ?? session.mode
     if (!agents.some((agent) => agent.metadata.id === restoredMode)) {
       this.setMode(session.id, resolveDefaultAgentId(projectId))
+    } else {
+      // The restored mode is kept: persist it, otherwise the DB row (created
+      // with the default agent) would disagree with the event-sourced detail.
+      updateSessionMode(session.id, restoredMode)
     }
 
     if (payload.cachedLayout) {
@@ -846,6 +855,15 @@ export class SessionManager {
     const fromMode = session.mode
 
     if (fromMode === toMode) {
+      // Self-heal a stale DB row: a forked/imported session carries its mode in
+      // the event snapshot, but its column was written at creation. Re-selecting
+      // the same agent must therefore persist it — otherwise the list keeps
+      // showing the old mode and resolveEffectiveProviderModel() falls back to
+      // the wrong agent's model override. Guarded by a read so we do not bump
+      // updated_at (and reorder the sidebar) on every no-op call.
+      if (dbGetSession(sessionId)?.mode !== toMode) {
+        updateSessionMode(sessionId, toMode)
+      }
       return session
     }
 
