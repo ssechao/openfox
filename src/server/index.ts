@@ -4,6 +4,7 @@ import { createServer as createHttpServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
 
 import type { Config, ModelConfig, ProviderBackend } from '../shared/types.js'
@@ -3573,7 +3574,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   app.use('/api/files', createFileSearchRoutes())
 
   // Serve static web UI
-  const webDir = resolve(__dirname, '../../web')
+  // The web sources sit next to the compiled server:
+  //   - from source (src/server/): ../../web
+  //   - from the build (dist/):    ../web   (the repo keeps its web/ source)
+  // Pick whichever exists so dev mode works both from source (tsx) and from the
+  // built CLI — resolving only ../../web made the build fail with
+  // "Could not resolve <parent>/web/vite.config.ts".
+  const webDirCandidates = [resolve(__dirname, '../../web'), resolve(__dirname, '../web')]
+  const webDir = webDirCandidates.find((dir) => existsSync(dir)) ?? webDirCandidates[0]!
   const isDev = config.mode === 'development'
 
   let viteServer: ViteDevServer | undefined
@@ -3585,7 +3593,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     // Create Vite server in middleware mode
     viteServer = await createViteServer({
       root: webDir,
-      configFile: resolve(__dirname, '../../web/vite.config.ts'),
+      configFile: resolve(webDir, 'vite.config.ts'),
       server: { middlewareMode: true },
       appType: 'spa',
       logLevel: 'warn',
