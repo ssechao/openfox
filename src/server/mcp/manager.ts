@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -115,12 +116,16 @@ export class McpManager {
 
       if (entry.config.transport === 'stdio') {
         if (!entry.config.command) throw new Error('command is required for stdio transport')
-        transport = new StdioClientTransport({
+        const stdioTransport = new StdioClientTransport({
           command: entry.config.command,
           ...(entry.config.args ? { args: entry.config.args } : {}),
           ...(entry.config.env ? { env: entry.config.env } : {}),
           stderr: 'pipe',
         })
+        // Discard diagnostics continuously so a full stderr pipe cannot block the server.
+        const stderrStream = stdioTransport.stderr
+        if (stderrStream instanceof Readable) stderrStream.resume()
+        transport = stdioTransport
       } else if (entry.config.transport === 'http') {
         if (!entry.config.url) throw new Error('url is required for http transport')
         const httpOpts: StreamableHTTPClientTransportOptions = {}
