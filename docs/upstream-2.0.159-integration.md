@@ -53,6 +53,15 @@ No conflict markers and no unmerged index entries remain. Every fork guard is pr
 
 Passing local and mock tests is not a live-provider or deployment verification: no provider call, install or restart was performed.
 
+## Post-merge review adjustments
+
+- **Native scrollbars default**: `DisplayTab` read the setting with a `'true'` fallback and declared `defaultValue: 'true'`, while the server default and the `useDisplaySettings` fallback are `'false'` — the toggle could render ON while the behaviour was OFF. Both are now `'false'`.
+- **Feed virtualization default**: the declared default was `'false'` → `'off'`, while the client fallback (`'auto'`) and the Display tab's help text document Auto ("enables this on feeds longer than 50 items"). The declared default is now `'auto'`, guarded by a settings test.
+- **Fullscreen slash-command toggle**: it governs the composer's slash popup, so it moved from `FEED_TOGGLES` to `COMPOSER_TOGGLES`, with an assertion added to the Composer section test.
+- **Redundant `role="button"`** removed from the `ToggleList` switch (it is already a `<button>`; `aria-pressed` carries the state).
+- Left as upstream: the fullscreen popup's positioning magic numbers (`document.querySelector('header')`, `42`, `84px`) come from upstream's commit `246cfff5` and were not touched by the merge; a layout refactor belongs to its own change.
+- Known pre-existing gap carried by both parents: the slash autocomplete lists enabled skills, but neither `parseSlashCommand` (web) nor `resolveSlashLaunch` (server) recognises a skill id, so selecting one sends the literal text. Wiring it is a feature (skill launch path), not a merge fix.
+
 ## Delivery gates
 
 - Commit the merge with both frozen parents and the repository hooks enabled (no `--no-verify`).

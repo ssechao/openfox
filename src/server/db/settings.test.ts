@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { loadConfig } from '../config.js'
 import { closeDatabase, initDatabase } from './index.js'
-import { SETTINGS_KEYS, deleteSetting, getAllSettings, getMaxVisibleItems, getSetting, setSetting } from './settings.js'
+import {
+  SETTINGS_DEFAULTS,
+  SETTINGS_KEYS,
+  deleteSetting,
+  getAllSettings,
+  getMaxVisibleItems,
+  getSetting,
+  setSetting,
+} from './settings.js'
 
 describe('db settings', () => {
   beforeEach(() => {
@@ -35,6 +43,13 @@ describe('db settings', () => {
   describe('max visible items', () => {
     it('uses the declared default when the setting is absent', () => {
       expect(getMaxVisibleItems()).toBe(300)
+    })
+
+    it('declares auto as the feed virtualization default, matching the documented behaviour', () => {
+      // The client falls back to 'auto' and the Display tab documents Auto
+      // ("enables this on feeds longer than 50 items"); the declared default
+      // must agree, or the select flips to Off as soon as the server answers.
+      expect(SETTINGS_DEFAULTS[SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION]).toBe('auto')
     })
 
     it('preserves explicit limits, including zero for unlimited history', () => {

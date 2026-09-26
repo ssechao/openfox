@@ -78,15 +78,6 @@ const FEED_TOGGLES: ToggleDefinition[] = [
       fr: 'Affiche les marqueurs de début et de fin de workflow',
     },
   },
-  {
-    key: SETTINGS_KEYS.DISPLAY_FULLSCREEN_SLASH_COMMAND,
-    label: { en: 'Fullscreen slash commands view', fr: 'Vue plein écran des commandes slash' },
-    description: {
-      en: 'Choose whether the commands view uses default sizing or fills the available screen height.',
-      fr: 'Choisissez si la vue des commandes utilise la taille par défaut ou remplit la hauteur d’écran disponible.',
-    },
-    defaultValue: 'false',
-  },
 ]
 
 const PERF_TOGGLES: ToggleDefinition[] = [
@@ -100,7 +91,7 @@ const PERF_TOGGLES: ToggleDefinition[] = [
       en: 'Swap custom styled scrollbars for native ones in tool call views (file previews, arguments, results). Faster, but native scrollbars look different on some platforms.',
       fr: 'Remplace les barres de défilement personnalisées par des barres natives dans les vues d’appels d’outils (aperçus de fichiers, arguments, résultats). Plus rapide, mais l’apparence diffère selon les plateformes.',
     },
-    defaultValue: 'true',
+    defaultValue: 'false',
   },
   {
     key: SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS,
@@ -159,6 +150,15 @@ const COMPOSER_TOGGLES: ToggleDefinition[] = [
     },
     defaultValue: 'false',
   },
+  {
+    key: SETTINGS_KEYS.DISPLAY_FULLSCREEN_SLASH_COMMAND,
+    label: { en: 'Fullscreen slash commands view', fr: 'Vue plein écran des commandes slash' },
+    description: {
+      en: 'Choose whether the commands view uses default sizing or fills the available screen height.',
+      fr: 'Choisissez si la vue des commandes utilise la taille par défaut ou remplit la hauteur d’écran disponible.',
+    },
+    defaultValue: 'false',
+  },
 ]
 
 export function DisplayTab() {
@@ -171,7 +171,7 @@ export function DisplayTab() {
   const showWorkflowBars = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_WORKFLOW_BARS, 'true')
   const showToolCallStreaming = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_TOOL_CALL_STREAMING, 'false')
   const fullscreenSlashCommand = useSetting(SETTINGS_KEYS.DISPLAY_FULLSCREEN_SLASH_COMMAND, 'false')
-  const nativeScrollbars = useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS, 'true')
+  const nativeScrollbars = useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS, 'false')
   const nativeScrollbarsCodeBlocks = useSetting(SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS, 'false')
   const collapseLargeToolCalls = useSetting(SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS, 'false')
   const deferCodeHighlightWhileStreaming = useSetting(
@@ -455,7 +455,6 @@ function ToggleList({
           </div>
           <button
             type="button"
-            role="button"
             aria-pressed={local[key] ? 'true' : 'false'}
             onClick={() => onToggle(key)}
             className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${

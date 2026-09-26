@@ -98,6 +98,10 @@ describe('DisplayTab Composer setting', () => {
 
     expect(screen.getByText('Composer')).toBeTruthy()
     expect(screen.getByText('Expand composer full-screen on mobile')).toBeTruthy()
+    // The slash-command popup belongs to the composer, not to the feed: it must
+    // be listed under Composer so it can be found where it applies.
+    const composerSection = screen.getByText('Composer').closest('div') as HTMLElement
+    expect(within(composerSection).getByText('Fullscreen slash commands view')).toBeTruthy()
   })
 
   it('persists the fullscreen composer toggle', async () => {
