@@ -49,6 +49,9 @@ e2e/.openfox-test/
 e2e/**/.openfox-test/
 .openfox/pr-description.md
 
+# Transient handoff notes (developer-machine specific, never committed)
+HANDOVER_*.md
+
 # Logs
 *.log
 logs/
