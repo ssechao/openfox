@@ -64,4 +64,37 @@ describe('McpManager stdio stderr', () => {
       await manager.disconnectAll()
     }
   })
+
+  it('keeps per-session clients responsive under heavy stderr output', async () => {
+    const manager = new McpManager()
+
+    try {
+      await manager.addServer('noisy-session', {
+        transport: 'stdio',
+        command: process.execPath,
+        args: ['-e', noisyServer],
+        perSession: true,
+      })
+
+      // A per-session server never gets a shared client: every call goes through
+      // the child spawned for the calling session, so the diagnostics must be
+      // drained there too. Without it the child blocks on its second stderr
+      // write and the call never returns.
+      expect(await manager.callTool('noisy-session', 'ping', {}, 'session-1')).toEqual({
+        success: true,
+        output: 'pong',
+      })
+      expect(await manager.callTool('noisy-session', 'ping', {}, 'session-1')).toEqual({
+        success: true,
+        output: 'pong',
+      })
+      // A second session owns its own child, drained the same way.
+      expect(await manager.callTool('noisy-session', 'ping', {}, 'session-2')).toEqual({
+        success: true,
+        output: 'pong',
+      })
+    } finally {
+      await manager.disconnectAll()
+    }
+  })
 })

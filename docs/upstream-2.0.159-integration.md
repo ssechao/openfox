@@ -61,6 +61,7 @@ Passing local and mock tests is not a live-provider or deployment verification: 
 - **Redundant `role="button"`** removed from the `ToggleList` switch (it is already a `<button>`; `aria-pressed` carries the state).
 - Left as upstream: the fullscreen popup's positioning magic numbers (`document.querySelector('header')`, `42`, `84px`) come from upstream's commit `246cfff5` and were not touched by the merge; a layout refactor belongs to its own change.
 - Known pre-existing gap carried by both parents: the slash autocomplete lists enabled skills, but neither `parseSlashCommand` (web) nor `resolveSlashLaunch` (server) recognises a skill id, so selecting one sends the literal text. Wiring it is a feature (skill launch path), not a merge fix.
+- **Per-session MCP stderr drain**: the fork's drain covered only the shared client; a `perSession: true` server spawns its child in `spawnSessionClient`, where the same full-pipe block applied. The drain is now applied there too, with a RED→GREEN test (the per-session case timed out at 8 s before the fix).
 
 ## Delivery gates
 

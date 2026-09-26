@@ -385,6 +385,11 @@ export class McpManager {
       env: { ...(entry.config.env ?? {}), OPENFOX_SESSION_ID: sessionId },
       stderr: 'pipe',
     })
+    // Same reason as the shared client: a per-session child that writes more
+    // than the pipe buffer to stderr blocks on its next write and never answers
+    // initialize/tools/list/tools/call. Discard its diagnostics continuously.
+    const stderrStream = transport.stderr
+    if (stderrStream instanceof Readable) stderrStream.resume()
 
     client.onclose = () => {
       const live = this.sessionClients.get(sessionId)
