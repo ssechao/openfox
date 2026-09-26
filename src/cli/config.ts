@@ -154,6 +154,7 @@ const mcpServerSchema = z.object({
   timeout: z.number().positive().optional(),
   disabled: z.boolean().optional(),
   perSession: z.boolean().optional(),
+  sessionIdInjection: z.record(z.string(), z.string()).optional(),
 })
 
 const llmConfigSchema = z.object({

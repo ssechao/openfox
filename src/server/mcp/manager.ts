@@ -54,6 +54,30 @@ function withoutAuthorizationHeader(headers: Record<string, string> | undefined)
   return Object.fromEntries(kept)
 }
 
+type SessionIdInjectionResult = { ok: true; args: Record<string, unknown> } | { ok: false; error: string }
+
+function applySessionIdInjection(
+  injection: Record<string, string> | undefined,
+  args: Record<string, unknown>,
+  sessionId: string | undefined,
+): SessionIdInjectionResult {
+  const target = args['server_name']
+  if (!injection || typeof target !== 'string') return { ok: true, args }
+  const paramName: unknown = injection[target]
+  if (typeof paramName !== 'string' || paramName.length === 0) return { ok: true, args }
+  if (!sessionId) {
+    return { ok: false, error: `a session id is required to call '${target}' through this proxy` }
+  }
+  const inner = args['arguments']
+  if (inner !== undefined && (typeof inner !== 'object' || inner === null || Array.isArray(inner))) {
+    return { ok: false, error: `arguments for '${target}' must be an object to carry '${paramName}'` }
+  }
+  return {
+    ok: true,
+    args: { ...args, arguments: { ...(inner as Record<string, unknown> | undefined), [paramName]: sessionId } },
+  }
+}
+
 /** Rough token estimate: ~4 chars per token for JSON-serialized tool definitions */
 export function estimateToolTokens(
   toolName: string,
@@ -559,6 +583,10 @@ export class McpManager {
     const entry = this.servers.get(serverName)
     if (!entry) return { success: false, error: `MCP server '${serverName}' not found` }
 
+    const injected = applySessionIdInjection(entry.config.sessionIdInjection, args, sessionId)
+    if (!injected.ok) return { success: false, error: injected.error }
+    const forwardedArgs = injected.args
+
     // A per-session server has no shared client: resolve (or spawn) the one
     // dedicated to the calling session. Without a session id there is no
     // correct client to use, and guessing one would misattribute the call —
@@ -579,7 +607,7 @@ export class McpManager {
     }
 
     if (!client) return { success: false, error: `MCP server '${serverName}' is not connected` }
-    const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, args)
+    const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, forwardedArgs)
     const timeoutMs = timeoutSeconds * 1000
     const controller = new AbortController()
     let timer: NodeJS.Timeout | undefined
@@ -596,7 +624,7 @@ export class McpManager {
       let result
       try {
         result = await Promise.race([
-          client.callTool({ name: toolName, arguments: args }, undefined, {
+          client.callTool({ name: toolName, arguments: forwardedArgs }, undefined, {
             timeout: timeoutMs,
             signal: controller.signal,
           }),

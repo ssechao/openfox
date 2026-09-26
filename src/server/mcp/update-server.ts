@@ -69,6 +69,10 @@ export function buildUpdatedServerConfig(
     ...(persistedCfg?.cachedTools && persistedCfg.cachedTools.length > 0
       ? { cachedTools: persistedCfg.cachedTools }
       : {}),
+    ...(persistedCfg?.perSession !== undefined ? { perSession: persistedCfg.perSession } : {}),
+    ...(persistedCfg?.sessionIdInjection && Object.keys(persistedCfg.sessionIdInjection).length > 0
+      ? { sessionIdInjection: persistedCfg.sessionIdInjection }
+      : {}),
   }
 
   return { serverCfg }

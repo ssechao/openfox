@@ -30,6 +30,7 @@ export interface McpServerConfig {
    * comes from `cachedTools` and is (re)seeded from the first session client.
    */
   perSession?: boolean
+  sessionIdInjection?: Record<string, string>
 }
 
 export interface McpServerState {
