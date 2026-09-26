@@ -46,6 +46,8 @@ import { OnboardingWizard } from './components/onboarding/OnboardingWizard'
 import { EffortChangeGateProvider } from './components/plan/EffortChangeGate'
 import { CrossSessionConfirmationBanner } from './components/shared/CrossSessionConfirmationBanner'
 import { UpdateBanner } from './components/UpdateBanner'
+import { PluginPanelHost } from './components/plugins/PluginPanelHost'
+import { NotificationToasts } from './components/notifications/NotificationToasts'
 import { ChangelogModal } from './components/ChangelogModal'
 import { getStoredLastVersion, getStoredPreviousVersion, isVersionNewerThan, trackVersion } from './lib/versionTracking'
 
@@ -603,6 +605,8 @@ function App() {
         </div>
       </MainLayout>
       <UpdateBanner />
+      <PluginPanelHost />
+      <NotificationToasts />
       <ChangelogModal
         isOpen={showChangelog}
         onClose={() => setShowChangelog(false)}

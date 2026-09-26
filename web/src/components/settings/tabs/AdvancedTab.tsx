@@ -8,7 +8,7 @@ import { Toggle } from '../../shared/Toggle'
 import { SETTINGS_KEYS, setSetting } from '../../../lib/resources'
 import { useSetting } from '../../../hooks/useSetting'
 import { useTestButton } from '../../../hooks/useTestButton'
-import { RetryPatternsEditor, type RetryPatternsValue } from '../RetryPatternsEditor'
+import { RetryPatternsEditor, isValidRegex, type RetryPatternsValue } from '../RetryPatternsEditor'
 import { useConfig } from '../../../hooks/useConfig'
 import { useUpdateStore } from '../../../stores/update'
 import { AutoUpdateModal } from '../../AutoUpdateModal'
@@ -23,8 +23,10 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
   const cavemanThinking = useSetting(SETTINGS_KEYS.LLM_CAVEMAN_THINKING).value === 'true'
   const cacheWarming = useSetting(SETTINGS_KEYS.CACHE_WARMING).value === 'true'
   const autoContinueOnBoot = useSetting(SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT).value === 'true'
+  const parallelSubAgents = useSetting(SETTINGS_KEYS.AGENT_ALLOW_PARALLEL_SUB_AGENTS).value === 'true'
   const retryPatternsSetting = useSetting(SETTINGS_KEYS.RETRY_PATTERNS).value
   const proxyUrlSetting = useSetting(SETTINGS_KEYS.PROXY_URL).value
+  const vscodeRemotePrefixSetting = useSetting(SETTINGS_KEYS.VSCODE_REMOTE_PREFIX).value
   const defaultAgentSetting = useSetting(SETTINGS_KEYS.DEFAULT_AGENT).value
   const showChangelogSetting = useSetting(SETTINGS_KEYS.DISPLAY_SHOW_CHANGELOG_ON_UPDATE, 'true').value
 
@@ -34,10 +36,12 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
     cacheWarming,
     cavemanThinking,
     autoContinueOnBoot,
+    parallelSubAgents,
   })
 
   const [retryPatterns, setRetryPatterns] = useState<RetryPatternsValue>({ patterns: [], maxRetriesPerTurn: 10 })
   const [proxyUrl, setProxyUrl] = useState('')
+  const [vscodeRemotePrefix, setVscodeRemotePrefix] = useState('')
   const [defaultAgent, setDefaultAgent] = useState('')
   const [defaultAgentLoaded, setDefaultAgentLoaded] = useState(false)
   const [proxyTestText, proxyTestError, proxyTestSuccess, testProxy] = useTestButton()
@@ -61,8 +65,9 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
       cacheWarming,
       cavemanThinking,
       autoContinueOnBoot,
+      parallelSubAgents,
     })
-  }, [showOpenInEditor, dynamicSystemPrompt, cacheWarming, cavemanThinking, autoContinueOnBoot])
+  }, [showOpenInEditor, dynamicSystemPrompt, cacheWarming, cavemanThinking, autoContinueOnBoot, parallelSubAgents])
 
   useEffect(() => {
     if (retryPatternsSetting) {
@@ -81,6 +86,10 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
   }, [proxyUrlSetting])
 
   useEffect(() => {
+    setVscodeRemotePrefix(vscodeRemotePrefixSetting)
+  }, [vscodeRemotePrefixSetting])
+
+  useEffect(() => {
     if (defaultAgentSetting !== '') {
       setDefaultAgent(defaultAgentSetting)
       setDefaultAgentLoaded(true)
@@ -89,12 +98,18 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
 
   const handleRetryPatternsChange = useCallback((value: RetryPatternsValue) => {
     setRetryPatterns(value)
-    void setSetting(SETTINGS_KEYS.RETRY_PATTERNS, JSON.stringify(value))
+    const saved = { ...value, patterns: value.patterns.filter((p) => isValidRegex(p.pattern)) }
+    void setSetting(SETTINGS_KEYS.RETRY_PATTERNS, JSON.stringify(saved))
   }, [])
 
   const handleProxyUrlChange = (value: string) => {
     setProxyUrl(value)
     void setSetting(SETTINGS_KEYS.PROXY_URL, value)
+  }
+
+  const handleVscodeRemotePrefixChange = (value: string) => {
+    setVscodeRemotePrefix(value)
+    void setSetting(SETTINGS_KEYS.VSCODE_REMOTE_PREFIX, value)
   }
 
   function handleTestProxy() {
@@ -132,6 +147,12 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
     const newValue = !localToggles.autoContinueOnBoot
     setLocalToggles((prev) => ({ ...prev, autoContinueOnBoot: newValue }))
     void setSetting(SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT, String(newValue))
+  }
+
+  const handleToggleParallelSubAgents = () => {
+    const newValue = !localToggles.parallelSubAgents
+    setLocalToggles((prev) => ({ ...prev, parallelSubAgents: newValue }))
+    void setSetting(SETTINGS_KEYS.AGENT_ALLOW_PARALLEL_SUB_AGENTS, String(newValue))
   }
 
   function handleLaunchOnboarding() {
@@ -251,6 +272,17 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
         )}
       </div>
       <hr className="border-border" />
+      <SettingsToggle
+        title={t({ en: 'Parallel sub-agent calls', fr: 'Appels de sous-agents en parallèle' })}
+        description={t({
+          en: 'When an agent launches several sub-agents in a single batch, run them simultaneously. Off by default: calls run one after the other to save context and compute on local models.',
+          fr: 'Lorsqu’un agent lance plusieurs sous-agents dans un même lot, les exécute simultanément. Désactivé par défaut : les appels s’exécutent les uns après les autres pour économiser le contexte et le calcul sur les modèles locaux.',
+        })}
+        enabled={localToggles.parallelSubAgents}
+        onToggle={handleToggleParallelSubAgents}
+        boldTitle
+      />
+      <hr className="border-border" />
       <div>
         <h3 className="text-sm font-medium text-text-primary mb-1">{t({ en: 'Onboarding', fr: 'Prise en main' })}</h3>
         <p className="text-sm text-text-muted mb-4">
@@ -274,6 +306,35 @@ export function AdvancedTab({ onClose }: { onClose: () => void }) {
           enabled={localToggles.openInEditor}
           onToggle={handleToggleOpenInEditor}
         />
+        {localToggles.openInEditor && (
+          <div className="mt-4">
+            <h3 className="text-sm font-medium text-text-primary mb-1">
+              {t({ en: 'VSCode SSH Remote Prefix', fr: 'Préfixe VSCode SSH distant' })}
+            </h3>
+            <p className="text-sm text-text-muted mb-3">
+              {t({
+                en: 'Insert a prefix in every "Open in VSCode" link to open files on a remote host over an SSH tunnel. Requires SSH credentials configured on the local machine running VS Code. Leave empty for local or WSL machines.',
+                fr: 'Insère un préfixe dans chaque lien « Ouvrir dans VSCode » pour ouvrir des fichiers sur un hôte distant via un tunnel SSH. Nécessite des identifiants SSH configurés sur la machine locale exécutant VS Code. Laissez vide pour une machine locale ou WSL.',
+              })}
+            </p>
+            <div className="flex items-center gap-0.5 px-3 py-2 bg-bg-tertiary border border-border rounded font-mono text-sm focus-within:ring-2 focus-within:ring-accent-primary/50 focus-within:border-accent-primary">
+              <span className="text-text-secondary shrink-0 select-none">vscode://</span>
+              <input
+                type="text"
+                value={vscodeRemotePrefix}
+                onChange={(e) => handleVscodeRemotePrefixChange(e.target.value)}
+                placeholder="vscode-remote/ssh-remote+username@192.168.1.100"
+                spellCheck={false}
+                className="flex-1 min-w-0 bg-transparent text-text-primary placeholder-text-muted focus:outline-none"
+              />
+              <span className="text-text-secondary shrink-0 select-none mr-4">/path/to/file</span>
+            </div>
+            <p className="text-xs text-text-muted mt-1">
+              {t({ en: 'Example:', fr: 'Exemple :' })}{' '}
+              <span className="font-mono">vscode://vscode-remote/ssh-remote+username@192.168.1.100/path/to/file</span>
+            </p>
+          </div>
+        )}
       </div>
       <hr className="border-border" />
       <SettingsToggle

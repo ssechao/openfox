@@ -140,4 +140,39 @@ describe('getVisibleModels mode derivation', () => {
     const visible = getVisibleModels(provider)
     expect(visible[0]?.reasoningEfforts).toEqual(['low', 'high'])
   })
+
+  it('preserves plugin metadata contributed for a model', () => {
+    const provider = {
+      id: 'p1',
+      name: 'P1',
+      url: 'https://api.test',
+      backend: 'openai',
+      models: [
+        {
+          id: 'cheap-model',
+          contextWindow: 4096,
+          source: 'backend',
+          pluginMetadata: {
+            nameTone: 'success',
+            subline: [{ text: 'In: $0.15/M', tone: 'success' }],
+            badges: [{ label: { en: 'Cheap', fr: 'Économique' }, tone: 'success' }],
+          },
+        },
+      ],
+      isActive: false,
+      createdAt: '',
+    } as unknown as Provider
+
+    const visible = getVisibleModels(provider)
+    expect(visible[0]?.pluginMetadata?.nameTone).toBe('success')
+    expect(visible[0]?.pluginMetadata?.badges?.[0]?.tone).toBe('success')
+
+    const rendered = renderRow(visible[0]!)
+    try {
+      expect(rendered.container.querySelector('[data-model-subline]')?.textContent).toContain('In: $0.15/M')
+      expect(rendered.container.textContent).toContain('Cheap')
+    } finally {
+      cleanup(rendered)
+    }
+  })
 })

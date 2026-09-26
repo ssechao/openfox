@@ -3,7 +3,14 @@ import { create } from 'zustand'
 import { authFetch } from '../../lib/api'
 import { appUrl } from '../../lib/basePath'
 import { consumePrefetchedSession } from '../../lib/sessionPrefetch'
-import type { SessionSummary, Message, Session, ContextState, WorkflowExecution } from '@shared/types.js'
+import type {
+  SessionSummary,
+  Message,
+  Session,
+  ContextState,
+  WorkflowExecution,
+  SessionStatsSummary,
+} from '@shared/types.js'
 import type { QueuedMessage, PendingQuestionPayload } from '@shared/protocol.js'
 import { wsClient } from '../../lib/ws'
 import { useConfigStore } from '../config'
@@ -12,7 +19,12 @@ import { useBackgroundProcessesStore } from '../background-processes'
 import { writeSplitLayout, isSplitRoute } from '../../lib/splitPersistence'
 import type { SessionState, SessionPane, PendingPathConfirmation } from './types'
 import { getBuffer, setFlushFn, cancelStreamingFlush, releaseStreamingBuffer } from './streamingBuffer'
-import { handleServerMessage as handleMessage } from './messageHandler'
+import {
+  handleServerMessage as handleMessage,
+  trimPaneMessages,
+  getMaxVisibleItems,
+  appendStreamingOutput,
+} from './messageHandler'
 import {
   emptyPane,
   paneFromFlat,
@@ -43,6 +55,7 @@ interface SessionLoadData {
   session: Session
   messages?: Message[]
   hiddenCount?: number
+  sessionStats?: SessionStatsSummary | null
   contextState?: ContextState | null
   queueState?: QueuedMessage[]
   pendingConfirmations?: PendingPathConfirmation[]
@@ -61,10 +74,10 @@ function applyToolOutputs(
     matchedCallIds.add(tc.id)
     return {
       ...tc,
-      streamingOutput: [
-        ...(tc.streamingOutput ?? []),
-        ...outputs.map((o) => ({ stream: o.stream, content: o.content, timestamp: Date.now() })),
-      ],
+      streamingOutput: appendStreamingOutput(
+        tc.streamingOutput,
+        outputs.map((o) => ({ stream: o.stream, content: o.content, timestamp: Date.now() })),
+      ),
     }
   })
 }
@@ -189,7 +202,13 @@ export const useSessionStore = create<SessionState>((set, get) => {
             applied = true
           }
           if (!applied) return pane
-          return { ...pane, messages: pane.messages.map((m) => (m.id === buf.messageId ? updated : m)) }
+          return {
+            ...pane,
+            messages: trimPaneMessages(
+              pane.messages.map((m) => (m.id === buf.messageId ? updated : m)),
+              getMaxVisibleItems(),
+            ),
+          }
         })
       })
 
@@ -335,6 +354,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           session: data.session,
           messages: loadedMessages,
           hiddenCount: (data.hiddenCount as number | undefined) ?? 0,
+          sessionStats: (data.sessionStats as SessionStatsSummary | null | undefined) ?? null,
           contextState: data.contextState ?? null,
           queuedMessages: (data.queueState as QueuedMessage[] | undefined) ?? [],
           pendingPathConfirmations: (data.pendingConfirmations ?? []) as PendingPathConfirmation[],
@@ -398,6 +418,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
     activeWorkflowExecution: null,
     llmRetry: null,
     liveTurnStats: null,
+    sessionStats: null,
     sessionsHasMore: true,
     sessionsPaginationLoading: false,
     pendingSessionCreate: false as boolean | string,
@@ -912,6 +933,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           currentSession: null,
           messages: [],
           hiddenCount: 0,
+          sessionStats: null,
           currentTodos: [],
           contextState: null,
           restoredInput: null,
@@ -1075,6 +1097,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
               ...p,
               messages: data.messages,
               hiddenCount: (data.hiddenCount as number) ?? 0,
+              sessionStats: (data.sessionStats as SessionStatsSummary | null | undefined) ?? p.sessionStats,
             })),
           )
         }
@@ -1149,6 +1172,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
             session: data.session,
             messages: data.messages ?? prior.messages,
             hiddenCount: (data.hiddenCount as number | undefined) ?? prior.hiddenCount,
+            sessionStats: (data.sessionStats as SessionStatsSummary | null | undefined) ?? prior.sessionStats,
             contextState: data.contextState ?? prior.contextState,
           }
           return replacePane(state, sessionId, nextPane)
@@ -1172,6 +1196,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
             session: data.session,
             messages: data.messages ?? prior.messages,
             hiddenCount: (data.hiddenCount as number | undefined) ?? prior.hiddenCount,
+            sessionStats: (data.sessionStats as SessionStatsSummary | null | undefined) ?? prior.sessionStats,
           }
           return replacePane(state, sessionId, nextPane)
         })
@@ -1198,6 +1223,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
             session: data.session,
             messages: data.messages ?? prior.messages,
             hiddenCount: (data.hiddenCount as number | undefined) ?? prior.hiddenCount,
+            sessionStats: (data.sessionStats as SessionStatsSummary | null | undefined) ?? prior.sessionStats,
           }
           return replacePane(state, sessionId, nextPane)
         })
@@ -1220,6 +1246,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
             session: data.session,
             messages: data.messages ?? prior.messages,
             hiddenCount: (data.hiddenCount as number | undefined) ?? prior.hiddenCount,
+            sessionStats: (data.sessionStats as SessionStatsSummary | null | undefined) ?? prior.sessionStats,
           }
           return replacePane(state, sessionId, nextPane)
         })

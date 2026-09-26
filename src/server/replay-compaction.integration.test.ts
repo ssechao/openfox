@@ -351,9 +351,18 @@ describe('replay before compaction', () => {
     await waitForIdle(baseUrl, sessionId, () => provider.requests.length, requestCount + 1)
     expect(provider.requests.at(-1)!.path).toBe('/v1/responses')
 
+    // Only the latest context window can be forked (the LLM prefix covers just
+    // that window), so the side branch forks the current window's last answer
+    // rather than the pre-compaction one.
+    const currentWindow = (await (await fetch(`${baseUrl}/api/sessions/${sessionId}`)).json()) as {
+      messages: Array<{ id: string; role: string; content: string }>
+    }
+    const forkPoint = [...currentWindow.messages].reverse().find((message) => message.role === 'assistant')!
+    expect(forkPoint).toBeDefined()
+
     const forkResponse = await postJson(`${baseUrl}/api/sessions/${sessionId}/fork`, {
-      messageId: firstAnswer!.id,
-      title: 'Historical fork',
+      messageId: forkPoint.id,
+      title: 'Side fork',
     })
     expect(forkResponse.status).toBe(201)
     const fork = (await forkResponse.json()) as { session: { id: string } }

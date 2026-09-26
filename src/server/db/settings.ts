@@ -26,16 +26,19 @@ export const SETTINGS_KEYS = {
   DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS: 'display.useNativeScrollbarsCodeBlocks',
   DISPLAY_COLLAPSE_LARGE_TOOL_CALLS: 'display.collapseLargeToolCalls',
   DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING: 'display.deferCodeHighlightWhileStreaming',
+  DISPLAY_SHOW_TOOL_CALL_STREAMING: 'display.showToolCallStreaming',
   DISPLAY_FEED_VIRTUALIZATION: 'display.feedVirtualization',
   DISPLAY_MODEL_SELECTOR_HEIGHT: 'display.modelSelectorHeight',
   DISPLAY_COLLAPSE_PROVIDERS_BY_DEFAULT: 'display.collapseProvidersByDefault',
   DISPLAY_COLLAPSE_FAVORITES_BY_DEFAULT: 'display.collapseFavoritesByDefault',
   DISPLAY_MODEL_FAVORITES: 'display.modelFavorites',
   DISPLAY_MOBILE_FULLSCREEN_COMPOSER: 'display.mobileFullscreenComposer',
+  DISPLAY_FULLSCREEN_SLASH_COMMAND: 'display.fullscreenSlashCommand',
   LLM_DYNAMIC_SYSTEM_PROMPT: 'llm.dynamicSystemPrompt',
   LLM_CAVEMAN_THINKING: 'llm.cavemanThinking',
   CACHE_WARMING: 'cache.warming',
   AUTO_CONTINUE_ON_BOOT: 'agent.autoContinueOnBoot',
+  AGENT_ALLOW_PARALLEL_SUB_AGENTS: 'agent.allowParallelSubAgents',
   KEYBINDINGS: 'keybindings',
   RETRY_PATTERNS: 'agent.retryPatterns',
   SKILLS_DIRECTORIES: 'skills.directories',
@@ -52,6 +55,7 @@ export const SETTINGS_KEYS = {
   PROXY_URL: 'network.proxyUrl',
   DEFAULT_AGENT: 'agent.defaultAgent',
   AGENT_MODEL_OVERRIDES: 'agent.modelOverrides',
+  VSCODE_REMOTE_PREFIX: 'editor.vscodeRemotePrefix',
 } as const
 
 export const SETTINGS_DEFAULTS: Record<string, string> = {
@@ -75,16 +79,19 @@ export const SETTINGS_DEFAULTS: Record<string, string> = {
   [SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS]: 'false',
   [SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS]: 'false',
   [SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING]: 'false',
+  [SETTINGS_KEYS.DISPLAY_SHOW_TOOL_CALL_STREAMING]: 'false',
   [SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION]: 'false',
   [SETTINGS_KEYS.DISPLAY_MODEL_SELECTOR_HEIGHT]: 'default',
   [SETTINGS_KEYS.DISPLAY_COLLAPSE_PROVIDERS_BY_DEFAULT]: 'false',
   [SETTINGS_KEYS.DISPLAY_COLLAPSE_FAVORITES_BY_DEFAULT]: 'false',
   [SETTINGS_KEYS.DISPLAY_MODEL_FAVORITES]: '[]',
   [SETTINGS_KEYS.DISPLAY_MOBILE_FULLSCREEN_COMPOSER]: 'false',
+  [SETTINGS_KEYS.DISPLAY_FULLSCREEN_SLASH_COMMAND]: 'false',
   [SETTINGS_KEYS.LLM_DYNAMIC_SYSTEM_PROMPT]: 'false',
   [SETTINGS_KEYS.LLM_CAVEMAN_THINKING]: 'false',
   [SETTINGS_KEYS.CACHE_WARMING]: 'false',
   [SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT]: 'false',
+  [SETTINGS_KEYS.AGENT_ALLOW_PARALLEL_SUB_AGENTS]: 'false',
   [SETTINGS_KEYS.RETRY_PATTERNS]: JSON.stringify({ patterns: [], maxRetriesPerTurn: 10 }),
   [SETTINGS_KEYS.KEYBINDINGS]: JSON.stringify({
     terminalToggle: { type: 'double-press', key: 'Control', threshold: 300 },
@@ -102,6 +109,7 @@ export const SETTINGS_DEFAULTS: Record<string, string> = {
   [SETTINGS_KEYS.FEATURES_PER_SESSION_MCP]: 'false',
   [SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED]: 'false',
   [SETTINGS_KEYS.MAINTENANCE_TRANSIENT_EVENTS_MIGRATED]: 'false',
+  [SETTINGS_KEYS.VSCODE_REMOTE_PREFIX]: '',
 }
 
 export type SettingsKey = (typeof SETTINGS_KEYS)[keyof typeof SETTINGS_KEYS]

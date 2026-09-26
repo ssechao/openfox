@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
 import {
   CheckIcon,
   EditSmallIcon,
@@ -10,8 +11,13 @@ import {
   WarningIcon,
 } from '../shared/icons'
 import type { Provider } from '../../stores/config'
+import type { PluginModelMetadataView, LocalizedString } from '@shared/plugin.js'
 import { isSmallContext } from '../../lib/context-warning'
 import { useT } from '../../hooks/useT'
+import { useLocalizedString } from '../../hooks/useLocalizedString'
+import { PluginModelMeta } from '../plugins/PluginModelMeta'
+import { PluginLogo } from '../shared/PluginLogo'
+import { badgeToneTextClass, badgeToneClasses } from '../plugins/plugin-ui-utils'
 
 export function formatContextWindow(context: number): string {
   if (context >= 1000000) return `${(context / 1000000).toFixed(1)}M`
@@ -29,6 +35,7 @@ export interface ModelWithConfig {
   reasoningEffortOverride?: string
   thinkingLevel?: string
   thinkingEnabled?: boolean
+  pluginMetadata?: PluginModelMetadataView
 }
 
 export function modelMatchesQuery(model: { name?: string; id: string }, query: string): boolean {
@@ -43,8 +50,6 @@ export function getVisibleModels(provider: Provider): ModelWithConfig[] {
   const hasSelected = provider.models.some((m) => m.selected)
   const source = hasSelected ? provider.models.filter((m) => m.selected) : provider.models
   return source.map((m) => {
-    // A merged mode model exposes its levels via `modes`; surface them as
-    // reasoning efforts so the picker renders mode chips.
     const reasoningEfforts = m.reasoningEfforts?.length
       ? m.reasoningEfforts
       : m.modes?.length
@@ -60,6 +65,7 @@ export function getVisibleModels(provider: Provider): ModelWithConfig[] {
       ...(m.reasoningEffortOverride ? { reasoningEffortOverride: m.reasoningEffortOverride } : {}),
       ...(m.thinkingLevel ? { thinkingLevel: m.thinkingLevel } : {}),
       ...(m.thinkingEnabled !== undefined ? { thinkingEnabled: m.thinkingEnabled } : {}),
+      ...(m.pluginMetadata ? { pluginMetadata: m.pluginMetadata } : {}),
     }
   })
 }
@@ -74,6 +80,7 @@ export interface ModelEntryRowProps {
   isActive: boolean
   highlighted: boolean
   onModelClick: (providerId: string, modelId: string) => void
+  providerLogo?: string
   isDefault?: boolean
   isFavorite?: boolean
   disabled?: boolean
@@ -100,6 +107,7 @@ export function ModelEntryRow({
   settingDefault,
   highlighted,
   onModelClick,
+  providerLogo,
   onSetDefault,
   onToggleFavorite,
   onEditModel,
@@ -108,10 +116,53 @@ export function ModelEntryRow({
   onSelectEffort,
 }: ModelEntryRowProps) {
   const t = useT()
+  const localize = useLocalizedString()
+  const [showPopover, setShowPopover] = useState(false)
+  const [popoverCoords, setPopoverCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 })
+  const rowRef = useRef<HTMLDivElement>(null)
+
+  const pluginMeta = modelConfig.pluginMetadata
+  const popover = pluginMeta?.popover
+  const subline = pluginMeta?.subline
+  const nameToneClass = pluginMeta?.nameTone ? badgeToneTextClass(pluginMeta.nameTone) : ''
+
+  const handleMouseEnter = (e: React.MouseEvent) => {
+    if (popover && (popover.rows?.length || popover.title)) {
+      const dropdown = (e.currentTarget as HTMLElement).closest('[data-dropdown-container]') as HTMLElement | null
+      const targetRect = dropdown ? dropdown.getBoundingClientRect() : (rowRef.current?.getBoundingClientRect() ?? null)
+      const rowRect = rowRef.current?.getBoundingClientRect()
+      if (targetRect && rowRect) {
+        const spaceOnRight = window.innerWidth - targetRect.right
+        const popoverWidth = 220
+        const left =
+          spaceOnRight > popoverWidth ? targetRect.right + 8 : Math.max(8, targetRect.left - popoverWidth - 8)
+        setPopoverCoords({
+          top: rowRect.top,
+          left,
+        })
+        setShowPopover(true)
+      }
+    }
+  }
+
+  const handleMouseLeave = () => {
+    setShowPopover(false)
+  }
+
   const showEfforts = (reasoningEfforts?.length ?? 0) > 0 && !!onSelectEffort
+
+  const resolveText = (text?: LocalizedString | string): string => {
+    if (!text) return ''
+    if (typeof text === 'string') return text
+    return localize(text)
+  }
+
   return (
     <div
-      className={`${highlighted ? 'bg-bg-tertiary' : 'hover:bg-bg-tertiary'} ${disabled ? 'opacity-50 cursor-wait' : ''}`}
+      ref={rowRef}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      className={`relative ${highlighted ? 'bg-bg-tertiary' : 'hover:bg-bg-tertiary'} ${disabled ? 'opacity-50 cursor-wait' : ''}`}
     >
       <div
         className={`flex items-center px-4 py-1.5 text-sm transition-colors group ${
@@ -122,9 +173,25 @@ export function ModelEntryRow({
           type="button"
           onClick={() => onModelClick(providerId, modelConfig.id)}
           disabled={disabled}
-          className="flex-1 truncate text-left"
+          className={`flex-1 min-w-0 text-left truncate ${nameToneClass}`}
         >
+          {providerLogo && (
+            <PluginLogo icon={providerLogo} className="w-3.5 h-3.5 shrink-0 inline-block mr-1.5 align-middle" />
+          )}
           {modelConfig.name ?? modelConfig.id.split('/').pop()?.replace(/-/g, ' ') ?? modelConfig.id}
+          {subline && subline.length > 0 && (
+            <div
+              data-model-subline
+              className="text-[11px] font-mono flex items-center gap-1.5 whitespace-nowrap overflow-hidden text-ellipsis mt-0.5"
+            >
+              {subline.map((part, index) => (
+                <span key={index} className="inline-flex items-center shrink-0">
+                  <span className={badgeToneTextClass(part.tone)}>{part.text}</span>
+                  {index < subline.length - 1 && <span className="text-text-muted ml-1.5">·</span>}
+                </span>
+              ))}
+            </div>
+          )}
         </button>
         <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
           {modelConfig.supportsVision && (
@@ -138,6 +205,7 @@ export function ModelEntryRow({
             </span>
           )}
           <span className="text-xs text-text-muted">{formatContextWindow(modelConfig.contextWindow)}</span>
+          <PluginModelMeta metadata={modelConfig.pluginMetadata} />
           {isSmallContext(modelConfig.contextWindow) && (
             <span
               data-small-context
@@ -239,6 +307,51 @@ export function ModelEntryRow({
           })}
         </div>
       )}
+      {showPopover &&
+        popover &&
+        createPortal(
+          <div
+            data-model-popover
+            data-pricing-popover
+            className="fixed z-[9999] px-3 py-2 bg-bg-secondary border border-border rounded-lg shadow-xl text-xs space-y-1.5 pointer-events-none whitespace-nowrap min-w-[180px]"
+            style={{
+              top: `${popoverCoords.top}px`,
+              left: `${popoverCoords.left}px`,
+            }}
+          >
+            {(popover.title || popover.badge) && (
+              <div className="font-medium text-text-primary pb-1 border-b border-border/50 flex items-center justify-between gap-2">
+                <span>{resolveText(popover.title) || modelConfig.name || modelConfig.id}</span>
+                {popover.badge && (
+                  <span
+                    className={`px-1.5 py-0.5 text-[9px] font-medium leading-none rounded border ${badgeToneClasses(
+                      popover.badge.tone,
+                    )}`}
+                  >
+                    {resolveText(popover.badge.label)}
+                  </span>
+                )}
+              </div>
+            )}
+            {popover.rows?.map((row, idx) => (
+              <div key={idx} className="text-text-secondary flex justify-between items-center gap-3">
+                <span>{resolveText(row.label)}</span>
+                <span className="font-mono text-text-primary">
+                  {row.strikeThroughValue && (
+                    <span className="line-through text-text-muted mr-1.5">{row.strikeThroughValue}</span>
+                  )}
+                  <span className={badgeToneTextClass(row.tone)}>{row.value}</span>
+                </span>
+              </div>
+            ))}
+            {popover.footer && (
+              <div className="text-text-muted text-[10px] pt-1 border-t border-border/40 flex justify-between gap-3">
+                <span>{resolveText(popover.footer)}</span>
+              </div>
+            )}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }

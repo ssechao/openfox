@@ -49,6 +49,7 @@ export interface ToolBatchContext {
    * unset → local; an empty string is normalized to local too.
    */
   remoteAgentTarget?: string | null | undefined
+  allowParallelSubAgents?: boolean | undefined
 }
 
 export interface ToolBatchResult {
@@ -57,6 +58,13 @@ export interface ToolBatchResult {
   returnValueContent?: string | undefined
   returnValueResult?: string | undefined
   stepDoneCalled?: boolean | undefined
+}
+
+export interface ExecutedToolCall {
+  toolCall: ToolCall
+  toolResult: ToolResult
+  content: string
+  index: number
 }
 
 function interruptedError(): string {
@@ -186,15 +194,7 @@ export async function executeTools(
     }
   }
 
-  const executeTool = async (
-    toolCall: ToolCall,
-    index: number,
-  ): Promise<{
-    toolCall: ToolCall
-    toolResult: ToolResult
-    content: string
-    index: number
-  }> => {
+  const executeTool = async (toolCall: ToolCall, index: number): Promise<ExecutedToolCall> => {
     if (ctx.signal?.aborted) {
       const toolResult = createInterruptedResult()
       append(createToolResultEvent(assistantMsgId, toolCall.id, toolResult))
@@ -264,79 +264,89 @@ export async function executeTools(
 
     const startTime = Date.now()
     let toolResult: ToolResult
-    // Remote routing: execute on a headless-agent (via the hub) instead of
-    // locally. Target precedence:
-    //   1. an explicit non-empty `remote` argument on the call,
-    //   2. the session's pinned target (ctx.remoteAgentTarget),
-    //   3. nothing → local.
-    // An explicit EMPTY `remote` ("" ) forces local, overriding a session pin.
-    // Only environment tools (REMOTE_TOOL_NAMES) may be routed: a stray
-    // `remote` on a control-plane tool must run locally.
-    const explicitRemote = toolCall.arguments['remote']
-    const remoteCapable = REMOTE_TOOL_NAMES.has(toolCall.name)
-    let effectiveRemote: string | null = null
-    if (remoteCapable) {
-      if (typeof explicitRemote === 'string') {
-        // Explicit argument wins, including "" (empty) which means "force local".
-        effectiveRemote = normalizeRemoteTarget(explicitRemote)
-      } else {
-        effectiveRemote = normalizeRemoteTarget(ctx.remoteAgentTarget)
-      }
-    }
-    const remoteRequested = effectiveRemote !== null
-    // Enforce the SAME policy gate as local execution BEFORE routing, so a
-    // read-only agent (e.g. Planner, whose allowedTools exclude write_file)
-    // cannot bypass it by passing `remote`.
-    const remotePermissionError = remoteRequested
-      ? ctx.toolRegistry.checkPermission?.(toolCall.name, toolCall.arguments)
-      : undefined
-    if (effectiveRemote !== null && remotePermissionError) {
+    // Preflight-rejected calls must never execute: their arguments were cut
+    // short (path-only), so running the tool would either crash or produce a
+    // misleading result. Surface the preflight error directly instead.
+    if (toolCall.preflightError) {
       toolResult = {
         success: false,
-        error: remotePermissionError,
-        durationMs: Date.now() - startTime,
-        truncated: false,
-      }
-    } else if (effectiveRemote !== null && ctx.remoteExecutor) {
-      try {
-        toolResult = await ctx.remoteExecutor(ctx.sessionId, effectiveRemote, toolCall.name, toolCall.arguments)
-      } catch (error) {
-        toolResult = {
-          success: false,
-          error:
-            error instanceof Error
-              ? error.message
-              : serverT({ en: 'Remote execution failed', fr: 'Échec de l’exécution à distance' }),
-          durationMs: Date.now() - startTime,
-          truncated: false,
-        }
-      }
-    } else if (effectiveRemote !== null) {
-      // A remote target is set but no remote executor is configured (no hub).
-      toolResult = {
-        success: false,
-        error: serverT(
-          {
-            en: 'Remote agent requested ({{remote}}) but no remote-agent hub is configured. Set remoteAgent.hubUrl and remoteAgent.hubToken in the global config.',
-            fr: 'Agent distant demandé ({{remote}}) mais aucun hub remote-agent n’est configuré. Définissez remoteAgent.hubUrl et remoteAgent.hubToken dans la config globale.',
-          },
-          { remote: effectiveRemote },
-        ),
+        error: toolCall.preflightError,
         durationMs: Date.now() - startTime,
         truncated: false,
       }
     } else {
-      // Local execution. If a stray `remote` was supplied on a non-remote tool
-      // (e.g. a hallucinated `remote` on `remote_agents`), drop it so the local
-      // tool never sees an unexpected argument.
-      const localArgs =
-        typeof explicitRemote === 'string'
-          ? Object.fromEntries(Object.entries(toolCall.arguments).filter(([k]) => k !== 'remote'))
-          : toolCall.arguments
-      try {
-        toolResult = await ctx.toolRegistry.execute(toolCall.name, localArgs, toolContext)
-      } catch (error) {
-        toolResult = await handleToolExecutionError(error, ctx.sessionId, startTime)
+      // Remote routing: execute on a headless-agent (via the hub) instead of
+      // locally. Target precedence:
+      //   1. an explicit non-empty `remote` argument on the call,
+      //   2. the session's pinned target (ctx.remoteAgentTarget),
+      //   3. nothing → local.
+      // An explicit EMPTY `remote` ("" ) forces local, overriding a session pin.
+      // Only environment tools (REMOTE_TOOL_NAMES) may be routed: a stray
+      // `remote` on a control-plane tool must run locally.
+      const explicitRemote = toolCall.arguments['remote']
+      const remoteCapable = REMOTE_TOOL_NAMES.has(toolCall.name)
+      let effectiveRemote: string | null = null
+      if (remoteCapable) {
+        if (typeof explicitRemote === 'string') {
+          // Explicit argument wins, including "" (empty) which means "force local".
+          effectiveRemote = normalizeRemoteTarget(explicitRemote)
+        } else {
+          effectiveRemote = normalizeRemoteTarget(ctx.remoteAgentTarget)
+        }
+      }
+      // Enforce the SAME policy gate as local execution BEFORE routing, so a
+      // read-only agent (e.g. Planner, whose allowedTools exclude write_file)
+      // cannot bypass it by passing `remote`.
+      const remotePermissionError =
+        effectiveRemote !== null ? ctx.toolRegistry.checkPermission?.(toolCall.name, toolCall.arguments) : undefined
+      if (effectiveRemote !== null && remotePermissionError) {
+        toolResult = {
+          success: false,
+          error: remotePermissionError,
+          durationMs: Date.now() - startTime,
+          truncated: false,
+        }
+      } else if (effectiveRemote !== null && ctx.remoteExecutor) {
+        try {
+          toolResult = await ctx.remoteExecutor(ctx.sessionId, effectiveRemote, toolCall.name, toolCall.arguments)
+        } catch (error) {
+          toolResult = {
+            success: false,
+            error:
+              error instanceof Error
+                ? error.message
+                : serverT({ en: 'Remote execution failed', fr: 'Échec de l’exécution à distance' }),
+            durationMs: Date.now() - startTime,
+            truncated: false,
+          }
+        }
+      } else if (effectiveRemote !== null) {
+        // A remote target is set but no remote executor is configured (no hub).
+        toolResult = {
+          success: false,
+          error: serverT(
+            {
+              en: 'Remote agent requested ({{remote}}) but no remote-agent hub is configured. Set remoteAgent.hubUrl and remoteAgent.hubToken in the global config.',
+              fr: 'Agent distant demandé ({{remote}}) mais aucun hub remote-agent n’est configuré. Définissez remoteAgent.hubUrl et remoteAgent.hubToken dans la config globale.',
+            },
+            { remote: effectiveRemote },
+          ),
+          durationMs: Date.now() - startTime,
+          truncated: false,
+        }
+      } else {
+        // Local execution. If a stray `remote` was supplied on a non-remote tool
+        // (e.g. a hallucinated `remote` on `remote_agents`), drop it so the local
+        // tool never sees an unexpected argument.
+        const localArgs =
+          typeof explicitRemote === 'string'
+            ? Object.fromEntries(Object.entries(toolCall.arguments).filter(([k]) => k !== 'remote'))
+            : toolCall.arguments
+        try {
+          toolResult = await ctx.toolRegistry.execute(toolCall.name, localArgs, toolContext)
+        } catch (error) {
+          toolResult = await handleToolExecutionError(error, ctx.sessionId, startTime)
+        }
       }
     }
 
@@ -386,8 +396,38 @@ export async function executeTools(
   }
 
   const batchStart = Date.now()
-  const executionPromises = toolCalls.map((toolCall, index) => executeTool(toolCall, index))
-  const results = await Promise.all(executionPromises)
+
+  const runParallel = (calls: Array<{ toolCall: ToolCall; index: number }>) =>
+    Promise.all(calls.map(({ toolCall, index }) => executeTool(toolCall, index)))
+
+  const runSubAgentsSequentially = async (
+    calls: Array<{ toolCall: ToolCall; index: number }>,
+  ): Promise<ExecutedToolCall[]> => {
+    const executed: ExecutedToolCall[] = []
+    for (const { toolCall, index } of calls) {
+      executed.push(await executeTool(toolCall, index))
+    }
+    return executed
+  }
+
+  const allCalls = toolCalls.map((toolCall, index) => ({ toolCall, index }))
+  const subAgentCalls = allCalls.filter(({ toolCall }) => toolCall.name === 'call_sub_agent')
+
+  // Sub-agents are expensive on local models (context + compute), so by
+  // default several sub-agent calls in one batch run one after the other,
+  // while other tools in the batch stay in parallel. The advanced
+  // "allowParallelSubAgents" setting restores full parallelism.
+  let results: ExecutedToolCall[]
+  if (subAgentCalls.length > 1 && !ctx.allowParallelSubAgents) {
+    const [others, sequential] = await Promise.all([
+      runParallel(allCalls.filter(({ toolCall }) => toolCall.name !== 'call_sub_agent')),
+      runSubAgentsSequentially(subAgentCalls),
+    ])
+    results = [...others, ...sequential]
+  } else {
+    results = await runParallel(allCalls)
+  }
+
   ctx.turnMetrics.addToolTime(Date.now() - batchStart)
 
   results.sort((a, b) => a.index - b.index)

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { authFetch } from '../lib/api'
 import { configResource, providersResource, providerModelsResource, readProviders } from '../lib/resources'
 import type { ModelConfig } from '@shared/types.js'
+import type { PluginModelMetadataView } from '@shared/plugin.js'
 
 type LlmStatus = 'connected' | 'disconnected' | 'unknown'
 
@@ -20,6 +21,7 @@ type ProviderStatus = 'connected' | 'disconnected' | 'unknown'
 
 interface Provider {
   id: string
+  preset?: string
   name: string
   url: string
   backend: Backend
@@ -35,6 +37,10 @@ interface Provider {
   transportAdapter?: string
   credentialRef?: string
   apiProtocol?: 'auto' | 'responses' | 'chat-completions'
+  /** Custom logo or icon URL/SVG for the provider */
+  logo?: string
+  icon?: string
+  pluginMetadata?: PluginModelMetadataView
 }
 
 export interface PlatformInfo {

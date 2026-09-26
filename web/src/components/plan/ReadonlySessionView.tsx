@@ -106,6 +106,7 @@ export function ReadonlySessionView() {
             showStats={showStats}
             showAgentDefinitions={showAgentDefinitions}
             showWorkflowBars={showWorkflowBars}
+            virtualization={false}
           />
         </div>
         <div className="h-8" />

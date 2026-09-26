@@ -7,11 +7,13 @@ export interface SkillMetadata {
   name: string
   description: string
   version: string
+  group?: string
+  estimatedTokens?: number
   [key: string]: unknown
 }
 
 export type SkillSource =
-  'bundled' | 'global-shared' | 'global-openfox' | 'selected' | 'project-shared' | 'project-openfox'
+  'bundled' | 'global-shared' | 'global-openfox' | 'selected' | 'project-shared' | 'project-openfox' | 'plugin'
 
 export interface SkillDefinition {
   metadata: SkillMetadata

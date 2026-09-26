@@ -1,5 +1,216 @@
 # Changelog
 
+## 2.0.159 - 2026-09-24
+
+### Bug Fixes
+
+- **Context stats accurate after reload** — compacted sessions no longer show inflated compaction counts or zeroed token counts.
+
+## 2.0.158 - 2026-09-24
+
+### Bug Fixes
+
+- **Context-drift reminders never truncate again** — full system-prompt diffs and tool schemas are now shown to the agent.
+
+## 2.0.157 - 2026-09-23
+
+### Features
+
+- **Plugin logo support** — plugins can ship an icon or logo shown across the UI, including raw SVG markup.
+- **Built-in provider logos** — Ollama, LM Studio, llama.cpp, vLLM, and Unsloth ship local logos used across pickers.
+- **Custom provider logo** — set a logo URL when adding or editing a provider.
+- **Auto-saving plugin settings** — toggles save instantly, with sections, grouped/dependent fields, and half-width layout.
+- **Action buttons in plugin settings** — settings can include buttons that invoke a plugin RPC.
+- **Model metadata popovers** — hover a model to see pricing and badges; plugins can color model names and add sublines.
+- **Smarter declarative plugin UIs** — collapsible details sections, and inputs/selects can trigger plugin actions.
+- **Plugin RPC context** — calls automatically carry modelId, providerId, fieldId, and value.
+- **Pill button variant** — new pill-style button for plugin UIs.
+
+### Enhancements
+
+- **Provider logos in pickers** — provider and model pickers now show each provider's logo.
+- **Richer plugin card descriptions** — plugin cards render formatted description text.
+- **Sleeker progress bars** — declarative progress bars gain a position knob and cleaner design.
+- **Table row separators** — declarative tables now show row separators.
+- **Longer feed by default** — default max visible feed items raised from 100 to 300.
+- **llm.completed hook enriched** — now includes the active provider ID.
+
+### Bug Fixes
+
+- **Display toggles respect defaults** — toggles without a saved value now use their configured default.
+- **Accessible toggle switches** — toggles expose proper role and aria-pressed state.
+- **Provider list refreshes** — provider list now updates after saving plugin settings.
+
+## 2.0.156 - 2026-09-23
+
+### Features
+
+- **Cache-token attribution in session stats** — provider-reported cached and cache-write tokens now shown alongside token counts.
+- **Event-derived stats rollup** — the stats API exposes compactions, retries, tool errors, and sub-agent activity.
+- **New plugin hooks** — `context.compacted` and `retry.triggered` fire live from the session event stream.
+- **Plugin iframe session context** — plugin panels receive `sessionId`, `projectId`, and `workdir` as query params.
+- **Dynamic plugin badges** — badge RPC can drive state, live refresh intervals, and icon-only tone styling.
+- **Workdir-scoped badges** — badge state is scoped per workdir, and sessions pass their workdir to plugins.
+- **Dev-server lifecycle hooks** — plugins observe started/stopped events with reason and exit info.
+- **Dev-server state hook** — `devserver.state.changed` reports state plus the inspect-proxy port.
+
+### Enhancements
+
+- **llm.completed hook enriched** — now includes total tokens and provider cache-token fields.
+- **No stale badge flash** — dynamic badges stay hidden until the RPC value resolves.
+
+## 2.0.155 - 2026-09-22
+
+### Features
+
+- **Skills join slash commands** — enabled skills appear in autocomplete, and skill folders load recursively with group labels.
+- **Fullscreen slash command view** — a new Display setting opens the slash picker fullscreen.
+- **Skills manager groups by folder** — collapsible folders, bulk enable toggles, and per-skill token estimates.
+- **Thinking blocks collapse to a summary** — expanded reasoning shrinks to "Thought for Xs" with a live timer while streaming.
+- **Option to skip git init on non-git projects** — new setting decides whether new projects get a git repository.
+- **Custom VSCode remote prefix** — "Open in VSCode" links now respect a configurable remote prefix.
+- **Plugin panels reach xl and full sizes** — provider badges and pricing from plugin metadata render in the provider selector.
+- **Plugin secrets stay masked** — settings forms never show saved secret values in plaintext.
+
+### Enhancements
+
+- **Faster edit live previews** — LSP diagnostics coalesce during same-file edit bursts and preview payloads are deduped.
+- **Feed virtualization on by default** — long sessions render faster with lazy scroll panes and bounded history.
+
+### Bug Fixes
+
+- **Full-history view shows no more gaps** — virtualization is off in readonly view, fixing placeholder jumps.
+- **Provider chip keeps the model name visible** — truncation now shrinks the provider name first.
+
+## 2.0.154 - 2026-09-21
+
+### Features
+
+- **Write/edit on unread files now fails fast** — the call aborts mid-stream once the path arrives, saving tokens on doomed payloads.
+
+### Enhancements
+
+- **Live tool call previews are now opt-in** — off by default; re-enable in Display settings.
+
+## 2.0.153 - 2026-09-20
+
+### Features
+
+- **write_file and edit_file previews stream live** — the file content, edit context, and diff update with auto-scroll as the tool call runs.
+- **New "Show live tool call previews" display setting** — opt out of streaming previews if you prefer.
+
+### Enhancements
+
+- **Forking a compacted session preserves prompt-cache hits** — only the latest context window is copied.
+- **Fork errors from the server now surface** — instead of a generic failure message.
+
+### Bug Fixes
+
+- **Drift reminders land in the running sub-agent's window** — no longer cluttering the main session.
+- **Sub-agent compactions now work** — post-compaction reasoning streams into the thinking block instead of visible content, and the parent context window is no longer rotated or inflated.
+
+## 2.0.152 - 2026-09-20
+
+### Features
+
+- **Plugin buttons gain a ghost variant** — matches native header button styling and shows the text label when no icon is set.
+- **Plugin icons accept SVG paths or raw markup** — icons also resolve dynamically by name from the built-in icon set, no whitelist needed.
+
+### Enhancements
+
+- **Sub-agent calls run sequentially by default** — several sub-agent calls in one batch no longer compete for context on local models; a new Advanced setting restores parallelism.
+
+## 2.0.151 - 2026-09-19
+
+### Features
+
+- **Plugins render UI in app zones** — header, sidebar, session, composer, and settings now accept plugin content.
+- **Zones can be hidden or replaced** — plugins override native content via hide/replace with replacement nodes.
+- **Plugin settings tabs** — plugins can register their own tabs in the settings modal.
+- **Per-agent session stats** — the stats modal now breaks down usage by agent and sub-agent.
+- **Project search** — find projects by name in the project picker and open-project modal.
+- **Branch search** — filter git branches as you type in the branch switcher.
+- **Provider modal banners** — new banners point to OpenFox plugins and proxy settings.
+
+### Enhancements
+
+- **Plugin UI DSL extended** — new stack, card, callout, icon, input, select, and iframe nodes.
+- **MCP toggles apply instantly** — server and tool enable/disable updates apply immediately in settings.
+- **Stats split by reasoning effort** — model groups now separate reasoning-effort variants.
+- **Longer sessions use less memory** — the live feed caps visible messages and tool streaming output.
+
+### Bug Fixes
+
+- **Pending confirmations auto-expand** — tool calls awaiting user confirmation now expand automatically.
+- **Collapsed tool output survives reloads** — large collapsed outputs stay collapsed after reloading.
+- **Search engine API keys persist** — keys no longer vanish on page reload.
+
+## 2.0.150 - 2026-09-18
+
+### Features
+
+- **Plugin system** — install plugins from a curated registry, GitHub, npm, or a local folder.
+- **Plugins extend OpenFox** — providers, tools, commands, skills, and custom workflow transitions.
+- **Declarative plugin UI** — actions, badges, and panels in the header, composer, and sessions.
+- **Plugin notifications** — a new header bell with dropdown center and toasts.
+- **Plugin management tab** — enable, disable, reinstall, and uninstall plugins.
+
+### Enhancements
+
+- **Notifications moved to a header dropdown** — no more modal; clicking a notification marks it read.
+- **Plugin actions consolidated into one header menu** — with a direct shortcut to plugin management.
+- **Mobile menu gains nested submenus** — notifications and plugins now reachable from the hamburger menu.
+- **Workflow setup step guards existing workspaces** — already-used workspaces can no longer be selected.
+
+### Bug Fixes
+
+- **Pre-upgrade passwords work again** — passwords stored before the encryption upgrade now verify correctly.
+- **Tool-call timers survive reloads** — pending tool calls keep their elapsed-time display after reloading.
+- **Notification bell styling fixed** — icon color matches the header and the unread badge no longer clips.
+
+## 2.0.149 - 2026-09-15
+
+### Features
+
+- **Task attachments now readable by agents** — a new project_tasks get_attachment action returns image, text, and PDF attachments, with attachment metadata listed on task output.
+
+### Enhancements
+
+- **Retry pattern editor validates inline** — invalid regexes are flagged live as you type, and empty or invalid patterns are no longer saved.
+
+### Bug Fixes
+
+- **Empty retry patterns no longer loop every turn** — blank or invalid patterns are skipped server-side, so a stray empty pattern can't trigger infinite auto-retries.
+- **MCP tools honor their per-tool timeout** — calls no longer cap at the 60s default, and timed-out requests are aborted in flight.
+
+## 2.0.148 - 2026-09-14
+
+### Bug Fixes
+
+- **Sub-agent responses no longer truncate in long sessions** — sub-agent output is now budgeted against its own context instead of the parent session's, so plans and reviews run to completion even when the orchestrator session is huge.
+
+## 2.0.147 - 2026-09-14
+
+### Features
+
+- **Parallel workflow steps** — run sub-agent and shell steps concurrently inside one workflow step, capped by max concurrency, with per-child output keys to branch on.
+- **Parallel step editor** — build parallel steps in the workflow UI with a child list, per-child sub-agent/shell configuration, and slug-safe child ids.
+- **Project dropdown on session rows** — switch projects, start sessions, or open tasks directly from the home session list.
+
+### Enhancements
+
+- **Agent steps honor per-agent model overrides** — workflow steps pinned to a specific model (e.g. builder on Qwen) now actually run on it, matching the existing sub-agent behavior.
+
+### Bug Fixes
+
+- **Background process logs stream live** — the log viewer shows new output as it arrives without reopening the panel.
+
+## 2.0.146 - 2026-09-12
+
+### Bug Fixes
+
+- **Sidebar stats now cover the entire session** — AI time, speeds, and totals count every response across all context windows, including after compaction; stats load instantly from a server-computed headline, with the full response log available on demand.
+
 ## 2.0.145 - 2026-09-11
 
 ### Bug Fixes

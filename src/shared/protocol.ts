@@ -14,7 +14,9 @@ import type {
   ToolResult,
   ContextState,
   Attachment,
+  EditContextRegion,
 } from './types.js'
+import type { PluginNotification } from './plugin.js'
 
 // ============================================================================
 // Client → Server Messages
@@ -151,6 +153,11 @@ export type ServerMessageType =
   | 'tasks.update' // A task (or task config) changed; clients owning the project update their boards
   // MCP server events
   | 'mcp.servers.changed' // MCP server configuration was modified by agent
+  // Plugin events
+  | 'plugin.notification' // Plugin emitted an in-app notification
+  | 'plugin.notification_read' // Notification read state changed (unread count refresh)
+  | 'plugin.notification_deleted' // Notification deleted (single or all)
+  | 'plugin.ui_state' // Plugin published state for a declarative panel
   // Other
   | 'lsp.diagnostics'
   | 'error'
@@ -203,6 +210,7 @@ export interface SessionStatePayload {
   session: Session
   messages: Message[] // All messages for this session
   hiddenCount?: number // Number of older items not included due to maxVisibleItems
+  sessionStats?: import('./types.js').SessionStatsSummary // Lean, exact headline stats for the whole session
   pendingConfirmations: PendingPathConfirmationPayload[]
   pendingQuestions?: PendingQuestionPayload[]
   gitStatus?: GitStatusPayload // Current branch and diff, embedded on session load
@@ -264,6 +272,7 @@ export interface ChatToolPreparingPayload {
   index: number // Tool call index (for multiple parallel calls)
   name: string // Tool name (available early in stream)
   arguments?: string // Partial arguments (streaming JSON fragments)
+  editContext?: EditContextRegion[] // Live edit context for streaming edit_file
 }
 
 export interface ChatToolCallPayload {
@@ -538,6 +547,28 @@ export interface TasksUpdatePayload {
   autoLaunched?: { taskId: string; taskTitle: string; sessionId: string; projectId: string } | undefined
   /** Which task changed, when a targeted update is desired (informational). */
   changedTaskId?: string | undefined
+}
+
+// Plugin payloads
+export interface PluginNotificationMessagePayload {
+  notification: PluginNotification
+  unreadCount: number
+}
+
+export interface PluginNotificationReadPayload {
+  unreadCount: number
+}
+
+export interface PluginNotificationDeletedPayload {
+  id?: string
+  all?: boolean
+}
+
+export interface PluginUiStateMessagePayload {
+  pluginId: string
+  panelId?: string
+  key: string
+  value: unknown
 }
 
 // Shared background process types

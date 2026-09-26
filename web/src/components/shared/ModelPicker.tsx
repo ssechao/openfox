@@ -11,6 +11,9 @@ import { shouldAutofocus } from '../../lib/device'
 import { formatModelValue, parseModelValue } from '../../lib/model-value'
 import { resolveDisplayEffort } from '../../lib/effort-gate'
 import { useT } from '../../hooks/useT'
+import { usePlugins } from '../../hooks/usePlugins'
+import { PluginLogo, findPluginLogoForProvider } from './PluginLogo'
+import { PluginZone } from '../plugins/PluginZone'
 
 export interface ModelPickerProps {
   providers: Provider[]
@@ -21,6 +24,7 @@ export interface ModelPickerProps {
 
 export function ModelPicker({ providers, value, onChange, defaultLabel }: ModelPickerProps) {
   const t = useT()
+  const { plugins } = usePlugins()
   const resolvedDefaultLabel = defaultLabel ?? t({ en: 'Default (global model)', fr: 'Défaut (modèle global)' })
   const [isOpen, setIsOpen] = useState(false)
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null)
@@ -196,73 +200,81 @@ export function ModelPicker({ providers, value, onChange, defaultLabel }: ModelP
                   {resolvedDefaultLabel}
                 </button>
 
-                {visibleGroups.map((group) => (
-                  <div key={group.provider.id}>
-                    <div className="px-4 py-1.5 text-xs font-medium text-text-muted uppercase tracking-wider bg-bg-tertiary/50 flex items-center justify-between gap-2">
-                      <span className="truncate">{group.provider.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => handleEditProvider(group.provider)}
-                        className="p-0.5 text-text-muted hover:text-text-primary rounded transition-colors flex-shrink-0"
-                        title={t({ en: 'Edit provider', fr: 'Modifier le fournisseur' })}
-                        aria-label={t({
-                          en: `Edit provider ${group.provider.name}`,
-                          fr: `Modifier le fournisseur ${group.provider.name}`,
-                        })}
-                      >
-                        <EditSmallIcon className="w-3 h-3" />
-                      </button>
-                    </div>
-                    {group.models.map((modelConfig) => {
-                      const modelFlatIndex = flatItems.findIndex(
-                        (fi) => fi.providerId === group.provider.id && fi.modelConfig.id === modelConfig.id,
-                      )
-                      const isHighlighted = modelFlatIndex === highlightedIndex
-                      const isActive =
-                        !!parsedValue &&
-                        parsedValue.providerId === group.provider.id &&
-                        parsedValue.model === modelConfig.id
-                      return (
-                        <div
-                          key={`${group.provider.id}/${modelConfig.id}`}
-                          ref={isHighlighted ? highlightedRef : undefined}
-                        >
-                          <ModelEntryRow
-                            providerId={group.provider.id}
-                            modelConfig={modelConfig}
-                            isActive={isActive}
-                            highlighted={isHighlighted}
-                            onModelClick={(providerId, modelId) => {
-                              // Re-clicking the same model keeps its effort; a
-                              // cross-model pick resets it.
-                              const sameModel = parsedValue?.providerId === providerId && parsedValue.model === modelId
-                              onChange(
-                                formatModelValue(
-                                  providerId,
-                                  modelId,
-                                  sameModel ? parsedValue?.reasoningEffort : undefined,
-                                ),
-                              )
-                              setIsOpen(false)
-                            }}
-                            reasoningEfforts={modelConfig.reasoningEfforts}
-                            selectedEffort={isActive ? displayEffort : undefined}
-                            onSelectEffort={(providerId, modelId, effort) => {
-                              onChange(formatModelValue(providerId, modelId, effort))
-                              setIsOpen(false)
-                            }}
-                          />
+                {visibleGroups.map((group) => {
+                  const providerLogo = findPluginLogoForProvider(group.provider, plugins)
+                  return (
+                    <div key={group.provider.id}>
+                      <div className="px-4 py-1.5 text-xs font-medium text-text-muted uppercase tracking-wider bg-bg-tertiary/50 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {providerLogo && <PluginLogo icon={providerLogo} className="w-3.5 h-3.5" />}
+                          <span className="truncate">{group.provider.name}</span>
                         </div>
-                      )
-                    })}
-                  </div>
-                ))}
+                        <button
+                          type="button"
+                          onClick={() => handleEditProvider(group.provider)}
+                          className="p-0.5 text-text-muted hover:text-text-primary rounded transition-colors flex-shrink-0"
+                          title={t({ en: 'Edit provider', fr: 'Modifier le fournisseur' })}
+                          aria-label={t({
+                            en: `Edit provider ${group.provider.name}`,
+                            fr: `Modifier le fournisseur ${group.provider.name}`,
+                          })}
+                        >
+                          <EditSmallIcon className="w-3 h-3" />
+                        </button>
+                      </div>
+                      {group.models.map((modelConfig) => {
+                        const modelFlatIndex = flatItems.findIndex(
+                          (fi) => fi.providerId === group.provider.id && fi.modelConfig.id === modelConfig.id,
+                        )
+                        const isHighlighted = modelFlatIndex === highlightedIndex
+                        const isActive =
+                          !!parsedValue &&
+                          parsedValue.providerId === group.provider.id &&
+                          parsedValue.model === modelConfig.id
+                        return (
+                          <div
+                            key={`${group.provider.id}/${modelConfig.id}`}
+                            ref={isHighlighted ? highlightedRef : undefined}
+                          >
+                            <ModelEntryRow
+                              providerId={group.provider.id}
+                              modelConfig={modelConfig}
+                              isActive={isActive}
+                              highlighted={isHighlighted}
+                              onModelClick={(providerId, modelId) => {
+                                // Re-clicking the same model keeps its effort; a
+                                // cross-model pick resets it.
+                                const sameModel =
+                                  parsedValue?.providerId === providerId && parsedValue.model === modelId
+                                onChange(
+                                  formatModelValue(
+                                    providerId,
+                                    modelId,
+                                    sameModel ? parsedValue?.reasoningEffort : undefined,
+                                  ),
+                                )
+                                setIsOpen(false)
+                              }}
+                              reasoningEfforts={modelConfig.reasoningEfforts}
+                              selectedEffort={isActive ? displayEffort : undefined}
+                              onSelectEffort={(providerId, modelId, effort) => {
+                                onChange(formatModelValue(providerId, modelId, effort))
+                                setIsOpen(false)
+                              }}
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )
+                })}
 
                 {visibleGroups.length === 0 && searchQuery.trim() && (
                   <div className="px-4 py-3 text-sm text-text-muted text-center">
                     {t({ en: 'No models match your search', fr: 'Aucun modèle ne correspond à votre recherche' })}
                   </div>
                 )}
+                <PluginZone id="model.picker.footer" />
               </ScrollArea>
             </div>
           </div>,

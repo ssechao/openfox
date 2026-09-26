@@ -1,7 +1,7 @@
 import { memo, useState } from 'react'
 import type { Message, MessageSegment, ToolCall, PreparingToolCall } from '@shared/types.js'
 import { Markdown } from '../shared/Markdown'
-import { ThinkingBlock } from '../shared/ThinkingBlock'
+import { ThinkingBlockToggle } from '../shared/ThinkingBlockToggle'
 import { useT } from '../../hooks/useT'
 import { ToolCallDisplay } from '../shared/ToolCallDisplay'
 import { ToolCallPreparing } from '../shared/ToolCallPreparing'
@@ -13,7 +13,7 @@ import { useSessionStore } from '../../stores/session'
 import { useAgents } from '../../hooks/useAgents'
 import { getAgentColor } from '../../lib/agents-actions'
 import { InfoIcon, WarningSmallIcon } from '../shared/icons'
-import { forkSession } from '../../lib/api.js'
+import { forkSession, forkSessionErrorMessage } from '../../lib/api.js'
 import { deriveToolCallStatus } from '../../lib/toolStatus'
 import { useLocation } from 'wouter'
 import { formatTime } from '../../lib/format-stats'
@@ -168,8 +168,13 @@ export const AssistantMessage = memo(function AssistantMessage({
   const criteria = useSessionStore((state) => state.currentSession?.metadataEntries?.['criteria'])
   const { agents } = useAgents()
   const rawElements = messageToElements(message, showStats)
-  const filteredElements = showThinking ? rawElements : rawElements.filter((e) => e.type !== 'thinking')
-  const elements = groupConsecutiveCriteria(filteredElements)
+  const hasThinking = rawElements.some((e) => e.type === 'thinking')
+  const thinkingFinished = rawElements.some((e) => e.type !== 'thinking' && e.type !== 'stats')
+  const thinkingContent = rawElements
+    .filter((e) => e.type === 'thinking')
+    .map((e) => e.content)
+    .join('')
+  const elements = groupConsecutiveCriteria(rawElements.filter((e) => e.type !== 'thinking'))
   const [forkPending, setForkPending] = useState(false)
   const [forkError, setForkError] = useState<string | null>(null)
   const [, navigate] = useLocation()
@@ -185,10 +190,13 @@ export const AssistantMessage = memo(function AssistantMessage({
     setForkError(null)
     const result = await forkSession(sessionId, message.id)
     setForkPending(false)
-    if (result?.session) {
+    if (result && 'session' in result) {
       navigate(`/p/${result.session.projectId}/s/${result.session.id}`)
     } else {
-      setForkError(t({ en: 'Failed to fork session', fr: 'Échec de la duplication de la session' }))
+      setForkError(
+        forkSessionErrorMessage(result) ??
+          t({ en: 'Failed to fork session', fr: 'Échec de la duplication de la session' }),
+      )
     }
   }
 
@@ -198,17 +206,24 @@ export const AssistantMessage = memo(function AssistantMessage({
     () => void handleFork(),
   )
 
-  if (elements.length === 0) return null
+  if (elements.length === 0 && !hasThinking) return null
 
   return (
     <div className="feed-item" onContextMenu={(e) => onContextMenu(e, !!sessionId)}>
       <div className="min-w-0">
         {forkError && <p className="text-xs text-accent-error mb-1 ml-0.5">{forkError}</p>}
+        {hasThinking && (
+          <ThinkingBlockToggle
+            messageId={message.id}
+            content={thinkingContent}
+            isStreaming={message.isStreaming ?? false}
+            thinkingFinished={thinkingFinished}
+            thinkingDuration={message.stats?.thinkingDuration}
+            showThinking={showThinking}
+          />
+        )}
         {elements.map((element, i) => {
           switch (element.type) {
-            case 'thinking':
-              return <ThinkingBlock key={i} content={element.content} isStreaming={message.isStreaming} />
-
             case 'text':
               return (
                 <div key={i} className="prose prose-sm prose-invert max-w-none feed-item">
@@ -222,6 +237,8 @@ export const AssistantMessage = memo(function AssistantMessage({
                   key={`preparing-${element.preparing.index}`}
                   name={element.preparing.name}
                   arguments={element.preparing.arguments}
+                  editContext={element.preparing.editContext}
+                  forceCompact={!showVerboseToolOutput}
                 />
               )
 

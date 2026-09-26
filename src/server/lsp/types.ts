@@ -50,8 +50,12 @@ export interface LspManagerInterface {
   /**
    * Notify the LSP that a file has changed and get diagnostics
    * Returns diagnostics for the file (may be empty if no issues)
+   *
+   * When `awaitDiagnostics` is false, the document change is still pushed to
+   * the language server (so a later wait returns fresh diagnostics) but the
+   * call resolves immediately without blocking on the server round-trip.
    */
-  notifyFileChange(path: string, content: string): Promise<Diagnostic[]>
+  notifyFileChange(path: string, content: string, awaitDiagnostics?: boolean): Promise<Diagnostic[]>
 
   /**
    * Get current diagnostics for a file without triggering a change

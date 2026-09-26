@@ -113,17 +113,13 @@ function renderChatInput(input = '') {
 // whether the composer collapsed to 'auto' in between (layout churn while typing).
 function trackHeightWrites(textarea: HTMLTextAreaElement): string[] {
   const writes: string[] = []
-  const protoDesc = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'height')
-  Object.defineProperty(textarea.style, 'height', {
-    configurable: true,
-    get() {
-      return textarea.style.getPropertyValue('height')
-    },
-    set(value: string) {
+  const originalSetProperty = textarea.style.setProperty
+  textarea.style.setProperty = function (property: string, value: string, priority?: string) {
+    if (property === 'height') {
       writes.push(value)
-      protoDesc?.set?.call(this, value)
-    },
-  })
+    }
+    return originalSetProperty.call(this, property, value, priority)
+  }
   return writes
 }
 

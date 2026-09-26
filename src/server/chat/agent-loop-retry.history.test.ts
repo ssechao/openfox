@@ -159,6 +159,7 @@ describe('agent loop retry history (real EventStore)', () => {
     mockTurnMetrics = {
       addToolTime: vi.fn(),
       addLLMCall: vi.fn(),
+      addThinkingTime: vi.fn(),
       buildStats: vi.fn().mockReturnValue({ durationMs: 0 }),
     } as unknown as TurnMetrics
 

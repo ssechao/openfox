@@ -11,6 +11,12 @@ export interface ProviderInfo {
   isLocal?: boolean
   thinkingField?: string
   sendReasoningInMessages?: boolean
+  authAdapter?: string
+  transportAdapter?: string
+  credentialRef?: string
+  preset?: string
+  logo?: string
+  icon?: string
   models?: Array<{
     id: string
     contextWindow: number

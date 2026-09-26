@@ -1,6 +1,6 @@
 {
   "name": "openfox",
-  "version": "2.0.145-fork.22",
+  "version": "2.0.159-fork.0",
   "description": "Local-LLM-first agentic coding assistant",
   "type": "module",
   "bin": {
@@ -19,6 +19,10 @@
     "./provider": {
       "types": "./dist/provider/index.d.ts",
       "import": "./dist/provider/index.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin/index.d.ts",
+      "import": "./dist/plugin/index.js"
     }
   },
   "files": [
@@ -43,16 +47,18 @@
     "test:unit": "vitest run --reporter=dot --silent=passed-only",
     "test:e2e": "vitest run --reporter=dot --silent=passed-only --config e2e/vitest.config.ts",
     "test:playwright": "playwright test --config=e2e-playwright/playwright.config.ts",
+    "bench:web": "tsx scripts/bench/web-memory.ts",
     "optimize:snapshots": "tsx scripts/optimize-snapshots.ts",
     "test:playwright:ui": "playwright test --config=e2e-playwright/playwright.config.ts --ui",
     "test:playwright:headed": "playwright test --config=e2e-playwright/playwright.config.ts --headed",
     "test:cov": "vitest run --reporter=dot --silent=passed-only --coverage && vitest run --reporter=dot --silent=passed-only --config e2e/vitest.config.ts --coverage",
     "test:cov:unit": "vitest run --reporter=dot --silent=passed-only --coverage",
     "test:cov:e2e": "vitest run --reporter=dot --silent=passed-only --config e2e/vitest.config.ts --coverage",
-    "typecheck": "npm run typecheck:server && npm run typecheck:web && npm run typecheck:e2e",
+    "typecheck": "npm run typecheck:server && npm run typecheck:web && npm run typecheck:e2e && npm run typecheck:bench",
     "typecheck:server": "tsc --noEmit",
     "typecheck:web": "cd web && tsc --noEmit",
     "typecheck:e2e": "tsc --noEmit -p e2e/tsconfig.json",
+    "typecheck:bench": "tsc --noEmit -p scripts/bench/tsconfig.json",
     "lint": "eslint src/ web/src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --check . --ignore-unknown",

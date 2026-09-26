@@ -23,11 +23,21 @@ vi.mock('../runtime-config.js', () => ({
   getRuntimeConfig: vi.fn(() => ({ mode: 'development' })),
 }))
 
+vi.mock('../db/projects.js', () => ({
+  getProjectByWorkdir: vi.fn(() => null),
+}))
+
+vi.mock('../plugins/hook-emitter.js', () => ({
+  emitPluginHook: vi.fn(),
+}))
+
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { devServerManager } from './manager.js'
+import { emitPluginHook } from '../plugins/hook-emitter.js'
+import { getProjectByWorkdir } from '../db/projects.js'
 
-function makeMockProc(stdout = '', stderr = '', exitCode = 0) {
+function makeMockProc(stdout = '', stderr = '', exitCode: number | null | undefined = 0) {
   const listeners: Record<string, (arg: unknown) => void> = {}
   const mock: any = {
     stdout: {
@@ -241,6 +251,177 @@ describe('start with port probing and substitution', () => {
 
     expect(status.state).toBe('running')
     expect(status.url).toBe('http://localhost:3099')
+  })
+})
+
+describe('plugin dev-server lifecycle hooks', () => {
+  beforeEach(() => {
+    vi.mocked(readFile).mockReset()
+    vi.mocked(spawn).mockReset()
+    vi.mocked(emitPluginHook).mockReset()
+    vi.mocked(getProjectByWorkdir).mockReset()
+    vi.mocked(getProjectByWorkdir).mockReturnValue(null)
+  })
+
+  it('emits devserver.started with the resolved workdir, URL, command and port', async () => {
+    vi.mocked(readFile).mockResolvedValue(
+      JSON.stringify({ command: 'npm run dev -- -p ${PORT}', url: 'http://localhost:${PORT}' }),
+    )
+    vi.mocked(spawn).mockReturnValue(makeMockProc('', '', undefined) as any)
+
+    const status = await devServerManager.start('/tmp/plugin-hook-start')
+
+    expect(status.state).toBe('running')
+    expect(emitPluginHook).toHaveBeenCalledWith(
+      'devserver.started',
+      expect.objectContaining({
+        sessionId: '',
+        data: expect.objectContaining({
+          workdir: expect.stringContaining('plugin-hook-start'),
+          url: status.url,
+          command: expect.any(String),
+          port: expect.any(Number),
+        }),
+      }),
+    )
+
+    expect(emitPluginHook).toHaveBeenCalledWith(
+      'devserver.state.changed',
+      expect.objectContaining({
+        sessionId: '',
+        data: expect.objectContaining({
+          workdir: expect.stringContaining('plugin-hook-start'),
+          state: 'running',
+          url: status.url,
+        }),
+      }),
+    )
+
+    await devServerManager.stop('/tmp/plugin-hook-start')
+  })
+
+  it('emits devserver.state.changed for warning state transitions', async () => {
+    vi.mocked(readFile).mockResolvedValue(JSON.stringify({ command: 'npm run dev', url: 'http://localhost:3399' }))
+    vi.mocked(spawn).mockReturnValue(makeMockProc('', 'SyntaxError: boom', undefined) as any)
+
+    await devServerManager.start('/tmp/plugin-hook-warning')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(emitPluginHook).toHaveBeenCalledWith(
+      'devserver.state.changed',
+      expect.objectContaining({
+        data: expect.objectContaining({
+          workdir: expect.stringContaining('plugin-hook-warning'),
+          state: 'warning',
+          errorMessage: 'SyntaxError: boom',
+        }),
+      }),
+    )
+
+    await devServerManager.stop('/tmp/plugin-hook-warning')
+  })
+
+  it('includes projectId when the workdir belongs to a known project', async () => {
+    vi.mocked(getProjectByWorkdir).mockReturnValue({ id: 'project-123' } as any)
+    vi.mocked(readFile).mockResolvedValue(JSON.stringify({ command: 'npm run dev', url: 'http://localhost:3299' }))
+    vi.mocked(spawn).mockReturnValue(makeMockProc('', '', undefined) as any)
+
+    await devServerManager.start('/tmp/plugin-hook-project')
+
+    expect(emitPluginHook).toHaveBeenCalledWith(
+      'devserver.started',
+      expect.objectContaining({
+        projectId: 'project-123',
+      }),
+    )
+
+    await devServerManager.stop('/tmp/plugin-hook-project')
+  })
+
+  it('emits devserver.stopped only once for an explicit stop', async () => {
+    vi.mocked(readFile).mockResolvedValue(JSON.stringify({ command: 'npm run dev', url: 'http://localhost:3199' }))
+    vi.mocked(spawn).mockReturnValue(makeMockProc('', '', undefined) as any)
+
+    await devServerManager.start('/tmp/plugin-hook-stop')
+    vi.mocked(emitPluginHook).mockClear()
+
+    await devServerManager.stop('/tmp/plugin-hook-stop')
+
+    const stopped = vi.mocked(emitPluginHook).mock.calls.filter(([event]) => event === 'devserver.stopped')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0]?.[1]).toEqual(
+      expect.objectContaining({
+        sessionId: '',
+        data: expect.objectContaining({
+          workdir: expect.stringContaining('plugin-hook-stop'),
+          url: 'http://localhost:3199',
+          reason: 'stop',
+        }),
+      }),
+    )
+  })
+
+  it('emits devserver.stopped with reason exit on a clean process exit', async () => {
+    vi.mocked(readFile).mockResolvedValue(JSON.stringify({ command: 'npm run dev', url: 'http://localhost:3099' }))
+    vi.mocked(spawn).mockReturnValue(makeMockProc('', '', 0) as any)
+
+    await devServerManager.start('/tmp/plugin-hook-exit')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const stopped = vi.mocked(emitPluginHook).mock.calls.filter(([event]) => event === 'devserver.stopped')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0]?.[1]).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          workdir: expect.stringContaining('plugin-hook-exit'),
+          reason: 'exit',
+          exitCode: 0,
+        }),
+      }),
+    )
+  })
+
+  it('emits devserver.stopped with reason error and exit code on a non-zero exit', async () => {
+    vi.mocked(readFile).mockResolvedValue(JSON.stringify({ command: 'npm run dev', url: 'http://localhost:2999' }))
+    vi.mocked(spawn).mockReturnValue(makeMockProc('', '', 1) as any)
+
+    await devServerManager.start('/tmp/plugin-hook-error')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const stopped = vi.mocked(emitPluginHook).mock.calls.filter(([event]) => event === 'devserver.stopped')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0]?.[1]).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          workdir: expect.stringContaining('plugin-hook-error'),
+          reason: 'error',
+          exitCode: 1,
+        }),
+      }),
+    )
+  })
+
+  it('does not emit devserver.stopped twice when close fires after an explicit stop', async () => {
+    vi.mocked(readFile).mockResolvedValue(JSON.stringify({ command: 'npm run dev', url: 'http://localhost:2899' }))
+    vi.mocked(spawn).mockReturnValue(makeMockProc('', '', undefined) as any)
+
+    await devServerManager.start('/tmp/plugin-hook-dedup')
+    vi.mocked(emitPluginHook).mockClear()
+
+    await devServerManager.stop('/tmp/plugin-hook-dedup')
+
+    const proc = vi.mocked(spawn).mock.results[0]?.value
+    const closeCb = proc.on.mock.calls.find(([event]: [string]) => event === 'close')?.[1] as (code: number) => void
+    closeCb(0)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const stopped = vi.mocked(emitPluginHook).mock.calls.filter(([event]) => event === 'devserver.stopped')
+    expect(stopped).toHaveLength(1)
+    expect(stopped[0]?.[1]).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({ reason: 'stop' }),
+      }),
+    )
   })
 })
 

@@ -64,8 +64,11 @@ import { createAutoUpdateRoutes } from './routes/auto-update.js'
 import { createProviderAuthRoutes } from './routes/provider-auth.js'
 import { devServerManager } from './dev-server/manager.js'
 import { getGlobalConfigDir } from '../cli/paths.js'
-import { ProviderRegistry, loadProviderPlugins } from './providers/plugins/index.js'
+import { ProviderRegistry } from './providers/plugins/index.js'
+import { PluginHost } from './plugins/host.js'
 import { createPluginRoutes } from './routes/plugins.js'
+import { createNotificationRoutes } from './routes/notifications.js'
+import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { logger, setLogLevel } from './utils/logger.js'
 import { VERSION } from '../constants.js'
@@ -139,10 +142,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     mode: config.mode === 'development' ? 'development' : 'production',
     configDirectory: configDir,
   })
-  const pluginDiagnostics = await loadProviderPlugins({ registry: providerAdapters, configDirectory: configDir })
+  const pluginHost = new PluginHost({
+    configDirectory: configDir,
+    mode: config.mode === 'development' ? 'development' : 'production',
+    logger,
+    registry: providerAdapters,
+  })
+  const pluginDiagnostics = await pluginHost.start()
   for (const diagnostic of pluginDiagnostics) {
-    if (!diagnostic.loaded) logger.warn('Provider plugin failed to load', { ...diagnostic })
+    if (!diagnostic.loaded) logger.warn('Plugin failed to load', { ...diagnostic })
   }
+  pluginHost.attachEventStore(getEventStore())
 
   // Hydrate concise preset-backed provider entries after plugins are loaded.
   config.providers = providerAdapters.resolveProviders(config.providers ?? [])
@@ -339,7 +349,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
     const authConfig = getAuthConfig()
     if (authConfig?.strategy === 'network' && authConfig.encryptedPassword) {
-      const token = req.headers['x-session-token'] as string
+      const headerToken = req.headers['x-session-token'] as string | undefined
+      const token = headerToken ?? pluginAssetToken(req)
       if (!token || !(await isValidToken(token))) {
         res.status(401).json({ error: 'Unauthorized' })
         return
@@ -456,8 +467,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(400).json({ error: 'name and workdir are required' })
     }
     const { createProjectDirectory } = await import('./utils/project-creator.js')
+    const { loadGlobalConfig } = await import('../cli/config.js')
+    const globalConfig = await loadGlobalConfig(config.mode ?? 'production', config.globalConfigPath)
     try {
-      const project = await createProjectDirectory(name, workdir)
+      const project = await createProjectDirectory(name, workdir, globalConfig.workspace?.autoGitInit ?? true)
       res.status(201).json({ project })
     } catch (err) {
       const eaccError = err as Error & { code?: string; cause?: unknown }
@@ -1080,7 +1093,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   app.get('/api/sessions/:id', async (req, res) => {
     const { getEventStore, combineEventsWithSnapshot } = await import('./events/index.js')
-    const { buildMessagesFromStoredEvents, foldPendingConfirmations } = await import('./events/folding.js')
+    const { buildMessagesFromStoredEvents, buildSessionStatsMessages, foldPendingConfirmations } =
+      await import('./events/folding.js')
+    const { computeSessionStatsSummary } = await import('../shared/stats.js')
     const { getPendingQuestionsForSession } = await import('./tools/index.js')
     const { getMaxVisibleItems } = await import('./db/settings.js')
 
@@ -1098,6 +1113,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     const maxVisibleItems = req.query['full'] === 'true' ? undefined : getMaxVisibleItems() || undefined
     const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems)
+    const sessionStats = computeSessionStatsSummary(buildSessionStatsMessages(events))
     const contextState = sessionManager.getContextState(req.params.id)
     const queueState = sessionManager.getQueueState(req.params.id)
     const pendingQuestions = getPendingQuestionsForSession(req.params.id)
@@ -1108,6 +1124,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       session: toClientSession(session!),
       messages,
       hiddenCount,
+      sessionStats,
       contextState,
       queueState,
       pendingQuestions,
@@ -1152,6 +1169,16 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     })
 
     res.json(status)
+  })
+
+  // Full session stats (headline + per-response and per-call progression) for
+  // the StatsModal's on-demand detail load. Cheap: extracted from snapshot
+  // messages + later message.done events, no message rebuild. The always-on
+  // session payload only carries the lean summary; this endpoint is hit once
+  // when the user asks to see the full response log.
+  app.get('/api/sessions/:id/stats', async (req, res) => {
+    const { handleGetSessionStats } = await import('./routes/session-stats.js')
+    await handleGetSessionStats(sessionManager, req, res)
   })
 
   app.delete('/api/sessions/:id', async (req, res) => {
@@ -2549,6 +2576,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       authAdapter,
       transportAdapter,
       apiProtocol,
+      logo,
+      icon,
     } = req.body as {
       name: string
       url: string
@@ -2562,6 +2591,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       authAdapter?: string
       transportAdapter?: string
       apiProtocol?: 'auto' | 'responses' | 'chat-completions'
+      logo?: string
+      icon?: string
     }
 
     if (!name || !url || !backend) {
@@ -2594,6 +2625,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         ...(authAdapter ? { authAdapter } : {}),
         ...(transportAdapter ? { transportAdapter } : {}),
         ...(apiProtocol ? { apiProtocol } : {}),
+        ...(logo ? { logo } : {}),
+        ...(icon ? { icon } : {}),
         models: providerModels,
         isActive: true,
       })
@@ -2775,20 +2808,23 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
   })
 
-  app.use('/api/plugins', createPluginRoutes({ config, providerAdapters, pluginDiagnostics, logger }))
-  app.get('/api/plugins', (_req, res) => res.json({ plugins: pluginDiagnostics }))
-  app.get('/api/provider-presets', (_req, res) => res.json({ presets: providerAdapters.getPresets() }))
+  app.use('/api/plugins', createPluginRoutes({ config, host: pluginHost, logger }))
+  app.get('/api/plugins', (_req, res) => res.json({ plugins: pluginHost.getDiagnostics() }))
+  app.use('/api/notifications', createNotificationRoutes(pluginHost.notifications))
+  app.get('/api/provider-presets', (_req, res) => res.json({ presets: pluginHost.registry.getPresets() }))
   app.get('/api/provider-adapters', (_req, res) =>
     res.json({
-      authAdapters: providerAdapters.listAuthAdapters(),
-      transportAdapters: providerAdapters.listTransportAdapters(),
+      authAdapters: pluginHost.registry.listAuthAdapters(),
+      transportAdapters: pluginHost.registry.listTransportAdapters(),
     }),
   )
   app.use('/api/provider-auth', createProviderAuthRoutes(config, providerManager, providerAdapters))
 
   // Provider endpoints
-  app.get('/api/providers', (_req, res) => {
-    const providers = providerManager.getProviders().map((p) => ({
+  app.get('/api/providers', async (_req, res) => {
+    const { enrichProvidersWithPluginMetadata } = await import('./plugins/model-metadata.js')
+    const enriched = await enrichProvidersWithPluginMetadata(providerManager.getProviders())
+    const providers = enriched.map((p) => ({
       ...p,
       status: providerManager.getProviderStatus(p.id),
     }))
@@ -2894,6 +2930,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       authAdapter,
       transportAdapter,
       apiProtocol,
+      logo,
+      icon,
     } = req.body as {
       name?: string
       url?: string
@@ -2906,6 +2944,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       authAdapter?: string | null
       transportAdapter?: string | null
       apiProtocol?: 'auto' | 'responses' | 'chat-completions' | null
+      logo?: string | null
+      icon?: string | null
     }
     try {
       const { loadGlobalConfig, saveGlobalConfig, updateProvider } = await import('../cli/config.js')
@@ -2925,6 +2965,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       if (authAdapter !== undefined) updates['authAdapter'] = authAdapter || undefined
       if (transportAdapter !== undefined) updates['transportAdapter'] = transportAdapter || undefined
       if (apiProtocol !== undefined) updates['apiProtocol'] = apiProtocol || undefined
+      if (logo !== undefined) updates['logo'] = logo || undefined
+      if (icon !== undefined) updates['icon'] = icon || undefined
       if (modelConfigs !== undefined) {
         updates['models'] = buildModelConfigs(modelConfigs as ModelConfigInput[])
       }
@@ -3784,6 +3826,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   )
   const wss = wssExports.wss
 
+  // Point the plugin host at the live WebSocket broadcaster now that it exists.
+  pluginHost.setBroadcaster((message) => wssExports.broadcastAll(message))
+
   // Point the tasks service at the live WebSocket broadcaster now that it exists.
   // Broadcast to ALL clients (not just the project's active session): a task
   // board can be open in a window with no session loaded (homepage) or in
@@ -3899,7 +3944,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     listProjects: () => listProjects(),
     createProject: async (name, workdir) => {
       const { createProjectDirectory } = await import('./utils/project-creator.js')
-      return createProjectDirectory(name, workdir)
+      const { loadGlobalConfig } = await import('../cli/config.js')
+      const globalConfig = await loadGlobalConfig(config.mode ?? 'production', config.globalConfigPath)
+      return createProjectDirectory(name, workdir, globalConfig.workspace?.autoGitInit ?? true)
     },
     deleteProject: (projectId) => {
       const project = getProject(projectId)

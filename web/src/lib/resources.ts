@@ -1,5 +1,20 @@
 import { authFetch } from './api'
 import { resource, snapshot } from './resourceCache'
+import {
+  fetchPluginList,
+  fetchNotifications,
+  fetchPluginDiagnostics,
+  fetchPluginRegistry,
+  fetchPluginTools,
+  fetchPluginSettings,
+  type PluginListData,
+  type NotificationsData,
+  type PluginSettingsData,
+  type RegistryPlugin,
+  type PluginDiagnosticInfo,
+  type PluginToolInfo,
+} from './plugin-actions'
+import type { PluginSettingScope } from '@shared/plugin.js'
 import type { AgentInfo } from './agents-actions'
 import type { AgentFull } from './agents-actions'
 import type { CommandInfo, CommandFull } from './commands-actions'
@@ -231,6 +246,12 @@ export function readSkills(workdir?: string): SkillsData | undefined {
   return snapshot<SkillsData>(skillsResource.keyOf(workdir)).data
 }
 
+export function selectActiveSkills(data?: SkillsData): SkillInfo[] {
+  if (!data) return []
+  const all = data.items.length > 0 ? data.items : [...data.defaults, ...data.userItems, ...data.projectItems]
+  return all.filter((sk) => sk.enabled)
+}
+
 export async function fetchSkill(skillId: string, workdir?: string): Promise<SkillFull | null> {
   const res = await authFetch(scopedUrl(`/api/skills/${skillId}`, workdir))
   if (!res.ok) return null
@@ -275,11 +296,16 @@ export interface McpServerInfo {
   status: string
   tools: McpToolInfo[]
   estimatedTokens: number
+  error?: string
   config: {
-    transport?: string
+    transport?: 'stdio' | 'http' | string
     command?: string
     args?: string[]
+    env?: Record<string, string>
     url?: string
+    headers?: Record<string, string>
+    oauth?: boolean
+    timeout?: number
     disabled?: boolean
   }
 }
@@ -592,16 +618,19 @@ export const SETTINGS_KEYS = {
   DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS: 'display.useNativeScrollbarsCodeBlocks',
   DISPLAY_COLLAPSE_LARGE_TOOL_CALLS: 'display.collapseLargeToolCalls',
   DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING: 'display.deferCodeHighlightWhileStreaming',
+  DISPLAY_SHOW_TOOL_CALL_STREAMING: 'display.showToolCallStreaming',
   DISPLAY_FEED_VIRTUALIZATION: 'display.feedVirtualization',
   DISPLAY_MODEL_SELECTOR_HEIGHT: 'display.modelSelectorHeight',
   DISPLAY_COLLAPSE_PROVIDERS_BY_DEFAULT: 'display.collapseProvidersByDefault',
   DISPLAY_COLLAPSE_FAVORITES_BY_DEFAULT: 'display.collapseFavoritesByDefault',
   DISPLAY_MODEL_FAVORITES: 'display.modelFavorites',
   DISPLAY_MOBILE_FULLSCREEN_COMPOSER: 'display.mobileFullscreenComposer',
+  DISPLAY_FULLSCREEN_SLASH_COMMAND: 'display.fullscreenSlashCommand',
   LLM_DYNAMIC_SYSTEM_PROMPT: 'llm.dynamicSystemPrompt',
   LLM_CAVEMAN_THINKING: 'llm.cavemanThinking',
   CACHE_WARMING: 'cache.warming',
   AUTO_CONTINUE_ON_BOOT: 'agent.autoContinueOnBoot',
+  AGENT_ALLOW_PARALLEL_SUB_AGENTS: 'agent.allowParallelSubAgents',
   KEYBINDINGS: 'keybindings',
   RETRY_PATTERNS: 'agent.retryPatterns',
   SKILLS_DIRECTORIES: 'skills.directories',
@@ -615,6 +644,7 @@ export const SETTINGS_KEYS = {
   FEATURES_PER_SESSION_MCP: 'features.perSessionMcp',
   PROXY_URL: 'network.proxyUrl',
   DEFAULT_AGENT: 'agent.defaultAgent',
+  VSCODE_REMOTE_PREFIX: 'editor.vscodeRemotePrefix',
 } as const
 
 export const DISPLAY_SETTINGS_KEYS = [
@@ -633,7 +663,9 @@ export const DISPLAY_SETTINGS_KEYS = [
   SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS,
   SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS,
   SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING,
+  SETTINGS_KEYS.DISPLAY_SHOW_TOOL_CALL_STREAMING,
   SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION,
+  SETTINGS_KEYS.DISPLAY_FULLSCREEN_SLASH_COMMAND,
 ] as const
 
 export async function fetchChangelog(since?: string): Promise<string> {
@@ -817,5 +849,46 @@ export async function fetchAgentDefaultContent(agentId: string): Promise<AgentFu
 export const agentDefaultResource = resource<AgentFull | null, [string]>({
   key: (agentId) => `agent-default:${agentId}`,
   fetch: fetchAgentDefaultContent,
+  maxAgeMs: 0,
+})
+
+/** Installed plugins plus their declarative UI contributions (single fetch). */
+export const pluginListResource = resource<PluginListData, []>({
+  key: () => 'plugins:list',
+  fetch: fetchPluginList,
+  maxAgeMs: 0,
+})
+
+/** Plugin-emitted notifications (bell + toast source of truth). */
+export const notificationsResource = resource<NotificationsData, []>({
+  key: () => 'plugins:notifications',
+  fetch: fetchNotifications,
+})
+
+/** Per-plugin settings schema + masked values, keyed by plugin and scope. */
+export const pluginSettingsResource = resource<PluginSettingsData, [string, PluginSettingScope, string | undefined]>({
+  key: (pluginId, scope, projectId) => `plugins:settings:${pluginId}:${scope}:${projectId ?? ''}`,
+  fetch: fetchPluginSettings,
+  maxAgeMs: 0,
+})
+
+/** Curated plugin registry shipped with OpenFox (core-controlled). */
+export const pluginRegistryResource = resource<{ plugins: RegistryPlugin[] }, []>({
+  key: () => 'plugins:registry',
+  fetch: fetchPluginRegistry,
+  maxAgeMs: 300_000,
+})
+
+/** Load diagnostics for every discovered plugin (loaded, failed, disabled). */
+export const pluginDiagnosticsResource = resource<{ diagnostics: PluginDiagnosticInfo[] }, []>({
+  key: () => 'plugins:diagnostics',
+  fetch: fetchPluginDiagnostics,
+  maxAgeMs: 0,
+})
+
+/** Tools contributed by enabled plugins, with their owning plugin id. */
+export const pluginToolsResource = resource<{ tools: PluginToolInfo[] }, []>({
+  key: () => 'plugins:tools',
+  fetch: fetchPluginTools,
   maxAgeMs: 0,
 })

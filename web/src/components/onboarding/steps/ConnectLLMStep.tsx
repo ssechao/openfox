@@ -5,6 +5,8 @@ import { useResource } from '../../../hooks/useResource'
 import { providersResource } from '../../../lib/resources'
 import { PlusLgIcon, TrashIcon, ChevronUpIcon, ChevronDownIcon, GripVerticalIcon } from '../../shared/icons'
 import { ProviderModal, providerFormPayload, type ProviderFormData } from '../../shared/ProviderModal'
+import { usePlugins } from '../../../hooks/usePlugins'
+import { PluginLogo, findPluginLogoForProvider } from '../../shared/PluginLogo'
 import { getBackendDisplayName, type ProviderInfo } from '../types'
 
 export interface ConnectLLMStepHandle {
@@ -23,6 +25,7 @@ export const ConnectLLMStep = forwardRef<ConnectLLMStepHandle, ConnectLLMStepPro
   ref,
 ) {
   const t = useT()
+  const { plugins } = usePlugins()
   const [existingProviders, setExistingProviders] = useState<ProviderInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [showModal, setShowModal] = useState(false)
@@ -53,6 +56,12 @@ export const ConnectLLMStep = forwardRef<ConnectLLMStepHandle, ConnectLLMStepPro
       isLocal: p.isLocal,
       thinkingField: p.thinkingField,
       sendReasoningInMessages: p.sendReasoningInMessages,
+      authAdapter: p.authAdapter,
+      transportAdapter: p.transportAdapter,
+      credentialRef: p.credentialRef,
+      preset: p.preset,
+      logo: p.logo,
+      icon: p.icon,
       models: p.models,
     }))
     setExistingProviders(mapped)
@@ -283,6 +292,9 @@ export const ConnectLLMStep = forwardRef<ConnectLLMStepHandle, ConnectLLMStepPro
                 )}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
+                    {findPluginLogoForProvider(provider, plugins) && (
+                      <PluginLogo icon={findPluginLogoForProvider(provider, plugins)} className="w-4 h-4" />
+                    )}
                     <span className="px-2 py-0.5 bg-accent-primary/25 text-accent-primary rounded text-xs font-medium">
                       {getBackendDisplayName(provider.backend)}
                     </span>

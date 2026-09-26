@@ -64,6 +64,8 @@ const providerSchema = z
     transportAdapter: z.string().optional(),
     credentialRef: z.string().optional(),
     apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional(),
+    logo: z.string().optional(),
+    icon: z.string().optional(),
   })
   .transform((provider): Provider => ({
     id: provider.id,
@@ -84,6 +86,8 @@ const providerSchema = z
     ...(provider.transportAdapter ? { transportAdapter: provider.transportAdapter } : {}),
     ...(provider.credentialRef ? { credentialRef: provider.credentialRef } : {}),
     ...(provider.apiProtocol ? { apiProtocol: provider.apiProtocol } : {}),
+    ...(provider.logo ? { logo: provider.logo } : {}),
+    ...(provider.icon ? { icon: provider.icon } : {}),
   }))
 
 const serverSchema = z.object({
@@ -102,6 +106,7 @@ const databaseSchema = z.object({
 
 const workspaceSchema = z.object({
   workdir: z.string().default(process.cwd()),
+  autoGitInit: z.boolean().optional(),
 })
 
 // Remote-agent (headless-agent) hub configuration. The OpenFox server uses

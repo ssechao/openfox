@@ -100,6 +100,8 @@ interface MessageListProps {
   hiddenCount?: number
   onScrollbarGesture?: (kind: ScrollbarGestureKind, gapToEndPx: number | null) => void
   emptyState?: ReactNode
+  /** Forwarded to ChatFeedItems: whether the feed is pinned to the newest items. */
+  isAutoScrollActive?: boolean
 }
 
 export const MessageList = memo(function MessageList({
@@ -111,6 +113,7 @@ export const MessageList = memo(function MessageList({
   hiddenCount = 0,
   onScrollbarGesture,
   emptyState,
+  isAutoScrollActive = true,
 }: MessageListProps) {
   const t = useT()
   const scopeId = useSessionScope()
@@ -285,6 +288,7 @@ export const MessageList = memo(function MessageList({
               highlightedMessageId={highlightedMessageId}
               sessionId={sessionId}
               scrollContainerRef={scrollContainerRef}
+              isAutoScrollActive={isAutoScrollActive}
               showThinking={showThinking}
               showVerboseToolOutput={showVerboseToolOutput}
               showStats={showStats}

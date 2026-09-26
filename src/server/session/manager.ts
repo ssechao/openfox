@@ -91,6 +91,7 @@ import {
   emitMetadataSet,
   emitContextState,
   getCurrentContextWindowId,
+  getCurrentWindowMessages,
 } from '../events/index.js'
 import type { Message, CriterionStatus } from '../../shared/types.js'
 import { isInDangerZone, canCompact } from '../context/tokenizer.js'
@@ -159,6 +160,11 @@ export class SessionManager {
   // Sessions already warned about an unresolvable provider — getContextState runs on every
   // turn, and the warning is only worth one line per session.
   private unknownProviderWarned = new Set<string>()
+  private subAgentContextSizes = new Map<string, number>()
+  // The sub-agent currently running per session (last-wins when parallel).
+  // Used to scope system-generated events (drift reminders) to the sub-agent
+  // window instead of the main session.
+  private activeSubAgents = new Map<string, { subAgentId: string; subAgentType: string }>()
   private switchLocks = new Map<string, Promise<unknown>>()
   private workspaceCreationLocks = new Map<string, Promise<void>>()
   // A single LLM client per session, shared by WebSocket, REST queue, and agent
@@ -529,8 +535,20 @@ export class SessionManager {
     const state = getSessionState(originalSessionId)
     if (!state) throw new Error(`Session ${originalSessionId} has no state`)
 
-    const msgIndex = state.messages.findIndex((m) => m.id === messageId)
-    if (msgIndex === -1) throw new Error(`Message ${messageId} not found`)
+    // Fork only the latest context window: compacted sessions keep every
+    // historical window in state.messages, but the LLM prefix only covers the
+    // current window. Copying all of them would change the forked session's
+    // request prefix and defeat the provider-side prefix cache.
+    const windowMessages = getCurrentWindowMessages(originalSessionId)
+    const msgIndex = windowMessages.findIndex((m) => m.id === messageId)
+    if (msgIndex === -1) {
+      if (state.messages.some((m) => m.id === messageId)) {
+        throw new Error(
+          `Message ${messageId} belongs to a compacted context window; only the latest context window can be forked`,
+        )
+      }
+      throw new Error(`Message ${messageId} not found`)
+    }
 
     const newSession = this.createSession(
       projectId,
@@ -541,7 +559,7 @@ export class SessionManager {
     )
     const newWindowId = getCurrentContextWindowId(newSession.id) ?? crypto.randomUUID()
 
-    const messages = state.messages.slice(0, msgIndex + 1)
+    const messages = windowMessages.slice(0, msgIndex + 1)
 
     const snapshot: import('../events/types.js').SessionSnapshot = {
       mode: state.mode,
@@ -1688,6 +1706,9 @@ export class SessionManager {
     // their context.state must never inherit the main session's count.
     const compactionCount = subAgentId ? 0 : (state?.contextState.compactionCount ?? 0)
     const dynamicContextChanged = this.getDynamicContextChanged(sessionId)
+    if (subAgentId) {
+      this.subAgentContextSizes.set(subAgentId, currentTokens)
+    }
 
     emitContextState(
       sessionId,
@@ -1701,6 +1722,25 @@ export class SessionManager {
     )
 
     logger.debug('Context state updated', { sessionId, promptTokens, maxTokens, subAgentId })
+  }
+
+  /** Tokens used by a sub-agent's own scoped context (fresh, never-compacted). */
+  getSubAgentContextTokens(subAgentId: string): number | undefined {
+    return this.subAgentContextSizes.get(subAgentId)
+  }
+
+  /** Record the sub-agent currently running for a session (undefined clears it). */
+  setActiveSubAgent(sessionId: string, subAgent: { subAgentId: string; subAgentType: string } | undefined): void {
+    if (subAgent) {
+      this.activeSubAgents.set(sessionId, subAgent)
+    } else {
+      this.activeSubAgents.delete(sessionId)
+    }
+  }
+
+  /** The sub-agent currently running for a session, if any. */
+  getActiveSubAgent(sessionId: string): { subAgentId: string; subAgentType: string } | undefined {
+    return this.activeSubAgents.get(sessionId)
   }
 
   // ============================================================================

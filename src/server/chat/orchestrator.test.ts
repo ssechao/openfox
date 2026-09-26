@@ -11,6 +11,7 @@ const {
   consumeStreamGeneratorMock,
   getConversationMessagesMock,
   processEventsForConversationMock,
+  getSettingMock,
 } = vi.hoisted(() => ({
   getEventStoreMock: vi.fn(),
   getContextMessagesMock: vi.fn(),
@@ -22,6 +23,7 @@ const {
   consumeStreamGeneratorMock: vi.fn(),
   getConversationMessagesMock: vi.fn((): import('./request-context.js').RequestContextMessage[] => []),
   processEventsForConversationMock: vi.fn(async () => []),
+  getSettingMock: vi.fn().mockReturnValue('false'),
 }))
 
 vi.mock('../events/index.js', () => ({
@@ -40,7 +42,7 @@ vi.mock('./conversation-history.js', () => ({
 }))
 
 vi.mock('../db/settings.js', () => ({
-  getSetting: vi.fn().mockReturnValue('false'),
+  getSetting: getSettingMock,
   SETTINGS_KEYS: { LLM_DYNAMIC_SYSTEM_PROMPT: 'llm.dynamicSystemPrompt' },
 }))
 
@@ -170,7 +172,7 @@ vi.mock('../agents/registry.js', () => {
 
 import { PathAccessDeniedError } from '../tools/path-security.js'
 import { getEnabledSkillMetadata } from '../skills/registry.js'
-import { TurnMetrics, runAgentTurn, runChatTurn } from './orchestrator.js'
+import { TurnMetrics, buildRetryPatterns, runAgentTurn, runChatTurn } from './orchestrator.js'
 import { applyEvents } from '../events/apply-events.js'
 
 function createEventStore() {
@@ -378,6 +380,7 @@ describe('chat orchestrator', () => {
     streamLLMPureMock.mockReset()
     consumeStreamGeneratorMock.mockReset()
     streamLLMPureMock.mockReset()
+    getSettingMock.mockReset().mockReturnValue('false')
     streamLLMPureMock.mockResolvedValue({
       messageId: 'verifier-msg',
       content: 'done',
@@ -2140,17 +2143,22 @@ describe('chat orchestrator', () => {
       eventStore.upsertMessageCheckpoint.mockImplementation(() => {
         throw new Error('storage unavailable')
       })
-      consumeStreamGeneratorMock.mockImplementation(async (_gen: unknown, onEvent: (event: unknown) => void) => {
-        onEvent({ type: 'message.thinking', data: { messageId: 'ignored', content: 'partial' } })
-        return {
-          content: 'not persisted',
-          toolCalls: [],
-          segments: [],
-          aborted: false,
-          usage: { promptTokens: 0, completionTokens: 0 },
-          timing: { ttft: 0, completionTime: 0, tps: 0, prefillTps: 0 },
-        }
-      })
+      consumeStreamGeneratorMock.mockImplementation(
+        async (_gen: unknown, onEvent: (event: unknown) => void | Promise<void>) => {
+          // The production consumer awaits the callback (an async callback may
+          // reject); the mock must mirror that contract or a storage failure on
+          // the write path would surface as an unhandled rejection instead.
+          await onEvent({ type: 'message.thinking', data: { messageId: 'ignored', content: 'partial' } })
+          return {
+            content: 'not persisted',
+            toolCalls: [],
+            segments: [],
+            aborted: false,
+            usage: { promptTokens: 0, completionTokens: 0 },
+            timing: { ttft: 0, completionTime: 0, tps: 0, prefillTps: 0 },
+          }
+        },
+      )
       await runChatTurn({
         sessionManager: plannerSessionManager() as never,
         sessionId: 'session-1',
@@ -2189,5 +2197,43 @@ describe('chat orchestrator', () => {
           .at(-1),
       ).toBe('running.changed')
     })
+  })
+})
+
+describe('buildRetryPatterns', () => {
+  it('drops a stored empty pattern when loading', async () => {
+    getSettingMock.mockReturnValue(
+      JSON.stringify({
+        patterns: [
+          { field: 'content', pattern: '', action: 'retry', active: true },
+          { field: 'content', pattern: 'error', action: 'retry', active: true },
+        ],
+        maxRetriesPerTurn: 10,
+      }),
+    )
+    const { retryPatterns } = await buildRetryPatterns()
+    expect(retryPatterns).toHaveLength(1)
+    expect(retryPatterns[0]!.pattern).toBe('error')
+  })
+
+  it('drops invalid regex patterns when loading', async () => {
+    getSettingMock.mockReturnValue(
+      JSON.stringify({
+        patterns: [
+          { field: 'content', pattern: '[invalid', action: 'retry', active: true },
+          { field: 'content', pattern: 'error', action: 'retry', active: true },
+        ],
+        maxRetriesPerTurn: 10,
+      }),
+    )
+    const { retryPatterns } = await buildRetryPatterns()
+    expect(retryPatterns).toHaveLength(1)
+    expect(retryPatterns[0]!.pattern).toBe('error')
+  })
+
+  it('returns empty patterns for a non-JSON stored value', async () => {
+    getSettingMock.mockReturnValue('false')
+    const { retryPatterns } = await buildRetryPatterns()
+    expect(retryPatterns).toEqual([])
   })
 })

@@ -498,6 +498,7 @@ describe('config', () => {
             authAdapter: 'example-auth',
             transportAdapter: 'example-transport',
             credentialRef: 'credential-ref-1',
+            logo: 'https://example.com/provider-logo.png',
           },
         ],
         defaultModelSelection: 'external/gpt-5.4',
@@ -510,6 +511,7 @@ describe('config', () => {
         authAdapter: 'example-auth',
         transportAdapter: 'example-transport',
         credentialRef: 'credential-ref-1',
+        logo: 'https://example.com/provider-logo.png',
       }),
     )
   })

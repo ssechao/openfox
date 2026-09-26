@@ -98,6 +98,16 @@
 }
 
 @layer components {
+  /* OptionalScrollArea's lazy fallback: it has to scroll without showing a
+     native scrollbar, so it looks identical to an OverlayScrollbars pane until
+     the overlay instance is created on first interaction. */
+  .scrollbar-hidden {
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hidden::-webkit-scrollbar {
+    display: none;
+  }
   .panel {
     @apply bg-bg-secondary border border-border rounded;
   }

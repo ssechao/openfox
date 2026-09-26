@@ -35,6 +35,9 @@ web/vite.config.local.ts
 *.swp
 *.swo
 
+# Editor local history (VS Code .history/)
+.history/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -69,4 +72,4 @@ e2e-test-project/
 tmp/
 worktrees/
 
-plugins/
+/plugins/

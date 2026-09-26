@@ -330,7 +330,6 @@ export function PlanPanel({
         criteriaSidebarOpen={criteriaSidebarOpen}
         criteriaSidebarOverlay={externalCriteriaSidebarOverlay}
         onCriteriaSidebarToggle={onCriteriaSidebarToggle}
-        messages={messages}
         sessionId={targetSessionId}
       >
         <SidebarSummaryHeader visible={!criteriaSidebarOpen} />
@@ -350,6 +349,7 @@ export function PlanPanel({
           onScrollToTop={() => setAutoScroll(false)}
           hiddenCount={hiddenCount}
           onScrollbarGesture={handleScrollbarGesture}
+          isAutoScrollActive={isAutoScrollActive}
           emptyState={
             messages.length === 0 && session?.projectId ? (
               <FeedTaskPreview projectId={session.projectId} sessionId={session.id} />

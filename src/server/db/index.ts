@@ -226,6 +226,39 @@ function runMigrations(db: Database.Database): void {
     )
   `)
 
+  // Create notifications table for plugin-emitted in-app notifications
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      plugin_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT,
+      level TEXT NOT NULL,
+      actions TEXT,
+      created_at TEXT NOT NULL,
+      read_at TEXT
+    )
+  `)
+
+  const notificationColumns = db.prepare(`PRAGMA table_info(notifications)`).all() as { name: string }[]
+  const notificationColumnNames = new Set(notificationColumns.map((column) => column.name))
+  if (!notificationColumnNames.has('plugin_id')) {
+    logger.info('Migrating notifications table: adding plugin_id column')
+    db.exec(`ALTER TABLE notifications ADD COLUMN plugin_id TEXT NOT NULL DEFAULT 'system'`)
+  }
+  if (!notificationColumnNames.has('level')) {
+    logger.info('Migrating notifications table: adding level column')
+    db.exec(`ALTER TABLE notifications ADD COLUMN level TEXT NOT NULL DEFAULT 'info'`)
+  }
+  if (!notificationColumnNames.has('actions')) {
+    logger.info('Migrating notifications table: adding actions column')
+    db.exec(`ALTER TABLE notifications ADD COLUMN actions TEXT`)
+  }
+  if (!notificationColumnNames.has('read_at')) {
+    logger.info('Migrating notifications table: adding read_at column')
+    db.exec(`ALTER TABLE notifications ADD COLUMN read_at TEXT`)
+  }
+
   // Migration: Add custom_instructions column to projects table
   const projectColumns = db.prepare(`PRAGMA table_info(projects)`).all() as { name: string }[]
   const projectColumnNames = projectColumns.map((c) => c.name)

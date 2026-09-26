@@ -119,7 +119,7 @@ export class LspManager implements LspManagerInterface {
    * Notify LSP that a file has changed and get diagnostics.
    * This is the main entry point for tools like write_file and edit_file.
    */
-  async notifyFileChange(path: string, content: string): Promise<Diagnostic[]> {
+  async notifyFileChange(path: string, content: string, awaitDiagnostics: boolean = true): Promise<Diagnostic[]> {
     const server = await this.getServerForFile(path)
     if (!server) {
       return []
@@ -128,6 +128,13 @@ export class LspManager implements LspManagerInterface {
     try {
       // Send the change to LSP
       await server.didChange(path, content)
+
+      // Skip the diagnostics round-trip when the caller does not need it
+      // (e.g. intermediate edits of a same-file batch — the last edit waits
+      // and reports the final state). The doc is kept in sync either way.
+      if (!awaitDiagnostics) {
+        return []
+      }
 
       // Wait for and return diagnostics
       const diagnostics = await server.getDiagnosticsWithWait(path)

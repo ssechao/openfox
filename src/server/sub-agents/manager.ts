@@ -18,7 +18,7 @@ import type { AgentDefinition } from '../agents/types.js'
 import { readFile, access } from 'node:fs/promises'
 import { join, dirname, isAbsolute } from 'node:path'
 import { loadAllAgentsDefault, findAgentById } from '../agents/registry.js'
-import { resolveLLMClientForAgent } from '../agents/model-overrides.js'
+import { resolveLLMClientForAgent, buildAgentOverrideStatsIdentity } from '../agents/model-overrides.js'
 import { buildBasePrompt } from '../chat/prompts.js'
 import { TurnMetrics, createMessageStartEvent } from '../chat/stream-pure.js'
 import { runTopLevelAgentLoop } from '../chat/agent-loop.js'
@@ -172,14 +172,7 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
     if (resolved.usedOverride && resolved.override) {
       hasOverride = true
       llmClient = resolved.client
-      const provider = effectiveProviderManager.getProviders().find((p) => p.id === resolved.override!.providerId)
-      statsIdentity = {
-        providerId: resolved.override.providerId,
-        providerName: provider?.name ?? resolved.override.providerId,
-        backend: provider?.backend ?? resolved.client.getBackend(),
-        model: resolved.override.model,
-        ...(resolved.override.reasoningEffort ? { reasoningEffort: resolved.override.reasoningEffort } : {}),
-      }
+      statsIdentity = buildAgentOverrideStatsIdentity(effectiveProviderManager, resolved.client, resolved.override)
       // Use model settings from the override provider/model, not the session model
       // — with the mode derived from the override's effective effort so "none"
       // disables thinking instead of forcing chat_template_kwargs enable_thinking=true.
@@ -324,47 +317,55 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
   const subAgentScope = { type: 'subagent' as const, sessionId, subAgentId, subAgentType }
   const append = createTurnEventSink(eventStore, sessionId)
 
-  const loopResult = await runTopLevelAgentLoop(
-    {
-      mode: subAgentType,
-      append,
-      sessionManager,
-      sessionId,
-      llmClient,
-      statsIdentity,
-      providerManager,
-      // When an override is active, use its model settings (or empty to avoid leaking session settings)
-      ...(hasOverride ? { modelSettings: overrideModelSettings ?? {} } : {}),
-      signal,
-      onMessage,
-      assembleRequest: async (input) =>
-        createAssemblyResult({
-          systemPrompt,
-          messages: input.messages,
-          injectedFiles: input.injectedFiles,
-          requestTools: input.promptTools,
-          toolChoice: input.toolChoice,
+  // Mark this sub-agent as active so system-generated events (e.g. tool/prompt
+  // drift reminders) are scoped to its window instead of the main session.
+  sessionManager.setActiveSubAgent(sessionId, { subAgentId, subAgentType })
+  let loopResult: Awaited<ReturnType<typeof runTopLevelAgentLoop>>
+  try {
+    loopResult = await runTopLevelAgentLoop(
+      {
+        mode: subAgentType,
+        append,
+        sessionManager,
+        sessionId,
+        llmClient,
+        statsIdentity,
+        providerManager,
+        // When an override is active, use its model settings (or empty to avoid leaking session settings)
+        ...(hasOverride ? { modelSettings: overrideModelSettings ?? {} } : {}),
+        signal,
+        onMessage,
+        assembleRequest: async (input) =>
+          createAssemblyResult({
+            systemPrompt,
+            messages: input.messages,
+            injectedFiles: input.injectedFiles,
+            requestTools: input.promptTools,
+            toolChoice: input.toolChoice,
 
-          ...(instructionContent ? { customInstructions: instructionContent } : {}),
-          ...(skills.length > 0 ? { skills } : {}),
-        }),
-      getToolRegistry: () => toolRegistry,
-      getConversationMessages: async () => {
-        const overrideVision = overrideModelSettings?.['supportsVision']
-        const visionOverride = hasOverride
-          ? typeof overrideVision === 'boolean'
-            ? overrideVision
-            : undefined
-          : sessionManager.getCurrentModelSettings(sessionId, subAgentType)?.supportsVision
-        const processedEvents = await processEventsForConversation(sessionId, llmClient, append, visionOverride)
-        return getConversationMessages(subAgentScope, { events: processedEvents })
+            ...(instructionContent ? { customInstructions: instructionContent } : {}),
+            ...(skills.length > 0 ? { skills } : {}),
+          }),
+        getToolRegistry: () => toolRegistry,
+        getConversationMessages: async () => {
+          const overrideVision = overrideModelSettings?.['supportsVision']
+          const visionOverride = hasOverride
+            ? typeof overrideVision === 'boolean'
+              ? overrideVision
+              : undefined
+            : sessionManager.getCurrentModelSettings(sessionId, subAgentType)?.supportsVision
+          const processedEvents = await processEventsForConversation(sessionId, llmClient, append, visionOverride)
+          return getConversationMessages(subAgentScope, { events: processedEvents })
+        },
+        subAgentMetadata: { subAgentId, subAgentType, subAgentName: agentDef.metadata.name },
+        breakOnReturnValue: true,
+        requireReturnValue: true,
       },
-      subAgentMetadata: { subAgentId, subAgentType },
-      breakOnReturnValue: true,
-      requireReturnValue: true,
-    },
-    turnMetrics,
-  )
+      turnMetrics,
+    )
+  } finally {
+    sessionManager.setActiveSubAgent(sessionId, undefined)
+  }
 
   // --- Build result ---
 

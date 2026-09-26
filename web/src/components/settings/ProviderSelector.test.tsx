@@ -303,6 +303,48 @@ describe('ProviderSelector', () => {
     expect(button.textContent).toContain('•')
   })
 
+  it('[AUTOMATED] Criterion 0 - gives the model name truncation priority over the provider name', async () => {
+    await setConfigState({
+      providers: [
+        {
+          id: 'provider-1',
+          name: 'OpenAI',
+          url: 'https://api.openai.com/v1',
+          backend: 'openai',
+          isLocal: false,
+          models: [
+            { id: 'gpt-4', name: 'GPT-4', contextWindow: 128000, selected: true, reasoningEffortOverride: 'max' },
+          ],
+          isActive: true,
+        },
+      ],
+      activeProviderId: 'provider-1',
+      defaultModelSelection: 'provider-1/gpt-4',
+    })
+    renderProviderSelector()
+    const providerSpan = screen.getByTestId('provider-label-provider')
+    const modelSpan = screen.getByTestId('provider-label-model')
+    const label = providerSpan.parentElement as HTMLElement
+    // The provider name yields first (collapses/truncates) before the model name.
+    expect(providerSpan.className).toContain('truncate')
+    expect(providerSpan.className).toContain('shrink-[100]')
+    // The model name stays shrinkable as last resort, but never at the expense
+    // of the provider name — it must not be flex-shrink-0 (that would overflow
+    // the pane edge instead of truncating cleanly).
+    expect(modelSpan.className).toContain('truncate')
+    expect(modelSpan.className).toContain('min-w-0')
+    expect(modelSpan.className).not.toContain('flex-shrink-0')
+    expect(label.className).toContain('min-w-0')
+    // The effort suffix yields before the model name does.
+    const effortSpan = [...label.querySelectorAll('span')].find((s) =>
+      (s.textContent ?? '').startsWith(':'),
+    ) as HTMLElement
+    expect(effortSpan.className).toContain('truncate')
+    expect(effortSpan.className).toContain('shrink-[100]')
+    const badge = label.nextElementSibling as HTMLElement
+    expect(badge.className).toContain('flex-shrink-0')
+  })
+
   it('[AUTOMATED] Criterion 1 - falls back to model-only display when activeProvider is not found (no prefix)', async () => {
     await setConfigState({
       providers: [

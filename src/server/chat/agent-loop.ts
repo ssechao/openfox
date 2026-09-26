@@ -31,11 +31,14 @@ import {
   recordLLMFailure,
   clearLLMFailure,
 } from './stream-pure.js'
+import { LiveEditContextTracker } from './edit-file-preview.js'
+import { preflightPathTool } from './tool-preflight.js'
 import { getCurrentContextWindowId, getCurrentWindowMessageOptions } from '../events/index.js'
 import { getAllInstructions } from '../context/instructions.js'
 import { getEnabledSkillMetadata } from '../skills/registry.js'
 import { getRuntimeConfig } from '../runtime-config.js'
 import { getGlobalConfigDir } from '../../cli/paths.js'
+import { getSetting, SETTINGS_KEYS } from '../db/settings.js'
 import {
   createChatMessageUpdatedMessage,
   createChatDoneMessage,
@@ -58,8 +61,9 @@ import { settleUnpairedToolCalls } from './unpaired-tool-calls.js'
 import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
-import { CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT } from './prompts.js'
+import { COMPACTION_PROMPT, CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT } from './prompts.js'
 import { logger } from '../utils/logger.js'
+import { emitPluginHook } from '../plugins/hook-emitter.js'
 import type { LLMRetryPolicy } from '../runner/types.js'
 import { DEFAULT_LLM_RETRY_POLICY } from '../runner/types.js'
 import { serverT } from '../i18n.js'
@@ -193,7 +197,7 @@ export interface TopLevelLoopConfig {
    *  system prompt + tools become canonical for that window. */
   rebuildCachedContext?: (() => Promise<void> | void) | undefined
   /** When set, assistant messages are tagged with sub-agent metadata for scope isolation. */
-  subAgentMetadata?: { subAgentId: string; subAgentType: string }
+  subAgentMetadata?: { subAgentId: string; subAgentType: string; subAgentName?: string }
   /** When set and return_value tool is called, emit done events and break immediately. */
   breakOnReturnValue?: boolean
   /** When set, if the loop would normally break without return_value being called,
@@ -251,6 +255,13 @@ export async function runTopLevelAgentLoop(
   const append = config.append
   const agentType = config.subAgentMetadata ? ('sub-agent' as const) : undefined
   const chainKey = responsesChainKeyFor(sessionId, config.subAgentMetadata?.subAgentType)
+  // Sub-agent identity tags spread into scoped events (assistant messages,
+  // compaction prompt/summary, rejection, nudges) so they stay in the
+  // sub-agent's context and chatfeed window. Empty for top-level runs.
+  const subAgentTags = (): { subAgentId?: string; subAgentType?: string } =>
+    config.subAgentMetadata
+      ? { subAgentId: config.subAgentMetadata.subAgentId, subAgentType: config.subAgentMetadata.subAgentType }
+      : {}
   // Fresh per attempt when a resolver is provided (provider switch mid-turn).
   const resolveClient = () => config.getLLMClient?.() ?? llmClient
 
@@ -374,7 +385,7 @@ export async function runTopLevelAgentLoop(
             runtimeConfig.context.compactionThreshold,
         )
       ) {
-        appendCompactionPrompt(sessionId, append)
+        appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
         invalidateStoredChain()
         compacting = true
       }
@@ -563,11 +574,15 @@ export async function runTopLevelAgentLoop(
         }
       }
 
-      const currentTokensForBudget =
-        wrapperInputTokens ??
-        (contextState.currentTokensKnown === false || historyReductionTarget !== undefined
-          ? estimateAssembled()
-          : contextState.currentTokens)
+      // A sub-agent runs in a fresh scoped context: its output budget must be
+      // clamped against its own usage, never the parent session's (a big parent
+      // session would otherwise leave it only the 256-token safety floor).
+      const currentTokensForBudget = config.subAgentMetadata
+        ? (sessionManager.getSubAgentContextTokens?.(config.subAgentMetadata.subAgentId) ?? 0)
+        : (wrapperInputTokens ??
+          (contextState.currentTokensKnown === false || historyReductionTarget !== undefined
+            ? estimateAssembled()
+            : contextState.currentTokens))
       if (!compacting && preflightCompactionPending) {
         preflightCompactionPending = false
         const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
@@ -579,7 +594,7 @@ export async function runTopLevelAgentLoop(
               runtimeConfig.context.compactionThreshold,
           )
         ) {
-          appendCompactionPrompt(sessionId, append)
+          appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
           invalidateStoredChain()
           compacting = true
           continue agentLoop
@@ -596,14 +611,19 @@ export async function runTopLevelAgentLoop(
         append(
           createMessageStartEvent(assistantMsgId, 'assistant', undefined, {
             ...(currentWindowMessageOptions ?? {}),
-            ...(config.subAgentMetadata
-              ? { subAgentId: config.subAgentMetadata.subAgentId, subAgentType: config.subAgentMetadata.subAgentType }
-              : {}),
+            ...subAgentTags(),
           }),
         )
       }
 
-      previousContextTokens = currentTokensForBudget
+      // Sub-agents run in a fresh scoped context: their output budget must be
+      // clamped against their own context usage, never the parent session's
+      // (a big parent session would otherwise leave the sub-agent only the
+      // 256-token safety floor — the root cause of truncated sub-agent plans).
+      const subAgentContextTokens = config.subAgentMetadata
+        ? (sessionManager.getSubAgentContextTokens?.(config.subAgentMetadata.subAgentId) ?? 0)
+        : undefined
+      previousContextTokens = subAgentContextTokens ?? contextState.currentTokens
 
       let availableForOutput = Math.max(
         256,
@@ -679,13 +699,39 @@ export async function runTopLevelAgentLoop(
         responsesChainKey: chainKey,
         ...(config.retryPatterns ? { retryPatterns: config.retryPatterns } : {}),
         ...(modelSettings && { modelSettings }),
+        preflight: (path) =>
+          preflightPathTool(path, {
+            workdir: sessionManager.getEffectiveWorkdir(sessionId),
+            readFiles: sessionManager.getReadFiles(sessionId),
+          }),
       })
+
+      // Per-turn cache of file contents read to build live edit context for
+      // streaming edit_file preparing events. The tracker dedupes recomputes
+      // and WebSocket payloads across the many partial chunks of a call.
+      const editFileContentCache = new Map<string, string>()
+      const liveEditTracker = new LiveEditContextTracker()
 
       const bufferedStream = coalesceStreamEvents(streamGen)
       let attemptResult
       try {
-        attemptResult = await consumeStreamGenerator(bufferedStream, (event) => {
+        attemptResult = await consumeStreamGenerator(bufferedStream, async (event) => {
           ensureAssistantMessage()
+          // While the LLM streams an edit_file call, enrich its preparing events
+          // with a live edit context (surrounding lines) computed from the file —
+          // the same shape the final tool result carries. The file content is
+          // read once per path for the whole turn, and the context is recomputed
+          // only when the parsed edit spec changes.
+          if (event.type === 'tool.preparing' && event.data.name === 'edit_file') {
+            const editContext = await liveEditTracker.next(
+              event.data.index,
+              event.data.arguments,
+              session.workdir,
+              editFileContentCache,
+            )
+            append(editContext && editContext.length > 0 ? { ...event, data: { ...event.data, editContext } } : event)
+            return
+          }
           append(event)
         })
       } catch (error) {
@@ -705,6 +751,27 @@ export async function runTopLevelAgentLoop(
         historyReductionTarget = undefined
         historyReductionAttempts = 0
         result = attemptResult
+        const usage = attemptResult.usage
+        emitPluginHook('llm.completed', {
+          sessionId,
+          data: {
+            providerId:
+              config.providerManager?.getActiveProviderId?.() ?? config.providerManager?.getActiveProvider?.()?.id,
+            model: attemptClient.getModel(),
+            finishReason: attemptResult.finishReason,
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            totalTokens: usage.totalTokens,
+            ...(usage.cachedPromptTokens !== undefined && {
+              cachedPromptTokens: usage.cachedPromptTokens,
+            }),
+            ...(usage.cacheWriteTokens !== undefined && {
+              cacheWriteTokens: usage.cacheWriteTokens,
+            }),
+            ...(usage.cacheSource !== undefined && { cacheSource: usage.cacheSource }),
+            toolCalls: attemptResult.toolCalls.length,
+          },
+        })
         break
       }
 
@@ -762,7 +829,7 @@ export async function runTopLevelAgentLoop(
         // can fix that. Summarize instead of burning the remaining retries.
         if (!compacting) {
           const { appendCompactionPrompt } = await import('../context/compactor.js')
-          appendCompactionPrompt(sessionId, append)
+          appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
           invalidateStoredChain()
           compacting = true
           contextRetryCount = 0
@@ -925,7 +992,12 @@ export async function runTopLevelAgentLoop(
       result.usage.completionTokens,
       previousContextTokens,
       result.modelParams,
+      result.usage,
     )
+    // Accumulate wall-clock thinking time across LLM attempts in this turn.
+    if (result.thinkingDurationMs !== undefined) {
+      turnMetrics.addThinkingTime(result.thinkingDurationMs)
+    }
     // Stream the running turn totals to the client so the sidebar can build
     // dynamically as each LLM call completes. Sub-agent turns run inside the
     // parent turn — their stats would clobber the parent's live numbers, so
@@ -952,11 +1024,24 @@ export async function runTopLevelAgentLoop(
       const measuredState = sessionManager.getContextState(sessionId)
       lastMeasuredState = measuredState
       const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+      const compactionTokens = config.subAgentMetadata
+        ? (sessionManager.getSubAgentContextTokens?.(config.subAgentMetadata.subAgentId) ?? 0)
+        : contextState.currentTokens
+      const compactionWindow = config.subAgentMetadata
+        ? sessionManager.getCurrentModelContext(sessionId, config.mode)
+        : contextState.maxTokens
+      // A sub-agent is measured against its own scoped context and model window;
+      // a top-level turn keeps the authoritative window resolved for this turn
+      // and the unknown-usage-aware effective token count.
+      const gateTokens = config.subAgentMetadata
+        ? compactionTokens
+        : effectiveContextTokens(measuredState, pendingToolResultTokens, () => compactionTokens)
+      const gateWindow = config.subAgentMetadata ? compactionWindow : contextWindow
       if (
         compactAfterTools ||
         shouldCompact(
-          effectiveContextTokens(measuredState, pendingToolResultTokens, () => measuredState.currentTokens),
-          contextWindow,
+          gateTokens,
+          gateWindow,
           sessionManager.getModelCompactionThreshold(sessionId, config.mode) ??
             runtimeConfig.context.compactionThreshold,
         )
@@ -964,7 +1049,7 @@ export async function runTopLevelAgentLoop(
         if (result.toolCalls.length > 0) {
           compactAfterTools = true
         } else {
-          appendCompactionPrompt(sessionId, append)
+          appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
           invalidateStoredChain()
           compacting = true
           compactAfterTools = false
@@ -1052,6 +1137,28 @@ export async function runTopLevelAgentLoop(
     }
 
     if (result.toolCalls.length > 0) {
+      if (compacting) {
+        const rejectionMsgId = crypto.randomUUID()
+        append(
+          createMessageStartEvent(
+            rejectionMsgId,
+            'user',
+            `Tool calls are not possible at this stage. STOP and produce a summary for compaction purposes NOW:
+
+${COMPACTION_PROMPT}`,
+            {
+              ...(currentWindowMessageOptions ?? {}),
+              isSystemGenerated: true,
+              messageKind: 'correction',
+              ...subAgentTags(),
+            },
+          ),
+        )
+        append({ type: 'message.done', data: { messageId: rejectionMsgId } })
+        retryLimiter.reset()
+        continue
+      }
+
       append(
         createMessageDoneEvent(assistantMsgId, {
           segments: result.segments,
@@ -1088,6 +1195,7 @@ export async function runTopLevelAgentLoop(
           batchContext.remoteAgentTarget = resolveRemoteAgentTarget(session.projectId, sessionId)
         }
         batchContext.agentTimeout = getRuntimeConfig().agent.toolTimeout
+        batchContext.allowParallelSubAgents = getSetting(SETTINGS_KEYS.AGENT_ALLOW_PARALLEL_SUB_AGENTS) === 'true'
         const batchResult = await executeTools(assistantMsgId, result.toolCalls, batchContext, append)
         pendingToolResultTokens = estimateMessagesTokens(batchResult.toolMessages)
         // Invalid JSON must never become an unbounded model/tool recovery loop.
@@ -1157,14 +1265,18 @@ export async function runTopLevelAgentLoop(
 
       // The new context window starts fresh — apply the current system prompt
       // + tools so they are canonical and never stale there. Best-effort: a
-      // rebuild failure must not break the compaction itself.
-      try {
-        await config.rebuildCachedContext?.()
-      } catch (error) {
-        logger.error('Failed to rebuild cached context after compaction', {
-          sessionId,
-          error: error instanceof Error ? error.message : String(error),
-        })
+      // rebuild failure must not break the compaction itself. Top-level only:
+      // a sub-agent compaction must never rebuild the parent's cached context
+      // or reinject the parent's reminder.
+      if (!config.subAgentMetadata) {
+        try {
+          await config.rebuildCachedContext?.()
+        } catch (error) {
+          logger.error('Failed to rebuild cached context after compaction', {
+            sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
       }
 
       // Compaction rewrites the context, so the stored Responses-API conversation no
@@ -1173,12 +1285,21 @@ export async function runTopLevelAgentLoop(
       resolveClient().resetResponsesChain?.(chainKey)
 
       const closedWindowId = getCurrentContextWindowId(sessionId) ?? ''
-      const newWindowId = crypto.randomUUID()
+      // Sub-agent compaction is scoped: it stays in the current window (the
+      // parent's window must not rotate), so no fresh window id is minted.
+      const newWindowId = config.subAgentMetadata ? closedWindowId : crypto.randomUUID()
       const tokenCountAtClose = result.usage.promptTokens
 
       append({
         type: 'context.compacted',
-        data: { closedWindowId, newWindowId, beforeTokens: tokenCountAtClose, afterTokens: 0, summary },
+        data: {
+          closedWindowId,
+          newWindowId,
+          beforeTokens: tokenCountAtClose,
+          afterTokens: 0,
+          summary,
+          ...subAgentTags(),
+        },
       })
 
       append({
@@ -1189,13 +1310,38 @@ export async function runTopLevelAgentLoop(
           content: summary,
           contextWindowId: newWindowId,
           isCompactionSummary: true,
+          ...subAgentTags(),
         },
       })
       append(createMessageDoneEvent(assistantMsgId, { stats: turnMetrics.buildStats(statsIdentity, mode) }))
       append(createChatDoneEvent(assistantMsgId, 'complete', undefined, agentType))
 
-      // Reinject the agent reminder into the new window
-      config.injectAgentReminder?.()
+      // Sub-agent compaction: emit a fresh-context marker so the chatfeed
+      // shows a new window boundary — mirrors the reinjected agent reminder
+      // the top-level agent gets after compaction. Purely visual (excluded
+      // from LLM context), scoped to the sub-agent.
+      if (config.subAgentMetadata) {
+        const freshMsgId = crypto.randomUUID()
+        append(
+          createMessageStartEvent(
+            freshMsgId,
+            'user',
+            `Fresh Context - ${config.subAgentMetadata.subAgentName ?? config.subAgentMetadata.subAgentType} Sub-Agent`,
+            {
+              ...(currentWindowMessageOptions ?? {}),
+              isSystemGenerated: true,
+              messageKind: 'context-reset',
+              ...subAgentTags(),
+            },
+          ),
+        )
+        append({ type: 'message.done', data: { messageId: freshMsgId } })
+      }
+
+      // Reinject the agent reminder into the new window (top-level only)
+      if (!config.subAgentMetadata) {
+        config.injectAgentReminder?.()
+      }
       compacting = false
       // context.compacted rewrote the window: the cached gauge is meaningless.
       lastMeasuredState = undefined
@@ -1221,9 +1367,7 @@ export async function runTopLevelAgentLoop(
               ...(currentWindowMessageOptions ?? {}),
               isSystemGenerated: true,
               messageKind: 'correction',
-              ...(config.subAgentMetadata
-                ? { subAgentId: config.subAgentMetadata.subAgentId, subAgentType: config.subAgentMetadata.subAgentType }
-                : {}),
+              ...subAgentTags(),
             },
           ),
         )

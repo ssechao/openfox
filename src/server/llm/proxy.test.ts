@@ -6,7 +6,9 @@ const { mockGetSetting } = vi.hoisted(() => ({
 
 vi.mock('../db/settings.js', () => ({
   getSetting: mockGetSetting,
-  SETTINGS_KEYS: { PROXY_URL: 'network.proxyUrl' },
+  SETTINGS_KEYS: {
+    PROXY_URL: 'network.proxyUrl',
+  },
 }))
 
 interface MockProxyAgentInstance {
@@ -48,7 +50,7 @@ describe('global fetch override', () => {
   it('calls native fetch when no proxy is configured', async () => {
     mockGetSetting.mockReturnValue(null)
 
-    const result = await fetch('http://example.com')
+    const result = await fetch('data:text/plain,ok')
 
     expect(result).toBeInstanceOf(Response)
     expect(mockUndiciFetch).not.toHaveBeenCalled()
@@ -57,7 +59,7 @@ describe('global fetch override', () => {
   it('calls native fetch when proxy URL is empty string', async () => {
     mockGetSetting.mockReturnValue('')
 
-    const result = await fetch('http://example.com')
+    const result = await fetch('data:text/plain,ok')
 
     expect(result).toBeInstanceOf(Response)
     expect(mockUndiciFetch).not.toHaveBeenCalled()
@@ -83,8 +85,8 @@ describe('global fetch override', () => {
     mockGetSetting.mockReturnValue('http://proxy:8080')
     const mockResponse = new Response('proxied')
     mockUndiciFetch.mockResolvedValue(mockResponse)
-    const abortController = new AbortController()
 
+    const abortController = new AbortController()
     await fetch('http://example.com', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -104,7 +106,7 @@ describe('global fetch override', () => {
     )
   })
 
-  it('reuses cached proxy agent for the same URL', async () => {
+  it('reuses cached proxy agent for same URL', async () => {
     mockGetSetting.mockReturnValue('http://proxy:8080')
     mockUndiciFetch.mockResolvedValue(new Response('ok'))
 
@@ -118,11 +120,13 @@ describe('global fetch override', () => {
   it('creates new agent and destroys old one when proxy URL changes', async () => {
     mockGetSetting.mockReturnValue('http://proxy-old:8080')
     mockUndiciFetch.mockResolvedValue(new Response('ok'))
+
     await fetch('http://example.com')
     expect(mockProxyAgentCtor).toHaveBeenCalledTimes(1)
     const oldAgent = mockProxyAgentInstances[0]
 
     mockGetSetting.mockReturnValue('http://proxy-new:8080')
+
     await fetch('http://example.com')
 
     expect(mockProxyAgentCtor).toHaveBeenCalledTimes(2)
@@ -133,12 +137,14 @@ describe('global fetch override', () => {
   it('destroys old agent when proxy is cleared', async () => {
     mockGetSetting.mockReturnValue('http://proxy:8080')
     mockUndiciFetch.mockResolvedValue(new Response('ok'))
+
     await fetch('http://example.com')
     const oldAgent = mockProxyAgentInstances[0]
     expect(oldAgent).toBeDefined()
 
     mockGetSetting.mockReturnValue(null)
-    await fetch('http://example.com')
+
+    await fetch('data:text/plain,ok')
 
     expect(oldAgent!.destroy).toHaveBeenCalledTimes(1)
   })
@@ -146,11 +152,13 @@ describe('global fetch override', () => {
   it('calls native fetch after proxy is cleared', async () => {
     mockGetSetting.mockReturnValue('http://proxy:8080')
     mockUndiciFetch.mockResolvedValue(new Response('proxied'))
+
     await fetch('http://example.com')
     expect(mockUndiciFetch).toHaveBeenCalledTimes(1)
 
     mockGetSetting.mockReturnValue(null)
-    const result = await fetch('http://example.com')
+
+    const result = await fetch('data:text/plain,ok')
 
     expect(result).toBeInstanceOf(Response)
     expect(mockUndiciFetch).toHaveBeenCalledTimes(1)

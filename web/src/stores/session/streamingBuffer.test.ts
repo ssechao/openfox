@@ -332,12 +332,13 @@ describe('streaming flush throttling', () => {
 // Finding E (remediation plan): a raw delta feeds a private accumulator. It
 // must not publish Zustand state, clone the panes map, or wake subscribers.
 describe('zustand commit accounting during streaming', () => {
-  it('keeps a 674-message thinking fixture bounded across 4000 deltas and terminal publication', async () => {
+  it('keeps a large thinking fixture bounded across 4000 deltas and terminal publication', async () => {
     const store = await bootStreamingSession()
     const { createElement } = await import('react')
     const { renderToString } = await import('react-dom/server')
     const { ThinkingBlock } = await import('../../components/shared/ThinkingBlock')
     const { getMarkdownCacheSizeForTest, resetMarkdownCacheForTest } = await import('../../components/shared/Markdown')
+    const { getMaxVisibleItems, MESSAGE_CAP_HEADROOM } = await import('./messageHandler')
     for (let i = 0; i < 673; i++) {
       store.getState().handleServerMessage({
         type: 'chat.message',
@@ -347,7 +348,28 @@ describe('zustand commit accounting during streaming', () => {
         },
       } as never)
     }
-    expect(store.getState().messages).toHaveLength(674)
+    // The pane is bounded by the display window plus a small headroom (0 =
+    // unlimited), so a long run cannot balloon pane.messages.
+    expect(store.getState().messages.length).toBeLessThanOrEqual(getMaxVisibleItems() + MESSAGE_CAP_HEADROOM)
+    expect(store.getState().messages.length).toBeGreaterThan(1)
+    // The bound dropped the oldest message — the streaming target seeded by
+    // bootStreamingSession — so re-announce it: the deltas below must land on a
+    // message the pane still holds.
+    store.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-1',
+          role: 'assistant',
+          content: '',
+          timestamp: '2024-01-01T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: true,
+        },
+      },
+    } as never)
+    expect(store.getState().messages.find((message) => message.id === 'msg-1')).toBeDefined()
     resetMarkdownCacheForTest()
     let commits = 0
     const unsubscribe = store.subscribe(() => {

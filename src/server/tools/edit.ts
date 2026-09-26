@@ -4,26 +4,56 @@ import type { Diagnostic, EditContextRegion } from '../../shared/types.js'
 import { createTool } from './tool-helpers.js'
 import { formatDiagnosticsForLLM, appendLspInstallHint } from './diagnostics.js'
 import { validateFileForWrite, computeFileHash } from './file-tracker.js'
-import { extractEditContext } from './edit-context.js'
+import { extractEditContext } from '../../shared/edit-context.js'
 import { detectEncoding, decodeContent, encodeContent } from '../utils/encoding.js'
 import { serverT } from '../i18n.js'
 
 // Per-file mutex to serialize parallel edits on the same file.
 // Prevents the read-modify-write race condition where concurrent edits
 // all read the same original content and only the last write survives.
-const fileLocks = new Map<string, Promise<void>>()
+const fileLocks = new Map<string, FileLockState>()
 
-async function withFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-  const prev = fileLocks.get(filePath) ?? Promise.resolve()
-  const next = prev.then(fn, fn)
-  fileLocks.set(
-    filePath,
-    next.then(
-      () => {},
-      () => {},
-    ),
+interface FileLockState {
+  tail: Promise<void>
+  pending: number
+}
+
+interface FileLockHandle {
+  /** True when no other edit is queued or running on this file. */
+  isLastInQueue: () => boolean
+}
+
+async function withFileLock<T>(filePath: string, fn: (handle: FileLockHandle) => Promise<T>): Promise<T> {
+  let state = fileLocks.get(filePath)
+  if (!state) {
+    state = { tail: Promise.resolve(), pending: 0 }
+    fileLocks.set(filePath, state)
+  }
+  state.pending += 1
+
+  const handle: FileLockHandle = {
+    isLastInQueue: () => state!.pending === 1,
+  }
+
+  const prev = state.tail
+  const run = prev.then(() => fn(handle))
+  state.tail = run.then(
+    () => {},
+    () => {},
   )
-  return next
+
+  // Decrement the queue count when the locked fn settles. Using then(ok, err)
+  // (not .finally) so a rejecting fn (e.g. a rethrown PathAccessDeniedError)
+  // cannot produce an unhandled rejection on the cleanup promise.
+  const settle = (): void => {
+    state!.pending -= 1
+    if (state!.pending <= 0 && fileLocks.get(filePath) === state) {
+      fileLocks.delete(filePath)
+    }
+  }
+  run.then(settle, settle)
+
+  return run
 }
 
 function detectLineEnding(content: string): 'crlf' | 'lf' | 'cr' {
@@ -81,7 +111,7 @@ export const editFileTool = createTool<EditFileArgs>(
     const fullPath = helpers.resolvePath(args.path)
     await helpers.checkPathAccess([fullPath])
 
-    return withFileLock(fullPath, async () => {
+    return withFileLock(fullPath, async (handle) => {
       const replaceAll = args.replace_all ?? false
 
       // jscpd:ignore-start
@@ -208,8 +238,17 @@ export const editFileTool = createTool<EditFileArgs>(
       let diagnostics: Diagnostic[] = []
 
       if (context.lspManager) {
-        diagnostics = await context.lspManager.notifyFileChange(fullPath, restoredContent)
-        output += formatDiagnosticsForLLM(diagnostics)
+        // Only the last edit of a same-file batch waits for diagnostics: it
+        // reflects the final state after all writes. Intermediate edits push
+        // the change to the LSP but return immediately, so a burst of N
+        // parallel edits costs ~1 language-server round-trip instead of N.
+        const isLast = handle.isLastInQueue()
+        diagnostics = await context.lspManager.notifyFileChange(fullPath, restoredContent, isLast)
+        if (isLast) {
+          output += formatDiagnosticsForLLM(diagnostics)
+        }
+        // Install hints are one-shot per session; report them on every edit so
+        // an intermediate edit of a batch is not the one that loses it.
         output = appendLspInstallHint(output, context.lspManager, fullPath)
       }
 

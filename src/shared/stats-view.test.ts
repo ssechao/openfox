@@ -179,6 +179,16 @@ const baseStats: SessionStats = {
       totalTime: 13.1,
     },
   ],
+  events: {
+    compactions: [],
+    retries: [],
+    toolCalls: 0,
+    toolErrors: 0,
+    toolBreakdown: [],
+    subAgentCalls: 0,
+    compactionCount: 0,
+    retryCount: 0,
+  },
   modelGroups: [
     {
       key: 'provider-1::qwen-1',
@@ -187,6 +197,23 @@ const baseStats: SessionStats = {
       providerName: 'Local vLLM',
       backend: 'vllm',
       model: 'qwen-1',
+      totalTime: 34.6,
+      aiTime: 34.6,
+      toolTime: 0,
+      prefillTokens: 8300,
+      generationTokens: 931,
+      avgPrefillSpeed: 1900,
+      avgGenerationSpeed: 30.8,
+      responseCount: 4,
+      llmCallCount: 5,
+      dataPoints: [],
+      callDataPoints: [],
+    },
+  ],
+  agentGroups: [
+    {
+      agentId: 'planner',
+      isSubAgent: false,
       totalTime: 34.6,
       aiTime: 34.6,
       toolTime: 0,
@@ -226,6 +253,16 @@ describe('stats view helpers', () => {
       ...baseStats,
       llmCallCount: 0,
       callDataPoints: [],
+      events: {
+        compactions: [],
+        retries: [],
+        toolCalls: 0,
+        toolErrors: 0,
+        toolBreakdown: [],
+        subAgentCalls: 0,
+        compactionCount: 0,
+        retryCount: 0,
+      },
     }
 
     const chart = buildPerformanceChartData(responseOnlyStats)

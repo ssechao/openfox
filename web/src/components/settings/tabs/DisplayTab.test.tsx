@@ -112,6 +112,34 @@ describe('DisplayTab Composer setting', () => {
   })
 })
 
+describe('DisplayTab tool call streaming toggle', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Object.keys(mockSettings).forEach((k) => delete mockSettings[k])
+    setLocale('en')
+  })
+
+  it('renders the live tool call previews toggle off by default', () => {
+    render(<DisplayTab />)
+
+    const label = screen.getByText('Show live tool call previews').closest('label') as HTMLElement
+    expect(label).toBeTruthy()
+    const toggle = within(label).getByRole('button')
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('persists turning the live previews toggle on', async () => {
+    const user = userEvent.setup()
+    render(<DisplayTab />)
+
+    const label = screen.getByText('Show live tool call previews').closest('label') as HTMLElement
+    const toggle = within(label).getByRole('button')
+    await user.click(toggle)
+
+    expect(mockSetSetting).toHaveBeenCalledWith(SETTINGS_KEYS.DISPLAY_SHOW_TOOL_CALL_STREAMING, 'true')
+  })
+})
+
 describe('DisplayTab Model Selector', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -169,5 +197,32 @@ describe('DisplayTab Model Selector', () => {
     await user.click(collapseFavorites)
 
     expect(mockSetSetting).toHaveBeenCalledWith(SETTINGS_KEYS.DISPLAY_COLLAPSE_FAVORITES_BY_DEFAULT, 'true')
+  })
+})
+
+describe('DisplayTab Fullscreen slash commands', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Object.keys(mockSettings).forEach((k) => delete mockSettings[k])
+    setLocale('en')
+  })
+
+  it('renders fullscreen slash commands toggle with proper description in English', () => {
+    render(<DisplayTab />)
+    expect(screen.getByText('Fullscreen slash commands view')).toBeTruthy()
+    expect(
+      screen.getByText('Choose whether the commands view uses default sizing or fills the available screen height.'),
+    ).toBeTruthy()
+  })
+
+  it('renders fullscreen slash commands toggle with proper description in French', () => {
+    setLocale('fr')
+    render(<DisplayTab />)
+    expect(screen.getByText('Vue plein écran des commandes slash')).toBeTruthy()
+    expect(
+      screen.getByText(
+        'Choisissez si la vue des commandes utilise la taille par défaut ou remplit la hauteur d’écran disponible.',
+      ),
+    ).toBeTruthy()
   })
 })

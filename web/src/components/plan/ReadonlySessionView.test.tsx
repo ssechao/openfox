@@ -23,8 +23,13 @@ vi.mock('../../hooks/useDisplaySettings', () => ({
   }),
 }))
 
+const capturedFeedProps = vi.hoisted(() => ({ current: {} as Record<string, unknown> }))
+
 vi.mock('./ChatFeedItems', () => ({
-  ChatFeedItems: () => <div>ChatFeedItems</div>,
+  ChatFeedItems: (props: Record<string, unknown>) => {
+    capturedFeedProps.current = props
+    return <div>ChatFeedItems</div>
+  },
 }))
 
 vi.mock('../shared/Spinner', () => ({
@@ -61,5 +66,30 @@ describe('ReadonlySessionView — server-side truncation', () => {
     await waitFor(() => {
       expect(screen.getByText(/5 older hidden/)).toBeDefined()
     })
+  })
+
+  it('renders the feed with windowing virtualization forced off', async () => {
+    vi.mocked(authFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          session: { id: 'session-1', metadata: { title: 'Test' } },
+          messages: Array.from({ length: 50 }, (_, i) => ({
+            id: `msg-${i}`,
+            role: 'user',
+            content: `Hi ${i}`,
+            timestamp: new Date().toISOString(),
+          })),
+          hiddenCount: 0,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+
+    render(<ReadonlySessionView />)
+
+    await waitFor(() => {
+      expect(screen.getByText('ChatFeedItems')).toBeDefined()
+    })
+    expect(capturedFeedProps.current.virtualization).toBe(false)
   })
 })

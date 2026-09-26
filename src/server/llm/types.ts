@@ -1,4 +1,4 @@
-import type { ToolCall, Attachment } from '../../shared/types.js'
+import type { TokenUsage, ToolCall, Attachment } from '../../shared/types.js'
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -64,11 +64,13 @@ export interface LLMCompletionResponse {
   thinkingContent?: string
   reasoning_content?: string
   finishReason: 'stop' | 'tool_calls' | 'length' | 'content_filter'
-  usage: {
-    promptTokens: number
-    completionTokens: number
-    totalTokens: number
-  }
+  /**
+   * Provider-side token usage including optional cache attribution
+   * (sourced from the provider API or the provider-agnostic
+   * `extractTokenUsage` normalizer — never derived from
+   * `prefTokenIncrement`).
+   */
+  usage: TokenUsage
   /** True when the underlying Responses API response reached `completed` status
    *  (a failed/interrupted response leaves this false). */
   completed?: boolean

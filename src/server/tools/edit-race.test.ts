@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { editFileTool } from './edit.js'
 import type { ToolContext } from './types.js'
 import type { SessionManager } from '../session/manager.js'
+import type { LspManagerInterface } from '../lsp/types.js'
+import type { Diagnostic } from '../../shared/types.js'
 
 function hashFile(filePath: string): string {
   const content = readFileSync(filePath)
@@ -120,5 +122,56 @@ describe('edit_file parallel race condition', () => {
 
     // All 3 parallel edits should be applied (no race condition)
     expect(totalApplied).toBe(3)
+  })
+
+  it('waits for LSP diagnostics only on the last edit of a same-file batch', async () => {
+    const waitCalls: boolean[] = []
+    const lspManager = {
+      async notifyFileChange(_path: string, _content: string, awaitDiagnostics = true) {
+        waitCalls.push(awaitDiagnostics)
+        if (awaitDiagnostics) {
+          // Simulate a slow language server round-trip.
+          await new Promise((resolve) => setTimeout(resolve, 60))
+          return [
+            {
+              path: _path,
+              range: {
+                start: { line: 0, character: 0 },
+                end: { line: 0, character: 0 },
+              },
+              severity: 'error',
+              message: 'mock diagnostic',
+              source: 'mock-lsp',
+            } as Diagnostic,
+          ]
+        }
+        return []
+      },
+      getDiagnostics: () => [],
+      isAvailableFor: () => true,
+      getInstallHint: () => null,
+    } as unknown as LspManagerInterface
+
+    const context: ToolContext = { ...createContext(), lspManager }
+    const results = await Promise.all([
+      editFileTool.execute(
+        { path: filePath, old_string: 'const a = "old_value_a"', new_string: 'const a = "new_value_a"' },
+        context,
+      ),
+      editFileTool.execute(
+        { path: filePath, old_string: 'const b = "old_value_b"', new_string: 'const b = "new_value_b"' },
+        context,
+      ),
+    ])
+
+    for (const r of results) {
+      expect(r.success).toBe(true)
+    }
+
+    // Both edits still notify the LSP (document stays in sync)…
+    expect(waitCalls).toHaveLength(2)
+    // …but only the last edit in the queue blocks on the (slow) diagnostics
+    // round-trip — exactly one awaitDiagnostics=true instead of two.
+    expect(waitCalls).toEqual([false, true])
   })
 })
