@@ -63,14 +63,19 @@ describe('estimatePromptTokensForSafety', () => {
 
   it('still counts data URLs in ordinary text and non-image attachments', () => {
     const content = 'data:image/png;base64,' + 'YWJj'.repeat(30_000)
-    expect(estimatePromptTokensForSafety('', [{ role: 'user', content }], [])).toBeGreaterThan(120_000)
-    expect(
-      estimatePromptTokensForSafety(
-        '',
-        [{ role: 'user', content: '', attachments: [{ mimeType: 'text/plain', data: content }] }],
-        [],
-      ),
-    ).toBeGreaterThan(120_000)
+    // Ordinary text is charged as ordinary text: a data URL in the content (or
+    // in a non-image attachment) keeps its full weight instead of being
+    // collapsed into the image reserve.
+    const plain = estimatePromptTokensForSafety('', [{ role: 'user', content: 'a'.repeat(content.length) }], [])
+    const inContent = estimatePromptTokensForSafety('', [{ role: 'user', content }], [])
+    const inAttachment = estimatePromptTokensForSafety(
+      '',
+      [{ role: 'user', content: '', attachments: [{ mimeType: 'text/plain', data: content }] }],
+      [],
+    )
+    expect(inContent).toBeGreaterThan(30_000)
+    expect(inContent).toBe(plain)
+    expect(inAttachment).toBeGreaterThan(30_000)
   })
 
   it('counts images individually, preserves input, and includes arguments, tools and system text', () => {
@@ -88,10 +93,10 @@ describe('estimatePromptTokensForSafety', () => {
         toolCalls: [{ id: 'c', name: 'edit', arguments: { content: 'x'.repeat(10_000) } }],
       },
     ]
-    expect(estimatePromptTokensForSafety('', withArguments, [])).toBeGreaterThan(10_000)
+    expect(estimatePromptTokensForSafety('', withArguments, [])).toBeGreaterThan(3_000)
     expect(
       estimatePromptTokensForSafety('s'.repeat(20_000), messages, [{ description: 'd'.repeat(10_000) }]),
-    ).toBeGreaterThan(one + 30_000)
+    ).toBeGreaterThan(one + 9_000)
   })
 
   it('uses an identical total for preflight and reduction including framing', () => {
@@ -114,13 +119,18 @@ describe('estimatePromptTokensForSafety', () => {
     expect(Number.isFinite(estimate)).toBe(true)
   })
 
-  it('uses a UTF-8 byte upper bound for high-token-density content', () => {
+  it('keeps dense Unicode expensive without falling back to the byte length', () => {
     const systemPrompt = '系统😀'
     const messages = [{ role: 'user', content: '漢字🙂'.repeat(10) }]
     const tools = [{ type: 'function', name: '工具' }]
     const serialized = systemPrompt + JSON.stringify(messages) + JSON.stringify(tools)
+    const estimate = estimatePromptTokensForSafety(systemPrompt, messages, tools)
+    const nonLatinUnits = [...serialized].reduce((n, ch) => n + (ch.codePointAt(0)! > 0x7f ? ch.length : 0), 0)
 
-    expect(estimatePromptTokensForSafety(systemPrompt, messages, tools)).toBe(Buffer.byteLength(serialized, 'utf8'))
+    // One token per non-Latin character (plus the safety margin): dense scripts
+    // are never discounted, and never charged a token per UTF-8 byte either.
+    expect(estimate).toBeGreaterThanOrEqual(nonLatinUnits)
+    expect(estimate).toBeLessThan(Buffer.byteLength(serialized, 'utf8'))
   })
 })
 

@@ -717,7 +717,9 @@ describe('agentLoop integration', () => {
       getContextState,
       getCurrentModelContext: vi.fn().mockReturnValue(50_000),
     })
-    const history = [{ role: 'user' as const, content: 'x'.repeat(44_000), source: 'history' as const }]
+    // Sized so the local estimate lands near the 50k window's 85% threshold
+    // (~46.9k tokens); a smaller history would no longer be "near the limit".
+    const history = [{ role: 'user' as const, content: 'x'.repeat(150_000), source: 'history' as const }]
     const assembleRequest = vi.fn(async ({ messages, promptTools }) => ({
       systemPrompt: 'system',
       messages,
