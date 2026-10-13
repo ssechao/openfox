@@ -19,6 +19,10 @@ import { authFetch } from '../../lib/api'
 import { formatRootDir, getRootDirBlockReason, suggestRootDirChild } from '@shared/workspace.js'
 import { dedupById } from '../../lib/modal-utils'
 import { useT } from '../../hooks/useT'
+import { usePlugins } from '../../hooks/usePlugins'
+import { useLocalizedString } from '../../hooks/useLocalizedString'
+import { PluginSettingsForm } from '../plugins/PluginSettingsForm'
+import { PluginZone } from '../plugins/PluginZone'
 
 interface ProjectSettingsModalProps {
   isOpen: boolean
@@ -28,6 +32,9 @@ interface ProjectSettingsModalProps {
 
 export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettingsModalProps) {
   const t = useT()
+  const loc = useLocalizedString()
+  const { contributions } = usePlugins()
+  const pluginDangerLevels = contributions.dangerLevels ?? []
   const updateProject = useProjectStore((state) => state.updateProject)
   const { data: wsConfig, loading: wsLoading } = useResource(workspaceConfigResource, project.workdir)
   const { data } = useResource(agentsResource, project.workdir)
@@ -489,7 +496,7 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
               fr: 'Niveau de danger par défaut pour les nouvelles sessions de ce projet. Les sessions existantes ne sont pas affectées.',
             })}
           </p>
-          <div className="flex items-center gap-1 px-1.5 py-1 rounded bg-bg-tertiary/50 w-fit">
+          <div className="flex items-center gap-1 px-1.5 py-1 rounded bg-bg-tertiary/50 w-fit flex-wrap">
             <button
               type="button"
               onClick={() => handleDangerLevelChange('')}
@@ -517,6 +524,21 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
             >
               {t({ en: 'Normal', fr: 'Normal' })}
             </button>
+            {pluginDangerLevels.map((dl) => (
+              <button
+                key={dl.id}
+                type="button"
+                onClick={() => handleDangerLevelChange(dl.id)}
+                className={`px-3 py-1 text-sm font-medium rounded transition-colors ${
+                  dangerLevel === dl.id
+                    ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30'
+                    : 'text-text-muted hover:text-text-primary hover:bg-bg-tertiary'
+                }`}
+                title={dl.description ? loc(dl.description) : undefined}
+              >
+                {loc(dl.label)}
+              </button>
+            ))}
             <button
               type="button"
               onClick={() => handleDangerLevelChange('dangerous')}
@@ -533,7 +555,53 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
               {t({ en: 'Dangerous', fr: 'Dangereux' })}
             </button>
           </div>
+          <p className="text-xs text-text-muted mt-2">
+            {dangerLevel === ''
+              ? t({
+                  en: 'Follows the global default danger level (Normal).',
+                  fr: 'Suit le niveau de danger global par défaut (Normal).',
+                })
+              : dangerLevel === 'normal'
+                ? t({
+                    en: 'Normal mode — access to files outside the project or sensitive files requires user confirmation.',
+                    fr: 'Mode normal — l’accès aux fichiers hors du projet ou sensibles nécessite une confirmation.',
+                  })
+                : dangerLevel === 'dangerous'
+                  ? t({
+                      en: 'Dangerous mode — bypasses all path confirmations and auto-approves all file access.',
+                      fr: 'Mode dangereux — contourne toutes les confirmations de chemin et approuve automatiquement l’accès.',
+                    })
+                  : (() => {
+                      const activeDl = pluginDangerLevels.find((d) => d.id === dangerLevel)
+                      return activeDl?.description ? loc(activeDl.description) : null
+                    })()}
+          </p>
+          {(() => {
+            const activeDl = pluginDangerLevels.find((d) => d.id === dangerLevel)
+            if (!activeDl) return null
+            return (
+              <div className="mt-3 p-3 bg-bg-secondary border border-border rounded-lg">
+                <PluginSettingsForm
+                  pluginId={activeDl.pluginId}
+                  scope="project"
+                  projectId={project.id}
+                  dangerLevel={dangerLevel}
+                  hideScopeSelector
+                />
+              </div>
+            )
+          })()}
         </div>
+
+        {/* Project Plugin Zone */}
+        <PluginZone
+          id="project.settings"
+          context={{
+            projectId: project.id,
+            workdir: project.workdir,
+            projectName: project.name,
+          }}
+        />
 
         <div>
           <label
@@ -829,6 +897,8 @@ export function ProjectSettingsModal({ isOpen, onClose, project }: ProjectSettin
             })}
           </p>
         </div>
+
+        {/* Project Plugin Zone */}
 
         {saveError && (
           <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded px-3 py-2">

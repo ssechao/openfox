@@ -240,6 +240,98 @@ describe('agentLoop integration', () => {
     expect(retryEvents.length).toBeGreaterThanOrEqual(1)
   })
 
+  const MATCHING_CONTENT = 'the model keeps emitting <marker> every round'
+
+  function matchingStreamMock() {
+    // Depends on streamLLMPure being called immediately before
+    // consumeStreamGenerator within the same loop round — reads the patterns
+    // of the latest streamLLMPure call to derive the stream's patternMatch.
+    ;(consumeStreamGenerator as any).mockImplementation(async () => {
+      const callArgs = (streamLLMPure as any).mock.calls.at(-1)![0] as {
+        retryPatterns?: { active: boolean; pattern: string }[]
+      }
+      const activePatterns = (callArgs.retryPatterns ?? []).filter((p) => p.active)
+      const matched = activePatterns.find((p) => new RegExp(p.pattern).test(MATCHING_CONTENT))
+      return makeStreamResult({
+        content: MATCHING_CONTENT,
+        patternMatch: matched
+          ? { pattern: matched.pattern, field: 'content', matchedContent: MATCHING_CONTENT }
+          : undefined,
+      })
+    })
+  }
+
+  it('picks up a retry pattern deleted mid-turn on the next LLM round', async () => {
+    const append = vi.fn()
+    const patterns = [{ field: 'both' as const, pattern: '<marker>', action: 'retry' as const, active: true }]
+    const provider = vi
+      .fn()
+      .mockResolvedValueOnce({ retryPatterns: patterns, maxRetriesPerTurn: 10 })
+      .mockResolvedValue({ retryPatterns: [], maxRetriesPerTurn: 10 })
+
+    matchingStreamMock()
+
+    await runTopLevelAgentLoop(makeConfig({ append, retryPatternsProvider: provider }), turnMetrics)
+
+    expect(provider).toHaveBeenCalledTimes(2)
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    const retryEvents = append.mock.calls.filter((args: unknown[]) => (args[0] as any).type === 'pattern.retry')
+    expect(retryEvents.length).toBe(1)
+  })
+
+  it('honors a mid-turn maxRetriesPerTurn increase from the provider', async () => {
+    const append = vi.fn()
+    const patterns = [{ field: 'both' as const, pattern: '<marker>', action: 'retry' as const, active: true }]
+    const provider = vi
+      .fn()
+      .mockResolvedValueOnce({ retryPatterns: patterns, maxRetriesPerTurn: 1 })
+      .mockResolvedValueOnce({ retryPatterns: patterns, maxRetriesPerTurn: 5 })
+      .mockResolvedValue({ retryPatterns: [], maxRetriesPerTurn: 5 })
+
+    matchingStreamMock()
+
+    const result = await runTopLevelAgentLoop(makeConfig({ append, retryPatternsProvider: provider }), turnMetrics)
+
+    const retryEvents = append.mock.calls.filter((args: unknown[]) => (args[0] as any).type === 'pattern.retry')
+    expect(retryEvents.length).toBe(2)
+    expect(result.failed).toBeUndefined()
+  })
+
+  it('honors a mid-turn maxRetriesPerTurn decrease from the provider', async () => {
+    const append = vi.fn()
+    const patterns = [{ field: 'both' as const, pattern: '<marker>', action: 'retry' as const, active: true }]
+    const provider = vi.fn().mockResolvedValue({ retryPatterns: patterns, maxRetriesPerTurn: 1 })
+
+    matchingStreamMock()
+
+    await expect(
+      runTopLevelAgentLoop(makeConfig({ append, retryPatternsProvider: provider }), turnMetrics),
+    ).rejects.toThrow('Auto-retry limit exceeded')
+
+    const retryEvents = append.mock.calls.filter((args: unknown[]) => (args[0] as any).type === 'pattern.retry')
+    expect(retryEvents.length).toBe(1)
+  })
+
+  it('keeps using static config.retryPatterns for every round when no provider is set', async () => {
+    const append = vi.fn()
+    const patterns = [{ field: 'both' as const, pattern: '<marker>', action: 'retry' as const, active: true }]
+
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(
+        makeStreamResult({
+          content: MATCHING_CONTENT,
+          patternMatch: { pattern: '<marker>', field: 'content', matchedContent: MATCHING_CONTENT },
+        }),
+      )
+      .mockResolvedValueOnce(makeStreamResult({ content: 'good format', finishReason: 'stop' }))
+
+    await runTopLevelAgentLoop(makeConfig({ append, retryPatterns: patterns }), turnMetrics)
+
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+    const firstCall = (streamLLMPure as any).mock.calls[0][0] as { retryPatterns?: unknown[] }
+    expect(firstCall.retryPatterns).toEqual(patterns)
+  })
+
   it('retries on truncation (finishReason=length) up to MAX_TRUNCATION_RETRIES', async () => {
     const append = vi.fn()
 
@@ -1384,5 +1476,43 @@ describe('agentLoop integration', () => {
     // 3 truncation retries then 3 malformed strikes — anything beyond that is
     // the runaway loop this guards against.
     expect(vi.mocked(consumeStreamGenerator).mock.calls.length).toBeLessThanOrEqual(8)
+  })
+
+  it('ensures message.start is emitted before tool calls when stream yields no intermediate deltas', async () => {
+    const append = vi.fn()
+
+    const toolCall = {
+      id: 'call-direct',
+      name: 'run_command',
+      arguments: { command: 'echo hello' },
+    }
+
+    // Stream directly returns tool_calls without yielding any intermediate text/delta events to callback
+    ;(consumeStreamGenerator as any).mockImplementationOnce(async (_gen: any, _onEvent: any) => {
+      // Intentionally don't invoke _onEvent to simulate 0 intermediate deltas
+      return makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' })
+    })
+    ;(executeTools as any).mockResolvedValueOnce({
+      toolMessages: [{ role: 'tool', content: 'hello', source: 'history', toolCallId: 'call-direct' }],
+      stepDoneCalled: true,
+    })
+
+    await runTopLevelAgentLoop(
+      makeConfig({
+        append,
+      }),
+      turnMetrics,
+    )
+
+    const events = append.mock.calls.map((args: unknown[]) => args[0] as any)
+    const messageStart = events.find((e: any) => e.type === 'message.start' && e.data?.role === 'assistant')
+    const messageDone = events.find((e: any) => e.type === 'message.done')
+
+    expect(messageStart).toBeDefined()
+    expect(messageDone).toBeDefined()
+
+    const startIndex = events.indexOf(messageStart)
+    const doneIndex = events.indexOf(messageDone)
+    expect(startIndex).toBeLessThan(doneIndex)
   })
 })

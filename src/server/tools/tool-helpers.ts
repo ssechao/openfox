@@ -8,7 +8,6 @@ import { requestPathAccess, PathAccessDeniedError, registerPathConfirmation } fr
 import { AskUserInterrupt } from './ask.js'
 import { createChatPathConfirmationMessage } from '../ws/protocol.js'
 import { getEventStore } from '../events/index.js'
-import { serverT } from '../i18n.js'
 
 /**
  * Counter for generating unique confirmation callIds within a single tool invocation.
@@ -78,6 +77,8 @@ export type ToolHandler<TArgs> = (args: TArgs, context: ToolContext, helpers: To
 export async function requestUserConfirmation(context: ToolContext, toolLabel: string, desc: string): Promise<boolean> {
   // In dangerous mode, auto-approve all shell guard confirmations
   if (context.dangerLevel === 'dangerous') return Promise.resolve(true)
+  // Night mode (normal danger level): no one is home — fail closed, same as sub-agents
+  if (context.nightMode) return Promise.resolve(false)
   // Skip workspace/git action confirmations if user opted out via settings
   if (toolLabel === 'workspace' || toolLabel === 'command') {
     try {
@@ -139,14 +140,9 @@ export function validateAction(
 ): ToolResult | undefined {
   if (!action || !allowed.includes(action)) {
     return {
+      // LLM-facing (rendered into the tool content) — English by design.
       success: false,
-      error: serverT(
-        {
-          en: 'Invalid action: {{action}}. Must be one of: {{allowed}}',
-          fr: 'Action invalide : {{action}}. Doit être l’une des actions suivantes : {{allowed}}',
-        },
-        { action: action ?? '', allowed: allowed.join(', ') },
-      ),
+      error: `Invalid action: ${action ?? ''}. Must be one of: ${allowed.join(', ')}`,
       durationMs: Date.now() - startTime,
       truncated: false,
     }
@@ -161,14 +157,9 @@ export function checkActionPermission(
 ): ToolResult | undefined {
   if (action && permittedActions && permittedActions.length > 0 && !permittedActions.includes(action)) {
     return {
+      // LLM-facing (rendered into the tool content) — English by design.
       success: false,
-      error: serverT(
-        {
-          en: "Action '{{action}}' not allowed. Available: {{available}}",
-          fr: 'Action « {{action}} » non autorisée. Disponibles : {{available}}',
-        },
-        { action: action ?? '', available: permittedActions.join(', ') },
-      ),
+      error: `Action '${action ?? ''}' not allowed. Available: ${permittedActions.join(', ')}`,
       durationMs: Date.now() - startTime,
       truncated: false,
     }
@@ -185,8 +176,9 @@ export function requireSession(
 
 export function unexpectedError(startTime: number): ToolResult {
   return {
+    // LLM-facing (rendered into the tool content) — English by design.
     success: false,
-    error: serverT({ en: 'Unexpected error', fr: 'Erreur inattendue' }),
+    error: 'Unexpected error',
     durationMs: Date.now() - startTime,
     truncated: false,
   }
@@ -195,7 +187,8 @@ export function unexpectedError(startTime: number): ToolResult {
 export function catchError(error: unknown, startTime: number): ToolResult {
   return {
     success: false,
-    error: error instanceof Error ? error.message : serverT({ en: 'Unknown error', fr: 'Erreur inconnue' }),
+    // LLM-facing (rendered into the tool content) — English by design.
+    error: error instanceof Error ? error.message : 'Unknown error',
     durationMs: Date.now() - startTime,
     truncated: false,
   }
@@ -231,6 +224,11 @@ export function createTool<TArgs>(name: string, definition: LLMToolDefinition, h
 
         checkPathAccess: async (paths: string[], command?: string) => {
           if (context.onEvent) {
+            const projectId =
+              context.projectId ??
+              (typeof context.sessionManager?.getSession === 'function'
+                ? context.sessionManager.getSession(context.sessionId)?.projectId
+                : undefined)
             await requestPathAccess(
               paths,
               context.workdir,
@@ -241,6 +239,8 @@ export function createTool<TArgs>(name: string, definition: LLMToolDefinition, h
               context.dangerLevel,
               command,
               context.isSubAgent,
+              projectId,
+              context.nightMode,
             )
           }
         },
@@ -271,13 +271,8 @@ export function createTool<TArgs>(name: string, definition: LLMToolDefinition, h
 
         return {
           success: false,
-          error:
-            error instanceof Error
-              ? error.message
-              : serverT({
-                  en: 'Unknown error in tool execution',
-                  fr: 'Erreur inconnue lors de l’exécution de l’outil',
-                }),
+          // LLM-facing (rendered into the tool content) — English by design.
+          error: error instanceof Error ? error.message : 'Unknown error in tool execution',
           durationMs: Date.now() - startTime,
           truncated: false,
         }

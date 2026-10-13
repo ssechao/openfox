@@ -71,5 +71,6 @@ test-results/
 e2e-test-project/
 tmp/
 worktrees/
+.agent-office/
 
 /plugins/

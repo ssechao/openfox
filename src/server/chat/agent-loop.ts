@@ -64,6 +64,7 @@ import { drainQueue } from './drain-queue.js'
 import { COMPACTION_PROMPT, CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT } from './prompts.js'
 import { logger } from '../utils/logger.js'
 import { emitPluginHook } from '../plugins/hook-emitter.js'
+import { applyPluginMessageTransforms } from '../plugins/message-transforms.js'
 import type { LLMRetryPolicy } from '../runner/types.js'
 import { DEFAULT_LLM_RETRY_POLICY } from '../runner/types.js'
 import { serverT } from '../i18n.js'
@@ -140,6 +141,16 @@ export interface TopLevelLoopConfig {
   mode: ToolMode
   retryPatterns?: RetryPatternConfig[]
   maxRetriesPerTurn?: number
+  /** Resolves retry patterns and the retry cap fresh on every LLM round, so a
+   *  mid-turn edit (deleting/toggling a pattern in the UI) takes effect on the
+   *  next round. When set, takes precedence over the static `retryPatterns`
+   *  and `maxRetriesPerTurn` above. */
+  retryPatternsProvider?:
+    | (() => Promise<{
+        retryPatterns: RetryPatternConfig[]
+        maxRetriesPerTurn: number
+      }>)
+    | undefined
   /** Function to append events (provided by orchestrator) */
   append: (event: import('../events/types.js').TurnEvent) => void
   sessionManager: SessionManager
@@ -681,18 +692,36 @@ export async function runTopLevelAgentLoop(
       const attemptAbort = new AbortController()
       // Keep the selected client effort during compaction: changing global
       // effort can invalidate cached history even when a native session resumes.
+      const transformResult = await applyPluginMessageTransforms(assembledRequest.messages, {
+        sessionId,
+        ...(session.projectId ? { projectId: session.projectId } : {}),
+        workdir: sessionManager.getEffectiveWorkdir(sessionId),
+        model: attemptClient.getModel(),
+        systemPrompt: assembledRequest.systemPrompt,
+        ...(config.mode ? { mode: config.mode } : {}),
+        ...(signal ? { signal } : {}),
+      })
+
+      // Resolve retry patterns fresh each round so a mid-turn edit (deleting
+      // or toggling a pattern, changing the cap) takes effect on the next
+      // LLM round instead of on the next turn.
+      const freshRetry = config.retryPatternsProvider ? await config.retryPatternsProvider() : undefined
+      if (freshRetry) {
+        retryLimiter.setMaxRetries(freshRetry.maxRetriesPerTurn)
+      }
+      const roundRetryPatterns = freshRetry ? freshRetry.retryPatterns : config.retryPatterns
       const streamGen = streamLLMPure({
         messageId: assistantMsgId,
-        systemPrompt: assembledRequest.systemPrompt,
+        systemPrompt: transformResult.systemPrompt,
         llmClient: attemptClient,
         sessionId,
-        messages: assembledRequest.messages,
+        messages: transformResult.messages,
         tools: assembledRequest.tools,
         toolChoice: requestToolChoice,
         signal: signal ? AbortSignal.any([signal, attemptAbort.signal]) : attemptAbort.signal,
         subAgentAliases,
         responsesChainKey: chainKey,
-        ...(config.retryPatterns ? { retryPatterns: config.retryPatterns } : {}),
+        ...(roundRetryPatterns ? { retryPatterns: roundRetryPatterns } : {}),
         ...(modelSettings && { modelSettings }),
         preflight: (path) =>
           preflightPathTool(path, {
@@ -745,6 +774,7 @@ export async function runTopLevelAgentLoop(
         // able to survive a genuine overflow fifty iterations later.
         historyReductionTarget = undefined
         historyReductionAttempts = 0
+        ensureAssistantMessage()
         result = attemptResult
         const usage = attemptResult.usage
         emitPluginHook('llm.completed', {
@@ -1176,6 +1206,11 @@ ${COMPACTION_PROMPT}`,
         }
         if (session.dangerLevel) {
           batchContext.dangerLevel = session.dangerLevel
+        }
+        // Fresh per iteration: `session` was re-required from the DB above, so a
+        // mid-turn toggle of night mode takes effect on this very batch.
+        if (session.nightMode) {
+          batchContext.nightMode = true
         }
         if (config.subAgentMetadata) {
           batchContext.isSubAgent = true

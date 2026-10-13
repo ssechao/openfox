@@ -1,7 +1,9 @@
+import { useState, useEffect, useRef, type ChangeEvent, type FocusEvent } from 'react'
 import { useLocalizedString } from '../../hooks/useLocalizedString'
 import { activatePluginAction, badgeToneClasses, pluginIcon, type PluginActionContext } from './plugin-ui-utils'
 import type { DeclarativeNode, PluginBadgeTone } from '@shared/plugin.js'
 import { ChevronDownIcon } from '../shared/icons'
+import { Toggle } from '../shared/Toggle'
 
 const PROGRESS_COLORS: Record<string, string> = {
   neutral: 'bg-text-muted',
@@ -11,13 +13,16 @@ const PROGRESS_COLORS: Record<string, string> = {
   danger: 'bg-accent-error',
 }
 
-const BUTTON_VARIANT_CLASSES: Record<'default' | 'primary' | 'danger' | 'ghost' | 'pill', string> = {
-  default: 'bg-bg-tertiary text-text-primary hover:bg-bg-primary',
-  primary: 'bg-accent-primary text-white hover:bg-accent-primary/80',
-  danger: 'bg-accent-error text-white hover:bg-accent-error/80',
-  ghost: 'p-2.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary',
-  pill: 'px-1.5 py-0.5 shrink-0 rounded-full border border-accent-primary/40 bg-accent-primary/10 text-accent-primary text-[10px] font-mono font-medium hover:bg-accent-primary/20',
-}
+const BUTTON_VARIANT_CLASSES: Record<'default' | 'primary' | 'danger' | 'success' | 'ghost' | 'pill' | 'link', string> =
+  {
+    default: 'bg-bg-tertiary text-text-primary hover:bg-bg-primary',
+    primary: 'bg-accent-primary text-white hover:bg-accent-primary/80',
+    danger: 'bg-accent-error text-white hover:bg-accent-error/80',
+    success: 'bg-accent-success text-white hover:bg-accent-success/80',
+    ghost: 'p-2.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary',
+    pill: 'px-1.5 py-0.5 shrink-0 rounded-full border border-accent-primary/40 bg-accent-primary/10 text-accent-primary text-[10px] font-mono font-medium hover:bg-accent-primary/20',
+    link: 'text-xs text-accent-primary hover:text-accent-primary/80 shrink-0',
+  }
 
 const GAP_CLASSES: Record<'none' | 'xs' | 'sm' | 'md' | 'lg', string> = {
   none: 'gap-0',
@@ -49,9 +54,11 @@ const CALLOUT_CLASSES: Record<PluginBadgeTone, string> = {
   danger: 'bg-accent-error/10 border-accent-error/30 text-text-primary',
 }
 
-export function interpolate(text: string, values?: Record<string, unknown>): string {
-  if (!values) return text
-  return text.replace(/\{\{(\w+)\}\}/g, (match, key: string) => (key in values ? String(values[key]) : match))
+export function interpolate(text: unknown, values?: Record<string, unknown>): string {
+  if (text === null || text === undefined) return ''
+  const str = String(text)
+  if (!values) return str
+  return str.replace(/\{\{(\w+)\}\}/g, (match, key: string) => (key in values ? String(values[key]) : match))
 }
 
 export interface DeclarativeRendererProps {
@@ -60,16 +67,312 @@ export interface DeclarativeRendererProps {
   context?: PluginActionContext & { pluginId?: string }
 }
 
+function parseCssColor(color: string): { bg: string; text: string; border: string } {
+  const trimmed = color.trim()
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(trimmed)) {
+    const hex =
+      trimmed.length === 4 ? `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}` : trimmed
+    return {
+      bg: `${hex}1f`,
+      text: hex,
+      border: `${hex}4d`,
+    }
+  }
+  return {
+    bg: `color-mix(in srgb, ${trimmed} 12%, transparent)`,
+    text: trimmed,
+    border: `color-mix(in srgb, ${trimmed} 30%, transparent)`,
+  }
+}
+
+function DeclarativeTextField({
+  node,
+  isTextarea,
+  values = {},
+  context = {},
+}: {
+  node: Extract<DeclarativeNode, { type: 'input' }>
+  isTextarea?: boolean
+  values?: Record<string, unknown>
+  context?: PluginActionContext & { pluginId?: string }
+}) {
+  const localize = useLocalizedString()
+  const externalVal = interpolate(node.defaultValue ?? '', values)
+  const [localVal, setLocalVal] = useState(externalVal)
+  const isFocusedRef = useRef(false)
+  const pendingExternalRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (isFocusedRef.current) {
+      // Never fight the user's typing: remember the incoming value and apply it
+      // on blur instead of dropping it.
+      pendingExternalRef.current = externalVal
+      return
+    }
+    pendingExternalRef.current = null
+    setLocalVal(externalVal)
+  }, [externalVal])
+
+  const releaseFocus = (typedValue: string) => {
+    isFocusedRef.current = false
+    const pending = pendingExternalRef.current
+    pendingExternalRef.current = null
+    if (pending !== null && pending !== typedValue) {
+      setLocalVal(pending)
+    }
+  }
+
+  const triggerAction = (action: typeof node.onChange, value: string) => {
+    if (action) {
+      void activatePluginAction(context.pluginId, action, { ...context, fieldId: node.id, value })
+    }
+  }
+
+  const handleFocus = () => {
+    isFocusedRef.current = true
+  }
+
+  const handleChange = (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const val = e.target.value
+    setLocalVal(val)
+    triggerAction(node.onChange, val)
+  }
+
+  const handleBlur = (e: FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    releaseFocus(e.target.value)
+    triggerAction(node.onBlur, e.target.value)
+  }
+
+  const placeholder = node.placeholder ? localize(node.placeholder) : undefined
+  const disabledClass = node.disabled ? 'opacity-60 cursor-not-allowed bg-bg-secondary/80 select-none' : ''
+
+  const lineCount = localVal ? localVal.split('\n').length : 1
+  const computedRows = Math.min(Math.max(node.rows ?? 2, lineCount), 15)
+
+  const Icon = node.icon ? pluginIcon(node.icon) : null
+
+  return (
+    <div className={`flex-1 min-w-0 ${node.className ?? ''}`}>
+      {node.label && (
+        <label htmlFor={node.id} className="text-xs text-text-secondary block mb-0.5">
+          {localize(node.label)}
+        </label>
+      )}
+      {isTextarea ? (
+        <textarea
+          id={node.id}
+          rows={computedRows}
+          disabled={node.disabled}
+          value={localVal}
+          placeholder={placeholder}
+          onFocus={handleFocus}
+          onChange={handleChange}
+          onBlur={handleBlur}
+          className={`w-full px-2.5 py-1.5 bg-bg-tertiary border border-border rounded text-xs font-mono text-text-primary focus:outline-none focus:border-accent-primary resize-y ${disabledClass}`}
+        />
+      ) : node.bare ? (
+        <input
+          id={node.id}
+          type={node.inputType ?? 'text'}
+          disabled={node.disabled}
+          value={localVal}
+          placeholder={placeholder}
+          onFocus={handleFocus}
+          onChange={handleChange}
+          onBlur={handleBlur}
+          className={`w-full bg-transparent text-sm text-text-primary outline-none font-mono placeholder-text-muted ${disabledClass}`}
+        />
+      ) : Icon ? (
+        <div className="relative">
+          <Icon className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted pointer-events-none" />
+          <input
+            id={node.id}
+            type={node.inputType ?? 'text'}
+            disabled={node.disabled}
+            value={localVal}
+            placeholder={placeholder}
+            onFocus={handleFocus}
+            onChange={handleChange}
+            onBlur={handleBlur}
+            className={`w-full text-sm bg-bg-primary border border-border-default rounded pl-8 pr-2 py-1.5 text-text-primary placeholder-text-muted focus:outline-none focus:border-accent-primary ${disabledClass}`}
+          />
+        </div>
+      ) : (
+        <input
+          id={node.id}
+          type={node.inputType ?? 'text'}
+          disabled={node.disabled}
+          value={localVal}
+          placeholder={placeholder}
+          onFocus={handleFocus}
+          onChange={handleChange}
+          onBlur={handleBlur}
+          className={`w-full px-2 py-1 bg-bg-tertiary border border-border rounded text-xs text-text-primary focus:outline-none focus:border-accent-primary ${disabledClass}`}
+        />
+      )}
+    </div>
+  )
+}
+
+function DeclarativeCheckbox({
+  node,
+  values = {},
+  context = {},
+}: {
+  node: Extract<DeclarativeNode, { type: 'input' }>
+  values?: Record<string, unknown>
+  context?: PluginActionContext & { pluginId?: string }
+}) {
+  const localize = useLocalizedString()
+  const raw = values[node.id]
+  const externalChecked = raw !== undefined ? raw === true || raw === 'true' : Boolean(node.defaultChecked)
+  const [isChecked, setIsChecked] = useState(externalChecked)
+
+  useEffect(() => {
+    setIsChecked(externalChecked)
+  }, [externalChecked])
+
+  return (
+    <label
+      htmlFor={node.id}
+      className={`inline-flex items-center gap-2 select-none text-xs text-text-primary ${
+        node.disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+      }`}
+    >
+      <input
+        id={node.id}
+        type="checkbox"
+        disabled={node.disabled}
+        checked={isChecked}
+        onChange={(e) => {
+          const next = e.target.checked
+          setIsChecked(next)
+          if (node.onChange) {
+            void activatePluginAction(context.pluginId, node.onChange, {
+              ...context,
+              fieldId: node.id,
+              value: next ? 'true' : 'false',
+            })
+          }
+        }}
+        className={`w-4 h-4 rounded border-border bg-bg-tertiary text-accent-primary focus:ring-accent-primary/30 accent-accent-primary shrink-0 ${
+          node.disabled ? 'cursor-not-allowed' : 'cursor-pointer'
+        }`}
+      />
+      {node.label && <span>{localize(node.label)}</span>}
+    </label>
+  )
+}
+
+function DeclarativeSelect({
+  node,
+  values = {},
+  context = {},
+}: {
+  node: Extract<DeclarativeNode, { type: 'select' }>
+  values?: Record<string, unknown>
+  context?: PluginActionContext & { pluginId?: string }
+}) {
+  const localize = useLocalizedString()
+  const externalVal = interpolate(node.defaultValue ?? '', values)
+  const [value, setValue] = useState(externalVal)
+  const isFocusedRef = useRef(false)
+
+  useEffect(() => {
+    // Keep the select in sync with refreshed panel content, but never yank the
+    // value out from under an open dropdown.
+    if (!isFocusedRef.current) {
+      setValue(externalVal)
+    }
+  }, [externalVal])
+
+  return (
+    <div className="flex-1 min-w-0">
+      {node.label && (
+        <label htmlFor={node.id} className="text-xs text-text-secondary block mb-0.5">
+          {localize(node.label)}
+        </label>
+      )}
+      <select
+        id={node.id}
+        value={value}
+        onFocus={() => {
+          isFocusedRef.current = true
+        }}
+        onBlur={() => {
+          isFocusedRef.current = false
+        }}
+        onChange={(e) => {
+          const next = e.target.value
+          setValue(next)
+          if (node.onChange) {
+            void activatePluginAction(context.pluginId, node.onChange, {
+              ...context,
+              fieldId: node.id,
+              value: next,
+            })
+          }
+        }}
+        className="w-full px-2 py-1 bg-bg-tertiary border border-border rounded text-xs text-text-primary focus:outline-none focus:border-accent-primary cursor-pointer"
+      >
+        {node.options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {localize(option.label)}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
 export function DeclarativeRenderer({ node, values = {}, context = {} }: DeclarativeRendererProps) {
   const localize = useLocalizedString()
 
   switch (node.type) {
-    case 'text':
+    case 'text': {
+      const action = node.action ?? node.onActivate
+      const content = interpolate(localize(node.text), values)
+      const isPre = Boolean(
+        node.className && (node.className.includes('whitespace-pre') || node.className.includes('font-mono')),
+      )
+      const baseClass = node.className ?? (node.muted ? 'text-sm text-text-muted' : 'text-sm text-text-primary')
+      if (action) {
+        return (
+          <div
+            role="button"
+            tabIndex={0}
+            title={node.title ? localize(node.title) : undefined}
+            onClick={() => void activatePluginAction(context.pluginId, action, context)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                void activatePluginAction(context.pluginId, action, context)
+              }
+            }}
+            className={`cursor-pointer ${baseClass}`}
+            style={isPre ? { whiteSpace: 'pre-wrap' } : undefined}
+          >
+            {content}
+          </div>
+        )
+      }
+      if (isPre) {
+        return (
+          <pre
+            title={node.title ? localize(node.title) : undefined}
+            className={`${baseClass} overflow-x-auto`}
+            style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}
+          >
+            {content}
+          </pre>
+        )
+      }
       return (
-        <div className={node.className ?? (node.muted ? 'text-sm text-text-muted' : 'text-sm text-text-primary')}>
-          {interpolate(localize(node.text), values)}
+        <div title={node.title ? localize(node.title) : undefined} className={baseClass}>
+          {content}
         </div>
       )
+    }
 
     case 'keyValue':
       return (
@@ -136,36 +439,57 @@ export function DeclarativeRenderer({ node, values = {}, context = {} }: Declara
       )
     }
 
-    case 'badge':
+    case 'badge': {
+      const colorScheme = node.color ? parseCssColor(node.color) : undefined
+      const customStyle = colorScheme
+        ? {
+            backgroundColor: colorScheme.bg,
+            color: colorScheme.text,
+            borderColor: colorScheme.border,
+          }
+        : undefined
+
       return (
         <span
-          className={`inline-flex items-center px-2 py-0.5 rounded border text-xs font-medium ${badgeToneClasses(
-            node.tone,
-          )}`}
+          style={customStyle}
+          className={`inline-flex items-center px-2 py-0.5 rounded border text-xs font-medium whitespace-nowrap shrink-0 select-none ${
+            node.color ? '' : badgeToneClasses(node.tone)
+          } ${node.className ?? ''}`}
         >
           {localize(node.label)}
         </span>
       )
+    }
 
     case 'button': {
       const Icon = node.icon ? pluginIcon(node.icon) : null
       const labelText = localize(node.label)
       const isGhost = node.variant === 'ghost'
-      const showLabel = !isGhost || !Icon
+      const isSelfStyled = node.variant === 'ghost' || node.variant === 'link'
+      const showLabel = Boolean(labelText && (!isGhost || !Icon))
+      const tooltipText = node.title ? localize(node.title) : labelText
+      const variantClass = isSelfStyled
+        ? node.variant === 'ghost'
+          ? `${BUTTON_VARIANT_CLASSES.ghost} ${!Icon ? 'px-2.5 py-1.5 text-sm' : ''}`
+          : BUTTON_VARIANT_CLASSES.link
+        : `gap-1.5 px-3 py-1.5 rounded text-sm font-medium ${BUTTON_VARIANT_CLASSES[node.variant ?? 'default']}`
       return (
         <button
           type="button"
-          title={labelText || undefined}
-          aria-label={labelText || undefined}
-          onClick={() => void activatePluginAction(context.pluginId, node.onActivate, context)}
-          className={`transition-colors inline-flex items-center justify-center ${
-            isGhost
-              ? `${BUTTON_VARIANT_CLASSES.ghost} ${!Icon ? 'px-2.5 py-1.5 text-sm' : ''}`
-              : `gap-1.5 px-3 py-1.5 rounded text-sm font-medium ${BUTTON_VARIANT_CLASSES[node.variant ?? 'default']}`
-          }`}
+          disabled={node.disabled}
+          title={tooltipText || undefined}
+          aria-label={tooltipText || labelText || undefined}
+          onClick={() => {
+            if (!node.disabled) {
+              void activatePluginAction(context.pluginId, node.action ?? node.onActivate, context)
+            }
+          }}
+          className={`transition-colors inline-flex items-center justify-center shrink-0 ${
+            node.disabled ? 'opacity-50 cursor-not-allowed' : ''
+          } ${variantClass} ${node.className ?? ''}`}
         >
-          {Icon && <Icon className="w-4 h-4" />}
-          {showLabel && labelText && <span>{labelText}</span>}
+          {Icon && <Icon className="w-3.5 h-3.5 shrink-0" />}
+          {showLabel && <span className="truncate text-xs">{labelText}</span>}
         </button>
       )
     }
@@ -174,7 +498,12 @@ export function DeclarativeRenderer({ node, values = {}, context = {} }: Declara
       return <hr className="border-border my-2" />
 
     case 'stack': {
-      const directionClass = node.direction === 'row' ? 'flex flex-row w-full' : 'flex flex-col'
+      if (node.children.length === 0) return null
+      const hasCustomWidth = Boolean(
+        node.className && /(?:^|\s)(w-|flex-1|flex-auto|flex-initial|flex-none|shrink)/.test(node.className),
+      )
+      const directionClass =
+        node.direction === 'row' ? (hasCustomWidth ? 'flex flex-row' : 'flex flex-row w-full') : 'flex flex-col'
       const gapClass = GAP_CLASSES[node.gap ?? 'sm']
       const alignClass = ALIGN_CLASSES[node.align ?? 'start']
       const justifyClass = JUSTIFY_CLASSES[node.justify ?? 'start']
@@ -190,7 +519,7 @@ export function DeclarativeRenderer({ node, values = {}, context = {} }: Declara
     case 'card': {
       return (
         <div
-          className={`rounded-lg border border-border bg-bg-secondary p-3 shadow-sm space-y-2 flex-1 min-w-0 ${
+          className={`@container rounded-lg border border-border bg-bg-secondary p-3 shadow-sm space-y-2 flex-1 min-w-0 ${
             node.className ?? ''
           }`}
         >
@@ -242,60 +571,50 @@ export function DeclarativeRenderer({ node, values = {}, context = {} }: Declara
 
     case 'icon': {
       const Icon = pluginIcon(node.icon)
-      return <Icon className={`w-4 h-4 ${node.className ?? ''}`} />
+      const sizeClass = /\bw-/.test(node.className ?? '') ? '' : 'w-4 h-4 '
+      return <Icon className={`${sizeClass}${node.className ?? ''}`} />
     }
 
     case 'input': {
-      const triggerAction = (action: typeof node.onChange, value: string) => {
-        if (action) {
-          void activatePluginAction(context.pluginId, action, { ...context, fieldId: node.id, value })
-        }
+      if (node.inputType === 'checkbox') {
+        return <DeclarativeCheckbox node={node} values={values} context={context} />
       }
-      return (
-        <div className="flex-1 min-w-0">
-          {node.label && <label className="text-xs text-text-secondary block mb-0.5">{localize(node.label)}</label>}
-          <input
-            id={node.id}
-            type={node.inputType ?? 'text'}
-            defaultValue={interpolate(node.defaultValue ?? '', values)}
-            placeholder={node.placeholder ? localize(node.placeholder) : undefined}
-            onChange={(e) => {
-              triggerAction(node.onChange, e.target.value)
-            }}
-            onBlur={(e) => {
-              triggerAction(node.onBlur, e.target.value)
-            }}
-            className="w-full px-2 py-1 bg-bg-tertiary border border-border rounded text-xs text-text-primary focus:outline-none focus:border-accent-primary"
-          />
-        </div>
-      )
+
+      if (node.inputType === 'textarea') {
+        return <DeclarativeTextField node={node} isTextarea values={values} context={context} />
+      }
+
+      return <DeclarativeTextField node={node} values={values} context={context} />
     }
 
     case 'select': {
+      return <DeclarativeSelect node={node} values={values} context={context} />
+    }
+
+    case 'toggle': {
+      const raw = node.id ? values[node.id] : undefined
+      const isEnabled =
+        raw !== undefined ? raw === true || raw === 'true' : (node.enabled ?? Boolean(node.defaultChecked))
+      const labelText = node.label ? localize(node.label) : undefined
+
       return (
-        <div className="flex-1 min-w-0">
-          {node.label && <label className="text-xs text-text-secondary block mb-0.5">{localize(node.label)}</label>}
-          <select
-            id={node.id}
-            defaultValue={node.defaultValue}
-            onChange={(e) => {
-              if (node.onChange) {
-                void activatePluginAction(context.pluginId, node.onChange, {
-                  ...context,
-                  fieldId: node.id,
-                  value: e.target.value,
-                })
-              }
-            }}
-            className="w-full px-2 py-1 bg-bg-tertiary border border-border rounded text-xs text-text-primary focus:outline-none focus:border-accent-primary cursor-pointer"
-          >
-            {node.options.map((option) => (
-              <option key={option.value} value={option.value}>
-                {localize(option.label)}
-              </option>
-            ))}
-          </select>
-        </div>
+        <Toggle
+          enabled={isEnabled}
+          disabled={node.disabled}
+          label={labelText}
+          onClick={() => {
+            if (node.disabled) return
+            const next = !isEnabled
+            const action = node.onActivate ?? node.onChange
+            if (action) {
+              void activatePluginAction(context.pluginId, action, {
+                ...context,
+                fieldId: node.id,
+                value: next ? 'true' : 'false',
+              })
+            }
+          }}
+        />
       )
     }
 

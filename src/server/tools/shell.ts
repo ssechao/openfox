@@ -1,12 +1,10 @@
-import { spawn } from 'node:child_process'
 import { resolve, isAbsolute } from 'node:path'
-import { access } from 'node:fs/promises'
 import stripAnsi from 'strip-ansi'
 import { OUTPUT_LIMITS } from './types.js'
 import { createTool, requestUserConfirmation } from './tool-helpers.js'
 import { serverT } from '../i18n.js'
 import { checkAborted, spawnShellProcess } from '../utils/shell.js'
-import { decodeUtf8, createUtf8StreamDecoder } from '../utils/utf8.js'
+import { createUtf8StreamDecoder } from '../utils/utf8.js'
 import {
   extractAbsolutePathsFromCommand,
   extractSensitivePathsFromCommand,
@@ -14,7 +12,6 @@ import {
 } from './path-security.js'
 import { terminateProcessTree } from '../utils/process-tree.js'
 import { stripTailPipe } from './shell-tail.js'
-import { getSetting, SETTINGS_KEYS } from '../db/settings.js'
 
 /**
  * Check if a command performs a Git mutation that changes branches or workspace state.
@@ -32,33 +29,16 @@ export function detectGitMutation(command: string): string | null {
   return null
 }
 
-let rtkAvailable: boolean | undefined
-
-async function checkRtkAvailability(): Promise<boolean> {
-  if (rtkAvailable !== undefined) return rtkAvailable
-  try {
-    await access('/usr/local/bin/rtk')
-    rtkAvailable = true
-  } catch {
-    try {
-      const out = await new Promise<string>((resolve, reject) => {
-        const proc = spawn('rtk', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] })
-        let output = ''
-        proc.stdout?.on('data', (d: Buffer) => {
-          output += d.toString()
-        })
-        proc.on('error', reject)
-        proc.on('close', (code) => {
-          if (code === 0) resolve(output.trim())
-          else reject(new Error(`exit ${code}`))
-        })
-      })
-      rtkAvailable = out.startsWith('rtk ')
-    } catch {
-      rtkAvailable = false
-    }
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  let m = Math.floor(ms / 60_000)
+  let s = Math.round((ms % 60_000) / 1000)
+  if (s === 60) {
+    m += 1
+    s = 0
   }
-  return rtkAvailable
+  return `${m}m ${s}s`
 }
 
 interface PendingHeredoc {
@@ -303,7 +283,7 @@ export const runCommandTool = createTool<RunCommandArgs>(
     function: {
       name: 'run_command',
       description:
-        'Execute a shell command. Returns stdout, stderr, and exit code. Does NOT support trailing "&" for backgrounding — use background_process tool instead.\nCommands run from your working directory automatically, so prefer relative paths.',
+        'Execute a shell command. Returns stdout, stderr, exit code, and elapsed duration. Does NOT support trailing "&" for backgrounding — use background_process tool instead.\nCommands run from your working directory automatically, so prefer relative paths.',
       parameters: {
         type: 'object',
         properties: {
@@ -329,10 +309,8 @@ export const runCommandTool = createTool<RunCommandArgs>(
 
     if (hasBackgroundAmpersand(args.command)) {
       return helpers.error(
-        serverT({
-          en: 'Use background_process tool (action: "start") for background/long-running commands instead of \'&\'. See the tool description for details.',
-          fr: 'Utilisez l’outil background_process (action : « start ») pour les commandes d’arrière-plan ou de longue durée au lieu de « & ». Consultez la description de l’outil pour plus de détails.',
-        }),
+        // LLM-facing (rendered into the tool content) — English by design.
+        'Use background_process tool (action: "start") for background/long-running commands instead of \'&\'. See the tool description for details.',
       )
     }
 
@@ -349,13 +327,8 @@ export const runCommandTool = createTool<RunCommandArgs>(
       const approved = await requestUserConfirmation(context, 'command', desc)
       if (!approved) {
         return helpers.error(
-          serverT(
-            {
-              en: 'User denied: "{{mutation}}" modifies Git state. Use the workspace tool to switch workspaces or branches.',
-              fr: 'Refusé par l’utilisateur : « {{mutation}} » modifie l’état Git. Utilisez l’outil workspace pour changer de workspace ou de branche.',
-            },
-            { mutation: mutationMatch },
-          ),
+          // LLM-facing (rendered into the tool content) — English by design.
+          `User denied: "${mutationMatch}" modifies Git state. Use the workspace tool to switch workspaces or branches.`,
         )
       }
     }
@@ -388,10 +361,8 @@ export const runCommandTool = createTool<RunCommandArgs>(
     const tailInfo = stripTailPipe(args.command)
     const execCommand = tailInfo ? tailInfo.command : args.command
 
-    const useRtk = getSetting(SETTINGS_KEYS.TOOLS_USE_RTK) === 'true'
-    const finalCommand = useRtk ? await tryRtkRewrite(execCommand) : execCommand
-
-    const result = await executeCommand(finalCommand, workingDir, timeout, context.signal, context.onProgress)
+    const execStart = Date.now()
+    const result = await executeCommand(execCommand, workingDir, timeout, context.signal, context.onProgress)
 
     let output = ''
 
@@ -431,16 +402,17 @@ export const runCommandTool = createTool<RunCommandArgs>(
       truncated = true
     }
 
-    const wasInterrupted = output.includes('[interrupted by user]')
+    output += `\n[Duration: ${formatDuration(Date.now() - execStart)}]`
+
+    const wasInterrupted = result.interrupted === true
 
     return helpers.success(output, truncated, {
       success: result.exitCode === 0,
-      ...(result.exitCode !== 0 && !wasInterrupted
+      ...(wasInterrupted ? { metadata: { interrupted: true } } : {}),
+      ...(result.exitCode !== 0
         ? {
-            error: serverT(
-              { en: 'Command exited with code {{code}}', fr: 'La commande s’est terminée avec le code {{code}}' },
-              { code: result.exitCode },
-            ),
+            // LLM-facing (rendered into the tool content) — English by design.
+            error: wasInterrupted ? 'Command was interrupted by user' : `Command exited with code ${result.exitCode}`,
           }
         : {}),
     })
@@ -451,31 +423,7 @@ interface CommandResult {
   stdout: string
   stderr: string
   exitCode: number
-}
-
-async function tryRtkRewrite(command: string): Promise<string> {
-  if (!(await checkRtkAvailability())) return command
-  try {
-    const result = await new Promise<string>((resolve, reject) => {
-      const proc = spawn('rtk', ['rewrite', command], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 2_000,
-      })
-      const chunks: Buffer[] = []
-      proc.stdout?.on('data', (data: Buffer) => {
-        chunks.push(data)
-      })
-      proc.on('error', reject)
-      proc.on('close', (code) => {
-        if (code === 0 || code === 3) resolve(decodeUtf8(chunks).trim())
-        else reject(new Error(`exit ${code}`))
-      })
-    })
-    if (result && result !== command) return result
-  } catch {
-    // rewrite failed — fall through
-  }
-  return command
+  interrupted?: boolean
 }
 
 function executeCommand(
@@ -511,7 +459,7 @@ function executeCommand(
     // then settle with the shell's real exit code.
     const ZOMBIE_PIPE_GRACE_MS = 2000
 
-    const settle = (code: number, appendix?: string) => {
+    const settle = (code: number, appendix?: string, interrupted = false) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
@@ -522,6 +470,7 @@ function executeCommand(
         stdout: appendix ? (out ? `${out}\n\n${appendix}` : appendix) : out,
         stderr: (stderr + stderrDecoder.end()).trim(),
         exitCode: code,
+        ...(interrupted ? { interrupted: true } : {}),
       })
     }
 
@@ -540,7 +489,7 @@ function executeCommand(
       if (!timedOut && !aborted) {
         aborted = true
         if (exited) {
-          settle(130, '[interrupted by user]')
+          settle(130, '[interrupted by user]', true)
           return
         }
         void terminateProcessTree(proc, { exited: () => exited, immediate: true })
@@ -570,7 +519,7 @@ function executeCommand(
       exitCode = code
       exited = true
       if (aborted) {
-        settle(130, '[interrupted by user]')
+        settle(130, '[interrupted by user]', true)
         return
       }
       if (timedOut) {
@@ -596,7 +545,7 @@ function executeCommand(
       }
 
       if (aborted) {
-        settle(130, '[interrupted by user]')
+        settle(130, '[interrupted by user]', true)
         return
       }
 
