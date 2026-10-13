@@ -5,6 +5,7 @@ import { createLLMClient } from './client.js'
 import { executeTools } from '../chat/execute-tools.js'
 import type { LLMCompletionResponse } from './types.js'
 import type { TurnEvent } from '../events/types.js'
+import { createUtf8StreamDecoder } from '../utils/utf8.js'
 
 vi.mock('../agents/registry.js', () => ({
   loadAllAgentsDefault: vi.fn(async () => []),
@@ -27,10 +28,12 @@ async function startResponsesMock(events: unknown[]): Promise<{
 
   const server = createServer((req, res) => {
     let raw = ''
+    const bodyDecoder = createUtf8StreamDecoder()
     req.on('data', (chunk: Buffer) => {
-      raw += chunk.toString()
+      raw += bodyDecoder.write(chunk)
     })
     req.on('end', () => {
+      raw += bodyDecoder.end()
       requests.push({ path: req.url ?? '', body: JSON.parse(raw || '{}') as Record<string, unknown> })
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
       for (const event of events) {
@@ -219,10 +222,12 @@ describe('createLLMClient end-to-end against a Responses API mock', () => {
     mock.server.removeAllListeners('request')
     mock.server.on('request', (req, res) => {
       let raw = ''
+      const bodyDecoder = createUtf8StreamDecoder()
       req.on('data', (chunk: Buffer) => {
-        raw += chunk.toString()
+        raw += bodyDecoder.write(chunk)
       })
       req.on('end', () => {
+        raw += bodyDecoder.end()
         mock.requests.push({ path: req.url ?? '', body: JSON.parse(raw || '{}') as Record<string, unknown> })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(

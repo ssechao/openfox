@@ -8,6 +8,7 @@ import { WebSocket } from 'ws'
 import { createServerHandle } from './index.js'
 import type { ServerHandle } from './context.js'
 import type { Config, Provider } from '../shared/types.js'
+import { createUtf8StreamDecoder } from './utils/utf8.js'
 
 const SUMMARY = 'SYNTHETIC_COMPACT_SUMMARY'
 
@@ -34,10 +35,12 @@ async function startResponsesProvider(): Promise<{
   }
   const server = createServer((req, res) => {
     let raw = ''
+    const bodyDecoder = createUtf8StreamDecoder()
     req.on('data', (chunk: Buffer) => {
-      raw += chunk.toString()
+      raw += bodyDecoder.write(chunk)
     })
     req.on('end', async () => {
+      raw += bodyDecoder.end()
       if (req.url?.endsWith('/models')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ data: [] }))

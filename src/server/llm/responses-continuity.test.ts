@@ -9,6 +9,7 @@ import { createLLMClient } from './client.js'
 import type { LLMCompletionRequest, LLMCompletionResponse, LLMToolDefinition } from './types.js'
 import { EventStore } from '../events/store.js'
 import { buildContextMessagesFromEventHistory, buildSnapshot, foldSessionState } from '../events/folding.js'
+import { createUtf8StreamDecoder } from '../utils/utf8.js'
 
 /**
  * Boots an SSE server emulating the OpenAI Responses API that records every
@@ -41,10 +42,12 @@ async function startResponsesMock(
   let index = 0
   const server = createServer((req, res) => {
     let raw = ''
+    const bodyDecoder = createUtf8StreamDecoder()
     req.on('data', (chunk: Buffer) => {
-      raw += chunk.toString()
+      raw += bodyDecoder.write(chunk)
     })
     req.on('end', async () => {
+      raw += bodyDecoder.end()
       const body = JSON.parse(raw || '{}') as Record<string, unknown>
       requests.push({ path: req.url ?? '', headers: req.headers, body })
       if (req.url === '/v1/responses/input_tokens') {

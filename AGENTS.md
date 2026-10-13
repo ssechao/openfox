@@ -106,6 +106,22 @@ git commit -m "message"   # timeout: 120000ms
 
 Never skip the hooks unless the user explicitly asks.
 
+**If this host cannot finish the suite.** The pre-commit hook runs the full
+suite (unit + e2e) locally. A machine that is already busy — or simply slower
+than the suite's fixed timeouts assume — fails it on flakes that pass in
+isolation, on an untouched checkout too, so no commit gets through. Such a
+clone can delegate the suite to an idle Docker host (the static gates always
+stay local):
+
+```bash
+git config openfox.testRemote <ssh-host>   # per clone, never committed
+OPENFOX_TEST_REMOTE=1 git commit           # or a one-off override
+```
+
+`scripts/test-remote.sh` syncs the tree and runs `npm test` in a container
+there. The target is to move the suite to CI and leave only the static gates
+in the hook.
+
 ### Release
 
 **When asked to publish, read [docs/RELEASE.md](RELEASE.md) and follow the playbook.** It's the single source of truth: changelog generation, version bump, publish, and the merge to `main` (all release work happens on `develop`; `main` only ever receives a successful release).
