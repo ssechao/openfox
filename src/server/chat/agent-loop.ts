@@ -648,7 +648,10 @@ export async function runTopLevelAgentLoop(
       if (compacting) {
         // A session with no headroom left is exactly the one that needs a
         // summary most — refusing here leaves the user with no way out. Free
-        // room instead of giving up, and only fail when nothing can be freed.
+        // room when we can, then ATTEMPT the summary with whatever budget is
+        // left instead of dead-ending the turn: the model decides what it can
+        // fit, and a request the provider still refuses surfaces as a normal
+        // chat error the user can act on.
         if (availableForOutput < MIN_COMPACTION_OUTPUT_TOKENS) {
           const reductionTarget = Math.max(
             MIN_COMPACTION_OUTPUT_TOKENS,
@@ -663,17 +666,9 @@ export async function runTopLevelAgentLoop(
           // Nothing left to shrink: fall back to what we are ACTUALLY about to
           // send. The gauge measures a history the summary request no longer
           // carries, so it can forbid a request that would fit comfortably.
+          // Keep the 256-token floor so the summary request is still valid.
           const assembledHeadroom = contextWindow - estimateAssembled() - OUTPUT_RESERVE_TOKENS
-          if (assembledHeadroom < MIN_COMPACTION_OUTPUT_TOKENS) {
-            return failLLM(
-              serverT({
-                en: 'Not enough context headroom to summarize safely. History was preserved; compact earlier or reduce the input.',
-                fr: 'Marge de contexte insuffisante pour résumer correctement. Historique conservé ; compactez plus tôt ou réduisez les entrées.',
-              }),
-              0,
-            )
-          }
-          availableForOutput = assembledHeadroom
+          availableForOutput = Math.max(256, assembledHeadroom)
         }
         modelSettings = { ...modelSettings, maxTokens: Math.min(COMPACTION_OUTPUT_TOKENS, availableForOutput) }
       }

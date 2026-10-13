@@ -808,14 +808,20 @@ describe('agentLoop integration', () => {
     expect(streamLLMPure).toHaveBeenCalledTimes(1)
   })
 
-  it('refuses a genuinely oversized unknown context once, preserving history and gauge', async () => {
-    const history = [{ role: 'user' as const, content: '\u0001'.repeat(200_000), source: 'history' as const }]
+  it('attempts the summary instead of failing when a saturated window leaves no headroom', async () => {
+    // A tiny history and a small window keep this deterministic: the output
+    // budget left for the summary is below MIN_COMPACTION_OUTPUT_TOKENS while
+    // the history itself has nothing left to reduce.
+    const history = [{ role: 'user' as const, content: 'hello', source: 'history' as const }]
     const initial = JSON.stringify(history)
     const append = vi.fn()
     const sessionManager = createMockSessionManager({
-      getContextState: vi.fn().mockReturnValue({ currentTokens: 0, currentTokensKnown: false, maxTokens: 128_000 }),
-      getCurrentModelContext: vi.fn().mockReturnValue(128_000),
+      getContextState: vi.fn().mockReturnValue({ currentTokens: 0, currentTokensKnown: false, maxTokens: 3_000 }),
+      getCurrentModelContext: vi.fn().mockReturnValue(3_000),
     })
+    ;(consumeStreamGenerator as any).mockResolvedValue(
+      makeStreamResult({ content: 'Compacted summary', finishReason: 'stop' }),
+    )
     const result = await runTopLevelAgentLoop(
       makeConfig({
         initialCompacting: true,
@@ -827,10 +833,16 @@ describe('agentLoop integration', () => {
       }),
       turnMetrics,
     )
-    expect(result.failed?.error).toContain('Not enough context headroom')
-    expect(streamLLMPure).not.toHaveBeenCalled()
-    expect(sessionManager.setCurrentContextSize).not.toHaveBeenCalled()
-    expect(append.mock.calls.some(([e]) => e.type === 'context.compacted')).toBe(false)
+
+    // No fork-only refusal: the session with no headroom left is exactly the one
+    // that needs a summary most, so the summary request goes out with whatever
+    // budget is left and the model decides what it can fit.
+    expect(result.failed).toBeUndefined()
+    expect(streamLLMPure).toHaveBeenCalledTimes(1)
+    const requested = vi.mocked(streamLLMPure).mock.calls[0]![0]
+    expect(requested.modelSettings?.maxTokens).toBeGreaterThan(0)
+    expect(append.mock.calls.some(([e]) => e.type === 'context.compacted')).toBe(true)
+    // The original history array is never mutated in place.
     expect(JSON.stringify(history)).toBe(initial)
   })
 
