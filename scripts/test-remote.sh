@@ -44,10 +44,15 @@ $SSH "$HOST" "mkdir -p '$DIR'"
 
 # --delete keeps the remote tree identical to this one; the excludes are the
 # artefacts that must survive it (dependencies) or that the suite never reads.
+# *.db is a gitignored local database, never source.
 rsync -az --delete \
   --exclude node_modules --exclude dist --exclude .git \
-  --exclude .playwright-cli --exclude '*.tgz' \
+  --exclude .playwright-cli --exclude '*.tgz' --exclude '*.db' --exclude '*.db-wal' --exclude '*.db-shm' \
   ./ "$HOST:$DIR/"
+
+# A stray database from an earlier run would be read by the suite as if it were
+# its own store, which is how a run once started with data it had not created.
+$SSH "$HOST" "rm -f '$DIR'/*.db '$DIR'/*.db-wal '$DIR'/*.db-shm"
 
 # First run only: install the dependencies the image does not ship. npm 11
 # leaves the install scripts of esbuild/node-pty/core-js ungated unless they

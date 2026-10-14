@@ -4,6 +4,7 @@ import { mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { validateProjectName, createProjectDirectory } from './project-creator.js'
+import { createProject as createProjectDb } from '../db/projects.js'
 
 const mockRealExecSync = vi.hoisted(() => ({
   current: undefined as unknown as typeof execSync,
@@ -14,6 +15,16 @@ vi.mock('node:child_process', async (importOriginal) => {
   mockRealExecSync.current = actual.execSync
   return { ...actual, execSync: vi.fn(actual.execSync) }
 })
+
+// createProjectDirectory persists the new project through the DB layer, and this
+// suite only ever asserted the filesystem half of it. Left unmocked it wrote to
+// whatever database the machine running the tests already had: every run
+// inserted 'my-project', 'existing', 'test.project-123', 'no-git-project' and
+// 'no-auto-git-project' into the user's own store, where they showed up as
+// empty projects next to the real ones.
+vi.mock('../db/projects.js', () => ({
+  createProject: vi.fn((name: string, workdir: string) => ({ id: `project-${name}`, name, workdir })),
+}))
 
 describe('project-creator', () => {
   let testDir: string
@@ -48,10 +59,15 @@ describe('project-creator', () => {
   })
 
   describe('createProjectDirectory', () => {
-    beforeEach(async () => {
-      const { initDatabase } = await import('../db/index.js')
-      const { loadConfig } = await import('../config.js')
-      initDatabase(loadConfig())
+    // No database is opened here: the DB layer is mocked above, so the suite
+    // never touches the store the machine running the tests already has.
+
+    it('registers the project through the DB layer instead of the real database', async () => {
+      const fullPath = join(testDir, 'my-project')
+      const project = await createProjectDirectory('my-project', fullPath)
+
+      expect(project.name).toBe('my-project')
+      expect(vi.mocked(createProjectDb)).toHaveBeenCalledWith('my-project', fullPath)
     })
 
     it('creates directory and git repo (frontend flow)', async () => {

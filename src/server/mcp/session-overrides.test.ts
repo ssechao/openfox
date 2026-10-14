@@ -13,7 +13,13 @@ import { createProject, updateProject } from '../db/projects.js'
 
 describe('session-overrides', () => {
   beforeEach(() => {
-    initDatabase(loadConfig())
+    // Keep the store in memory: this suite creates and updates projects, and
+    // initDatabase(loadConfig()) pointed it at whatever database the machine
+    // running the tests already had - including, in a container, a file in the
+    // working directory that then persisted across runs.
+    const config = loadConfig()
+    config.database.path = ':memory:'
+    initDatabase(config)
     setGlobalMcpServersProvider(null)
   })
 
