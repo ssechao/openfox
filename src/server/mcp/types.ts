@@ -20,6 +20,7 @@ export interface McpServerConfig {
   cachedTools?: CachedToolInfo[]
   timeout?: number
   disabled?: boolean
+  sessionIdInjection?: Record<string, string>
 }
 
 export interface McpServerState {

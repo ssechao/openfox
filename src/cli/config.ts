@@ -136,6 +136,7 @@ const mcpServerSchema = z.object({
   cachedTools: z.array(cachedToolSchema).optional(),
   timeout: z.number().positive().optional(),
   disabled: z.boolean().optional(),
+  sessionIdInjection: z.record(z.string(), z.string()).optional(),
 })
 
 const llmConfigSchema = z.object({

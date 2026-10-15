@@ -215,3 +215,39 @@ describe('applyMcpServerUpdate oauth patch semantics', () => {
     expect(savedCfg).not.toHaveProperty('oauth')
   })
 })
+
+describe('applyMcpServerUpdate keeps the routing settings the settings form does not edit', () => {
+  let manager: McpManager
+  let savedCfg: McpServerConfig | undefined
+  const save = vi.fn(async (cfg: McpServerConfig) => {
+    savedCfg = cfg
+  })
+
+  beforeEach(() => {
+    savedCfg = undefined
+    manager = new McpManager()
+  })
+
+  it('keeps sessionIdInjection when the patch does not mention it', async () => {
+    const proxyCfg: McpServerConfig = {
+      transport: 'stdio',
+      command: 'node',
+      sessionIdInjection: { 'llm-aether': 'session_id' },
+    }
+    await manager.addServer('mcp-lazy', proxyCfg)
+
+    const { serverCfg, error } = await applyMcpServerUpdate({
+      name: 'mcp-lazy',
+      patch: { timeout: 30 },
+      existing: manager.getServer('mcp-lazy')!,
+      persistedCfg: proxyCfg,
+      mcpManager: manager,
+      save,
+    })
+
+    expect(error).toBeUndefined()
+    expect(serverCfg.sessionIdInjection).toEqual({ 'llm-aether': 'session_id' })
+    expect(savedCfg?.sessionIdInjection).toEqual({ 'llm-aether': 'session_id' })
+    expect(manager.getServer('mcp-lazy')!.config.sessionIdInjection).toEqual({ 'llm-aether': 'session_id' })
+  })
+})

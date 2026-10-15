@@ -53,6 +53,30 @@ function withoutAuthorizationHeader(headers: Record<string, string> | undefined)
   return Object.fromEntries(kept)
 }
 
+type SessionIdInjectionResult = { ok: true; args: Record<string, unknown> } | { ok: false; error: string }
+
+function applySessionIdInjection(
+  injection: Record<string, string> | undefined,
+  args: Record<string, unknown>,
+  sessionId: string | undefined,
+): SessionIdInjectionResult {
+  const target = args['server_name']
+  if (!injection || typeof target !== 'string') return { ok: true, args }
+  const paramName: unknown = injection[target]
+  if (typeof paramName !== 'string' || paramName.length === 0) return { ok: true, args }
+  if (!sessionId) {
+    return { ok: false, error: `a session id is required to call '${target}' through this proxy` }
+  }
+  const inner = args['arguments']
+  if (inner !== undefined && (typeof inner !== 'object' || inner === null || Array.isArray(inner))) {
+    return { ok: false, error: `arguments for '${target}' must be an object to carry '${paramName}'` }
+  }
+  return {
+    ok: true,
+    args: { ...args, arguments: { ...(inner as Record<string, unknown> | undefined), [paramName]: sessionId } },
+  }
+}
+
 /** Rough token estimate: ~4 chars per token for JSON-serialized tool definitions */
 export function estimateToolTokens(
   toolName: string,
@@ -288,12 +312,17 @@ export class McpManager {
     serverName: string,
     toolName: string,
     args: Record<string, unknown>,
+    sessionId?: string,
   ): Promise<{ success: boolean; output?: string; error?: string }> {
     const entry = this.servers.get(serverName)
     if (!entry) return { success: false, error: `MCP server '${serverName}' not found` }
 
+    const injected = applySessionIdInjection(entry.config.sessionIdInjection, args, sessionId)
+    if (!injected.ok) return { success: false, error: injected.error }
+    const forwardedArgs = injected.args
+
     if (!entry.client) return { success: false, error: `MCP server '${serverName}' is not connected` }
-    const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, args)
+    const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, forwardedArgs)
     const timeoutMs = timeoutSeconds * 1000
     const controller = new AbortController()
     let timer: NodeJS.Timeout | undefined
@@ -310,7 +339,7 @@ export class McpManager {
       let result
       try {
         result = await Promise.race([
-          entry.client.callTool({ name: toolName, arguments: args }, undefined, {
+          entry.client.callTool({ name: toolName, arguments: forwardedArgs }, undefined, {
             timeout: timeoutMs,
             signal: controller.signal,
           }),

@@ -340,6 +340,29 @@ describe('config', () => {
       expect(loaded.mcpServers!['test']!.disabledTools).toEqual(['tool_a', 'tool_b'])
     })
 
+    it('should preserve sessionIdInjection through save and load cycle', async () => {
+      const raw = {
+        providers: [],
+        mcpServers: {
+          'mcp-lazy': {
+            transport: 'stdio' as const,
+            command: 'node',
+            sessionIdInjection: { 'llm-aether': 'session_id' },
+          },
+        },
+      }
+
+      await writeFile(join(TEST_DIR, 'production', 'config.json'), JSON.stringify(raw))
+      const loaded = await loadGlobalConfig('production')
+
+      expect(loaded.mcpServers!['mcp-lazy']!.sessionIdInjection).toEqual({ 'llm-aether': 'session_id' })
+
+      await saveGlobalConfig('production', loaded)
+      const reloaded = await loadGlobalConfig('production')
+
+      expect(reloaded.mcpServers!['mcp-lazy']!.sessionIdInjection).toEqual({ 'llm-aether': 'session_id' })
+    })
+
     it('should handle missing mcpServers', async () => {
       const loaded = await loadGlobalConfig('production')
       expect(loaded.mcpServers).toBeUndefined()
