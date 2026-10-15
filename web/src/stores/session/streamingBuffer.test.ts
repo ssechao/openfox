@@ -336,8 +336,8 @@ describe('zustand commit accounting during streaming', () => {
     const store = await bootStreamingSession()
     const { createElement } = await import('react')
     const { renderToString } = await import('react-dom/server')
-    const { ThinkingBlock } = await import('../../components/shared/ThinkingBlock')
-    const { getMarkdownCacheSizeForTest, resetMarkdownCacheForTest } = await import('../../components/shared/Markdown')
+    const { Markdown, getMarkdownCacheBytesForTest } = await import('../../components/shared/Markdown')
+    const { getMaxVisibleItems, MESSAGE_CAP_HEADROOM } = await import('./messageHandler')
     for (let i = 0; i < 673; i++) {
       store.getState().handleServerMessage({
         type: 'chat.message',
@@ -347,8 +347,29 @@ describe('zustand commit accounting during streaming', () => {
         },
       } as never)
     }
-    expect(store.getState().messages).toHaveLength(674)
-    resetMarkdownCacheForTest()
+    // The pane keeps only the most recent messages plus headroom, so the fixture
+    // is capped rather than retained in full.
+    expect(store.getState().messages.length).toBeLessThanOrEqual(getMaxVisibleItems() + MESSAGE_CAP_HEADROOM)
+    expect(store.getState().messages.length).toBeGreaterThan(1)
+    // The bound dropped the oldest message — the streaming target seeded by
+    // bootStreamingSession — so re-announce it: the deltas below must land on a
+    // message the pane still holds.
+    store.getState().handleServerMessage({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'msg-1',
+          role: 'assistant',
+          content: '',
+          timestamp: '2024-01-01T00:00:00.000Z',
+          tokenCount: 0,
+          isStreaming: true,
+        },
+      },
+    } as never)
+    expect(store.getState().messages.find((message) => message.id === 'msg-1')).toBeDefined()
+    const cacheBytesBeforeStreaming = getMarkdownCacheBytesForTest()
     let commits = 0
     const unsubscribe = store.subscribe(() => {
       commits++
@@ -370,8 +391,9 @@ describe('zustand commit accounting during streaming', () => {
         expect(commits).toBe(batch + 1)
         const message = store.getState().messages.find((message) => message.id === 'msg-1')!
         expect(message.thinkingContent).toBe('**think** &self\n'.repeat((batch + 1) * 1000))
-        renderToString(createElement(ThinkingBlock, { content: message.thinkingContent!, isStreaming: true }))
-        expect(getMarkdownCacheSizeForTest()).toBe(0)
+        renderToString(createElement(Markdown, { content: message.thinkingContent!, isStreaming: true }))
+        // Streaming content must not enter the cache at all.
+        expect(getMarkdownCacheBytesForTest()).toBe(cacheBytesBeforeStreaming)
       }
       store.getState().handleServerMessage({
         type: 'chat.message_updated',
@@ -389,11 +411,11 @@ describe('zustand commit accounting during streaming', () => {
       const message = store.getState().messages.find((message) => message.id === 'msg-1')!
       expect(message.isStreaming).toBe(false)
       expect(store.getState().currentSession?.isRunning).toBe(false)
-      renderToString(createElement(ThinkingBlock, { content: message.thinkingContent! }))
-      expect(getMarkdownCacheSizeForTest()).toBe(1)
+      renderToString(createElement(Markdown, { content: message.thinkingContent! }))
+      // Completed content is parsed and cached exactly once.
+      expect(getMarkdownCacheBytesForTest()).toBeGreaterThan(cacheBytesBeforeStreaming)
     } finally {
       unsubscribe()
-      resetMarkdownCacheForTest()
     }
   })
 
