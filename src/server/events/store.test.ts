@@ -1791,6 +1791,97 @@ describe('EventStore - Event Cleanup', () => {
       expect(refreshed.map((p) => p.id)).toContain('m2')
       expect(refreshed).not.toEqual(prompts)
     })
+
+    it('persists prompts so a cold store does not parse the snapshot', () => {
+      db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, recent_user_prompts TEXT)`)
+      db.prepare(`INSERT INTO sessions (id) VALUES (?)`).run('session-1')
+      store.append('session-1', {
+        type: 'turn.snapshot',
+        data: {
+          ...snapshotData('planner', 1),
+          messages: [{ id: 'm1', role: 'user', content: 'First', timestamp: 1000 }],
+        },
+      })
+      store.append('session-1', {
+        type: 'message.start',
+        data: { messageId: 'm2', role: 'user', content: 'Second' },
+      })
+
+      const coldStore = new EventStore(db)
+      const snapshotSpy = vi.spyOn(coldStore, 'getLatestSnapshot')
+      expect(coldStore.getRecentUserPrompts('session-1', 10).map((prompt) => prompt.id)).toEqual(['m2', 'm1'])
+      expect(snapshotSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('compactArchivedToolResults', () => {
+    it('compacts only closed context windows and is idempotent', async () => {
+      const result = {
+        success: true,
+        output: 'x'.repeat(4096),
+        durationMs: 1,
+        truncated: false,
+        metadata: { mimeType: 'image/png', base64Data: 'A'.repeat(4096) },
+      }
+      const snapshot: SessionSnapshot = {
+        mode: 'builder',
+        phase: 'build',
+        isRunning: false,
+        messages: [
+          {
+            id: 'closed',
+            role: 'assistant',
+            content: '',
+            timestamp: 1,
+            contextWindowId: 'old-window',
+            toolCalls: [{ id: 'closed-call', name: 'read_file', arguments: {}, result: structuredClone(result) }],
+          },
+          {
+            id: 'active',
+            role: 'assistant',
+            content: '',
+            timestamp: 2,
+            contextWindowId: 'active-window',
+            toolCalls: [{ id: 'active-call', name: 'read_file', arguments: {}, result: structuredClone(result) }],
+          },
+        ],
+        criteria: [],
+        metadataEntries: {},
+        contextState: {
+          currentTokens: 0,
+          maxTokens: 200000,
+          compactionCount: 1,
+          dangerZone: false,
+          canCompact: false,
+          dynamicContextChanged: false,
+        },
+        currentContextWindowId: 'active-window',
+        todos: [],
+        readFiles: [],
+        snapshotSeq: 1,
+        snapshotAt: 2,
+      }
+      store.append('session-1', { type: 'turn.snapshot', data: snapshot })
+
+      const report = await store.compactArchivedToolResults({ maxResultBytes: 1024 })
+      expect(report.rewritten).toBe(1)
+      expect(report.compactedResults).toBe(1)
+      expect(report.bytesAfter).toBeLessThan(report.bytesBefore)
+
+      const stored = store.getLatestSnapshot('session-1')!.data
+      const closed = stored.messages.find((message) => message.id === 'closed')!.toolCalls![0]!
+      const active = stored.messages.find((message) => message.id === 'active')!.toolCalls![0]!
+      expect(closed.result!.output).toContain('[Archived output truncated:')
+      expect(closed.result!.metadata).not.toHaveProperty('base64Data')
+      expect(closed.result!.metadata).toMatchObject({ archivedDataOmitted: true })
+      expect(active.result).toEqual(result)
+      expect(stored.currentContextWindowId).toBe('active-window')
+      expect(stored.messages).toHaveLength(2)
+
+      const second = await store.compactArchivedToolResults({ maxResultBytes: 1024 })
+      expect(second.rewritten).toBe(0)
+      expect(second.compactedResults).toBe(0)
+    })
   })
 
   describe('migrateSnapshotStreams', () => {
@@ -1914,6 +2005,26 @@ describe('EventStore - Event Cleanup', () => {
       expect(second.skipped).toBe(true)
       expect(statSync(backupPath).mtimeMs).toBe(backupMtime)
 
+      fileDb.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('reuses an externally verified backup instead of creating a second copy', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'openfox-bak-'))
+      const path = join(dir, 'test.db')
+      const verifiedBackup = join(dir, 'verified.bak')
+      const fileDb = new Database(path)
+      fileDb.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)`)
+      const fileStore = new EventStore(fileDb)
+      fileStore.append('session-1', { type: 'turn.snapshot', data: snapshotWithStreams() })
+      await fileDb.backup(verifiedBackup)
+
+      const report = await fileStore.migrateSnapshotStreams({ backupPath: verifiedBackup })
+
+      expect(report.skipped).toBe(false)
+      expect(report.backupPath).toBe(verifiedBackup)
+      expect(existsSync(verifiedBackup)).toBe(true)
+      expect(existsSync(path + '.pre-de-dup.bak')).toBe(false)
       fileDb.close()
       rmSync(dir, { recursive: true, force: true })
     })

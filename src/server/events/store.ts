@@ -36,6 +36,25 @@ function isUniqueConstraintError(error: unknown): boolean {
   return err?.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err?.message ?? '').includes('UNIQUE constraint failed')
 }
 
+function compactArchivedResult(
+  result: NonNullable<NonNullable<SnapshotMessage['toolCalls']>[number]['result']>,
+  bytes: number,
+): void {
+  const metadata: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(result.metadata ?? {})) {
+    if (key === 'base64Data') continue
+    const encoded = JSON.stringify(value)
+    if (encoded !== undefined && encoded.length <= 4096) metadata[key] = value
+  }
+  metadata['archivedDataOmitted'] = true
+  metadata['originalResultBytes'] = bytes
+  result.output = `[Archived output truncated: ${bytes} bytes]`
+  result.truncated = true
+  result.metadata = metadata
+  delete result.diagnostics
+  delete result.editContext
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -171,6 +190,7 @@ export class EventStore {
   // any realistic caller limit so the cached result is not clipped to whatever
   // limit the first caller happened to request.
   private static readonly PROMPTS_QUERY_LIMIT = 100
+  private static readonly RECENT_PROMPTS_MAX_ENTRIES = 20
 
   constructor(db: Database.Database) {
     this.db = db
@@ -256,7 +276,8 @@ export class EventStore {
       }
     }
 
-    this.invalidateSessionCache(sessionId)
+    this.updateRecentUserPrompts(sessionId, event, timestamp)
+    this.invalidateSessionCache(sessionId, event)
 
     const stored: StoredEvent = {
       seq,
@@ -309,7 +330,11 @@ export class EventStore {
         })
         transaction()
 
-        this.invalidateSessionCache(sessionId)
+        for (const stored of results) {
+          const event = { type: stored.type, data: stored.data } as TurnEvent
+          this.updateRecentUserPrompts(sessionId, event, stored.timestamp)
+          this.invalidateSessionCache(sessionId, event)
+        }
 
         // Notify after transaction commits
         for (const stored of results) {
@@ -346,10 +371,11 @@ export class EventStore {
     })
     transaction()
 
-    this.invalidateSessionCache(sessionId)
-
     const stored: StoredEvent[] = events.map((event) => ({ ...event, sessionId }))
     for (const event of stored) {
+      const turnEvent = { type: event.type, data: event.data } as TurnEvent
+      this.updateRecentUserPrompts(sessionId, turnEvent, event.timestamp)
+      this.invalidateSessionCache(sessionId, turnEvent)
       this.notifySubscribers(sessionId, event)
     }
     return stored
@@ -485,13 +511,100 @@ export class EventStore {
     }
   }
 
-  private invalidateSessionCache(sessionId: string): void {
-    const entry = this.snapshotCache.get(sessionId)
-    if (entry) {
-      this.snapshotCacheBytes -= entry.bytes
-      this.snapshotCache.delete(sessionId)
+  private readRecentUserPrompts(
+    sessionId: string,
+  ): Array<{ id: string; content: string; timestamp: string }> | undefined {
+    try {
+      const row = this.db.prepare('SELECT recent_user_prompts FROM sessions WHERE id = ?').get(sessionId) as
+        { recent_user_prompts: string | null } | undefined
+      if (!row) return undefined
+      if (!row.recent_user_prompts) return []
+      const parsed = JSON.parse(row.recent_user_prompts) as unknown
+      if (!Array.isArray(parsed)) return []
+      return parsed
+        .filter(
+          (prompt): prompt is { id: string; content: string; timestamp: string } =>
+            typeof prompt === 'object' &&
+            prompt !== null &&
+            typeof prompt.id === 'string' &&
+            typeof prompt.content === 'string' &&
+            typeof prompt.timestamp === 'string',
+        )
+        .slice(0, EventStore.RECENT_PROMPTS_MAX_ENTRIES)
+    } catch {
+      return undefined
     }
-    this.promptsCache.delete(sessionId)
+  }
+
+  private writeRecentUserPrompts(
+    sessionId: string,
+    prompts: Array<{ id: string; content: string; timestamp: string }>,
+  ): void {
+    try {
+      this.db
+        .prepare('UPDATE sessions SET recent_user_prompts = ? WHERE id = ?')
+        .run(JSON.stringify(prompts.slice(0, EventStore.RECENT_PROMPTS_MAX_ENTRIES)), sessionId)
+    } catch {
+      return
+    }
+  }
+
+  private updateRecentUserPrompts(sessionId: string, event: TurnEvent, timestamp: number): void {
+    const isRealUserMessage = (message: {
+      role: string
+      isSystemGenerated?: boolean
+      messageKind?: string
+      subAgentType?: string
+    }) => message.role === 'user' && !message.isSystemGenerated && !message.messageKind && !message.subAgentType
+
+    if (event.type === 'message.start' && isRealUserMessage(event.data)) {
+      const current = this.readRecentUserPrompts(sessionId)
+      if (current === undefined) return
+      this.writeRecentUserPrompts(sessionId, [
+        {
+          id: event.data.messageId,
+          content: event.data.content ?? '',
+          timestamp: new Date(timestamp).toISOString(),
+        },
+        ...current.filter((prompt) => prompt.id !== event.data.messageId),
+      ])
+      return
+    }
+
+    if (event.type === 'turn.snapshot') {
+      const promptMap = new Map<string, { id: string; content: string; timestamp: string }>()
+      for (const message of event.data.messages) {
+        if (!isRealUserMessage(message)) continue
+        promptMap.set(message.id, {
+          id: message.id,
+          content: message.content,
+          timestamp: new Date(message.timestamp).toISOString(),
+        })
+      }
+      const prompts = [...promptMap.values()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+      this.writeRecentUserPrompts(sessionId, prompts)
+    }
+  }
+
+  private invalidateSessionCache(sessionId: string, event?: TurnEvent): void {
+    if (event === undefined || event.type === 'turn.snapshot') {
+      const entry = this.snapshotCache.get(sessionId)
+      if (entry) {
+        this.snapshotCacheBytes -= entry.bytes
+        this.snapshotCache.delete(sessionId)
+      }
+    }
+    if (
+      event === undefined ||
+      event.type === 'turn.snapshot' ||
+      (event.type === 'message.start' &&
+        event.data.role === 'user' &&
+        !event.data.isSystemGenerated &&
+        !event.data.messageKind &&
+        !event.data.subAgentType)
+    ) {
+      this.promptsCache.delete(sessionId)
+    }
   }
 
   private clearSnapshotCache(): void {
@@ -510,6 +623,12 @@ export class EventStore {
     const cached = this.promptsCache.get(sessionId)
     if (cached) {
       return cached.slice(0, limit)
+    }
+
+    const storedPrompts = this.readRecentUserPrompts(sessionId)
+    if (storedPrompts !== undefined) {
+      this.promptsCache.set(sessionId, storedPrompts)
+      return storedPrompts.slice(0, limit)
     }
 
     const isRealUserMessage = (msg: {
@@ -1048,6 +1167,71 @@ export class EventStore {
     }
   }
 
+  async compactArchivedToolResults(options?: { maxResultBytes?: number; backupPath?: string }): Promise<{
+    backupPath: string | null
+    scanned: number
+    rewritten: number
+    compactedResults: number
+    bytesBefore: number
+    bytesAfter: number
+  }> {
+    const maxResultBytes = options?.maxResultBytes ?? 16 * 1024
+    const dbName = this.db.name
+    let backupPath = options?.backupPath ?? null
+    if (!backupPath && dbName && dbName !== ':memory:') {
+      backupPath = `${dbName}.pre-archived-tools-${Date.now()}.bak`
+      await this.db.backup(backupPath)
+    }
+
+    const rows = this.db.prepare(`SELECT id, payload FROM events WHERE event_type = 'turn.snapshot'`).all() as Array<{
+      id: number
+      payload: string
+    }>
+    const update = this.db.prepare(`UPDATE events SET payload = ? WHERE id = ?`)
+    let rewritten = 0
+    let compactedResults = 0
+    let bytesBefore = 0
+    let bytesAfter = 0
+
+    this.db.transaction(() => {
+      for (const row of rows) {
+        const before = Buffer.byteLength(row.payload)
+        bytesBefore += before
+        let snapshot: SessionSnapshot
+        try {
+          snapshot = JSON.parse(row.payload) as SessionSnapshot
+        } catch {
+          bytesAfter += before
+          continue
+        }
+        let changed = false
+        const currentWindowId = snapshot.currentContextWindowId
+        for (const message of snapshot.messages ?? []) {
+          if (!message.contextWindowId || !currentWindowId || message.contextWindowId === currentWindowId) continue
+          for (const toolCall of message.toolCalls ?? []) {
+            if (!toolCall.result || toolCall.result.metadata?.['archivedDataOmitted'] === true) continue
+            const resultBytes = Buffer.byteLength(JSON.stringify(toolCall.result))
+            if (resultBytes <= maxResultBytes) continue
+            compactArchivedResult(toolCall.result, resultBytes)
+            compactedResults++
+            changed = true
+          }
+        }
+        if (!changed) {
+          bytesAfter += before
+          continue
+        }
+        const payload = JSON.stringify(snapshot)
+        update.run(payload, row.id)
+        bytesAfter += Buffer.byteLength(payload)
+        rewritten++
+      }
+    })()
+
+    this.clearSnapshotCache()
+    return { backupPath, scanned: rows.length, rewritten, compactedResults, bytesBefore, bytesAfter }
+  }
+
   /**
    * Rewrite every persisted snapshot with the snapshot streaming
    * de-duplication applied (see trimSnapshotStreamingOutput). Every finished
@@ -1061,7 +1245,7 @@ export class EventStore {
    * after a successful run the maintenance flag is set and subsequent runs are
    * a no-op. Returns a report used for the audit trail.
    */
-  async migrateSnapshotStreams(): Promise<{
+  async migrateSnapshotStreams(options?: { backupPath?: string }): Promise<{
     skipped: boolean
     backupPath: string | null
     scanned: number
@@ -1092,8 +1276,8 @@ export class EventStore {
     // Rollback guarantee: a consistent snapshot of the DB must exist before
     // any in-place rewrite. In-memory databases (tests) are skipped.
     const dbName = this.db.name
-    let backupPath: string | null = null
-    if (dbName && dbName !== ':memory:') {
+    let backupPath: string | null = options?.backupPath ?? null
+    if (!backupPath && dbName && dbName !== ':memory:') {
       backupPath = `${dbName}.pre-de-dup.bak`
       try {
         if (!existsSync(backupPath)) {

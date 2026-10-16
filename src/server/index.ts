@@ -796,7 +796,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Session endpoints (REST)
 
   app.get('/api/sessions', async (req, res) => {
-    const { getRecentUserPromptsForSession } = await import('./events/index.js')
     const { getPendingConfirmationsBySession } = await import('./tools/path-security.js')
 
     const projectId = req.query['projectId'] as string | undefined
@@ -825,7 +824,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     const sessionsWithPrompts = sessions.map((session) => ({
       ...session,
-      recentUserPrompts: getRecentUserPromptsForSession(session.id, 10),
+      recentUserPrompts: session.recentUserPrompts?.slice(0, 10) ?? [],
     }))
 
     // Collect pending confirmations for returned sessions

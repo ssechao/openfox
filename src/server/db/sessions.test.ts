@@ -224,6 +224,19 @@ describe('db sessions', () => {
     expect(sessions.map((s) => s.title)).toContain('Session B')
   })
 
+  it('returns persisted recent prompts in session summaries', () => {
+    const session = createSession(projectAId, rootA, 'Prompts')
+    const prompts = [{ id: 'm1', content: 'Cached prompt', timestamp: '2026-10-16T12:00:00.000Z' }]
+    getDatabase()
+      .prepare('UPDATE sessions SET recent_user_prompts = ? WHERE id = ?')
+      .run(JSON.stringify(prompts), session.id)
+
+    expect(listSessions().find((entry) => entry.id === session.id)?.recentUserPrompts).toEqual(prompts)
+    expect(
+      listSessionsByProject(projectAId).sessions.find((entry) => entry.id === session.id)?.recentUserPrompts,
+    ).toEqual(prompts)
+  })
+
   it('lists sessions by project using project_id only', () => {
     const sessionA = createSession(projectAId, rootA, 'Session A')
     const sessionANested = createSession(projectAId, join(rootA, 'nested'), 'Nested Session A')

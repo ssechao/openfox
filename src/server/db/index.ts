@@ -3,6 +3,7 @@ import type { Config } from '../config.js'
 import { logger } from '../utils/logger.js'
 
 let db: Database.Database | null = null
+const RECENT_PROMPTS_MAX_ENTRIES = 20
 
 export function initDatabase(config: Config): Database.Database {
   if (db) {
@@ -48,6 +49,92 @@ export function closeDatabase(): void {
     db.close()
     db = null
   }
+}
+
+function backfillRecentUserPrompts(database: Database.Database, refreshAll = false): number {
+  const sessions = database
+    .prepare(refreshAll ? 'SELECT id FROM sessions' : 'SELECT id FROM sessions WHERE recent_user_prompts IS NULL')
+    .all() as Array<{ id: string }>
+  const latestSnapshot = database.prepare(
+    "SELECT seq, payload FROM events WHERE session_id = ? AND event_type = 'turn.snapshot' ORDER BY seq DESC LIMIT 1",
+  )
+  const userEvents = database.prepare(
+    `SELECT payload, timestamp
+     FROM events
+     WHERE session_id = ? AND seq > ? AND event_type = 'message.start'
+       AND json_extract(payload, '$.role') = 'user'
+       AND COALESCE(json_extract(payload, '$.isSystemGenerated'), 0) = 0
+       AND json_extract(payload, '$.messageKind') IS NULL
+       AND json_extract(payload, '$.subAgentType') IS NULL
+     ORDER BY timestamp DESC
+     LIMIT ?`,
+  )
+  const update = database.prepare('UPDATE sessions SET recent_user_prompts = ? WHERE id = ?')
+
+  database.transaction(() => {
+    for (const session of sessions) {
+      const prompts = new Map<string, { id: string; content: string; timestamp: string }>()
+      const snapshot = latestSnapshot.get(session.id) as { seq: number; payload: string } | undefined
+      if (snapshot) {
+        try {
+          const parsed = JSON.parse(snapshot.payload) as {
+            messages?: Array<{
+              id: string
+              role: string
+              content?: string
+              timestamp: string | number
+              isSystemGenerated?: boolean
+              messageKind?: string
+              subAgentType?: string
+            }>
+          }
+          for (const message of parsed.messages ?? []) {
+            if (
+              message.role === 'user' &&
+              !message.isSystemGenerated &&
+              !message.messageKind &&
+              !message.subAgentType
+            ) {
+              prompts.set(message.id, {
+                id: message.id,
+                content: message.content ?? '',
+                timestamp: new Date(message.timestamp).toISOString(),
+              })
+            }
+          }
+        } catch {
+          prompts.clear()
+        }
+      }
+
+      const rows = userEvents.all(session.id, snapshot?.seq ?? 0, RECENT_PROMPTS_MAX_ENTRIES) as Array<{
+        payload: string
+        timestamp: number
+      }>
+      for (const row of rows) {
+        try {
+          const message = JSON.parse(row.payload) as { messageId: string; content?: string }
+          prompts.set(message.messageId, {
+            id: message.messageId,
+            content: message.content ?? '',
+            timestamp: new Date(row.timestamp).toISOString(),
+          })
+        } catch {
+          continue
+        }
+      }
+
+      const recent = [...prompts.values()]
+        .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+        .slice(0, RECENT_PROMPTS_MAX_ENTRIES)
+      update.run(JSON.stringify(recent), session.id)
+    }
+  })()
+  return sessions.length
+}
+
+export function refreshRecentUserPrompts(): number {
+  return backfillRecentUserPrompts(getDatabase(), true)
 }
 
 function runMigrations(db: Database.Database): void {
@@ -243,6 +330,12 @@ function runMigrations(db: Database.Database): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, event_type)
   `)
+
+  if (!columnNames.includes('recent_user_prompts')) {
+    logger.info('Migrating sessions table: adding recent_user_prompts column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN recent_user_prompts TEXT`)
+  }
+  backfillRecentUserPrompts(db)
 
   // Migration: Add per-session provider/model columns
   if (!columnNames.includes('provider_id')) {

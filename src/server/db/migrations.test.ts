@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { loadConfig } from '../config.js'
-import { closeDatabase, initDatabase } from './index.js'
+import { closeDatabase, initDatabase, refreshRecentUserPrompts } from './index.js'
 
 function createOldSchemaDatabase(dbPath: string): void {
   const db = new Database(dbPath)
@@ -210,6 +210,103 @@ describe('db migrations', () => {
     expect(columnNames).toContain('workspace')
     expect(columnNames).not.toContain('worktree')
 
+    db.close()
+  })
+
+  it('adds and backfills recent_user_prompts without truncating prompt bodies', () => {
+    createOldSchemaDatabase(dbPath)
+    const legacyDb = new Database(dbPath)
+    legacyDb.prepare(`INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, ?, ?, ?, ?)`).run(
+      'test-session',
+      1,
+      1000,
+      'turn.snapshot',
+      JSON.stringify({
+        messages: [
+          { id: 'm1', role: 'user', content: 'x'.repeat(3000), timestamp: 1000 },
+          { id: 'm2', role: 'user', content: 'ignored', timestamp: 2000, isSystemGenerated: true },
+        ],
+      }),
+    )
+    legacyDb
+      .prepare(`INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, ?, ?, ?, ?)`)
+      .run(
+        'test-session',
+        2,
+        3000,
+        'message.start',
+        JSON.stringify({ messageId: 'm3', role: 'user', content: 'explicit false', isSystemGenerated: false }),
+      )
+    legacyDb.close()
+
+    const config = loadConfig()
+    config.database.path = dbPath
+    initDatabase(config)
+
+    const db = new Database(dbPath)
+    const columns = db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[]
+    expect(columns.map((column) => column.name)).toContain('recent_user_prompts')
+    const row = db.prepare('SELECT recent_user_prompts FROM sessions WHERE id = ?').get('test-session') as {
+      recent_user_prompts: string
+    }
+    const prompts = JSON.parse(row.recent_user_prompts) as Array<{ id: string; content: string }>
+    expect(prompts).toEqual([
+      { id: 'm3', content: 'explicit false', timestamp: new Date(3000).toISOString() },
+      { id: 'm1', content: 'x'.repeat(3000), timestamp: new Date(1000).toISOString() },
+    ])
+    db.close()
+  })
+
+  it('does not overwrite an existing recent_user_prompts value during migration', () => {
+    createOldSchemaDatabase(dbPath)
+    const legacyDb = new Database(dbPath)
+    legacyDb.exec(`ALTER TABLE sessions ADD COLUMN recent_user_prompts TEXT`)
+    const existing = JSON.stringify([{ id: 'existing', content: 'Keep', timestamp: '2026-01-01T00:00:00.000Z' }])
+    legacyDb.prepare('UPDATE sessions SET recent_user_prompts = ? WHERE id = ?').run(existing, 'test-session')
+    legacyDb.close()
+
+    const config = loadConfig()
+    config.database.path = dbPath
+    initDatabase(config)
+
+    const db = new Database(dbPath)
+    const row = db.prepare('SELECT recent_user_prompts FROM sessions WHERE id = ?').get('test-session') as {
+      recent_user_prompts: string
+    }
+    expect(row.recent_user_prompts).toBe(existing)
+    db.close()
+  })
+
+  it('refreshes stale recent prompts during explicit maintenance', () => {
+    createOldSchemaDatabase(dbPath)
+    const legacyDb = new Database(dbPath)
+    legacyDb.exec(`ALTER TABLE sessions ADD COLUMN recent_user_prompts TEXT`)
+    legacyDb
+      .prepare('UPDATE sessions SET recent_user_prompts = ? WHERE id = ?')
+      .run(JSON.stringify([{ id: 'stale', content: 'Old', timestamp: '2026-01-01T00:00:00.000Z' }]), 'test-session')
+    legacyDb
+      .prepare(`INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, ?, ?, ?, ?)`)
+      .run(
+        'test-session',
+        1,
+        2000,
+        'turn.snapshot',
+        JSON.stringify({ messages: [{ id: 'fresh', role: 'user', content: 'Fresh', timestamp: 2000 }] }),
+      )
+    legacyDb.close()
+
+    const config = loadConfig()
+    config.database.path = dbPath
+    initDatabase(config)
+    expect(refreshRecentUserPrompts()).toBe(1)
+
+    const db = new Database(dbPath)
+    const row = db.prepare('SELECT recent_user_prompts FROM sessions WHERE id = ?').get('test-session') as {
+      recent_user_prompts: string
+    }
+    expect(JSON.parse(row.recent_user_prompts)).toEqual([
+      { id: 'fresh', content: 'Fresh', timestamp: new Date(2000).toISOString() },
+    ])
     db.close()
   })
 
