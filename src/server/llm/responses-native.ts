@@ -275,8 +275,9 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
       const item = event['item'] as ResponsesOutputItem | undefined
       if (item?.type === 'function_call') {
         const callId = item.call_id ?? item.id
+        const outputIndex = typeof event['output_index'] === 'number' ? event['output_index'] : 0
         const toolCall: StreamToolCall = {
-          index: 0,
+          index: outputIndex,
           ...(callId ? { id: callId } : {}),
           function: { name: item.name ?? '', arguments: item.arguments ?? '' },
         }
@@ -286,7 +287,11 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
     }
 
     case 'response.function_call_arguments.delta': {
-      const toolCall: StreamToolCall = { index: 0, function: { arguments: String(event['delta'] ?? '') } }
+      const outputIndex = typeof event['output_index'] === 'number' ? event['output_index'] : 0
+      const toolCall: StreamToolCall = {
+        index: outputIndex,
+        function: { arguments: String(event['delta'] ?? '') },
+      }
       return chunk(responseId, { tool_calls: [toolCall] })
     }
 
