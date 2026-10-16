@@ -123,6 +123,44 @@ describe('createLLMClient end-to-end against a Responses API mock', () => {
     expect(done?.response.finishReason).toBe('stop')
   })
 
+  it('sends attachment images as Responses input_image (not chat image_url)', async () => {
+    const { client, requests } = await boot(STREAM_EVENTS)
+
+    for await (const _event of client.stream({
+      messages: [
+        {
+          role: 'user',
+          content: 'see image',
+          attachments: [
+            {
+              id: 'a1',
+              filename: 'x.png',
+              mimeType: 'image/png',
+              size: 10,
+              data: 'data:image/png;base64,AAAA',
+            },
+          ],
+        },
+      ],
+      modelSettings: { supportsVision: true },
+    })) {
+      // drain the stream; only the request body matters here
+    }
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.path).toBe('/v1/responses')
+    expect(requests[0]!.body['input']).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'see image' },
+          { type: 'input_image', image_url: 'data:image/png;base64,AAAA', detail: 'auto' },
+        ],
+      },
+    ])
+    expect(JSON.stringify(requests[0]!.body['input'])).not.toContain('"image_url":{')
+  })
+
   it('maps non-streaming /responses output to a completion response', async () => {
     const { client, requests } = await boot([])
     // Non-streaming: replace the SSE body with a JSON response.

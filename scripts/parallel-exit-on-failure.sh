@@ -12,7 +12,11 @@ parallel_exit_on_failure() {
   _peof_old_e=""
   case "$-" in *e*) _peof_old_e="y"; set +e;; esac
 
-  TIMEOUT=120
+  # Watchdog budget in seconds. A job that never returns (a server that never
+  # binds, a stream that never closes) would otherwise block the commit for
+  # ever. Callers override it per batch via PEOF_TIMEOUT — a full test suite
+  # needs far more headroom than a lint pass.
+  TIMEOUT=${PEOF_TIMEOUT:-120}
   TMPDIR=$(mktemp -d) || return 1
   FAILED="$TMPDIR/failed"
   FAILED_BY="$TMPDIR/failed_by"
@@ -59,6 +63,8 @@ parallel_exit_on_failure() {
     shift 2
   done
 
+  _start=$(date +%s)
+
   while true; do
     if [ -f "$FAILED" ]; then
       _kill_all
@@ -83,6 +89,26 @@ parallel_exit_on_failure() {
           fi
         fi
       fi
+      _cleanup
+      [ -n "$_peof_old_e" ] && set -e
+      return 1
+    fi
+
+    # Watchdog. Reports which jobs never finished, so a hang is diagnosable
+    # instead of looking like an ordinary failure.
+    if [ $(( $(date +%s) - _start )) -ge "$TIMEOUT" ]; then
+      # Snapshot who is stuck BEFORE killing: a killed job still records an
+      # exit code on its way out, which would hide it from this list.
+      _stuck=""
+      for _name in $_names; do
+        [ -f "$TMPDIR/$_name.exit" ] || _stuck="$_stuck $_name"
+      done
+      _kill_all
+      wait 2>/dev/null
+      echo "  ✗ timed out after ${TIMEOUT}s"
+      for _name in $_stuck; do
+        echo "    still running: $_name"
+      done
       _cleanup
       [ -n "$_peof_old_e" ] && set -e
       return 1

@@ -579,6 +579,7 @@ export function createProviderManager(config: Config, options: ProviderManagerOp
         ...(provider.apiKey && { apiKey: provider.apiKey }),
         ...(thinkingField ? { thinkingField } : {}),
         ...(sendReasoningInMessages !== undefined ? { sendReasoningInMessages } : {}),
+        apiProtocol: provider.apiProtocol ?? 'auto',
         ...(modelThinking.reasoningEffort &&
           !send.suppressEffort && { reasoningEffort: modelThinking.reasoningEffort }),
       },

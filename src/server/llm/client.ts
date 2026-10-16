@@ -120,15 +120,24 @@ export function createLLMClient(
   const thinkingField = config.llm.thinkingField
   const sendReasoningInMessages = config.llm.sendReasoningInMessages
   const idleTimeout = config.llm.idleTimeout ?? 120_000
+  const apiProtocolOverride = config.llm.apiProtocol
 
   /**
-   * The API protocol the active model speaks on the current backend — derived
-   * from the model profile (gpt-5 family → responses on openai) plus the
-   * OpenCode Go curated table. Re-evaluated on every use so setModel /
-   * setBackend switches take effect.
+   * The API protocol the active model speaks on the current backend — an
+   * explicit provider override wins, then the model profile (gpt-5 family →
+   * responses on openai) plus the OpenCode Go curated table. Re-evaluated on
+   * every use so setModel / setBackend switches take effect.
    */
-  const currentApiProtocol = (): 'chat-completions' | 'responses' =>
-    resolveApiProtocol({ model, backend, profileApiProtocol: profile.apiProtocol })
+  const currentApiProtocol = (): 'chat-completions' | 'responses' => {
+    // Ollama speaks its native /api/chat endpoint, never the Responses API.
+    if (backend === 'ollama') return 'chat-completions'
+    return resolveApiProtocol({
+      model,
+      backend,
+      profileApiProtocol: profile.apiProtocol,
+      explicitApiProtocol: apiProtocolOverride === 'auto' ? undefined : apiProtocolOverride,
+    })
+  }
 
   function buildExtraParams(resolvedEffort: ReasoningEffort | undefined) {
     return {

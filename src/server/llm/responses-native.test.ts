@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildResponsesRequest, parseResponsesResponse, type ResponsesRequestBody } from './responses-native.js'
-import type { ChatCompletionCreateParamsStreaming } from './openai-types.js'
+import type { ChatCompletionCreateParamsStreaming, ChatCompletionMessageParam } from './openai-types.js'
 
 function streamParams(
   overrides: Partial<ChatCompletionCreateParamsStreaming> = {},
@@ -98,6 +98,120 @@ describe('buildResponsesRequest', () => {
     expect(keys).not.toContain('stream_options')
     expect(keys).not.toContain('chat_template_kwargs')
     expect(keys).not.toContain('reasoning_effort')
+  })
+
+  it('converts chat image parts to Responses input_image in message content', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+            ],
+          },
+        ],
+      }),
+    )
+    expect(body.input).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'look at this' },
+          { type: 'input_image', image_url: 'data:image/png;base64,AAAA', detail: 'auto' },
+        ],
+      },
+    ])
+    expect(JSON.stringify(body.input)).not.toContain('"image_url":{')
+  })
+
+  it('accepts an image_url string and preserves an explicit detail', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: 'data:image/jpeg;base64,BBBB', detail: 'high' },
+            ] as unknown as ChatCompletionMessageParam['content'],
+          },
+        ],
+      }),
+    )
+    expect(body.input).toEqual([
+      {
+        role: 'user',
+        content: [{ type: 'input_image', image_url: 'data:image/jpeg;base64,BBBB', detail: 'high' }],
+      },
+    ])
+  })
+
+  it('reads a detail nested inside image_url', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: 'data:image/png;base64,DDDD', detail: 'low' } },
+            ] as unknown as ChatCompletionMessageParam['content'],
+          },
+        ],
+      }),
+    )
+    expect(body.input).toEqual([
+      {
+        role: 'user',
+        content: [{ type: 'input_image', image_url: 'data:image/png;base64,DDDD', detail: 'low' }],
+      },
+    ])
+  })
+
+  it('maps assistant array content to output_text', () => {
+    const body = buildResponsesRequest(
+      streamParams({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'done' }] }] }),
+    )
+    expect(body.input).toEqual([{ role: 'assistant', content: [{ type: 'output_text', text: 'done' }] }])
+  })
+
+  it('passes unknown content part types through unchanged', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+            ] as unknown as ChatCompletionMessageParam['content'],
+          },
+        ],
+      }),
+    )
+    expect(body.input).toEqual([
+      { role: 'user', content: [{ type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } }] },
+    ])
+  })
+
+  it('leaves function_call_output content untouched (chat image parts preserved)', () => {
+    const body = buildResponsesRequest(
+      streamParams({
+        messages: [
+          {
+            role: 'tool',
+            tool_call_id: 'call-1',
+            content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,CCCC' } }],
+          } as unknown as ChatCompletionMessageParam,
+        ],
+      }),
+    )
+    expect(body.input).toEqual([
+      {
+        type: 'function_call_output',
+        call_id: 'call-1',
+        output: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,CCCC' } }],
+      },
+    ])
   })
 })
 

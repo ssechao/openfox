@@ -11,6 +11,7 @@ export interface ProviderInfo {
   isLocal?: boolean
   thinkingField?: string
   sendReasoningInMessages?: boolean
+  apiProtocol?: 'auto' | 'responses' | 'chat-completions'
   authAdapter?: string
   transportAdapter?: string
   credentialRef?: string

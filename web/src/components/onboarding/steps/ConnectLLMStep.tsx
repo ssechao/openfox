@@ -56,6 +56,7 @@ export const ConnectLLMStep = forwardRef<ConnectLLMStepHandle, ConnectLLMStepPro
       isLocal: p.isLocal,
       thinkingField: p.thinkingField,
       sendReasoningInMessages: p.sendReasoningInMessages,
+      apiProtocol: p.apiProtocol,
       authAdapter: p.authAdapter,
       transportAdapter: p.transportAdapter,
       credentialRef: p.credentialRef,

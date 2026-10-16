@@ -63,6 +63,7 @@ const providerSchema = z
     authAdapter: z.string().optional(),
     transportAdapter: z.string().optional(),
     credentialRef: z.string().optional(),
+    apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional(),
     logo: z.string().optional(),
     icon: z.string().optional(),
   })
@@ -84,6 +85,7 @@ const providerSchema = z
     ...(provider.authAdapter ? { authAdapter: provider.authAdapter } : {}),
     ...(provider.transportAdapter ? { transportAdapter: provider.transportAdapter } : {}),
     ...(provider.credentialRef ? { credentialRef: provider.credentialRef } : {}),
+    ...(provider.apiProtocol ? { apiProtocol: provider.apiProtocol } : {}),
     ...(provider.logo ? { logo: provider.logo } : {}),
     ...(provider.icon ? { icon: provider.icon } : {}),
   }))

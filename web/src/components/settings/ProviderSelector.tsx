@@ -1227,6 +1227,7 @@ export function ProviderSelector() {
             isLocal: modalProvider.isLocal,
             thinkingField: modalProvider.thinkingField,
             sendReasoningInMessages: modalProvider.sendReasoningInMessages,
+            apiProtocol: modalProvider.apiProtocol,
             authAdapter: modalProvider.authAdapter,
             transportAdapter: modalProvider.transportAdapter,
             logo: modalProvider.logo,

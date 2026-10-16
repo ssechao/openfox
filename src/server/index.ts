@@ -2413,6 +2413,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models: modelConfigs,
       authAdapter,
       transportAdapter,
+      apiProtocol,
       logo,
       icon,
     } = req.body as {
@@ -2427,6 +2428,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models?: Record<string, unknown>[]
       authAdapter?: string
       transportAdapter?: string
+      apiProtocol?: 'auto' | 'responses' | 'chat-completions'
       logo?: string
       icon?: string
     }
@@ -2460,6 +2462,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         ...(sendReasoningInMessages !== undefined ? { sendReasoningInMessages } : {}),
         ...(authAdapter ? { authAdapter } : {}),
         ...(transportAdapter ? { transportAdapter } : {}),
+        ...(apiProtocol ? { apiProtocol } : {}),
         ...(logo ? { logo } : {}),
         ...(icon ? { icon } : {}),
         models: providerModels,
@@ -2769,6 +2772,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models: modelConfigs,
       authAdapter,
       transportAdapter,
+      apiProtocol,
       logo,
       icon,
     } = req.body as {
@@ -2782,6 +2786,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       models?: Record<string, unknown>[]
       authAdapter?: string | null
       transportAdapter?: string | null
+      apiProtocol?: 'auto' | 'responses' | 'chat-completions' | null
       logo?: string | null
       icon?: string | null
     }
@@ -2802,6 +2807,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       if (sendReasoningInMessages !== undefined) updates['sendReasoningInMessages'] = sendReasoningInMessages
       if (authAdapter !== undefined) updates['authAdapter'] = authAdapter || undefined
       if (transportAdapter !== undefined) updates['transportAdapter'] = transportAdapter || undefined
+      if (apiProtocol !== undefined) updates['apiProtocol'] = apiProtocol || undefined
       if (logo !== undefined) updates['logo'] = logo || undefined
       if (icon !== undefined) updates['icon'] = icon || undefined
       if (modelConfigs !== undefined) {

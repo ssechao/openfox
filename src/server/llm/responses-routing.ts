@@ -18,7 +18,8 @@
  * The `/v1/responses` endpoint is OpenAI-specific: vLLM, Ollama, llama.cpp and
  * friends only speak chat completions, so a global model-name match would
  * wrongly route those. Routing is therefore backend-aware — an explicit
- * per-model override (persisted on the model config) wins over everything.
+ * provider-level override (chosen in the provider settings) wins over
+ * everything.
  *
  * Extensible: future protocols (e.g. 'anthropic-messages') only need a new
  * entry here plus a client; unknown ids keep the default chat/completions
@@ -36,7 +37,7 @@ export interface ProtocolResolutionInput {
   backend: Backend
   /** The model profile's preferred protocol (e.g. gpt-5 family → responses). */
   profileApiProtocol?: ApiProtocol | undefined
-  /** Explicit per-model override persisted on the model config. */
+  /** Explicit provider-level protocol override (from the provider settings). */
   explicitApiProtocol?: ApiProtocol | undefined
 }
 

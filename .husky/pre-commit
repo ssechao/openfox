@@ -11,9 +11,44 @@ script_dir=$(dirname "$0")/..
 
 echo "  Running checks..."
 
+# Static gates are CPU-bound but order-independent, so they run together.
+# The budget only exists to catch a genuine hang, not to police duration: a
+# loaded machine runs the four gates in parallel and typecheck alone can take
+# minutes, which used to look like a hang and refuse the commit.
+PEOF_TIMEOUT=900
+export PEOF_TIMEOUT
 parallel_exit_on_failure \
   "lint"      "npm run lint" \
   "typecheck" "npm run typecheck" \
   "format"    "npm run format" \
-  "duplicate" "npm run duplicate" \
-  "test"      "npm test"
+  "duplicate" "npm run duplicate" || { unset PEOF_TIMEOUT; exit 1; }
+
+# Tests run alone, AFTER the static gates. Parts of the suite race against
+# wall-clock deadlines (agent-loop-pause), so sharing the CPU with four other
+# jobs turns them into false failures — and a red hook that says nothing about
+# the commit is worse than a slower one.
+#
+# The suite also needs a host that can finish it. On a machine that is already
+# busy, or simply slower than the suite's fixed timeouts assume, it fails on
+# flakes that pass in isolation — on an untouched checkout too. Such a clone
+# can send the suite to an idle Docker host instead:
+#
+#   git config openfox.testRemote <ssh-host>   # per clone, never committed
+#   OPENFOX_TEST_REMOTE=1 git commit           # one-off override
+#
+# scripts/test-remote.sh does the sync + container run. Without either switch
+# the suite runs here, exactly as before. The static gates above are always
+# local.
+: "${OPENFOX_E2E_MAX_WORKERS:=4}"
+export OPENFOX_E2E_MAX_WORKERS
+
+# The budget only exists to catch a genuine hang, not to police duration.
+PEOF_TIMEOUT=1800
+export PEOF_TIMEOUT
+REMOTE_HOST=$(git config --get openfox.testRemote 2>/dev/null || true)
+if [ -n "$REMOTE_HOST" ] || [ "${OPENFOX_TEST_REMOTE:-}" = "1" ]; then
+  parallel_exit_on_failure "test" "$script_dir/scripts/test-remote.sh" || { unset PEOF_TIMEOUT; exit 1; }
+else
+  parallel_exit_on_failure "test" "npm test" || { unset PEOF_TIMEOUT; exit 1; }
+fi
+unset PEOF_TIMEOUT

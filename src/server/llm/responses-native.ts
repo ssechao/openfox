@@ -57,6 +57,29 @@ export interface ResponsesRequestBody {
 
 type ResponsesInputItem = Record<string, unknown>
 
+function convertContentPart(part: Record<string, unknown>, role: string): Record<string, unknown> {
+  if (part['type'] === 'text' && typeof part['text'] === 'string') {
+    return { type: role === 'assistant' ? 'output_text' : 'input_text', text: part['text'] }
+  }
+
+  if (part['type'] === 'image_url') {
+    const raw = part['image_url']
+    const url = typeof raw === 'string' ? raw : (raw as { url?: unknown } | undefined)?.['url']
+    if (typeof url === 'string') {
+      const nested = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>)['detail'] : undefined
+      const detail = typeof part['detail'] === 'string' ? part['detail'] : typeof nested === 'string' ? nested : 'auto'
+      return { type: 'input_image', image_url: url, detail }
+    }
+  }
+
+  return part
+}
+
+function convertMessageContent(content: ChatCompletionMessageParam['content'], role: string): unknown {
+  if (!Array.isArray(content)) return content ?? ''
+  return content.map((part) => convertContentPart(part as Record<string, unknown>, role))
+}
+
 function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInputItem | null {
   if (message.role === 'system' || message.role === 'developer') return null
 
@@ -68,7 +91,9 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
     // Assistant messages carrying tool calls become function_call items; the
     // textual part (usually empty in agent loops) is emitted before them.
     const items: ResponsesInputItem[] = []
-    if (message.content) items.push({ role: 'assistant', content: message.content })
+    if (message.content) {
+      items.push({ role: 'assistant', content: convertMessageContent(message.content, 'assistant') })
+    }
     for (const toolCall of message.tool_calls) {
       items.push({
         type: 'function_call',
@@ -80,7 +105,7 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
     return items.length === 1 ? items[0]! : { __multi: items }
   }
 
-  return { role: message.role, content: message.content ?? '' }
+  return { role: message.role, content: convertMessageContent(message.content, message.role) }
 }
 
 function flattenInput(items: Array<ResponsesInputItem>): Array<ResponsesInputItem> {

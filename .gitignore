@@ -3,11 +3,13 @@ node_modules/
 
 # Build outputs
 dist/
+dist-bin/
 dist-sea/
 dist-sea-bundle/
 out/
 launcher/
 *.tsbuildinfo
+/*.tgz
 
 # Database
 *.db

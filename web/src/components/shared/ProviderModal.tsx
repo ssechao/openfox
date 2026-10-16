@@ -104,6 +104,7 @@ export interface ProviderFormData {
   isLocal?: boolean
   thinkingField?: string
   sendReasoningInMessages?: boolean
+  apiProtocol?: 'auto' | 'responses' | 'chat-completions'
   authAdapter?: string
   transportAdapter?: string
   logo?: string
@@ -119,6 +120,7 @@ export function providerFormPayload(formData: ProviderFormData) {
     isLocal: formData.isLocal,
     thinkingField: formData.thinkingField,
     sendReasoningInMessages: formData.sendReasoningInMessages,
+    apiProtocol: formData.apiProtocol,
     authAdapter: formData.authAdapter,
     transportAdapter: formData.transportAdapter,
     logo: formData.logo,
@@ -140,6 +142,7 @@ interface ProviderModalProps {
     isLocal?: boolean
     thinkingField?: string
     sendReasoningInMessages?: boolean
+    apiProtocol?: 'auto' | 'responses' | 'chat-completions'
     authAdapter?: string
     transportAdapter?: string
     logo?: string
@@ -736,6 +739,7 @@ export function ProviderModal({
   const [showDefaults, setShowDefaults] = useState(false)
   const [thinkingField, setThinkingField] = useState('')
   const [sendReasoningInMessages, setSendReasoningInMessages] = useState(true)
+  const [apiProtocol, setApiProtocol] = useState<'auto' | 'responses' | 'chat-completions'>('auto')
   const [modelConfigs, setModelConfigs] = useState<Record<string, ModelConfig>>({})
   const [autoConfigState, setAutoConfigState] = useState<{
     loading: boolean
@@ -973,6 +977,7 @@ export function ProviderModal({
       setFetchError(null)
       setThinkingField(editProvider?.thinkingField ?? '')
       setSendReasoningInMessages(editProvider?.sendReasoningInMessages ?? true)
+      setApiProtocol(editProvider?.apiProtocol ?? 'auto')
       setTestResults({})
       setRawModalData(null)
       setDraftProviderId(null)
@@ -1425,6 +1430,7 @@ export function ProviderModal({
       isLocal: formIsLocal,
       thinkingField: thinkingField || undefined,
       sendReasoningInMessages,
+      apiProtocol,
       authAdapter: formAuthAdapter,
       transportAdapter: formTransportAdapter,
       logo: formLogo.trim() || undefined,
@@ -2469,6 +2475,41 @@ export function ProviderModal({
                   fr: 'Nom du champ que le backend utilise pour le contenu de raisonnement/réflexion (ex. reasoning, reasoning_content, thinking).',
                 })}
               </p>
+            </div>
+            <div>
+              <label className="text-xs text-text-secondary block mb-1">
+                {t({ en: 'API protocol', fr: 'Protocole d’API' })}
+              </label>
+              <select
+                aria-label={t({ en: 'API protocol', fr: 'Protocole d’API' })}
+                value={apiProtocol}
+                onChange={(e) => setApiProtocol(e.target.value as 'auto' | 'responses' | 'chat-completions')}
+                className="w-full px-3 py-2 bg-bg-primary border border-border rounded text-sm text-text-primary"
+              >
+                <option value="auto">
+                  {t({ en: 'Auto (derive from model and backend)', fr: 'Auto (déduit du modèle et du backend)' })}
+                </option>
+                <option value="responses">
+                  {t({ en: 'Responses (/v1/responses)', fr: 'Responses (/v1/responses)' })}
+                </option>
+                <option value="chat-completions">
+                  {t({ en: 'Chat Completions (/v1/chat/completions)', fr: 'Chat Completions (/v1/chat/completions)' })}
+                </option>
+              </select>
+              <p className="text-xs text-text-muted mt-1">
+                {t({
+                  en: 'Force the wire protocol for this provider. Keep Auto unless the provider serves a model only through /v1/responses.',
+                  fr: 'Force le protocole réseau de ce fournisseur. Gardez Auto sauf si le fournisseur ne sert un modèle que via /v1/responses.',
+                })}
+              </p>
+              {formBackend === 'ollama' && (
+                <p className="text-xs text-text-muted mt-1">
+                  {t({
+                    en: 'Ignored for Ollama: requests always use the native /api/chat endpoint.',
+                    fr: 'Ignoré pour Ollama : les requêtes utilisent toujours l’endpoint natif /api/chat.',
+                  })}
+                </p>
+              )}
             </div>
             <label className="flex items-center gap-2 cursor-pointer">
               <input

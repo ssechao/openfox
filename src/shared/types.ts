@@ -913,6 +913,8 @@ export interface Provider {
   thinkingField?: string
   /** When false, strips reasoning/thinking content from outgoing assistant messages */
   sendReasoningInMessages?: boolean
+  /** Wire protocol for this provider: 'auto' derives it from the model/backend. */
+  apiProtocol?: 'auto' | 'responses' | 'chat-completions'
   /** Custom logo or icon URL/SVG for the provider */
   logo?: string
   icon?: string
@@ -936,6 +938,8 @@ export interface Config {
     thinkingField?: string
     /** When false, strips reasoning/thinking content from outgoing assistant messages */
     sendReasoningInMessages?: boolean
+    /** Explicit wire protocol override ('auto' derives it from the model/backend). */
+    apiProtocol?: 'auto' | 'responses' | 'chat-completions'
     /** Vision model for image description fallback when primary model lacks vision support */
     visionModel?: string
   }

@@ -442,6 +442,38 @@ describe('config', () => {
       }),
     ])
   })
+
+  describe('provider apiProtocol', () => {
+    it('survives a save/load round-trip (the schema must not strip it)', async () => {
+      const provider = {
+        id: 'innovup',
+        name: 'InnovUp Provider',
+        url: 'http://192.168.71.122:3457/v1',
+        backend: 'unknown' as const,
+        models: [],
+        isActive: true,
+        createdAt: new Date().toISOString(),
+        apiProtocol: 'responses' as const,
+      }
+
+      await saveGlobalConfig('production', { providers: [provider] })
+      const loaded = await loadGlobalConfig('production')
+
+      expect(loaded.providers[0]?.apiProtocol).toBe('responses')
+    })
+
+    it('drops an unknown apiProtocol value', async () => {
+      await writeFile(
+        join(TEST_DIR, 'production', 'config.json'),
+        JSON.stringify({
+          providers: [{ id: 'p', name: 'p', url: 'http://x', backend: 'unknown', apiProtocol: 'bogus' }],
+        }),
+      )
+
+      const loaded = await loadGlobalConfig('production')
+      expect(loaded.providers[0]?.apiProtocol).toBeUndefined()
+    })
+  })
 })
 
 describe('resolveVisionFallback', () => {
