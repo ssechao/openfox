@@ -1,12 +1,17 @@
 #!/bin/sh
 
+script_dir=$(dirname "$0")/..
+REMOTE_HOST=$(git config --get openfox.testRemote 2>/dev/null || true)
+if [ -n "$REMOTE_HOST" ] || [ "${OPENFOX_TEST_REMOTE:-}" = "1" ]; then
+  exec "$script_dir/scripts/test-remote.sh" --all
+fi
+
 STAGED=$(git diff --cached --name-only --diff-filter=d)
 if [ -n "$STAGED" ]; then
   echo "$STAGED" | xargs npx prettier --write --ignore-unknown || exit 1
 fi
 git add -u
 
-script_dir=$(dirname "$0")/..
 . "$script_dir/scripts/parallel-exit-on-failure.sh"
 
 echo "  Running checks..."
@@ -36,9 +41,8 @@ parallel_exit_on_failure \
 #   git config openfox.testRemote <ssh-host>   # per clone, never committed
 #   OPENFOX_TEST_REMOTE=1 git commit           # one-off override
 #
-# scripts/test-remote.sh does the sync + container run. Without either switch
-# the suite runs here, exactly as before. The static gates above are always
-# local.
+# Without remote configuration this fallback runs the suite locally.
+# Configured clones exit near the top of this hook and run every gate remotely.
 : "${OPENFOX_E2E_MAX_WORKERS:=4}"
 export OPENFOX_E2E_MAX_WORKERS
 

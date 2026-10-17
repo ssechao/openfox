@@ -59,6 +59,18 @@ Default ports: **10469** (dev), **10369** (prod). The password is `password`.
 
 If it is not running, use the dev_server tool to start it
 
+### Production deployment boundary
+
+For this project, **deploy means only preparing/installing the production binary and web assets** (for example, updating the deployed checkout and running the production build). It never includes stopping, starting, restarting, booting out, or kickstarting OpenFox services.
+
+The user exclusively controls production process lifecycle, including launchd services such as ports 450 and 10550. After a deploy, report that the binary is ready and wait for the user to perform any stop/start. Do not launch a persistent/background restart helper, and do not ask another session to restart unless the user explicitly requests that communication.
+
+### Remote-only pre-commit on this Mac
+
+Agents must never run the pre-commit workload on this Mac: its fixed-timeout tests become extremely slow and unreliable under local load. Before any user-requested commit, verify that `git config openfox.testRemote` is set to `ssechao@192.168.71.122`. With that setting, `.husky/pre-commit` delegates **all** gates (typecheck, lint, format, duplicate detection, unit tests, and e2e tests) to Docker on `.122`.
+
+Do not unset or bypass that remote configuration, do not run the local fallback, and do not use `HUSKY=0` or `--no-verify`. If `.122` is unavailable, stop and report the blocker instead of committing. The local `git commit` process may only create the commit after the remote hook succeeds; it must not execute project checks on the Mac.
+
 ### Single Test File
 
 ```bash
@@ -98,13 +110,13 @@ OPENFOX_TEST_VERBOSE=true npx vitest run
 
 ### Git Commands
 
-Precommit hooks take >40s, so always use a 120s timeout when committing:
+On this Mac, the pre-commit hook delegates every project gate to Docker on `.122`. A requested commit must use a 30-minute command timeout so the remote gate can finish without being killed:
 
 ```bash
-git commit -m "message"   # timeout: 120000ms
+git commit -m "message"   # timeout: 1800000ms
 ```
 
-Never skip the hooks unless the user explicitly asks.
+Before committing, verify `git config openfox.testRemote` is `ssechao@192.168.71.122`. Never skip the hook, never run its workload locally, and never use `HUSKY=0` or `--no-verify`.
 
 ### Release
 

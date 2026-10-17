@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run the full test suite (unit + e2e) in a container on a remote Docker host.
+# Run the test suite, or every pre-commit gate with --all, in a remote Docker container.
 #
 # Why this exists: the pre-commit hook used to run the whole suite on whichever
 # machine was committing. On a host that is already busy — or simply slower than
@@ -12,6 +12,9 @@
 #
 # Configuration (per clone, never committed):
 #   git config openfox.testRemote <ssh-host>      e.g. ssechao@192.168.71.122
+# Usage:
+#   scripts/test-remote.sh          # unit + e2e
+#   scripts/test-remote.sh --all    # check + unit + e2e
 # Overrides: OPENFOX_TEST_HOST, OPENFOX_TEST_REMOTE_DIR, OPENFOX_TEST_IMAGE,
 #   OPENFOX_TEST_USER, OPENFOX_E2E_MAX_WORKERS
 set -eu
@@ -27,7 +30,13 @@ DIR=${OPENFOX_TEST_REMOTE_DIR:-/tmp/openfox-precommit}
 IMAGE=${OPENFOX_TEST_IMAGE:-node:24-bookworm}
 RUN_USER=${OPENFOX_TEST_USER:-node}
 WORKERS=${OPENFOX_E2E_MAX_WORKERS:-4}
+MODE=${1:-test}
 SSH="ssh -o BatchMode=yes"
+
+if [ "$MODE" != "test" ] && [ "$MODE" != "--all" ]; then
+  echo "test-remote: usage: $0 [--all]" >&2
+  exit 2
+fi
 
 if ! $SSH -o ConnectTimeout=8 "$HOST" true 2>/dev/null; then
   echo "test-remote: cannot reach $HOST over ssh (BatchMode)." >&2
@@ -39,7 +48,11 @@ if ! $SSH "$HOST" 'docker info >/dev/null 2>&1'; then
   exit 1
 fi
 
-echo "  Running the suite on $HOST ($IMAGE)..."
+if [ "$MODE" = "--all" ]; then
+  echo "  Running all pre-commit gates on $HOST ($IMAGE)..."
+else
+  echo "  Running the suite on $HOST ($IMAGE)..."
+fi
 $SSH "$HOST" "mkdir -p '$DIR'"
 
 # --delete keeps the remote tree identical to this one; the excludes are the
@@ -66,5 +79,10 @@ if ! $SSH "$HOST" "test -d '$DIR/node_modules'"; then
   }
 fi
 
-# The exit code is the suite's: ssh forwards the container's status.
-$SSH "$HOST" "docker run --rm --user '$RUN_USER' -v '$DIR:/work' -w /work '$IMAGE' sh -c 'OPENFOX_E2E_MAX_WORKERS=$WORKERS npm test'"
+if [ "$MODE" = "--all" ]; then
+  COMMAND="npm run check && OPENFOX_E2E_MAX_WORKERS=$WORKERS npm test"
+else
+  COMMAND="OPENFOX_E2E_MAX_WORKERS=$WORKERS npm test"
+fi
+
+$SSH "$HOST" "docker run --rm --user '$RUN_USER' -v '$DIR:/work' -w /work '$IMAGE' sh -c '$COMMAND'"
