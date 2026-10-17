@@ -70,3 +70,4 @@ worktrees/
 .agent-office/
 
 /plugins/
+/report/private/

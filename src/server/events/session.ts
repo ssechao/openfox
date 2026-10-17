@@ -35,7 +35,6 @@ import { getEventStore } from './store.js'
 import { getRuntimeConfig } from '../runtime-config.js'
 import {
   foldSessionState,
-  foldContextState,
   buildContextMessagesFromEventHistory,
   buildMessagesFromStoredEvents,
   spreadOptionalMessageFields,
@@ -319,10 +318,7 @@ export function getContextMessages(sessionId: string): ContextMessage[] {
  */
 export function getCurrentContextWindowId(sessionId: string): string | undefined {
   const eventStore = getEventStore()
-  const events = eventStore.getEvents(sessionId)
-
-  const contextResult = foldContextState(events, '')
-  return contextResult.currentContextWindowId || undefined
+  return eventStore.getCurrentWindowId(sessionId)
 }
 
 export function getCurrentWindowMessageOptions(sessionId: string): { contextWindowId: string } | undefined {

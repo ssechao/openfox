@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3'
 vi.mock('better-sqlite3', () => ({
   default: class MockDatabase {
     exec = vi.fn()
+    pragma = vi.fn(() => 1)
     prepare = vi.fn(() => ({
       run: vi.fn(() => ({ changes: 0 })),
       get: vi.fn(() => ({ max_seq: 0 })),
@@ -126,6 +127,7 @@ describe('WebSocket Message Ordering Integration', () => {
     let seqCounter = 0
     const mockDb = {
       exec: vi.fn(),
+      pragma: vi.fn(() => 1),
       prepare: vi.fn(() => ({
         run: vi.fn(() => ({ changes: 0 })),
         get: vi.fn(() => ({ max_seq: seqCounter++ })),
@@ -272,6 +274,7 @@ describe('WebSocket Message Ordering Integration', () => {
     let seqCounter = 0
     const mockDb = {
       exec: vi.fn(),
+      pragma: vi.fn(() => 1),
       prepare: vi.fn(() => ({
         run: vi.fn(() => ({ changes: 0 })),
         get: vi.fn(() => ({ max_seq: seqCounter++ })),

@@ -201,7 +201,7 @@ export function getConversationMessages(
   options?: { events?: StoredEvent[] },
 ): RequestContextMessage[] {
   const eventStore = getEventStore()
-  const events = options?.events ?? eventStore.getEvents(scope.sessionId)
+  const events = options?.events ?? eventStore.getReplayEvents(scope.sessionId)
   if (events.length === 0) return []
 
   const contextMessages = buildContextMessages(events, scope)
@@ -237,7 +237,7 @@ export async function processEventsForConversation(
   onEvent: (event: TurnEvent) => void,
 ): Promise<StoredEvent[]> {
   const eventStore = getEventStore()
-  const rawEvents = eventStore.getEvents(sessionId)
+  const rawEvents = eventStore.getReplayEvents(sessionId)
   const modelVision = modelSupportsVision(llmClient.getModel())
   const visionModel = await loadResolvedVisionModel()
   const { events: processedEvents } = await processContextImages(rawEvents, {

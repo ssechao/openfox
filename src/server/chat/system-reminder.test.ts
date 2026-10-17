@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { getEventStore } from '../events/store.js'
+import { foldContextState } from '../events/fold-state.js'
 import { runChatTurn } from './orchestrator.js'
 import { loadAllAgentsDefault } from '../agents/registry.js'
 
@@ -28,6 +29,9 @@ function createEventStore(initialEvents: any[] = []) {
       events.push(event)
     }),
     getEvents: vi.fn(() => events),
+    getCurrentWindowId: vi.fn(() => foldContextState(events, '').currentContextWindowId || undefined),
+    getReplayEvents: vi.fn(() => events),
+    measureSnapshotOperation: <T>(_operation: string, work: () => T): T => work(),
     getAllEvents: vi.fn(() => events),
     getLatestSnapshot: vi.fn().mockReturnValue(undefined),
     cleanupOldEvents: vi.fn(),

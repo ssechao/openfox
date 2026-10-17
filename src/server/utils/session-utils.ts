@@ -7,22 +7,7 @@ import { getEventStore } from '../events/index.js'
 
 export function getSessionMessageCount(sessionId: string): number {
   const eventStore = getEventStore()
-  const events = eventStore.getEvents(sessionId)
-
-  let count = 0
-  for (const event of events) {
-    if (event.type === 'message.start') {
-      const data = event.data as { role: string; isSystemGenerated?: boolean }
-      // System-generated messages (task reminders, auto prompts) are not
-      // "real" user input — they must not count as the first user message so
-      // auto session naming keys off the actual prompt.
-      if (data.role === 'user' && !data.isSystemGenerated) {
-        count++
-      }
-    }
-  }
-
-  return count
+  return eventStore.getUserMessageCount(sessionId)
 }
 
 export function finalizeTurnCompletion(

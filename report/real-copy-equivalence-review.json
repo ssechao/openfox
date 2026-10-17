@@ -1,0 +1,56 @@
+{
+  "source": "private consistent copy",
+  "cases": [
+    {
+      "sessionHash": "dd4e785a9e8103d6",
+      "snapshotJsonUnits": 106915733,
+      "events": 2,
+      "equivalent": true,
+      "warmedSnapshotParses": 0
+    },
+    {
+      "sessionHash": "9e81a1246e621525",
+      "snapshotJsonUnits": 88198805,
+      "events": 2,
+      "equivalent": true,
+      "warmedSnapshotParses": 0
+    },
+    {
+      "sessionHash": "387bb9c7606c45c7",
+      "snapshotJsonUnits": 70100951,
+      "events": 2,
+      "equivalent": true,
+      "warmedSnapshotParses": 0
+    },
+    {
+      "sessionHash": "dbe9683236e83611",
+      "snapshotJsonUnits": 67451648,
+      "events": 2,
+      "equivalent": true,
+      "warmedSnapshotParses": 0
+    },
+    {
+      "sessionHash": "851d3ae78ad00d7b",
+      "snapshotJsonUnits": 57505683,
+      "events": 19,
+      "equivalent": true,
+      "warmedSnapshotParses": 0
+    },
+    {
+      "sessionHash": "2fd21f9cc5e3aa04",
+      "snapshotJsonUnits": 52760318,
+      "events": 2,
+      "equivalent": true,
+      "warmedSnapshotParses": 0
+    },
+    {
+      "sessionHash": "18a1be2420ae11de",
+      "snapshotJsonUnits": 52086539,
+      "events": 1544,
+      "equivalent": true,
+      "warmedSnapshotParses": 0
+    }
+  ],
+  "sourceContentPublished": false,
+  "comparison": "Exact digests; fresh attachment UUID sequence seeded identically in each LLM fold"
+}

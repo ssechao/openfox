@@ -709,7 +709,7 @@ describe('buildContextMessages', () => {
         makeEvent({ seq: nextSeq(), type: 'message.done', data: { messageId: 'm-summary' } }),
       ]
       ;(getEventStore as ReturnType<typeof vi.fn>).mockReturnValue({
-        getEvents: () => events,
+        getReplayEvents: () => events,
       })
 
       const scope: SubAgentScope = {

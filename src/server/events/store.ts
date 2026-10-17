@@ -20,6 +20,14 @@ import type { TurnEvent, StoredEvent, SessionSnapshot, SnapshotMessage } from '.
 import { logger } from '../utils/logger.js'
 import { foldSessionState, buildSnapshot, trimSnapshotStreamingOutput } from './folding.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
+import { immutableSnapshot } from './immutable-snapshot.js'
+import { foldContextState } from './fold-state.js'
+import {
+  emptyStoreDiagnostics,
+  measureStoreOperation,
+  type StoreDiagnostics,
+  type StoreTiming,
+} from './store-diagnostics.js'
 
 // Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
 // auto-pruned on the next migration invocation (startup auto-run or manual
@@ -34,6 +42,11 @@ const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 function isUniqueConstraintError(error: unknown): boolean {
   const err = error as NodeJS.ErrnoException
   return err?.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err?.message ?? '').includes('UNIQUE constraint failed')
+}
+
+function isUserStart(event: { type: string; data: unknown }): boolean {
+  const data = event.data as { role?: string; isSystemGenerated?: boolean }
+  return event.type === 'message.start' && data.role === 'user' && !data.isSystemGenerated
 }
 
 function compactArchivedResult(
@@ -192,14 +205,156 @@ export class EventStore {
   private static readonly PROMPTS_QUERY_LIMIT = 100
   private static readonly RECENT_PROMPTS_MAX_ENTRIES = 20
 
-  constructor(db: Database.Database) {
+  private diagnostics: StoreDiagnostics | null
+  private readonly hotPath: boolean
+  private dataVersion: number | undefined
+  private projections = new Map<string, { windowId: string | undefined; userCount: number }>()
+  private activeSessions = new Map<string, boolean>()
+  private replayPrefixes = new Map<string, { seq: number; events: StoredEvent[]; serializedBytes: number }>()
+
+  private checkExternalWrites(): void {
+    if (!this.hotPath) return
+    const version = this.measureSnapshotOperation(
+      'dataVersion',
+      () => this.db.pragma('data_version', { simple: true }) as number,
+    )
+    if (this.dataVersion !== undefined && version !== this.dataVersion) this.clearSnapshotCache()
+    this.dataVersion = version
+  }
+
+  private currentProjection(sessionId: string): { windowId: string | undefined; userCount: number } {
+    this.checkExternalWrites()
+    let projection = this.projections.get(sessionId)
+    if (!projection) {
+      const events = this.getReplayEvents(sessionId)
+      projection = {
+        windowId: foldContextState(events, '').currentContextWindowId || undefined,
+        userCount: events.filter(isUserStart).length,
+      }
+      this.projections.set(sessionId, projection)
+    }
+    return projection
+  }
+
+  getCurrentWindowId(sessionId: string): string | undefined {
+    return this.hotPath
+      ? this.currentProjection(sessionId).windowId
+      : foldContextState(this.getEvents(sessionId), '').currentContextWindowId || undefined
+  }
+
+  getUserMessageCount(sessionId: string): number {
+    return this.hotPath
+      ? this.currentProjection(sessionId).userCount
+      : this.getEvents(sessionId).filter(isUserStart).length
+  }
+
+  getReplayEvents(sessionId: string): StoredEvent[] {
+    if (!this.hotPath) return this.getEvents(sessionId)
+    return this.db.transaction(() => {
+      const snapshot = this.getLatestSnapshot(sessionId)
+      if (!snapshot) {
+        const rows = this.db
+          .prepare(
+            `SELECT e.* FROM events e LEFT JOIN tombstones t
+          ON e.session_id=t.session_id AND e.seq=t.seq
+          WHERE e.session_id=? AND t.seq IS NULL ORDER BY e.seq`,
+          )
+          .all(sessionId) as EventRow[]
+        return rows.map((row) => this.rowToStoredEvent(row))
+      }
+      let prefix = this.replayPrefixes.get(sessionId)
+      if (!prefix || prefix.seq !== snapshot.seq) {
+        const rows = this.db
+          .prepare(
+            `SELECT e.* FROM events e LEFT JOIN tombstones t
+          ON e.session_id=t.session_id AND e.seq=t.seq
+          WHERE e.session_id=? AND e.seq<? AND t.seq IS NULL ORDER BY e.seq`,
+          )
+          .all(sessionId, snapshot.seq) as EventRow[]
+        prefix = {
+          seq: snapshot.seq,
+          events: rows.map((row) => immutableSnapshot(this.rowToStoredEvent(row))),
+          serializedBytes: this.diagnostics
+            ? rows.reduce((total, row) => total + Buffer.byteLength(row.payload), 0)
+            : 0,
+        }
+        this.replayPrefixes.set(sessionId, prefix)
+      }
+      return [...prefix.events, snapshot, ...this.getEvents(sessionId, snapshot.seq + 1)]
+    })()
+  }
+
+  private publishEvent(stored: StoredEvent, bytes: number): void {
+    const event = { type: stored.type, data: stored.data } as TurnEvent
+    const projection = this.projections.get(stored.sessionId)
+    if (this.hotPath && projection) {
+      if (event.type === 'session.initialized') projection.windowId = event.data.contextWindowId
+      if (event.type === 'context.compacted' && !event.data.subAgentId) projection.windowId = event.data.newWindowId
+      if (event.type === 'turn.snapshot') projection.windowId = event.data.currentContextWindowId
+      if (event.type === 'message.start' && event.data.role === 'user' && !event.data.isSystemGenerated)
+        projection.userCount++
+    }
+    if (this.hotPath && event.type === 'running.changed') {
+      this.activeSessions.set(stored.sessionId, event.data.isRunning)
+      this.evictSnapshots()
+    }
+    if (this.hotPath && event.type === 'turn.snapshot' && stored.seq === this.getLatestSnapshotSeq(stored.sessionId)) {
+      if (!this.activeSessions.has(stored.sessionId))
+        this.activeSessions.set(stored.sessionId, this.readRunning(stored.sessionId, event.data.isRunning))
+      this.measureSnapshotOperation('snapshotCacheInstall', () =>
+        this.cacheSnapshot(stored.sessionId, immutableSnapshot(stored), bytes),
+      )
+    }
+  }
+
+  private readRunning(sessionId: string, fallback: boolean): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT e.payload FROM events e LEFT JOIN tombstones t
+      ON e.session_id=t.session_id AND e.seq=t.seq
+      WHERE e.session_id=? AND e.event_type='running.changed' AND t.seq IS NULL ORDER BY e.seq DESC LIMIT 1`,
+      )
+      .get(sessionId) as { payload: string } | undefined
+    return row ? (JSON.parse(row.payload) as { isRunning: boolean }).isRunning : fallback
+  }
+
+  constructor(db: Database.Database, options: { diagnostics?: boolean; hotPath?: boolean } = {}) {
+    this.diagnostics =
+      (options.diagnostics ?? process.env['OPENFOX_SNAPSHOT_DIAGNOSTICS'] === '1') ? emptyStoreDiagnostics() : null
+    this.hotPath = options.hotPath ?? process.env['OPENFOX_SNAPSHOT_HOT_PATH'] !== '0'
     this.db = db
     this.initSchema()
+    this.checkExternalWrites()
   }
 
   // --------------------------------------------------------------------------
   // Schema
   // --------------------------------------------------------------------------
+
+  getDiagnostics(): StoreDiagnostics | null {
+    if (!this.diagnostics) return null
+    const result = structuredClone(this.diagnostics)
+    result.replayPrefixes.entries = this.replayPrefixes.size
+    for (const prefix of this.replayPrefixes.values()) {
+      result.replayPrefixes.events += prefix.events.length
+      result.replayPrefixes.serializedBytes += prefix.serializedBytes
+    }
+    return result
+  }
+
+  resetDiagnostics(): void {
+    if (this.diagnostics) this.diagnostics = emptyStoreDiagnostics()
+  }
+
+  measureSnapshotOperation<T>(operation: StoreTiming, work: () => T): T {
+    return measureStoreOperation(this.diagnostics, operation, work)
+  }
+
+  private serializeEvent(event: TurnEvent): string {
+    return event.type === 'turn.snapshot'
+      ? this.measureSnapshotOperation('snapshotStringify', () => JSON.stringify(event.data))
+      : JSON.stringify(event.data)
+  }
 
   private initSchema(): void {
     this.db.exec(`
@@ -247,6 +402,12 @@ export class EventStore {
    * Append a single event to a session
    */
   append(sessionId: string, event: TurnEvent): StoredEvent {
+    return event?.type === 'turn.snapshot'
+      ? this.measureSnapshotOperation('snapshotAppend', () => this.appendEvent(sessionId, event))
+      : this.appendEvent(sessionId, event)
+  }
+
+  private appendEvent(sessionId: string, event: TurnEvent): StoredEvent {
     if (!sessionId || typeof sessionId !== 'string') {
       throw new Error('Invalid sessionId: must be a non-empty string')
     }
@@ -257,7 +418,9 @@ export class EventStore {
       throw new Error('Invalid event: must have data object')
     }
 
+    this.checkExternalWrites()
     const timestamp = Date.now()
+    const payload = this.serializeEvent(event)
     const insert = this.db.prepare(
       `INSERT INTO events (session_id, seq, timestamp, event_type, payload)
        VALUES (?, ?, ?, ?, ?)`,
@@ -268,7 +431,7 @@ export class EventStore {
     let seq = this.getNextSeq(sessionId)
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
-        insert.run(sessionId, seq, timestamp, event.type, JSON.stringify(event.data))
+        insert.run(sessionId, seq, timestamp, event.type, payload)
         break
       } catch (error) {
         if (!isUniqueConstraintError(error) || attempt === 99) throw error
@@ -287,6 +450,7 @@ export class EventStore {
       data: event.data,
     }
 
+    this.publishEvent(stored, payload.length)
     this.notifySubscribers(sessionId, stored)
 
     return stored
@@ -297,8 +461,9 @@ export class EventStore {
    */
   appendBatch(sessionId: string, events: TurnEvent[]): StoredEvent[] {
     if (events.length === 0) return []
-
+    this.checkExternalWrites()
     const timestamp = Date.now()
+    const payloads = events.map((event) => this.serializeEvent(event))
 
     const insert = this.db.prepare(
       `INSERT INTO events (session_id, seq, timestamp, event_type, payload)
@@ -316,7 +481,7 @@ export class EventStore {
         const transaction = this.db.transaction(() => {
           let seq = baseSeq
           for (const event of events) {
-            insert.run(sessionId, seq, timestamp, event.type, JSON.stringify(event.data))
+            insert.run(sessionId, seq, timestamp, event.type, payloads[seq - baseSeq])
             const stored: StoredEvent = {
               seq,
               timestamp,
@@ -334,6 +499,7 @@ export class EventStore {
           const event = { type: stored.type, data: stored.data } as TurnEvent
           this.updateRecentUserPrompts(sessionId, event, stored.timestamp)
           this.invalidateSessionCache(sessionId, event)
+          this.publishEvent(stored, payloads[stored.seq - baseSeq]!.length)
         }
 
         // Notify after transaction commits
@@ -358,7 +524,10 @@ export class EventStore {
    */
   importEvents(sessionId: string, events: StoredEvent[]): StoredEvent[] {
     if (events.length === 0) return []
-
+    this.checkExternalWrites()
+    const payloads = new Map(
+      events.map((event) => [event.seq, this.serializeEvent({ type: event.type, data: event.data } as TurnEvent)]),
+    )
     const insert = this.db.prepare(
       `INSERT INTO events (session_id, seq, timestamp, event_type, payload)
        VALUES (?, ?, ?, ?, ?)`,
@@ -366,16 +535,19 @@ export class EventStore {
 
     const transaction = this.db.transaction(() => {
       for (const event of events) {
-        insert.run(sessionId, event.seq, event.timestamp, event.type, JSON.stringify(event.data))
+        insert.run(sessionId, event.seq, event.timestamp, event.type, payloads.get(event.seq))
       }
     })
     transaction()
 
+    this.projections.delete(sessionId)
+    this.replayPrefixes.delete(sessionId)
     const stored: StoredEvent[] = events.map((event) => ({ ...event, sessionId }))
-    for (const event of stored) {
+    for (const event of [...stored].sort((a, b) => a.seq - b.seq)) {
       const turnEvent = { type: event.type, data: event.data } as TurnEvent
       this.updateRecentUserPrompts(sessionId, turnEvent, event.timestamp)
       this.invalidateSessionCache(sessionId, turnEvent)
+      this.publishEvent(event, payloads.get(event.seq)!.length)
       this.notifySubscribers(sessionId, event)
     }
     return stored
@@ -396,6 +568,7 @@ export class EventStore {
    * Get all events for a session, optionally starting from a specific seq
    */
   getEvents(sessionId: string, fromSeq?: number): StoredEvent[] {
+    if (this.diagnostics && fromSeq === undefined) this.diagnostics.fullReads++
     const query =
       fromSeq !== undefined
         ? `SELECT e.* FROM events e
@@ -441,6 +614,7 @@ export class EventStore {
     })
 
     transaction()
+    this.invalidateSessionCache(sessionId)
     return count
   }
 
@@ -469,22 +643,28 @@ export class EventStore {
    * Get the latest snapshot event for a session
    */
   getLatestSnapshot(sessionId: string): StoredEvent<Extract<TurnEvent, { type: 'turn.snapshot' }>> | undefined {
+    this.checkExternalWrites()
     const cached = this.snapshotCache.get(sessionId)
     if (cached) {
+      if (this.diagnostics) this.diagnostics.snapshotCacheHits++
       return cached.stored as StoredEvent<Extract<TurnEvent, { type: 'turn.snapshot' }>>
     }
 
+    if (this.diagnostics) this.diagnostics.snapshotCacheMisses++
     const row = this.db
       .prepare(
-        `SELECT * FROM events 
-         WHERE session_id = ? AND event_type = 'turn.snapshot' 
-         ORDER BY seq DESC LIMIT 1`,
+        `SELECT e.* FROM events e LEFT JOIN tombstones t ON e.session_id=t.session_id AND e.seq=t.seq
+         WHERE e.session_id = ? AND e.event_type = 'turn.snapshot' AND t.seq IS NULL
+         ORDER BY e.seq DESC LIMIT 1`,
       )
       .get(sessionId) as EventRow | undefined
 
     if (!row) return undefined
 
-    const stored = this.rowToStoredEvent(row) as StoredEvent<Extract<TurnEvent, { type: 'turn.snapshot' }>>
+    const parsed = this.rowToStoredEvent(row) as StoredEvent<Extract<TurnEvent, { type: 'turn.snapshot' }>>
+    const stored = this.hotPath ? immutableSnapshot(parsed) : parsed
+    if (this.hotPath && !this.activeSessions.has(sessionId))
+      this.activeSessions.set(sessionId, this.readRunning(sessionId, stored.data.isRunning))
     this.cacheSnapshot(sessionId, stored, row.payload.length)
     return stored
   }
@@ -497,17 +677,25 @@ export class EventStore {
     this.snapshotCache.set(sessionId, { stored, bytes })
     this.snapshotCacheBytes += bytes
 
-    while (
-      this.snapshotCache.size > EventStore.SNAPSHOT_CACHE_MAX_ENTRIES ||
-      this.snapshotCacheBytes > EventStore.SNAPSHOT_CACHE_MAX_BYTES
-    ) {
-      const oldestKey = this.snapshotCache.keys().next().value
-      if (oldestKey === undefined || oldestKey === sessionId) break
-      const oldest = this.snapshotCache.get(oldestKey)
-      if (oldest) {
-        this.snapshotCacheBytes -= oldest.bytes
-      }
-      this.snapshotCache.delete(oldestKey)
+    this.evictSnapshots(sessionId)
+  }
+
+  private evictSnapshots(keep?: string): void {
+    let entries = 0,
+      bytes = 0
+    for (const [id, entry] of this.snapshotCache) {
+      if (this.hotPath && this.activeSessions.get(id)) continue
+      entries++
+      bytes += entry.bytes
+    }
+    for (const [id, entry] of this.snapshotCache) {
+      if (entries <= EventStore.SNAPSHOT_CACHE_MAX_ENTRIES && bytes <= EventStore.SNAPSHOT_CACHE_MAX_BYTES) break
+      if (id === keep || (this.hotPath && this.activeSessions.get(id))) continue
+      entries--
+      bytes -= entry.bytes
+      this.snapshotCacheBytes -= entry.bytes
+      this.snapshotCache.delete(id)
+      this.replayPrefixes.delete(id)
     }
   }
 
@@ -587,7 +775,12 @@ export class EventStore {
   }
 
   private invalidateSessionCache(sessionId: string, event?: TurnEvent): void {
+    if (event === undefined) {
+      this.projections.delete(sessionId)
+      this.activeSessions.delete(sessionId)
+    }
     if (event === undefined || event.type === 'turn.snapshot') {
+      this.replayPrefixes.delete(sessionId)
       const entry = this.snapshotCache.get(sessionId)
       if (entry) {
         this.snapshotCacheBytes -= entry.bytes
@@ -608,6 +801,9 @@ export class EventStore {
   }
 
   private clearSnapshotCache(): void {
+    this.projections.clear()
+    this.activeSessions.clear()
+    this.replayPrefixes.clear()
     this.snapshotCache.clear()
     this.snapshotCacheBytes = 0
     this.promptsCache.clear()
@@ -620,6 +816,7 @@ export class EventStore {
    * call dominated the list endpoint, so the result is memoized per session.
    */
   getRecentUserPrompts(sessionId: string, limit: number): Array<{ id: string; content: string; timestamp: string }> {
+    this.checkExternalWrites()
     const cached = this.promptsCache.get(sessionId)
     if (cached) {
       return cached.slice(0, limit)
@@ -780,6 +977,10 @@ export class EventStore {
   }
 
   private rowToStoredEvent(row: EventRow): StoredEvent {
+    if (this.diagnostics && row.event_type === 'turn.snapshot') {
+      this.diagnostics.snapshotParses++
+      this.diagnostics.snapshotParsedBytes += Buffer.byteLength(row.payload)
+    }
     return {
       seq: row.seq,
       timestamp: row.timestamp,
@@ -940,6 +1141,7 @@ export class EventStore {
    */
   cleanupOldEvents(sessionId: string): number {
     // Get the latest snapshot sequence
+    this.checkExternalWrites()
     const latestSnapshotSeq = this.getLatestSnapshotSeq(sessionId)
 
     if (latestSnapshotSeq === 0) {
@@ -970,7 +1172,10 @@ export class EventStore {
       )
       .run(sessionId, latestSnapshotSeq)
 
-    this.invalidateSessionCache(sessionId)
+    if (this.hotPath) {
+      this.replayPrefixes.delete(sessionId)
+      this.projections.delete(sessionId)
+    } else this.invalidateSessionCache(sessionId)
 
     return result.changes as number
   }
@@ -1011,9 +1216,9 @@ export class EventStore {
     const row = this.db
       .prepare(
         `
-        SELECT seq FROM events 
-        WHERE session_id = ? AND event_type = 'turn.snapshot' 
-        ORDER BY seq DESC LIMIT 1
+        SELECT e.seq FROM events e LEFT JOIN tombstones t ON e.session_id=t.session_id AND e.seq=t.seq
+        WHERE e.session_id = ? AND e.event_type = 'turn.snapshot' AND t.seq IS NULL
+        ORDER BY e.seq DESC LIMIT 1
       `,
       )
       .get(sessionId) as { seq: number } | undefined
@@ -1366,6 +1571,7 @@ export class EventStore {
       }
     })()
 
+    if (rewritten) this.clearSnapshotCache()
     this.setSettingViaDb(SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED, 'true')
     logger.info('Snapshot stream migration complete', {
       scanned: rows.length,

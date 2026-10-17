@@ -530,14 +530,15 @@ export async function runAgentTurn(
 function buildSnapshot(sessionManager: SessionManager, sessionId: string, _lastStats?: MessageStats): SessionSnapshot {
   const eventStore = getEventStore()
   const session = sessionManager.requireSession(sessionId)
-  const events = eventStore.getEvents(sessionId)
-  const latestSeq = eventStore.getLatestSeq(sessionId) ?? 0
-  const cachedPrompt = sessionManager.getCachedPrompt(sessionId)
-
-  return buildSnapshotFromSessionState({
-    session,
-    events,
-    latestSeq,
-    ...(cachedPrompt ? { cachedSystemPrompt: cachedPrompt.systemPrompt, dynamicContextHash: cachedPrompt.hash } : {}),
+  return eventStore.measureSnapshotOperation('snapshotBuild', () => {
+    const events = eventStore.getReplayEvents(sessionId)
+    const latestSeq = eventStore.getLatestSeq(sessionId) ?? 0
+    const cachedPrompt = sessionManager.getCachedPrompt(sessionId)
+    return buildSnapshotFromSessionState({
+      session,
+      events,
+      latestSeq,
+      ...(cachedPrompt ? { cachedSystemPrompt: cachedPrompt.systemPrompt, dynamicContextHash: cachedPrompt.hash } : {}),
+    })
   })
 }

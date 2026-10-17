@@ -192,6 +192,8 @@ function createEventStore() {
       return stored
     }),
     getEvents: vi.fn((sessionId: string) => eventsBySession.get(sessionId) ?? []),
+    getReplayEvents: vi.fn((sessionId: string) => eventsBySession.get(sessionId) ?? []),
+    measureSnapshotOperation: <T>(_operation: string, work: () => T): T => work(),
     getAllEvents: vi.fn((sessionId: string) => eventsBySession.get(sessionId) ?? []),
     getLatestSeq: vi.fn((sessionId: string) => {
       const events = eventsBySession.get(sessionId) ?? []

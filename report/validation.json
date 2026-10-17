@@ -1,0 +1,700 @@
+{
+  "base": "7e05ad22100962ac05c59acc5834f4b374b62ea4",
+  "featureFlag": "OPENFOX_SNAPSHOT_HOT_PATH",
+  "default": "enabled",
+  "rollback": "0",
+  "sourceHashes": {
+    ".gitignore": "ae087862a81f25f42eeee5ebd4cb2a9bcb7841e6cc9f08c8180d6ef8d8dd4313",
+    "scripts/bench/snapshot-copy-equivalence.ts": "ae29db41ad762f1192ea9eb3f31ecae1b2227d69fb55dc680b2c7f68b37b6393",
+    "scripts/bench/snapshot-hot-path.ts": "689014217c7f1a58d509d3dda48d178283100e6e389dbaa729d55f4d7e0abe70",
+    "scripts/test-remote.sh": "a3136285b01cbce68afc61c598b5c3d1f565569abbbf35b81bc2b7493282a5cb",
+    "scripts/test-remote.test.ts": "85fc333eaf932af73d8a84098e7e0f5404285863f35e1cda2213e7f9513c3058",
+    "src/server/chat/agent-loop-pause.test.ts": "f00bdcc12db6cfc04157d474f1c2f8a30c55ad08598692292680a6db7ae97fc4",
+    "src/server/chat/agent-loop.test.ts": "9ede217fb579903143ea78da22e61d1bab78b2b8c4b794002ef1f8f2f3c99bc2",
+    "src/server/chat/conversation-history.test.ts": "8ecb56fe9f33332082261859e6865a2a38c96107da5d9ec330c2711f77c02518",
+    "src/server/chat/conversation-history.ts": "455fadaee5da917fef6f41c28d69a32b84ebb4aae5e09bc3b7969ff1e489645d",
+    "src/server/chat/orchestrator.test.ts": "323c96705a13beaf3be494d99c62befe07864bb5a687c0efcbf97fcc7591b2fe",
+    "src/server/chat/orchestrator.ts": "62026a57be6829ff273cb8cec40c396aa3cdebac91ea18cd6b8773c50522cde7",
+    "src/server/chat/snapshot-hot-path.test.ts": "428258d9ebd741ccebc14aea78f1e4c8cf00042546fb92c13b93fadbf5c65fff",
+    "src/server/chat/system-reminder.test.ts": "efbcfaa7604b36095cd5d3fbc99842a3f13fe7aad8c4bd9863335b8dfc595bdf",
+    "src/server/events/apply-events-immutable.test.ts": "1bdccd89f1c09dc6af43864010dbf411ee4daab85341302906168921ecc07401",
+    "src/server/events/apply-events.ts": "fa0e34b18bfe2908cdd1c63e05d849e0f6e9d008297848a36dff5afef4bca33a",
+    "src/server/events/immutable-snapshot.ts": "0776454f77d57e3740821a58de83bd080c243b407c561dfb1c3da8e8f7e2c1ef",
+    "src/server/events/session.ts": "5687062d597ca1f75c8f2c04c7ba364a88732f192bb08038fbf80d290d96908e",
+    "src/server/events/store-diagnostics.test.ts": "4ca1344ea7be398c8b5e9fd5ce0a3cea9307350f61c92eb02fac1c079de29b54",
+    "src/server/events/store-diagnostics.ts": "9e50d333c067956b52d7bd743fd25bc3211d8ebbc110d089b32f35978d7a8189",
+    "src/server/events/store-hot-path.test.ts": "d94caa6e695c110c00597fef45d02fb0bab05895d0935d985bbc7aa6fd5285b5",
+    "src/server/events/store.ts": "94be5a5400b5c59883aeac45901089bdf24240c183508783257f15bd44eb245b",
+    "src/server/queue/processor.test.ts": "80ef6f6404eb806315b5b5c962e0eac7db79da447cfb34f1f736a5a94c96c76c",
+    "src/server/utils/session-utils.ts": "5158d10a84f3950681c6dfcfc5ac5668e1eac23ab4228be6e0fe2c79eb1c19c4",
+    "src/server/ws/ordering.test.ts": "c5155273b85576611a2b120ebe3436717486f9a8ffd86e3ffd72ed7c349250d3"
+  },
+  "checks": {
+    "unit": {
+      "passed": 6116,
+      "skipped": 29
+    },
+    "e2e": {
+      "passed": 357,
+      "skipped": 49
+    },
+    "lint": "PASS",
+    "typecheck": "PASS",
+    "format": "PASS",
+    "duplicates": "PASS",
+    "fullGateExit": 0,
+    "log": "report/review-final-gates-v2.log"
+  },
+  "benchmark": [
+    {
+      "mode": 0,
+      "run": 1,
+      "report": "report/paired-0-1.json",
+      "healthMs": {
+        "samples": 688,
+        "p50": 2727.489907000001,
+        "p95": 6456.121545999999,
+        "p99": 6736.259629000001,
+        "max": 6796.623756999999
+      },
+      "parses": 189,
+      "parsedBytes": 5146076628
+    },
+    {
+      "mode": 0,
+      "run": 2,
+      "report": "report/paired-0-2.json",
+      "healthMs": {
+        "samples": 689,
+        "p50": 2723.208445,
+        "p95": 6443.643796,
+        "p99": 6722.928978999999,
+        "max": 6783.261512000001
+      },
+      "parses": 189,
+      "parsedBytes": 5146076628
+    },
+    {
+      "mode": 0,
+      "run": 3,
+      "report": "report/paired-0-3.json",
+      "healthMs": {
+        "samples": 698,
+        "p50": 2776.329936,
+        "p95": 6527.630840000001,
+        "p99": 6809.2919059999995,
+        "max": 6870.509486999999
+      },
+      "parses": 189,
+      "parsedBytes": 5146076628
+    },
+    {
+      "mode": 1,
+      "run": 1,
+      "report": "report/paired-1-1.json",
+      "healthMs": {
+        "samples": 139,
+        "p50": 611.0245090000003,
+        "p95": 1235.5857919999999,
+        "p99": 1275.483303,
+        "max": 1283.394881
+      },
+      "parses": 0,
+      "parsedBytes": 0
+    },
+    {
+      "mode": 1,
+      "run": 2,
+      "report": "report/paired-1-2.json",
+      "healthMs": {
+        "samples": 138,
+        "p50": 605.8718900000003,
+        "p95": 1233.960082,
+        "p99": 1272.8998139999999,
+        "max": 1283.243222
+      },
+      "parses": 0,
+      "parsedBytes": 0
+    },
+    {
+      "mode": 1,
+      "run": 3,
+      "report": "report/paired-1-3.json",
+      "healthMs": {
+        "samples": 140,
+        "p50": 612.5259369999999,
+        "p95": 1233.6083110000002,
+        "p99": 1294.9892940000002,
+        "max": 1304.3768779999998
+      },
+      "parses": 0,
+      "parsedBytes": 0
+    }
+  ],
+  "performanceGoal": {
+    "healthP99LessThanMs": 100,
+    "met": false,
+    "reason": "Synchronous snapshot stringify/SQLite append remains blocking; no workload adjustment."
+  },
+  "realCopyReport": "report/real-copy-equivalence-review.json",
+  "evidenceHashes": {
+    "report/after-first.json": "c27db88df4a2d4b474ad0a9cc2a9353d74539d5d3415bb3784ef68fb28e2c5b3",
+    "report/baseline.json": "84f289acff072b827286eeafec1b7c9f93dad57de6bef0b23bbcf19f71d0e7f7",
+    "report/cache-overhead-green.log": "56e040f6848343d326b4d0bc61e5b2485291d2282471165cd4d64ce182b4b6d7",
+    "report/cache-overhead-red.log": "f61f1967bdd080ce991f0f0efcc1d69c7b584f11c33f8aea045921da5c3a590a",
+    "report/commit-private-exclusion-verified.log": "7be5341fc1e4cdb6d02ffaf3eb1dd5d5322a24e9fb5cc1ac9d57159df21d110b",
+    "report/commit-private-exclusion.log": "782b81a7486e692c3dfa8cf1ec17a8ce2bcd7f2ad1abedf32ec772bb978804e5",
+    "report/equivalence-final.log": "7e873ddd6ca270c995bda83273bfda40368622cb517f29fc7afee15bc570608d",
+    "report/final-gates.log": "603c36926f7cc94fbc5ea4015f7a3c17cffb4dbef09274daf6a6943b2b13cec3",
+    "report/paired-0-1.json": "4fd6a79ab6fb33d99581ab8db67145e7559cc97c092aa63f83d5cfd7884ccb4c",
+    "report/paired-0-2.json": "d72faef10b3828adeeee22d74afdf3b01f649e33748f3d9996a22ba6de4e2251",
+    "report/paired-0-3.json": "fd850412e60a0f0c5a1895cd0573a6326aa1b79ecaec7b4b46bc5ddf003441b9",
+    "report/paired-1-1.json": "da3b77eb5224f7ad6c15e382cbda4809816b827161a3dcb5edf24484fc891a08",
+    "report/paired-1-2.json": "0ccb67b87935621915be18e790e6a6605dadafb7af76835ea52c3d5a3046d414",
+    "report/paired-1-3.json": "e9d6b0393619396a06c20b318faaa9201e937781fed7b5e3044945a6af94099e",
+    "report/pinning-import-green.log": "eebd17c12ea2f639a4546ff3259ead67aff51d3cb70e7358ace7a62ad66469b7",
+    "report/pinning-import-red.log": "ea7ceb32ddee21abc2db165d65af30c0ade5598f4713faf8b7dea48538b43d1a",
+    "report/real-copy-equivalence-final.json": "33185a88214164fccabd572880029451d2ed6edf0505da6c3165e9b81f6fe95d",
+    "report/real-copy-equivalence-review.json": "33185a88214164fccabd572880029451d2ed6edf0505da6c3165e9b81f6fe95d",
+    "report/real-copy-equivalence.json": "33185a88214164fccabd572880029451d2ed6edf0505da6c3165e9b81f6fe95d",
+    "report/remote-private-check.log": "da045a3b838f5157df53eb7bb32ab6101a77a6301c469928fd6ef30607871a3d",
+    "report/review-audit-green.log": "e394e2b23c8c05d9d3c3f149ec89b043414b032b0b414634bafb00c3bd39ec76",
+    "report/review-audit-red.log": "6c777b4929212525f199c83df4bd9ba88bf9c46685e00cefb7b2657d73742384",
+    "report/review-bench-v0-s0-m0.json": "707710556371bccc74815d34756d7b027c5651143ae4143d7b281914a715aee3",
+    "report/review-bench-v0-s0-m1.json": "5a0530068b1575a28f0055bb68069b9a258d9fb2c97d7279fa33ff7a0b2b5f7b",
+    "report/review-bench-v0-s1-m0.json": "355515c8c79280ef3786badf59f5fa929744b5e31e1192a603e48125f82f7192",
+    "report/review-bench-v0-s1-m1.json": "f718dfd61f1980461c7df0368d9b31382ddbab57e91b59ce6bf17dc0415b0f65",
+    "report/review-bench-v1-s0-m0.json": "c6c8081ce466800f0bec4e1a5da8010da9335cc62fd3d654a8b34a2e980801bc",
+    "report/review-bench-v1-s0-m1.json": "639dc8a2f3c5e8ea8f8047a43677e0f91e6df79b055993af58db9cde85232aea",
+    "report/review-bench-v1-s1-m0.json": "d023993948bc1d7c69af4fef73aac221ed3e06eb6d92b1871c1c4d134665a746",
+    "report/review-bench-v1-s1-m1.json": "8dac21fd9028f56f15d7b70f19e7e72ce5e1779546ffbd42a2c7fbccf1f15838",
+    "report/review-final-bench-v0-s0-m0.json": "7b07c8f673263cb3a53cf3025d43942c18c89d684756d61749bd5c6b52de764a",
+    "report/review-final-bench-v0-s0-m1.json": "8c606c1c76e72cb4593d424e43eab18e13f93425e25b7dccb928dd11e4bd6391",
+    "report/review-final-bench-v0-s1-m0.json": "c70e109a1fd5f392302185358b62c6356b51ff9c463151326349b8d3d76fa905",
+    "report/review-final-bench-v0-s1-m1.json": "b5f700946eb4719eb9d217cb1d33d3ef80bce233697ff0eb0547a99b5527bf04",
+    "report/review-final-bench-v1-s0-m0.json": "425a90f443fa756f4997ca3974eec4282ba6f3357de62c4183d3d03e98cee352",
+    "report/review-final-bench-v1-s0-m1.json": "ebdfdf706a58d1d8b8715b8d82962a33babbfe513af756bd5f81ac49270b3031",
+    "report/review-final-bench-v1-s1-m0.json": "babe38aa115bb68cf9108942a1d224ccff236787b9f0531efd371b66c7c45de5",
+    "report/review-final-bench-v1-s1-m1.json": "9680379971708d977f552455f78f7e8b65160416f8fc7f72e0d76ba32bf8e93c",
+    "report/review-final-gates-v2.log": "b731d966e47e7b0ea88f3d120dcadbfa4f4284f4818b7e78baad05fb14a9d1ee",
+    "report/review-final-gates.log": "6e8359c6e753f4ef3138b83376bb5496786503e0f3df88a4bb41d61dcbcccdbb",
+    "report/review-gates.log": "5e05faab2ca19cba988ae1c2694433bfdee5968209ebc3353c18d28972f486f3",
+    "report/review-prefix-green.log": "fbc8996a855fa8e4288c1b3bf66611fc531f0f728b7b4c2cb9c3270e4c42d148",
+    "report/review-prefix-red.log": "72af3d6a6721432055c7f9db9d5ecd93750abc9c268485539f41dfdb42eeb9bc",
+    "report/step0-green.log": "db5a12fbd6331f174516165f325525c85d88cae4ac9e66711d38c65b7e21d5eb",
+    "report/step0-red.log": "cdb01ae00114a112e2a5230e1bea7d720172aab77e3ee8605e0592b0b418fd48",
+    "report/step1-red.log": "72f5f7d0ec352923a6252276bfb302f027227aa534dab3618761aa6f0a456a47",
+    "report/wiring-red.log": "509d4c371e1ad5334aa46aad3cf898b2287335a8f1dd9fc7af86e4f9f05ad2e3"
+  },
+  "restrictions": {
+    "pushed": false,
+    "deployed": false,
+    "productionRestarted": false,
+    "realDataTransferred": false,
+    "mainCriteriaEditorDiffSha256": "96e53772257b8f1ec7a342fa7efa417d3d97b585467f25dcb4cb3a98fd125cfa",
+    "localCommitsOnly": true
+  },
+  "generatedAt": "2026-10-17T23:26:57.867297+00:00",
+  "completedCriteria": [
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "29",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34",
+    "35",
+    "36",
+    "37",
+    "38",
+    "39",
+    "40",
+    "41",
+    "42",
+    "44",
+    "45",
+    "47"
+  ],
+  "pendingCriteria": ["43", "46"],
+  "securityCommit": "dbe1fe7bfb8c0ebc7a4bd2796c1796b486e5ea40",
+  "reviewHead": "commit containing this report",
+  "remoteTestDirectory": "/tmp/openfox-perf-dev0.kW992T",
+  "remoteCleanupEvidence": "report/remote-cleanup.log (post-commit)",
+  "reviewVariants": [
+    {
+      "report": "report/review-bench-v0-s0-m0.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": false,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 742,
+        "p50": 3084.5240239999994,
+        "p95": 6935.800498999999,
+        "p99": 7242.2772079999995,
+        "max": 7313.862734999999
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 54.44444000000021,
+        "p95": 127.46773899999971,
+        "p99": 144.1603,
+        "max": 144.1603
+      },
+      "eventLoopDelayMs": {
+        "p50": 460.849151,
+        "p95": 674.234367,
+        "p99": 675.807231,
+        "max": 675.807231
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-bench-v0-s0-m1.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": false,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 139,
+        "p50": 597.0556550000001,
+        "p95": 1217.8658020000003,
+        "p99": 1268.14057,
+        "max": 1278.540546
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 0.0802049999999781,
+        "p95": 0.2431739999999536,
+        "p99": 0.5143419999999423,
+        "max": 0.5143419999999423
+      },
+      "eventLoopDelayMs": {
+        "p50": 461.111295,
+        "p95": 462.684159,
+        "p99": 462.684159,
+        "max": 462.684159
+      },
+      "parses": 0
+    },
+    {
+      "report": "report/review-bench-v0-s1-m0.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": true,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 881,
+        "p50": 128.57338999999956,
+        "p95": 1324.313768,
+        "p99": 1690.9106859999997,
+        "max": 1771.8330499999997
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 52.38504599999942,
+        "p95": 134.8133880000005,
+        "p99": 150.88167900000008,
+        "max": 150.88167900000008
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.330111,
+        "p95": 320.339967,
+        "p99": 573.571071,
+        "max": 659.030015
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-bench-v0-s1-m1.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": true,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 370,
+        "p50": 0.2946560000000318,
+        "p95": 106.06443600000057,
+        "p99": 158.56797700000016,
+        "max": 178.08526399999982
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 0.09906399999999849,
+        "p95": 0.266791000000012,
+        "p99": 0.336620000000039,
+        "max": 0.336620000000039
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.346495,
+        "p95": 61.964287,
+        "p99": 129.630207,
+        "max": 135.921663
+      },
+      "parses": 0
+    },
+    {
+      "report": "report/review-bench-v1-s0-m0.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": false,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 915,
+        "p50": 4065.3082590000004,
+        "p95": 8607.868684000001,
+        "p99": 8959.724856,
+        "max": 9050.960323
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 79.9224979999999,
+        "p95": 171.46513700000014,
+        "p99": 182.9556190000003,
+        "max": 182.9556190000003
+      },
+      "eventLoopDelayMs": {
+        "p50": 599.261183,
+        "p95": 645.922815,
+        "p99": 675.282943,
+        "max": 675.282943
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-bench-v1-s0-m1.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": false,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 268,
+        "p50": 931.2162359999998,
+        "p95": 2392.890485,
+        "p99": 2513.3447949999995,
+        "max": 2533.8720829999997
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 14.320649999999887,
+        "p95": 35.262498999999934,
+        "p99": 39.77231999999981,
+        "max": 39.77231999999981
+      },
+      "eventLoopDelayMs": {
+        "p50": 110.100479,
+        "p95": 460.324863,
+        "p99": 461.111295,
+        "max": 461.111295
+      },
+      "parses": 0
+    },
+    {
+      "report": "report/review-bench-v1-s1-m0.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": true,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 1054,
+        "p50": 187.89192100000037,
+        "p95": 1831.911826,
+        "p99": 2253.720498,
+        "max": 2354.071565
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 75.92110500000035,
+        "p95": 175.75982600000043,
+        "p99": 192.10560799999985,
+        "max": 192.10560799999985
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.321919,
+        "p95": 423.886847,
+        "p99": 608.698367,
+        "max": 1016.594431
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-bench-v1-s1-m1.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": true,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 467,
+        "p50": 9.1062009999996,
+        "p95": 204.75830099999985,
+        "p99": 383.42436699999985,
+        "max": 423.296333
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 16.208954000000176,
+        "p95": 30.25141199999962,
+        "p99": 36.73716799999988,
+        "max": 36.73716799999988
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.330111,
+        "p95": 84.869119,
+        "p99": 173.277183,
+        "max": 228.065279
+      },
+      "parses": 0
+    },
+    {
+      "report": "report/review-final-bench-v0-s0-m0.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": false,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 739,
+        "p50": 3071.3519399999996,
+        "p95": 6916.912940000001,
+        "p99": 7216.752355999999,
+        "max": 7286.095995999999
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 54.43498499999987,
+        "p95": 128.20004199999994,
+        "p99": 139.11356999999953,
+        "max": 139.11356999999953
+      },
+      "eventLoopDelayMs": {
+        "p50": 465.567743,
+        "p95": 665.321471,
+        "p99": 682.098687,
+        "max": 682.098687
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-final-bench-v0-s0-m1.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": false,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 139,
+        "p50": 606.6555580000004,
+        "p95": 1232.8462610000001,
+        "p99": 1283.09,
+        "max": 1293.459722
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 0.07991600000013932,
+        "p95": 0.1894199999999273,
+        "p99": 0.600065000000086,
+        "max": 0.600065000000086
+      },
+      "eventLoopDelayMs": {
+        "p50": 466.616319,
+        "p95": 470.286335,
+        "p99": 470.286335,
+        "max": 470.286335
+      },
+      "parses": 0
+    },
+    {
+      "report": "report/review-final-bench-v0-s1-m0.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": true,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 891,
+        "p50": 132.00233099999969,
+        "p95": 1328.771533,
+        "p99": 1693.623971,
+        "max": 1774.4271989999997
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 53.29014999999981,
+        "p95": 136.59734000000026,
+        "p99": 173.59905499999968,
+        "max": 173.59905499999968
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.297343,
+        "p95": 325.844991,
+        "p99": 581.959679,
+        "max": 702.545919
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-final-bench-v0-s1-m1.json",
+      "parameters": {
+        "withoutVision": false,
+        "staggered": true,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 371,
+        "p50": 0.2994269999999233,
+        "p95": 102.16183299999966,
+        "p99": 145.4299030000002,
+        "max": 165.74353199999996
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 0.09428100000013728,
+        "p95": 0.2678249999999025,
+        "p99": 0.4086339999998927,
+        "max": 0.4086339999998927
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.330111,
+        "p95": 64.028671,
+        "p99": 132.579327,
+        "max": 142.082047
+      },
+      "parses": 0
+    },
+    {
+      "report": "report/review-final-bench-v1-s0-m0.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": false,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 859,
+        "p50": 3787.657599,
+        "p95": 8092.908961,
+        "p99": 8431.331715,
+        "max": 8511.26754
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 75.53448700000081,
+        "p95": 164.31304499999987,
+        "p99": 172.57892400000014,
+        "max": 172.57892400000014
+      },
+      "eventLoopDelayMs": {
+        "p50": 576.192511,
+        "p95": 638.058495,
+        "p99": 667.418623,
+        "max": 667.418623
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-final-bench-v1-s0-m1.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": false,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 269,
+        "p50": 944.4735990000004,
+        "p95": 2413.891057,
+        "p99": 2535.043461,
+        "max": 2554.5404930000004
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 15.349730999999792,
+        "p95": 36.43609900000001,
+        "p99": 42.77493100000038,
+        "max": 42.77493100000038
+      },
+      "eventLoopDelayMs": {
+        "p50": 112.001023,
+        "p95": 455.344127,
+        "p99": 455.344127,
+        "max": 455.344127
+      },
+      "parses": 0
+    },
+    {
+      "report": "report/review-final-bench-v1-s1-m0.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": true,
+        "hotPath": false
+      },
+      "healthMs": {
+        "samples": 1055,
+        "p50": 192.7300180000002,
+        "p95": 1872.2062920000003,
+        "p99": 2300.039389,
+        "max": 2399.263027
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 76.43148500000007,
+        "p95": 174.82068299999992,
+        "p99": 201.3366700000006,
+        "max": 201.3366700000006
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.297343,
+        "p95": 415.236095,
+        "p99": 623.902719,
+        "max": 983.039999
+      },
+      "parses": 189
+    },
+    {
+      "report": "report/review-final-bench-v1-s1-m1.json",
+      "parameters": {
+        "withoutVision": true,
+        "staggered": true,
+        "hotPath": true
+      },
+      "healthMs": {
+        "samples": 463,
+        "p50": 9.398259999999937,
+        "p95": 179.31496900000002,
+        "p99": 350.655849,
+        "max": 373.89437799999996
+      },
+      "roundMs": {
+        "samples": 84,
+        "p50": 15.713508000000047,
+        "p95": 26.67404099999999,
+        "p99": 30.72181300000011,
+        "max": 30.72181300000011
+      },
+      "eventLoopDelayMs": {
+        "p50": 10.321919,
+        "p95": 88.539135,
+        "p99": 173.408255,
+        "max": 232.783871
+      },
+      "parses": 0
+    }
+  ]
+}

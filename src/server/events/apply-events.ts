@@ -328,16 +328,14 @@ function deepCloneMessage<T extends object>(msg: T): T {
   const cloned = { ...msg } as T & Record<string, unknown>
   const obj = cloned as Record<string, unknown>
   if (obj['toolCalls']) {
-    obj['toolCalls'] = (obj['toolCalls'] as ToolCall[]).map((tc) => ({
+    obj['toolCalls'] = (obj['toolCalls'] as ToolCallWithResult[]).map((tc) => ({
       ...tc,
       ...(tc.result ? { result: { ...tc.result } } : {}),
+      ...(tc.streamingOutput ? { streamingOutput: [...tc.streamingOutput] } : {}),
     }))
   }
-  if (obj['segments']) {
-    obj['segments'] = [...(obj['segments'] as unknown[])]
-  }
-  if (obj['attachments']) {
-    obj['attachments'] = [...(obj['attachments'] as unknown[])]
+  for (const key of ['segments', 'attachments', 'preparingToolCalls', 'formatRetries']) {
+    if (obj[key]) obj[key] = [...(obj[key] as unknown[])]
   }
   return cloned as T
 }
