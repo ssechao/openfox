@@ -1,5 +1,5 @@
-import type { StoredEvent, TurnEvent, SessionSnapshot } from '../events/types.js'
-import type { Attachment } from '../../shared/types.js'
+import type { StoredEvent, TurnEvent, SessionSnapshot, SnapshotMessage } from '../events/types.js'
+import type { Attachment, ToolResult } from '../../shared/types.js'
 import { describeImageFromDataUrl } from '../llm/vision-fallback.js'
 import type { VisionBackend } from '../llm/vision-fallback.js'
 import { getRuntimeConfig } from '../runtime-config.js'
@@ -82,6 +82,65 @@ function hasImageMetadata(result: { metadata?: Record<string, unknown> }): boole
   const dataUrl = meta['dataUrl']
   const mimeType = meta['mimeType']
   return typeof dataUrl === 'string' && typeof mimeType === 'string' && (mimeType as string).startsWith('image/')
+}
+
+function mapChanged<T>(values: T[], transform: (value: T) => T): T[] {
+  let result = values
+  for (let index = 0; index < values.length; index++) {
+    const value = values[index]!
+    const next = transform(value)
+    if (next === value) continue
+    if (result === values) result = values.slice()
+    result[index] = next
+  }
+  return result
+}
+
+function copyPendingAttachments(attachments: Attachment[]): Attachment[] {
+  return mapChanged(attachments, (att) =>
+    (isImageAttachment(att) && !att.description) || (isPdfAttachment(att) && !att.pdfContent) ? { ...att } : att,
+  )
+}
+
+function copyPendingImageResult(result: ToolResult): ToolResult {
+  if (!result.metadata || !hasImageMetadata(result) || result.metadata['description']) return result
+  return { ...result, metadata: { ...result.metadata } }
+}
+
+function copyPendingSnapshotMessage(message: SnapshotMessage): SnapshotMessage {
+  if (message.role === 'user' && message.attachments) {
+    const attachments = copyPendingAttachments(message.attachments)
+    return attachments === message.attachments ? message : { ...message, attachments }
+  }
+  if (message.role === 'assistant' && message.toolCalls) {
+    const toolCalls = mapChanged(message.toolCalls, (toolCall) => {
+      if (!toolCall.result) return toolCall
+      const result = copyPendingImageResult(toolCall.result)
+      return result === toolCall.result ? toolCall : { ...toolCall, result }
+    })
+    return toolCalls === message.toolCalls ? message : { ...message, toolCalls }
+  }
+  return message
+}
+
+function copyPendingEnrichment(event: StoredEvent): StoredEvent {
+  if (event.type === 'message.start') {
+    const data = event.data as Extract<TurnEvent, { type: 'message.start' }>['data']
+    if (!data.attachments) return event
+    const attachments = copyPendingAttachments(data.attachments)
+    return attachments === data.attachments ? event : { ...event, data: { ...data, attachments } }
+  }
+  if (event.type === 'tool.result') {
+    const data = event.data as Extract<TurnEvent, { type: 'tool.result' }>['data']
+    const result = copyPendingImageResult(data.result)
+    return result === data.result ? event : { ...event, data: { ...data, result } }
+  }
+  if (event.type === 'turn.snapshot') {
+    const data = event.data as SessionSnapshot
+    const messages = mapChanged(data.messages, copyPendingSnapshotMessage)
+    return messages === data.messages ? event : { ...event, data: { ...data, messages } }
+  }
+  return event
 }
 
 async function describeImageDataUrl(
@@ -210,7 +269,7 @@ export async function processContextImages(
   }
 
   const descriptions = new Map<string, string>()
-  const modifiedEvents: StoredEvent[] = events.map((event) => structuredClone(event))
+  const modifiedEvents = mapChanged(events, copyPendingEnrichment)
 
   for (const event of modifiedEvents) {
     if (event.type === 'message.start') {

@@ -17,6 +17,8 @@
     "src/server/chat/orchestrator.ts": "62026a57be6829ff273cb8cec40c396aa3cdebac91ea18cd6b8773c50522cde7",
     "src/server/chat/snapshot-hot-path.test.ts": "428258d9ebd741ccebc14aea78f1e4c8cf00042546fb92c13b93fadbf5c65fff",
     "src/server/chat/system-reminder.test.ts": "efbcfaa7604b36095cd5d3fbc99842a3f13fe7aad8c4bd9863335b8dfc595bdf",
+    "src/server/context/image-processor-sharing.test.ts": "98261dab5c3684e7768a86601a7f04522e5a8e72548887d51f1057ef9669d760",
+    "src/server/context/image-processor.ts": "e4daf7d305a0f5eded0b348fac4f85b8843f6aecaf69d789b068cd0760101988",
     "src/server/events/apply-events-immutable.test.ts": "1bdccd89f1c09dc6af43864010dbf411ee4daab85341302906168921ecc07401",
     "src/server/events/apply-events.ts": "fa0e34b18bfe2908cdd1c63e05d849e0f6e9d008297848a36dff5afef4bca33a",
     "src/server/events/immutable-snapshot.ts": "0776454f77d57e3740821a58de83bd080c243b407c561dfb1c3da8e8f7e2c1ef",
@@ -31,7 +33,7 @@
   },
   "checks": {
     "unit": {
-      "passed": 6116,
+      "passed": 6124,
       "skipped": 29
     },
     "e2e": {
@@ -43,7 +45,7 @@
     "format": "PASS",
     "duplicates": "PASS",
     "fullGateExit": 0,
-    "log": "report/review-final-gates-v2.log"
+    "log": "report/image48-gates.log"
   },
   "benchmark": [
     {
@@ -144,8 +146,16 @@
     "report/cache-overhead-red.log": "f61f1967bdd080ce991f0f0efcc1d69c7b584f11c33f8aea045921da5c3a590a",
     "report/commit-private-exclusion-verified.log": "7be5341fc1e4cdb6d02ffaf3eb1dd5d5322a24e9fb5cc1ac9d57159df21d110b",
     "report/commit-private-exclusion.log": "782b81a7486e692c3dfa8cf1ec17a8ce2bcd7f2ad1abedf32ec772bb978804e5",
+    "report/commit-snapshot-hot-path.log": "2fb17e92f96be411cfe325cbee4098c2499e8befe607e6d8a80e0d12e792e3d8",
     "report/equivalence-final.log": "7e873ddd6ca270c995bda83273bfda40368622cb517f29fc7afee15bc570608d",
     "report/final-gates.log": "603c36926f7cc94fbc5ea4015f7a3c17cffb4dbef09274daf6a6943b2b13cec3",
+    "report/image48-after-s0.json": "2c499976f4336c2554be4e9f0a9ebdf2091dc7ce1bc2b3e314875a0218738725",
+    "report/image48-after-s1.json": "badcc8cb8c232ab743bdef377eeb4d8ee129e8ad5ab0fb4245d06ad72ae9001b",
+    "report/image48-before-s0.json": "0bb6fd00efeb454e895fdc092f9445fd39508c8e41ab06edea29619d63cc5d1d",
+    "report/image48-before-s1.json": "6fcd2bfad8b20cd7e2497f629ba7aaeb12103fcc708d051ad3746e1fd6b84902",
+    "report/image48-gates.log": "5617bf5235d95dee5e3bf4300900d5a3fd1f4ed3a7f82e9a57d12ba6b390d4ba",
+    "report/image48-green.log": "ce2399786655c528aa2d3bd85fd7b5f8f475d30c661eb34feeae2319d3cf1749",
+    "report/image48-red.log": "7e0248a935bccb1006500b77ad6e978120231381d37923cbcb93b7ee3ae4b302",
     "report/paired-0-1.json": "4fd6a79ab6fb33d99581ab8db67145e7559cc97c092aa63f83d5cfd7884ccb4c",
     "report/paired-0-2.json": "d72faef10b3828adeeee22d74afdf3b01f649e33748f3d9996a22ba6de4e2251",
     "report/paired-0-3.json": "fd850412e60a0f0c5a1895cd0573a6326aa1b79ecaec7b4b46bc5ddf003441b9",
@@ -157,6 +167,7 @@
     "report/real-copy-equivalence-final.json": "33185a88214164fccabd572880029451d2ed6edf0505da6c3165e9b81f6fe95d",
     "report/real-copy-equivalence-review.json": "33185a88214164fccabd572880029451d2ed6edf0505da6c3165e9b81f6fe95d",
     "report/real-copy-equivalence.json": "33185a88214164fccabd572880029451d2ed6edf0505da6c3165e9b81f6fe95d",
+    "report/remote-cleanup.log": "c7e817b3280f26030b40736d20eb19f29100220f4c78fc398c8277f7cd3f95f9",
     "report/remote-private-check.log": "da045a3b838f5157df53eb7bb32ab6101a77a6301c469928fd6ef30607871a3d",
     "report/review-audit-green.log": "e394e2b23c8c05d9d3c3f149ec89b043414b032b0b414634bafb00c3bd39ec76",
     "report/review-audit-red.log": "6c777b4929212525f199c83df4bd9ba88bf9c46685e00cefb7b2657d73742384",
@@ -194,7 +205,7 @@
     "mainCriteriaEditorDiffSha256": "96e53772257b8f1ec7a342fa7efa417d3d97b585467f25dcb4cb3a98fd125cfa",
     "localCommitsOnly": true
   },
-  "generatedAt": "2026-10-17T23:26:57.867297+00:00",
+  "generatedAt": "2026-10-17T23:40:34.966310+00:00",
   "completedCriteria": [
     "17",
     "18",
@@ -224,7 +235,8 @@
     "42",
     "44",
     "45",
-    "47"
+    "47",
+    "48"
   ],
   "pendingCriteria": ["43", "46"],
   "securityCommit": "dbe1fe7bfb8c0ebc7a4bd2796c1796b486e5ea40",
@@ -696,5 +708,118 @@
       },
       "parses": 0
     }
-  ]
+  ],
+  "imageProcessingReview": {
+    "parent": "b74b840e2ef84ba1ed6c5e5fa28758c276ef1a09",
+    "scope": "copy only changed enrichment paths; preserve identity when no enrichment is needed",
+    "tests": {
+      "red": 8,
+      "green": 35
+    },
+    "remoteDirectory": "/tmp/openfox-perf-image48.awODDY",
+    "cleanupEvidence": "report/image48-cleanup.log (post-commit)",
+    "benchmark": [
+      {
+        "report": "report/image48-after-s0.json",
+        "healthMs": {
+          "samples": 139,
+          "p50": 584.9055739999999,
+          "p95": 1226.5189360000002,
+          "p99": 1276.725294,
+          "max": 1286.1108299999999
+        },
+        "roundMs": {
+          "samples": 84,
+          "p50": 0.08367700000007972,
+          "p95": 0.211620000000039,
+          "p99": 0.5199230000000625,
+          "max": 0.5199230000000625
+        },
+        "eventLoopDelayMs": {
+          "p50": 460.849151,
+          "p95": 465.567743,
+          "p99": 465.567743,
+          "max": 465.567743
+        },
+        "rssAfterBytes": 661311488,
+        "parses": 0
+      },
+      {
+        "report": "report/image48-after-s1.json",
+        "healthMs": {
+          "samples": 373,
+          "p50": 0.2958300000000236,
+          "p95": 104.01926800000001,
+          "p99": 143.21357800000033,
+          "max": 163.76272599999993
+        },
+        "roundMs": {
+          "samples": 84,
+          "p50": 0.10059400000000096,
+          "p95": 0.21968900000001668,
+          "p99": 0.27186299999993935,
+          "max": 0.27186299999993935
+        },
+        "eventLoopDelayMs": {
+          "p50": 10.321919,
+          "p95": 68.354047,
+          "p99": 131.530751,
+          "max": 138.805247
+        },
+        "rssAfterBytes": 693641216,
+        "parses": 0
+      },
+      {
+        "report": "report/image48-before-s0.json",
+        "healthMs": {
+          "samples": 269,
+          "p50": 849.8509260000001,
+          "p95": 2413.7743150000006,
+          "p99": 2534.978924,
+          "max": 2555.4776530000004
+        },
+        "roundMs": {
+          "samples": 84,
+          "p50": 14.401485000000093,
+          "p95": 38.80218599999989,
+          "p99": 40.55857699999979,
+          "max": 40.55857699999979
+        },
+        "eventLoopDelayMs": {
+          "p50": 114.360319,
+          "p95": 454.557695,
+          "p99": 459.014143,
+          "max": 459.014143
+        },
+        "rssAfterBytes": 1219485696,
+        "parses": 0
+      },
+      {
+        "report": "report/image48-before-s1.json",
+        "healthMs": {
+          "samples": 469,
+          "p50": 10.285753999999542,
+          "p95": 223.80496399999993,
+          "p99": 404.72527200000013,
+          "max": 444.51942600000007
+        },
+        "roundMs": {
+          "samples": 84,
+          "p50": 16.607692000000043,
+          "p95": 32.120271,
+          "p99": 39.51036699999986,
+          "max": 39.51036699999986
+        },
+        "eventLoopDelayMs": {
+          "p50": 10.338303,
+          "p95": 78.970879,
+          "p99": 179.175423,
+          "max": 227.803135
+        },
+        "rssAfterBytes": 920637440,
+        "parses": 0
+      }
+    ],
+    "originalSourceSha256": "0457c113cbd8bd9928a5ba194d1762b7a8f184c91a9ecbc952b43fcef3d698d6"
+  }
 }

@@ -1,15 +1,17 @@
-# OF-PERF — étapes 0 et 1, prêt pour revue avec objectif non atteint
+# OF-PERF — étapes 0/1 et extension 48, objectif non atteint
 
 ## Décision de livraison
 
 **Ne pas déployer comme correctif entièrement validé : le critère 46 reste non satisfait.**
-Le correctif supprime les parses répétés à chaud ; la sérialisation/écriture synchrone de fin de tour reste bloquante. Aucun élargissement aux étapes 2/3 n'a été effectué pour maquiller ce résultat.
+Le correctif supprime les parses répétés à chaud ; la sérialisation/écriture synchrone de fin de tour reste bloquante. L’extension minimale 48 du processeur d’images a ensuite été explicitement autorisée ; aucun changement du banc ni élargissement au stockage d’archives pour maquiller le résultat.
 
 - Worktree : `/Users/sechaosouchiam/Source/github.com/OpenFoxFork-perf-snapshot` ; branche `perf/snapshot-hot-path`.
 - Base : `7e05ad22100962ac05c59acc5834f4b374b62ea4`. Révision du lot : commit contenant ce rapport sur `perf/snapshot-hot-path`, après les gates ; aucun push, PR, déploiement ou redémarrage. Les étapes 0/1 sont conservées ensemble pour ne pas reconstruire artificiellement un état intermédiaire ; le diff d’instrumentation initial reste dans `step0-instrumentation.patch`.
 - Base contenant `298eb60a` ; fichiers concernés identiques à `openfox-base@42c357ed` au départ. `openfox-base` est resté propre.
 - Diff préexistant CriteriaEditor du checkout principal inchangé : SHA-256 `96e53772257b8f1ec7a342fa7efa417d3d97b585467f25dcb4cb3a98fd125cfa`.
 - Critères 17–47 validés par Claude Infra OpenFox Diag avant le premier test écrit. Les critères 1–16 du wrapper sont un autre chantier.
+
+Les sections historiques ci-dessous, jusqu’à « Vérification finale du complément », décrivent `b74b840e`, avant le GO pour le critère 48. **L’état actuel et les dernières mesures sont dans « Extension autorisée 48 » en fin de rapport.**
 
 ## Modifications et choix
 
@@ -149,3 +151,26 @@ Avant le premier commit : aucun appel réel au hook/test-remote.sh pendant la pr
 Le relais `.husky/_` manquait dans ce worktree neuf : le premier commit de protection n’a pas exécuté le hook. Anomalie détectée sur sa durée/log ; installation du relais Husky standard, configuration distante inchangée, puis remplacement de ce seul commit local par amendement avec le hook complet distant vert. Preuve : `commit-private-exclusion-verified.log` (6116 unitaires, 357 e2e et gates statiques). Aucun contournement demandé ni conservé.
 
 Les sources, ce rapport, `validation.json` et le résultat neutralisé de la copie réelle sont versionnés. Les JSON bruts volumineux des bancs, le patch initial et les logs restent conservés dans ce worktree, hors commit ; leurs empreintes sont dans `validation.json`.
+
+## Extension autorisée 48 — processeur d’images sans clone global
+
+GO utilisateur transmis par Claude Infra OpenFox Diag puis précisé dans ses messages #17/#18, critère 48 mis à jour et relu avant implémentation. La contrainte initiale « seulement message.start » ne préservait pas les enrichissements de résultats d’outils et de snapshots ; l’exception minimale a été explicitement approuvée.
+
+Seuls les objets du chemin à enrichir sont recopiés superficiellement : event/data/attachments/élément pour message.start ; event/data/result/metadata pour tool.result ; event/data/messages/message puis attachments ou toolCalls/result/metadata pour un snapshot. Les autres objets, tableaux et chaînes sont partagés. Aucun structuredClone, aucun parcours récursif des payloads. Si toutes les descriptions/pdfContent sont déjà non vides, tous les objets **et le tableau des événements** sont rendus identiques par référence. Les champs vides gardent leur sémantique legacy : ils nécessitent un enrichissement. Les boucles d’enrichissement, callbacks et persistance existantes sont inchangées.
+
+TDD : **8 tests rouges** sur les identités/copies globales (`image48-red.log`), puis **8 verts +27 tests existants verts** (`image48-green.log`). Les valeurs événements/descriptions/persistEvent attendues passent déjà avant la modification ; les assertions de partage échouent, puis passent après. Couverture : aucune pièce jointe, image, PDF, mélange ; snapshot entièrement décrit ; une seule nouvelle image avec autres messages et attachments conservés par référence ; metadata d’image de résultat outil, brute et dans un snapshot. Toutes les entrées sont gelées ; leur sérialisation reste inchangée après traitement. persistEvent reçoit exactement l’objet data de l’événement retourné, et les mêmes valeurs qu’avant. Une seconde passe sur le snapshot enrichi ne copie rien et ne persiste rien.
+
+Banc repris **sans aucune modification** sur un nouveau répertoire dédié `/tmp/openfox-perf-image48.awODDY` (montage `/work`, node:24-bookworm, 2 CPU/4 Go, sans vision, lecteur optimisé actif). Deux variantes avant modification puis les deux après. La série antérieure à `b74b840e` reste conservée (2535 ms groupé, 351 ms étalé) ; la nouvelle exécution avant correction donne 2535/405 ms. Variabilité exposée, pas de sélection de la meilleure baseline.
+
+| Fins     | Version image-processor | Health p50 | Health p95 | Health p99 | Round p99 | Event-loop p99 | RSS final Mo |
+| -------- | ----------------------- | ---------: | ---------: | ---------: | --------: | -------------: | -----------: |
+| groupées | avant                   |     849.85 |    2413.77 |    2534.98 |     40.56 |         459.01 |      1219.49 |
+| groupées | après                   |     584.91 |    1226.52 |    1276.73 |      0.52 |         465.57 |       661.31 |
+| étalées  | avant                   |      10.29 |     223.80 |     404.73 |     39.51 |         179.18 |       920.64 |
+| étalées  | après                   |       0.30 |     104.02 |     143.21 |      0.27 |         131.53 |       693.64 |
+
+Zéro erreur HTTP et zéro parse de snapshot dans les quatre exécutions. En régime établi sans vision, le coût du clone disparaît : round p99 0,27–0,52 ms. Le p99 health **143 ms étalé /1277 ms groupé** reste supérieur à 100 ms, à cause de la sérialisation/écriture synchrone inchangée ; critère 46 toujours ouvert. La fixture ne contient pas d’images/PDF à décrire : elle mesure le coût évité sur le régime établi, pas la latence d’un fournisseur vision ni le coût d’écriture du premier enrichissement.
+
+La copie de DB réelle reste sur le Mac ; l’équivalence 7/7 précédemment vérifiée concerne le stockage/fold inchangé par cette extension, pas une validation de fournisseur vision réel. Les données du banc restent synthétiques. Le hook du troisième commit utilisera le nouveau répertoire dédié ; contrôle et nettoyage final dans `image48-cleanup.log`. Aucun push, déploiement ni redémarrage.
+
+Gates finales du critère 48 : **6 124 unitaires passés, 29 ignorés ; 357 e2e passés, 49 ignorés** ; typecheck serveur/web/e2e/bancs, lint, format et duplication verts, sortie 0 (`image48-gates.log`). La revue indépendante reste attendue ; completed ne signifie pas verified.
