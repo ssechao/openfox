@@ -60,6 +60,7 @@ $SSH "$HOST" "mkdir -p '$DIR'"
 # *.db is a gitignored local database, never source.
 rsync -az --delete \
   --exclude node_modules --exclude dist --exclude .git \
+  --exclude /report/private/ --exclude '.env*' \
   --exclude .playwright-cli --exclude '*.tgz' --exclude '*.db' --exclude '*.db-wal' --exclude '*.db-shm' \
   ./ "$HOST:$DIR/"
 
