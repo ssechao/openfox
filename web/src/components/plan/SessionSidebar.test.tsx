@@ -14,6 +14,9 @@ import type { Message } from '@shared/types.js'
 const mockSessionStore = vi.fn() as Mock
 const mockConfigStore = vi.fn() as Mock
 const mockUpdateStore = vi.fn() as Mock
+const { mockMetadataEntriesComponent } = vi.hoisted(() => ({
+  mockMetadataEntriesComponent: vi.fn((_props: { entries: unknown[] }) => null),
+}))
 
 vi.mock('../../stores/session', () => ({
   useSessionStore: (selector?: (s: unknown) => unknown) =>
@@ -45,7 +48,7 @@ vi.mock('../../hooks/useGitStatus', () => ({
 vi.mock('./StatsModal', () => ({ StatsModal: () => null }))
 vi.mock('./CriteriaEditor', () => ({ CriteriaEditor: () => null }))
 vi.mock('../shared/MetadataEntries', () => ({
-  MetadataEntries: () => null,
+  MetadataEntries: mockMetadataEntriesComponent,
   MetadataSectionHeader: ({ title: _title }: { title: string }) => null,
 }))
 vi.mock('../shared/MetadataModal', () => ({ MetadataModal: () => null }))
@@ -111,6 +114,33 @@ describe('SessionSidebar — git repo guards', () => {
 
     expect(html).toContain('my-app')
     expect(html).not.toContain('C:\\Users\\me\\projects\\my-app')
+  })
+})
+
+describe('SessionSidebar — metadata categories', () => {
+  it('routes review findings and dynamic categories through MetadataEntries', () => {
+    mockUseGitStatus.mockReturnValue({ branch: null, diff: { files: [], loading: false, error: null } })
+    const reviewFinding = { id: 'review-1', description: 'Known category finding', status: 'open' }
+    const dynamicEntry = { id: 'risk-1', description: 'Dynamic category entry', status: 'pending' }
+    mockSessionStore.mockReturnValue({
+      currentSession: {
+        id: 's1',
+        projectId: 'p1',
+        metadataEntries: {
+          review_findings: [reviewFinding],
+          project_risks: [dynamicEntry],
+        },
+        workdir: '/tmp/project',
+      },
+    })
+
+    renderToStaticMarkup(<SessionSidebar />)
+
+    const renderedEntries = mockMetadataEntriesComponent.mock.calls.map(
+      ([props]) => (props as { entries: unknown[] }).entries,
+    )
+    expect(renderedEntries).toContainEqual([reviewFinding])
+    expect(renderedEntries).toContainEqual([dynamicEntry])
   })
 })
 
