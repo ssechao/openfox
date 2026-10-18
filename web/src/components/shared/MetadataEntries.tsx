@@ -1,6 +1,7 @@
 import { memo, useMemo, useState, useCallback } from 'react'
 import type { MetadataEntry } from '@shared/types.js'
 import { MetadataStatusIcon, statusOrder, decodeHtmlEntities } from './MetadataStatusIcon'
+import { Tooltip } from './Tooltip'
 import { TrashIcon } from './icons'
 import { useT } from '../../hooks/useT'
 
@@ -58,17 +59,23 @@ export const MetadataEntries = memo(function MetadataEntries({ entries, title, o
         </div>
       )}
       <div className="bg-primary">
-        {entries.map((entry, idx) => (
-          <div
-            key={entry.id ?? idx}
-            className={`flex items-start gap-1 px-1.5 py-1 ${idx > 0 ? 'border-t border-border' : ''}`}
-          >
-            <MetadataStatusIcon status={entry.status} />
-            <div className="flex-1 min-w-0 text-xs truncate">
-              <span className="text-text-muted">[{entry.id}]</span> {decodeHtmlEntities(entry.description)}
+        {entries.map((entry, idx) => {
+          const description = decodeHtmlEntities(entry.description)
+          const fullEntry = `[${entry.id}] ${description}`
+          return (
+            <div
+              key={entry.id ?? idx}
+              className={`flex items-start gap-1 px-1.5 py-1 ${idx > 0 ? 'border-t border-border' : ''}`}
+            >
+              <MetadataStatusIcon status={entry.status} />
+              <Tooltip content={fullEntry} position="left" triggerClassName="block flex-1 min-w-0" className="max-w-lg">
+                <div className="text-xs truncate">
+                  <span className="text-text-muted">[{entry.id}]</span> {description}
+                </div>
+              </Tooltip>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
       {onClearAll && (
         <>
