@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import '@testing-library/jest-dom/vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CriteriaEditor } from './CriteriaEditor'
 import { authFetch } from '../../lib/api'
@@ -65,6 +66,38 @@ describe('CriteriaEditor', () => {
         ],
       }),
     })
+  })
+
+  it('shows the full criterion on hover and keeps click-to-edit', async () => {
+    const description =
+      'A very long acceptance criterion whose complete requirement must remain readable even when the row is truncated'
+    const { container } = render(
+      <CriteriaEditor sessionId="session-1" entries={[{ id: '7', description, status: 'pending' }]} />,
+    )
+
+    const criterionButton = screen.getByRole('button', { name: `[7] ${description}` })
+    expect(criterionButton).not.toHaveAttribute('title')
+    const trigger = criterionButton.parentElement as HTMLElement
+    fireEvent.mouseEnter(trigger)
+
+    await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent(`[7] ${description}`))
+
+    fireEvent.click(criterionButton)
+    expect(container.querySelector('input')).toHaveValue(description)
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('shows the full criterion when keyboard focus reaches its button', async () => {
+    const description = 'A criterion that must be available to keyboard users in full'
+    const user = userEvent.setup()
+    render(<CriteriaEditor sessionId="session-1" entries={[{ id: '9', description, status: 'pending' }]} />)
+
+    const criterionButton = screen.getByRole('button', { name: `[9] ${description}` })
+    await user.tab()
+    await user.tab()
+
+    expect(criterionButton).toHaveFocus()
+    await waitFor(() => expect(screen.getByRole('tooltip')).toHaveTextContent(`[9] ${description}`))
   })
 
   it('keeps a single-line paste as normal input without creating a criterion', () => {
