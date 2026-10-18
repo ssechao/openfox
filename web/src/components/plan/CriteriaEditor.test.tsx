@@ -34,7 +34,11 @@ function openAddInput() {
 }
 
 describe('CriteriaEditor', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
 
   beforeEach(() => {
     mockedAuthFetch.mockClear()
@@ -85,6 +89,48 @@ describe('CriteriaEditor', () => {
     fireEvent.click(criterionButton)
     expect(container.querySelector('input')).toHaveValue(description)
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('keeps a long criterion tooltip inside the viewport beside the sidebar', async () => {
+    const description = 'A long criterion '.repeat(50).trim()
+    vi.stubGlobal('innerWidth', 1280)
+    vi.stubGlobal('innerHeight', 720)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute('role') === 'tooltip') {
+        return {
+          top: 0,
+          left: 0,
+          right: 512,
+          bottom: 240,
+          width: 512,
+          height: 240,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect
+      }
+      return {
+        top: 12,
+        left: 1000,
+        right: 1270,
+        bottom: 32,
+        width: 270,
+        height: 20,
+        x: 1000,
+        y: 12,
+        toJSON: () => ({}),
+      } as DOMRect
+    })
+    render(<CriteriaEditor sessionId="session-1" entries={[{ id: '17', description, status: 'pending' }]} />)
+
+    const criterionButton = screen.getByRole('button', { name: `[17] ${description}` })
+    fireEvent.mouseEnter(criterionButton.parentElement as HTMLElement)
+
+    const tooltip = await screen.findByRole('tooltip')
+    await waitFor(() => expect(tooltip.style.left).toBe('480px'))
+    expect(tooltip).toHaveClass('max-w-lg')
+    expect(tooltip.style.top).toBe('8px')
+    expect(Number.parseFloat(tooltip.style.left) + 512).toBeLessThanOrEqual(1272)
   })
 
   it('shows the full criterion when keyboard focus reaches its button', async () => {

@@ -239,7 +239,12 @@ export function CriteriaEditor({ entries, sessionId }: CriteriaEditorProps) {
                     className="w-full bg-bg-tertiary text-text-primary text-xs px-1.5 py-0.5 rounded border border-border focus:outline-none focus:border-accent-primary"
                   />
                 ) : (
-                  <Tooltip content={fullCriterion} position="top" triggerClassName="block w-full min-w-0">
+                  <Tooltip
+                    content={fullCriterion}
+                    position="left"
+                    triggerClassName="block w-full min-w-0"
+                    className="max-w-lg"
+                  >
                     <button
                       onClick={() => handleStartEdit(entry.id, entry.description)}
                       className="text-xs text-text-primary text-left hover:text-accent-primary transition-colors w-full truncate cursor-pointer"
