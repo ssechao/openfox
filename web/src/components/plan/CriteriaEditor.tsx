@@ -5,6 +5,7 @@ import { authFetch } from '../../lib/api'
 import { shouldAutofocus } from '../../lib/device'
 import { PlusIcon, XCloseIcon, TrashIcon, InfoIcon } from '../shared/icons'
 import { Modal } from '../shared/Modal'
+import { Tooltip } from '../shared/Tooltip'
 import { MetadataStatusIcon, decodeHtmlEntities } from '../shared/MetadataStatusIcon'
 import { useAgents } from '../../hooks/useAgents'
 import { getAgentColor } from '../../lib/agents-actions'
@@ -210,6 +211,8 @@ export function CriteriaEditor({ entries, sessionId }: CriteriaEditorProps) {
         {criteria.map((entry, idx) => {
           const status = entry.status
           const isEditing = editingId === entry.id
+          const description = decodeHtmlEntities(entry.description)
+          const fullCriterion = `[${entry.id}] ${description}`
           return (
             <div
               key={entry.id}
@@ -236,13 +239,14 @@ export function CriteriaEditor({ entries, sessionId }: CriteriaEditorProps) {
                     className="w-full bg-bg-tertiary text-text-primary text-xs px-1.5 py-0.5 rounded border border-border focus:outline-none focus:border-accent-primary"
                   />
                 ) : (
-                  <button
-                    onClick={() => handleStartEdit(entry.id, entry.description)}
-                    className="text-xs text-text-primary text-left hover:text-accent-primary transition-colors w-full truncate cursor-pointer"
-                    title={t({ en: 'Click to edit', fr: 'Cliquer pour modifier' })}
-                  >
-                    [{entry.id}] {decodeHtmlEntities(entry.description)}
-                  </button>
+                  <Tooltip content={fullCriterion} position="top" triggerClassName="block w-full min-w-0">
+                    <button
+                      onClick={() => handleStartEdit(entry.id, entry.description)}
+                      className="text-xs text-text-primary text-left hover:text-accent-primary transition-colors w-full truncate cursor-pointer"
+                    >
+                      {fullCriterion}
+                    </button>
+                  </Tooltip>
                 )}
               </div>
               <button
