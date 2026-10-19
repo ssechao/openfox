@@ -211,6 +211,11 @@ export async function executeTools(
       ? createToolProgressHandler(append, assistantMsgId, toolCall.id, ctx.sessionId)
       : undefined
 
+    // Resolved once here so path checks do not rebuild the whole session to read it.
+    const projectId =
+      typeof ctx.sessionManager.getSessionProjectId === 'function'
+        ? ctx.sessionManager.getSessionProjectId(ctx.sessionId)
+        : undefined
     const toolContext: ToolContext = {
       sessionManager: ctx.sessionManager,
       workdir: ctx.sessionManager.getEffectiveWorkdir(ctx.sessionId),
@@ -219,6 +224,7 @@ export async function executeTools(
       llmClient: ctx.llmClient,
       statsIdentity: ctx.statsIdentity,
       lspManager: ctx.sessionManager.getLspManager(ctx.sessionId),
+      ...(projectId ? { projectId } : {}),
       onEvent: ctx.onMessage,
       onProgress,
       toolCallId: toolCall.id,

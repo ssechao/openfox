@@ -211,6 +211,13 @@ export class EventStore {
   private projections = new Map<string, { windowId: string | undefined; userCount: number }>()
   private activeSessions = new Map<string, boolean>()
   private replayPrefixes = new Map<string, { seq: number; events: StoredEvent[]; serializedBytes: number }>()
+  // Write revisions, so derived per-session state can be memoized: a session's
+  // revision moves on every write path that touches its events, and the global
+  // one moves whenever the caches are dropped (another connection wrote).
+  private sessionRevisions = new Map<string, number>()
+  private globalRevision = 0
+  private static instanceCount = 0
+  private readonly instanceId = ++EventStore.instanceCount
 
   private checkExternalWrites(): void {
     if (!this.hotPath) return
@@ -234,6 +241,22 @@ export class EventStore {
       this.projections.set(sessionId, projection)
     }
     return projection
+  }
+
+  /**
+   * Opaque token identifying the current content of a session's events, or
+   * undefined when it cannot be tracked (hot path disabled). Two equal tokens
+   * guarantee no event of the session was appended, deleted, rewritten or
+   * tombstoned in between, by this process or another connection.
+   */
+  getSessionRevision(sessionId: string): string | undefined {
+    if (!this.hotPath) return undefined
+    this.checkExternalWrites()
+    return `${this.instanceId}:${this.globalRevision}:${this.sessionRevisions.get(sessionId) ?? 0}`
+  }
+
+  private bumpSessionRevision(sessionId: string): void {
+    this.sessionRevisions.set(sessionId, (this.sessionRevisions.get(sessionId) ?? 0) + 1)
   }
 
   getCurrentWindowId(sessionId: string): string | undefined {
@@ -775,6 +798,7 @@ export class EventStore {
   }
 
   private invalidateSessionCache(sessionId: string, event?: TurnEvent): void {
+    this.bumpSessionRevision(sessionId)
     if (event === undefined) {
       this.projections.delete(sessionId)
       this.activeSessions.delete(sessionId)
@@ -801,6 +825,7 @@ export class EventStore {
   }
 
   private clearSnapshotCache(): void {
+    this.globalRevision++
     this.projections.clear()
     this.activeSessions.clear()
     this.replayPrefixes.clear()
@@ -1175,6 +1200,7 @@ export class EventStore {
     if (this.hotPath) {
       this.replayPrefixes.delete(sessionId)
       this.projections.delete(sessionId)
+      this.bumpSessionRevision(sessionId)
     } else this.invalidateSessionCache(sessionId)
 
     return result.changes as number

@@ -163,6 +163,20 @@ export function applyEvents<
   },
 ): T[] {
   const messages = new Map(initialMessages.map((message) => [message.id, deepCloneMessage(message) as T]))
+  // toolCallId → id of the message carrying it. tool.output arrives once per
+  // streamed chunk, and scanning every message for each one made replaying a
+  // large session quadratic. Built on first use, kept current on tool.call.
+  let toolCallOwners: Map<string, string> | undefined
+  const findToolCallOwner = (toolCallId: string): object | undefined => {
+    if (!toolCallOwners) {
+      toolCallOwners = new Map()
+      for (const msg of messages.values()) indexToolCalls(toolCallOwners, msg)
+    }
+    const ownerId = toolCallOwners.get(toolCallId)
+    const owner = ownerId === undefined ? undefined : messages.get(ownerId)
+    if (owner && hasToolCall(owner, toolCallId)) return owner
+    return findMessageWithToolCall(messages, toolCallId)
+  }
 
   for (const event of events) {
     switch (event.type) {
@@ -213,6 +227,7 @@ export function applyEvents<
           // path stamps it — so derive it here rather than persisting a copy.
           const toolCall = data.toolCall.startedAt ? data.toolCall : { ...data.toolCall, startedAt: event.timestamp }
           attachToolCallToMessage(msg, toolCall)
+          if (toolCallOwners && !toolCallOwners.has(toolCall.id)) toolCallOwners.set(toolCall.id, data.messageId)
           removeFromPreparing(msg, toolCall.id)
         }
         break
@@ -249,7 +264,7 @@ export function applyEvents<
       }
       case 'tool.output': {
         const data = event.data as Extract<TurnEvent, { type: 'tool.output' }>['data']
-        const msg = findMessageWithToolCall(messages, data.toolCallId)
+        const msg = findToolCallOwner(data.toolCallId)
         if (msg) {
           const tc = (msg as { toolCalls?: ToolCallWithResult[] }).toolCalls?.find((tc) => tc.id === data.toolCallId)
           if (tc) {
@@ -310,6 +325,20 @@ function removeFromPreparing(msg: object & { preparingToolCalls?: PreparingToolC
     Array.isArray((msg as { preparingToolCalls?: PreparingToolCall[] }).preparingToolCalls)
   ) {
     ;(msg as { preparingToolCalls: PreparingToolCall[] }).preparingToolCalls = []
+  }
+}
+
+function hasToolCall(msg: object, toolCallId: string): boolean {
+  const toolCalls = (msg as { toolCalls?: ToolCall[] }).toolCalls
+  return Array.isArray(toolCalls) && toolCalls.some((tc) => tc.id === toolCallId)
+}
+
+// First owner wins, matching the scan order of findMessageWithToolCall.
+function indexToolCalls(owners: Map<string, string>, msg: object): void {
+  const { id, toolCalls } = msg as { id: string; toolCalls?: ToolCall[] }
+  if (!Array.isArray(toolCalls)) return
+  for (const tc of toolCalls) {
+    if (!owners.has(tc.id)) owners.set(tc.id, id)
   }
 }
 
