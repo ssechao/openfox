@@ -368,7 +368,7 @@ export class SessionManager {
    * Uses workspace path when active, otherwise the project workdir.
    */
   getEffectiveWorkdir(sessionId: string): string {
-    const session = this.requireSession(sessionId)
+    const session = this.requireSessionRecord(sessionId)
     return session.workspace ?? session.workdir
   }
 
@@ -379,8 +379,16 @@ export class SessionManager {
    * workflows) lives and is managed from.
    */
   getProjectWorkdir(sessionId: string): string {
-    const session = this.requireSession(sessionId)
+    const session = this.requireSessionRecord(sessionId)
     return session.workdir
+  }
+
+  /**
+   * Project the session belongs to, from the sessions row alone.
+   * Returns undefined for an unknown session.
+   */
+  getSessionProjectId(sessionId: string): string | undefined {
+    return dbGetSession(sessionId)?.projectId
   }
 
   // ============================================================================
@@ -692,6 +700,20 @@ export class SessionManager {
    */
   requireSession(id: string): Session {
     const session = this.getSession(id)
+    if (!session) {
+      throw new SessionNotFoundError(id)
+    }
+    return session
+  }
+
+  /**
+   * Get the sessions row only (ids, workdir, workspace, provider, flags), without
+   * folding the event log. Use it for scalar fields: getSession rebuilds every
+   * message of the session, which costs hundreds of ms on large sessions and
+   * runs several times per tool call. Throws if not found.
+   */
+  requireSessionRecord(id: string): Session {
+    const session = dbGetSession(id)
     if (!session) {
       throw new SessionNotFoundError(id)
     }

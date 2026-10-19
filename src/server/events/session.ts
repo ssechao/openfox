@@ -209,7 +209,53 @@ function toSnapshotMessage(message: import('../../shared/types.js').Message): Sn
  *
  * maxTokens should come from providerManager.getCurrentModelContext()
  */
+// Folding replays every event since the snapshot and clones every message —
+// hundreds of ms on large sessions — and callers ask for it many times per tool
+// call. Results are memoized per session until its events change (store
+// revision), so the returned state is shared and must not be mutated.
+const SESSION_STATE_MEMO_MAX_SESSIONS = 8
+const sessionStateMemo = new Map<string, { revision: string; variants: Map<string, FoldedSessionState | undefined> }>()
+
 export function getSessionState(
+  sessionId: string,
+  maxTokens?: number,
+  defaultMode?: SessionMode,
+): FoldedSessionState | undefined {
+  const revision = getEventStore().getSessionRevision(sessionId)
+  if (revision === undefined) return foldStoredSessionState(sessionId, maxTokens, defaultMode)
+
+  const variantKey = `${maxTokens ?? getRuntimeConfig().context.maxTokens}|${defaultMode ?? ''}`
+  let entry = sessionStateMemo.get(sessionId)
+  if (entry?.revision !== revision) {
+    entry = { revision, variants: new Map() }
+  }
+  // Refresh recency (Map keeps insertion order) and evict the least recent.
+  sessionStateMemo.delete(sessionId)
+  sessionStateMemo.set(sessionId, entry)
+  if (sessionStateMemo.size > SESSION_STATE_MEMO_MAX_SESSIONS) {
+    sessionStateMemo.delete(sessionStateMemo.keys().next().value!)
+  }
+
+  if (entry.variants.has(variantKey)) return entry.variants.get(variantKey)
+  const state = foldStoredSessionState(sessionId, maxTokens, defaultMode)
+  if (state && process.env['VITEST']) deepFreeze(state)
+  entry.variants.set(variantKey, state)
+  return state
+}
+
+/** Drop memoized folded state (tests, or after replacing the event store). */
+export function clearSessionStateMemo(): void {
+  sessionStateMemo.clear()
+}
+
+// Under test, shared memoized state is frozen so any caller that mutates it fails loudly.
+function deepFreeze(value: unknown): void {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return
+  Object.freeze(value)
+  for (const child of Object.values(value)) deepFreeze(child)
+}
+
+function foldStoredSessionState(
   sessionId: string,
   maxTokens?: number,
   defaultMode?: SessionMode,

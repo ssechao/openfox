@@ -156,6 +156,20 @@ describe('SessionManager', () => {
     expect(manager.getProjectWorkdir(session.id)).toBe(workdir)
   })
 
+  it('reads workdirs and project id from the sessions row without replaying events', () => {
+    const session = manager.createSession(projectId)
+    emitUserMessage(session.id, 'hello')
+    const replay = vi.spyOn(getEventStore(), 'getEventsSinceSnapshot')
+
+    expect(manager.getEffectiveWorkdir(session.id)).toBe(workdir)
+    expect(manager.getProjectWorkdir(session.id)).toBe(workdir)
+    expect(manager.getSessionProjectId(session.id)).toBe(projectId)
+    expect(manager.getSessionProjectId('missing')).toBeUndefined()
+    expect(() => manager.getEffectiveWorkdir('missing')).toThrow('Session not found: missing')
+    expect(replay).not.toHaveBeenCalled()
+    replay.mockRestore()
+  })
+
   it('updates mode, phase, and running state while emitting events', () => {
     const session = manager.createSession(projectId, 'Custom Title')
     const allEvents: string[] = []
