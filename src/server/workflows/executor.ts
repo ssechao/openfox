@@ -121,7 +121,8 @@ export async function evaluateConditionAsync(
     ...(context?.stepId ? { stepId: context.stepId } : {}),
     ...(condition.config !== undefined ? { config: condition.config } : {}),
     outcome: stepOutcome,
-    ...(metadataEntries ? { metadataEntries } : {}),
+    // Plugins get their own copy: session state is shared and frozen.
+    ...(metadataEntries ? { metadataEntries: structuredClone(metadataEntries) } : {}),
   }
   return runPluginTransitionHandler(condition.handler, pluginContext)
 }

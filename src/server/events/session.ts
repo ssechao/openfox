@@ -33,6 +33,7 @@ import type {
 import type { SessionSnapshot, SnapshotMessage, ReadFileEntry } from './types.js'
 import { getEventStore } from './store.js'
 import { getRuntimeConfig } from '../runtime-config.js'
+import { resolveDefaultAgentId } from '../agents/registry.js'
 import {
   foldSessionState,
   buildContextMessagesFromEventHistory,
@@ -211,10 +212,16 @@ function toSnapshotMessage(message: import('../../shared/types.js').Message): Sn
  */
 // Folding replays every event since the snapshot and clones every message —
 // hundreds of ms on large sessions — and callers ask for it many times per tool
-// call. Results are memoized per session until its events change (store
-// revision), so the returned state is shared and must not be mutated.
+// call. The session is folded once per store revision; only `mode` (when no
+// event sets it) and `contextState.maxTokens` depend on the arguments, so each
+// (maxTokens, defaultMode) view is derived from that single fold. The returned
+// state is shared and frozen: callers must copy before changing anything.
 const SESSION_STATE_MEMO_MAX_SESSIONS = 8
-const sessionStateMemo = new Map<string, { revision: string; variants: Map<string, FoldedSessionState | undefined> }>()
+const UNSET_MODE = '\u0000unset-mode' as SessionMode
+const sessionStateMemo = new Map<
+  string,
+  { revision: string; base?: FoldedSessionState | undefined; views: Map<string, FoldedSessionState> }
+>()
 
 export function getSessionState(
   sessionId: string,
@@ -224,10 +231,9 @@ export function getSessionState(
   const revision = getEventStore().getSessionRevision(sessionId)
   if (revision === undefined) return foldStoredSessionState(sessionId, maxTokens, defaultMode)
 
-  const variantKey = `${maxTokens ?? getRuntimeConfig().context.maxTokens}|${defaultMode ?? ''}`
   let entry = sessionStateMemo.get(sessionId)
   if (entry?.revision !== revision) {
-    entry = { revision, variants: new Map() }
+    entry = { revision, views: new Map() }
   }
   // Refresh recency (Map keeps insertion order) and evict the least recent.
   sessionStateMemo.delete(sessionId)
@@ -236,11 +242,27 @@ export function getSessionState(
     sessionStateMemo.delete(sessionStateMemo.keys().next().value!)
   }
 
-  if (entry.variants.has(variantKey)) return entry.variants.get(variantKey)
-  const state = foldStoredSessionState(sessionId, maxTokens, defaultMode)
-  if (state && process.env['VITEST']) deepFreeze(state)
-  entry.variants.set(variantKey, state)
-  return state
+  if (!('base' in entry)) {
+    entry.base = foldStoredSessionState(sessionId, undefined, UNSET_MODE)
+    if (entry.base) deepFreeze(entry.base)
+  }
+  const base = entry.base
+  if (!base) return undefined
+
+  // Resolved on every read: the default agent is a setting, not an event.
+  const mode = base.mode === UNSET_MODE ? (defaultMode ?? resolveDefaultAgentId()) : base.mode
+  const effectiveMaxTokens = maxTokens ?? getRuntimeConfig().context.maxTokens
+  const viewKey = `${effectiveMaxTokens}|${mode}`
+  let view = entry.views.get(viewKey)
+  if (!view) {
+    view = Object.freeze({
+      ...base,
+      mode,
+      contextState: Object.freeze({ ...base.contextState, maxTokens: effectiveMaxTokens }),
+    })
+    entry.views.set(viewKey, view)
+  }
+  return view
 }
 
 /** Drop memoized folded state (tests, or after replacing the event store). */
@@ -248,7 +270,8 @@ export function clearSessionStateMemo(): void {
   sessionStateMemo.clear()
 }
 
-// Under test, shared memoized state is frozen so any caller that mutates it fails loudly.
+// Shared memoized state is frozen so a caller that mutates it fails loudly
+// instead of silently corrupting every later read of the session.
 function deepFreeze(value: unknown): void {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return
   Object.freeze(value)

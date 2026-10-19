@@ -4,7 +4,7 @@
  * after any write path (append, delete, tombstone, another connection).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -84,6 +84,26 @@ describe('getSessionState memoization', () => {
     const large = getSessionState('s1', 500000)
     expect(large).not.toBe(small)
     expect(getSessionState('s1', 1000)).toBe(small)
+  })
+
+  it('derives every maxTokens/defaultMode view from a single fold', () => {
+    seedSession('s1')
+    const replay = vi.spyOn(getEventStore(), 'getEventsSinceSnapshot')
+    const small = getSessionState('s1', 1000, 'planner')!
+    const large = getSessionState('s1', 500000, 'builder')!
+    expect(replay).toHaveBeenCalledTimes(1)
+    replay.mockRestore()
+    expect(large.messages).toBe(small.messages)
+    expect(small.contextState.maxTokens).toBe(1000)
+    expect(large.contextState.maxTokens).toBe(500000)
+  })
+
+  it('applies defaultMode only when no event sets the mode', () => {
+    seedSession('s1')
+    expect(getSessionState('s1', undefined, 'planner')!.mode).toBe('planner')
+    expect(getSessionState('s1', undefined, 'builder')!.mode).toBe('builder')
+    getEventStore().append('s1', { type: 'mode.changed', data: { mode: 'builder', auto: false } })
+    expect(getSessionState('s1', undefined, 'planner')!.mode).toBe('builder')
   })
 
   it('refolds when events are deleted and the same max seq is reached again', () => {
