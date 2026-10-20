@@ -961,10 +961,28 @@ export async function executeWorkflow(
 
   // Max iterations reached
   logger.warn('Workflow executor max iterations reached', { sessionId, iterations })
+  const maxIterationsReason = `Max iterations (${workflow.settings.maxIterations}) reached`
+  sessionManager.setPhase(sessionId, 'blocked')
+  if (executionId) {
+    sessionManager.blockWorkflow(
+      sessionId,
+      executionId,
+      workflow.metadata.id,
+      workflow.metadata.name,
+      workflow.metadata.color,
+    )
+  }
+  emitWorkflowMessage(
+    eventStore,
+    sessionId,
+    `Runner blocked: ${maxIterationsReason}`,
+    getCurrentWindowMessageOptions(sessionId),
+    onMessage,
+  )
   return {
     finalAction: {
       type: 'BLOCKED',
-      reason: `Max iterations (${workflow.settings.maxIterations}) reached`,
+      reason: maxIterationsReason,
       blockedCriteria: [],
     },
     iterations,

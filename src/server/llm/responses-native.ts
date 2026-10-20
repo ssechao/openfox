@@ -31,6 +31,7 @@ import type {
   ChatCompletionTool,
 } from './openai-types.js'
 import { logger } from '../utils/logger.js'
+import { LLMError } from '../utils/errors.js'
 import { ChatHttpClient, DONE, type ChatRequest } from './http-shared.js'
 
 export interface ResponsesClientOptions {
@@ -255,7 +256,8 @@ type StreamToolCall = NonNullable<ChatCompletionChunk['choices'][0]['delta']['to
 
 /**
  * Translate one Responses SSE event object into a chat chunk, `DONE` at
- * terminal events, or null for events with no chat equivalent.
+ * terminal events, or null for events with no chat equivalent. Throws an
+ * LLMError for `response.failed` and `error` events.
  */
 export function parseResponsesEvent(event: Record<string, unknown>): ChatCompletionChunk | typeof DONE | null {
   const type = event['type']
@@ -313,13 +315,13 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
       const response = event['response'] as ResponsesApiResponse | undefined
       const message = response?.error?.message ?? 'Responses API request failed'
       logger.warn('Responses API stream failed', { message })
-      return finalChunk(responseId, response)
+      throw new LLMError(message)
     }
 
     case 'error': {
       const message = (event['message'] as string | undefined) ?? 'Responses API stream error'
       logger.warn('Responses API stream error event', { message })
-      return null
+      throw new LLMError(message)
     }
 
     default:
@@ -393,11 +395,13 @@ export class OpenAIResponsesHttpClient extends ChatHttpClient {
     const data = trimmed.slice(6)
     if (data === '[DONE]') return DONE
 
+    let event: Record<string, unknown>
     try {
-      return parseResponsesEvent(JSON.parse(data) as Record<string, unknown>)
+      event = JSON.parse(data) as Record<string, unknown>
     } catch (error) {
       logger.warn('Failed to parse Responses SSE event', { data, error })
       return null
     }
+    return parseResponsesEvent(event)
   }
 }

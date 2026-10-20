@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { buildResponsesRequest, parseResponsesResponse, type ResponsesRequestBody } from './responses-native.js'
+import {
+  buildResponsesRequest,
+  parseResponsesEvent,
+  parseResponsesResponse,
+  type ResponsesRequestBody,
+} from './responses-native.js'
+import { LLMError } from '../utils/errors.js'
 import type { ChatCompletionCreateParamsStreaming, ChatCompletionMessageParam } from './openai-types.js'
 
 function streamParams(
@@ -285,5 +291,34 @@ describe('parseResponsesResponse', () => {
   it('maps failed status to the content_filter finish reason', () => {
     const response = parseResponsesResponse({ id: 'resp_4', status: 'failed', output: [] })
     expect(response.choices[0]?.finish_reason).toBe('content_filter')
+  })
+})
+
+describe('parseResponsesEvent terminal errors', () => {
+  it('raises response.failed as an LLM error carrying the provider message', () => {
+    expect(() =>
+      parseResponsesEvent({
+        type: 'response.failed',
+        response: { id: 'resp_5', status: 'failed', output: [], error: { message: 'Codex Responses backend failed.' } },
+      }),
+    ).toThrow(new LLMError('Codex Responses backend failed.'))
+  })
+
+  it('raises response.failed without a provider message as a generic LLM error', () => {
+    expect(() => parseResponsesEvent({ type: 'response.failed', response: { status: 'failed' } })).toThrow(
+      new LLMError('Responses API request failed'),
+    )
+  })
+
+  it('raises a stream error event as an LLM error', () => {
+    expect(() => parseResponsesEvent({ type: 'error', message: 'quota exhausted' })).toThrow(
+      new LLMError('quota exhausted'),
+    )
+  })
+
+  it('still maps response.completed to a final chunk', () => {
+    const chunk = parseResponsesEvent({ type: 'response.completed', response: { status: 'completed' } })
+    expect(chunk).not.toBeNull()
+    expect(typeof chunk === 'object' && chunk?.choices[0]?.finish_reason).toBe('stop')
   })
 })

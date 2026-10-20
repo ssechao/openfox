@@ -290,6 +290,40 @@ describe('workflow agent step LLM failure', () => {
   })
 })
 
+describe('workflow iteration budget exhausted', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('blocks the execution visibly so the step can be retried', async () => {
+    mockRunAgentTurn.mockImplementation(async () => ({ returnValueResult: 'completed' }))
+
+    const workflow = createWorkflow()
+    const onMessage = vi.fn()
+    const options = createMockOptions({ onMessage })
+    const result = await executeWorkflow(workflow, options)
+
+    expect(result.finalAction.type).toBe('BLOCKED')
+    expect((result.finalAction as { reason: string }).reason).toBe('Max iterations (10) reached')
+    expect(mockRunAgentTurn).toHaveBeenCalledTimes(10)
+
+    const sessionManager = options.sessionManager as any
+    const executionId = sessionManager.startWorkflow.mock.calls[0]?.[1]
+    expect(sessionManager.blockWorkflow).toHaveBeenCalledWith('test-session', executionId, 'test', 'Test', undefined)
+    expect(sessionManager.setPhase).toHaveBeenLastCalledWith('test-session', 'blocked')
+
+    const blockedNotice = 'Runner blocked: Max iterations (10) reached'
+    const appended = mockAppend.mock.calls
+      .map((c: any[]) => c[1])
+      .filter((e: any) => e?.type === 'message.start' && e?.data?.content === blockedNotice)
+    expect(appended).toHaveLength(1)
+    const relayed = onMessage.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((m: any) => m?.type === 'chat.message' && m?.payload?.message?.content === blockedNotice)
+    expect(relayed).toHaveLength(1)
+  })
+})
+
 // ============================================================================
 // Step-done nudge simplification
 // ============================================================================
