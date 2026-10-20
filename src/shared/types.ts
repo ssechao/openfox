@@ -947,6 +947,8 @@ export interface Config {
     maxTokens: number
     compactionThreshold: number
     compactionTarget: number
+    /** Take a turn.snapshot mid-turn once this many events piled up since the last one. */
+    snapshotEveryEvents?: number
   }
   agent: {
     maxIterations: number

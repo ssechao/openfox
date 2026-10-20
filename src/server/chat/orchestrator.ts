@@ -441,10 +441,18 @@ export async function runAgentTurn(
     )
   }
 
+  const eventStore = getEventStore()
+
   return runTopLevelAgentLoop(
     {
       mode: agentId,
       append,
+      appendStreaming: (event) => eventStore.appendStreaming(options.sessionId, event),
+      flushStreaming: () => {
+        eventStore.tryFlushStreaming(options.sessionId)
+      },
+      snapshotIfDue: () =>
+        snapshotIfDue(options.sessionManager, options.sessionId, getRuntimeConfig().context.snapshotEveryEvents),
       retryPatternsProvider: buildRetryPatterns,
       sessionManager: options.sessionManager,
       sessionId: options.sessionId,
@@ -523,6 +531,30 @@ export async function runAgentTurn(
 // ============================================================================
 // Shared Helpers
 // ============================================================================
+
+export const DEFAULT_SNAPSHOT_EVERY_EVENTS = 5000
+
+/**
+ * Take a turn.snapshot mid-turn once enough events piled up since the last
+ * one, so each LLM call (and each session read) replays a bounded tail
+ * instead of everything since the turn started. Only called between LLM
+ * calls of the top-level loop, when no message or tool call is in flight.
+ */
+export function snapshotIfDue(
+  sessionManager: SessionManager,
+  sessionId: string,
+  threshold: number = DEFAULT_SNAPSHOT_EVERY_EVENTS,
+): boolean {
+  const eventStore = getEventStore()
+  if (eventStore.countEventsSinceSnapshot(sessionId) < threshold) return false
+  const snapshotEvent = eventStore.append(sessionId, {
+    type: 'turn.snapshot',
+    data: buildSnapshot(sessionManager, sessionId),
+  })
+  const deletedCount = eventStore.cleanupOldEvents(sessionId)
+  logger.debug('Intra-turn snapshot', { sessionId, snapshotSeq: snapshotEvent.seq, deletedCount })
+  return true
+}
 
 /**
  * Build a snapshot of current session state.

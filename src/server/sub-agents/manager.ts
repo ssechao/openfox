@@ -324,6 +324,10 @@ export async function executeSubAgent(options: SubAgentExecutionOptions): Promis
       {
         mode: subAgentType,
         append: (event) => eventStore.append(sessionId, event),
+        appendStreaming: (event) => eventStore.appendStreaming(sessionId, event),
+        flushStreaming: () => {
+          eventStore.tryFlushStreaming(sessionId)
+        },
         sessionManager,
         sessionId,
         llmClient,

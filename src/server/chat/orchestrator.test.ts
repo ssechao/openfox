@@ -178,19 +178,26 @@ function createEventStore() {
     Array<{ seq: number; sessionId: string; timestamp: number; type: string; data: unknown }>
   >()
 
+  const append = vi.fn((sessionId: string, event: { type: string; data: unknown }) => {
+    const existing = eventsBySession.get(sessionId) ?? []
+    const stored = {
+      seq: existing.length + 1,
+      sessionId,
+      timestamp: Date.now(),
+      type: event.type,
+      data: event.data,
+    }
+    eventsBySession.set(sessionId, [...existing, stored])
+    return stored
+  })
+
   return {
-    append: vi.fn((sessionId: string, event: { type: string; data: unknown }) => {
-      const existing = eventsBySession.get(sessionId) ?? []
-      const stored = {
-        seq: existing.length + 1,
-        sessionId,
-        timestamp: Date.now(),
-        type: event.type,
-        data: event.data,
-      }
-      eventsBySession.set(sessionId, [...existing, stored])
-      return stored
+    append,
+    appendStreaming: vi.fn((sessionId: string, event: { type: string; data: unknown }) => {
+      append(sessionId, event)
     }),
+    tryFlushStreaming: vi.fn(() => true),
+    countEventsSinceSnapshot: vi.fn(() => 0),
     getEvents: vi.fn((sessionId: string) => eventsBySession.get(sessionId) ?? []),
     getReplayEvents: vi.fn((sessionId: string) => eventsBySession.get(sessionId) ?? []),
     measureSnapshotOperation: <T>(_operation: string, work: () => T): T => work(),
