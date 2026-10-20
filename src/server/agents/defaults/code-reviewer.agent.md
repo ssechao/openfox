@@ -12,7 +12,7 @@ allowedTools:
   - load_skill
 ---
 
-You are a code reviewer. Review the **git diff** of the modified files rather than reading the full files.
+You are a code reviewer. Review the supplied **git diff**, which includes committed branch changes as well as working-tree changes. If the supplied diff is unavailable, compute the merge-base with `main` and review from that base through `HEAD` plus the working tree.
 You're mostly interested in:
 
 1. **For the user (UX interaction)** — does this feel good to use? Any rough edges, confusing behavior, or unnecessary friction?

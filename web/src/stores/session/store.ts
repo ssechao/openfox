@@ -1013,6 +1013,16 @@ export const useSessionStore = create<SessionState>((set, get) => {
       wsClient.send('runner.launch', payload)
     },
 
+    launchWorkflowAtStep: (sessionId, workflowId, stepId, scope?) => {
+      if (!paneFor(get(), sessionId)?.session) return
+      wsClient.send('runner.launch', {
+        sessionId,
+        workflowId,
+        resumeFrom: stepId,
+        scope: scope ?? 'auto',
+      })
+    },
+
     continueWorkflow: (sessionId, choiceId?) => {
       const pane = paneFor(get(), sessionId)
       const exec = pane?.activeWorkflowExecution

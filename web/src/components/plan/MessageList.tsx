@@ -150,6 +150,7 @@ export const MessageList = memo(function MessageList({
     null,
   )
   const continueWorkflow = useSessionStore((state) => state.continueWorkflow)
+  const launchWorkflowAtStep = useSessionStore((state) => state.launchWorkflowAtStep)
   const llmRetry = useScopedPaneState(
     scopeId,
     (pane) => pane.llmRetry ?? null,
@@ -175,6 +176,11 @@ export const MessageList = memo(function MessageList({
   const hasActiveWorkflow =
     activeWorkflowExecution?.status === 'running' || activeWorkflowExecution?.status === 'waiting'
   const showStartBuilding = hasNewCriteria && !isRunning && hasAssistantResponse && !isDone && !hasActiveWorkflow
+  const showVerify =
+    criteria.length > 0 &&
+    criteria.every((criterion) => criterion.status === 'completed' || criterion.status === 'passed') &&
+    !isRunning &&
+    !hasActiveWorkflow
   const showContinueWorkflow = activeWorkflowExecution?.status === 'waiting' && !isRunning
   // The blocked-step affordance only makes sense when the session is idle: while
   // a turn is running (e.g. a chat turn on a session with a stale blocked
@@ -199,7 +205,13 @@ export const MessageList = memo(function MessageList({
     const el = getViewport()
     if (!el) return
     setIsScrollable(el.scrollHeight > el.clientHeight + 1)
-  }, [getViewport, displayItems])
+  }, [getViewport, displayItems, activeWorkflowExecution?.status, activeWorkflowExecution?.pendingChoices])
+
+  useLayoutEffect(() => {
+    if (!showContinueWorkflow || !isAutoScrollActive) return
+    const el = getViewport()
+    el?.scrollTo({ top: el.scrollHeight })
+  }, [getViewport, isAutoScrollActive, showContinueWorkflow, activeWorkflowExecution?.pendingChoices])
 
   useEffect(() => {
     const el = getViewport()
@@ -408,6 +420,18 @@ export const MessageList = memo(function MessageList({
                         : choice.label}
                   </button>
                 ))}
+              </div>
+            )}
+
+            {showVerify && sessionId && (
+              <div className="flex justify-center feed-item">
+                <button
+                  type="button"
+                  onClick={() => launchWorkflowAtStep(sessionId, 'default', 'verify', 'builtin')}
+                  className="px-4 py-1.5 text-sm font-medium rounded bg-accent-primary/15 text-accent-primary border border-accent-primary/25 hover:bg-accent-primary/25 transition-colors"
+                >
+                  {t({ en: 'Verify', fr: 'Vérifier' })}
+                </button>
               </div>
             )}
 

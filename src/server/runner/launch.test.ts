@@ -169,6 +169,30 @@ describe('launchWorkflowRun', () => {
     expect(options.params).toEqual({ feature: 'f' })
     expect(options.initialStepOutput).toEqual({ content: 'x' })
   })
+
+  it('keeps an explicit verify target when the latest execution is completed', async () => {
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    sessionManager.getLatestWorkflowExecution = vi.fn(() => ({
+      id: 'exec-1',
+      sessionId: 'sess-1',
+      workflowId: 'default',
+      workflowName: 'Build & Verify',
+      status: 'completed',
+      currentStepId: 'finalize',
+      currentStepName: 'Finalize',
+      stepOutput: { content: 'old' },
+      params: { feature: 'old' },
+    }))
+
+    run({ workflowId: 'default', resumeFrom: 'verify' })
+    await flush()
+
+    const options = runOrchestratorMock.mock.calls[0]![0]
+    expect(options.resumeFromStep).toBe('verify')
+    expect(options.params).toBeUndefined()
+    expect(options.initialStepOutput).toBeUndefined()
+    expect(sessionManager.resumeWorkflow).not.toHaveBeenCalled()
+  })
 })
 
 describe('abortRunnerRun', () => {

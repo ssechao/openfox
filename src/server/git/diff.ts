@@ -126,6 +126,53 @@ export async function formatGitDiffFiles(
   return files.map((f) => `- ${f.path} (${f.status})`).join('\n')
 }
 
+function runGitText(cwd: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    const proc = spawn('git', args, {
+      cwd,
+      env: gitSpawnEnv(),
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    })
+    let stdout = ''
+    proc.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString()
+    })
+    proc.on('close', (code) => resolve({ code, stdout }))
+    proc.on('error', () => resolve({ code: null, stdout: '' }))
+  })
+}
+
+export async function formatGitReviewDiff(cwd: string): Promise<string> {
+  let base: string | undefined
+  for (const ref of ['main', 'origin/main', 'develop', 'origin/develop']) {
+    const verified = await runGitText(cwd, ['rev-parse', '--verify', ref])
+    if (verified.code !== 0) continue
+    const merged = await runGitText(cwd, ['merge-base', 'HEAD', ref])
+    if (merged.code === 0 && merged.stdout.trim()) {
+      base = merged.stdout.trim()
+      break
+    }
+  }
+
+  const tracked = await runGitText(cwd, [
+    'diff',
+    '--no-ext-diff',
+    '--ignore-submodules=none',
+    '--binary',
+    base ?? 'HEAD',
+  ])
+  const parts = tracked.stdout.trim() ? [tracked.stdout.trimEnd()] : []
+  const untracked = await runGitText(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])
+  if (untracked.code === 0) {
+    for (const path of untracked.stdout.split('\0').filter(Boolean)) {
+      const fileDiff = await runGitText(cwd, ['diff', '--no-index', '--binary', '--', '/dev/null', path])
+      if (fileDiff.stdout.trim()) parts.push(fileDiff.stdout.trimEnd())
+    }
+  }
+  return parts.length > 0 ? parts.join('\n') : '(none)'
+}
+
 export function nativeGetGitBranch(cwd: string): Promise<string | null> {
   return new Promise((resolve) => {
     const proc = spawn('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {

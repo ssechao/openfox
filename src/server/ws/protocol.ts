@@ -7,6 +7,7 @@ import type {
   ProjectListPayload,
   SessionStatePayload,
   SessionListPayload,
+  SessionCreatedPayload,
   SessionRunningPayload,
   SessionPausePayload,
   SessionNameGeneratedPayload,
@@ -154,6 +155,30 @@ export function createSessionListMessage(
   correlationId?: string,
 ): ServerMessage<SessionListPayload> {
   return createServerMessage('session.list', { sessions }, correlationId)
+}
+
+export function createSessionCreatedMessage(session: Session): ServerMessage<SessionCreatedPayload> {
+  return createServerMessage('session.created', {
+    session: {
+      id: session.id,
+      projectId: session.projectId,
+      ...(session.metadata.title ? { title: session.metadata.title } : {}),
+      workdir: session.workdir,
+      ...(session.workspace ? { workspace: session.workspace } : {}),
+      ...(session.branch ? { branch: session.branch } : {}),
+      mode: session.mode,
+      phase: session.phase,
+      isRunning: session.isRunning,
+      isFavorite: false,
+      ...(session.providerId !== undefined ? { providerId: session.providerId } : {}),
+      ...(session.providerModel !== undefined ? { providerModel: session.providerModel } : {}),
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      criteriaCount: session.criteria.length,
+      criteriaCompleted: session.criteria.filter((criterion) => criterion.status.type === 'passed').length,
+      messageCount: session.messageCount ?? session.messages.length,
+    },
+  })
 }
 
 export function createSessionRunningMessage(

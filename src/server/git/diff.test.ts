@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { getGitDiffFiles, formatGitDiffFiles, getGitBranch } from './diff.js'
+import { getGitDiffFiles, formatGitDiffFiles, formatGitReviewDiff, getGitBranch } from './diff.js'
 import { setPluginVcsProviders, clearPluginVcsProviders } from '../plugins/vcs-providers.js'
 import type { PluginVcsProvider } from '../../plugin/index.js'
 
@@ -38,6 +38,30 @@ function makeMockProc(stdout: string, exitCode = 0): MockProc {
 beforeEach(() => {
   vi.resetAllMocks()
   clearPluginVcsProviders()
+})
+
+describe('formatGitReviewDiff', () => {
+  it('includes committed branch changes on a clean working tree', async () => {
+    vi.mocked(spawn).mockImplementation(((_cmd: string, args: string[]) => {
+      if (args.join(' ') === 'rev-parse --verify main') {
+        return makeMockProc('main-sha\n') as unknown as ReturnType<typeof spawn>
+      }
+      if (args.join(' ') === 'merge-base HEAD main') {
+        return makeMockProc('base-sha\n') as unknown as ReturnType<typeof spawn>
+      }
+      if (args[0] === 'diff' && args.at(-1) === 'base-sha') {
+        return makeMockProc('diff --git a/src/fix.ts b/src/fix.ts\n+committed fix\n') as unknown as ReturnType<
+          typeof spawn
+        >
+      }
+      return makeMockProc('', 1) as unknown as ReturnType<typeof spawn>
+    }) as typeof spawn)
+
+    const diff = await formatGitReviewDiff('/tmp/project')
+
+    expect(diff).toContain('diff --git a/src/fix.ts b/src/fix.ts')
+    expect(diff).toContain('+committed fix')
+  })
 })
 
 describe('getGitDiffFiles', () => {
