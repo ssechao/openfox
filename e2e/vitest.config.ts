@@ -37,6 +37,8 @@ export default defineConfig({
     // Include all test files (absolute path for running from project root)
     include: [`${__dirname}/*.test.ts`],
 
+    setupFiles: [`${rootDir}/src/server/utils/test-environment-setup.ts`],
+
     // No retries needed with deterministic mock
     retry: 0,
 
