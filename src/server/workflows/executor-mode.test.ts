@@ -95,6 +95,7 @@ vi.mock('../../shared/stats.js', () => ({
 // Mock git diff
 vi.mock('../git/diff.js', () => ({
   formatGitDiffFiles: vi.fn(async () => '(none)'),
+  formatGitReviewDiff: vi.fn(async () => '(none)'),
 }))
 
 import { executeWorkflow, userStepChoices } from './executor.js'
@@ -438,6 +439,32 @@ describe('executeWorkflow mode changes', () => {
 
     // Should reach $done (not WAITING) because we resume from the user step
     expect(result.finalAction).toHaveProperty('type', 'DONE')
+  })
+
+  it('creates a visible execution when resumeFrom starts without an active execution', async () => {
+    await executeWorkflow(workflow, {
+      ...options,
+      resumeFromStep: 'build',
+    })
+
+    expect(mockSessionManager.startWorkflow).toHaveBeenCalledWith(
+      'test-session',
+      expect.any(String),
+      'test',
+      'Test',
+      undefined,
+      {},
+      undefined,
+    )
+    expect(mockSessionManager.updateWorkflowStep).toHaveBeenCalledWith(
+      'test-session',
+      expect.any(String),
+      'build',
+      'Builder',
+      'test',
+      'Test',
+      undefined,
+    )
   })
 
   it('resume from user step does not set phase to waiting', async () => {

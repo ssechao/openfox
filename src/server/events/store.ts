@@ -408,6 +408,14 @@ export class EventStore {
     if (this.diagnostics) this.diagnostics = emptyStoreDiagnostics()
   }
 
+  getRunningState(sessionId: string, fallback: boolean): boolean {
+    const cached = this.activeSessions.get(sessionId)
+    if (cached !== undefined) return cached
+    const current = this.readRunning(sessionId, fallback)
+    if (this.hotPath) this.activeSessions.set(sessionId, current)
+    return current
+  }
+
   measureSnapshotOperation<T>(operation: StoreTiming, work: () => T): T {
     return measureStoreOperation(this.diagnostics, operation, work)
   }

@@ -720,11 +720,19 @@ export class SessionManager {
     return session
   }
 
+  private projectRunningState<T extends { id: string; isRunning: boolean }>(sessions: T[]): T[] {
+    const eventStore = getEventStore()
+    return sessions.map((session) => ({
+      ...session,
+      isRunning: eventStore.getRunningState(session.id, session.isRunning),
+    }))
+  }
+
   /**
    * List all sessions (summary only).
    */
   listSessions(): SessionSummary[] {
-    return dbListSessions()
+    return this.projectRunningState(dbListSessions())
   }
 
   /**
@@ -732,7 +740,7 @@ export class SessionManager {
    * all projects, summaries only (no prompt extraction, no snapshot parsing).
    */
   listHomeSessions(limit = 20): SessionSummary[] {
-    return dbListHomeSessions(limit)
+    return this.projectRunningState(dbListHomeSessions(limit))
   }
 
   /**
@@ -743,7 +751,8 @@ export class SessionManager {
     if (!project) {
       return { sessions: [], hasMore: false }
     }
-    return dbListSessionsByProject(projectId, limit, offset)
+    const result = dbListSessionsByProject(projectId, limit, offset)
+    return { ...result, sessions: this.projectRunningState(result.sessions) }
   }
 
   /**
@@ -752,7 +761,8 @@ export class SessionManager {
    * explicitly requested (the homepage itself uses listHomeSessions).
    */
   listSessionsLimited(limit = 20, offset = 0): { sessions: SessionSummary[]; hasMore: boolean } {
-    return dbListSessionsLimited(limit, offset)
+    const result = dbListSessionsLimited(limit, offset)
+    return { ...result, sessions: this.projectRunningState(result.sessions) }
   }
 
   /**
@@ -1091,6 +1101,9 @@ export class SessionManager {
     logger.debug('Setting session provider', { sessionId, providerId, providerModel, reasoningEffort })
 
     updateSessionProvider(sessionId, providerId, providerModel, providerManual, reasoningEffort)
+    if (providerManual !== undefined) {
+      updateSessionProviderActive(sessionId, true)
+    }
     // A fresh manual pick (or a reset) supersedes any pinned effort.
     if (providerId === null || providerManual === true) {
       this.clearSessionPinnedEffort(sessionId)
@@ -2385,7 +2398,7 @@ export class SessionManager {
         ...dbSession,
         mode: dbSession.mode,
         phase: 'plan',
-        isRunning: dbSession.isRunning,
+        isRunning: getEventStore().getRunningState(dbSession.id, dbSession.isRunning),
         pauseState: this.getPauseState(dbSession.id),
         messages: [],
         criteria: [],
@@ -2417,8 +2430,7 @@ export class SessionManager {
       return msg
     })
 
-    // Use database is_running as source of truth (more reliable than EventStore which may have missing events)
-    const isRunning = dbSession.isRunning
+    const isRunning = getEventStore().getRunningState(dbSession.id, dbSession.isRunning)
 
     const cachedPrompt = getSessionCachedPrompt(dbSession.id)
 

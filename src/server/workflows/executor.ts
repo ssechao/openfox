@@ -27,7 +27,7 @@ import { createChatMessageMessage } from '../ws/protocol.js'
 import { runAgentTurn, TurnMetrics, createMessageStartEvent } from '../chat/orchestrator.js'
 import { loadAllAgentsDefault, resolveDefaultAgentId } from '../agents/registry.js'
 import { computeSessionStats } from '../../shared/stats.js'
-import { formatGitDiffFiles } from '../git/diff.js'
+import { formatGitDiffFiles, formatGitReviewDiff } from '../git/diff.js'
 import { aggregateParallel, mapPool, runChild, runShellChild, runSubAgentChild, type RunChildDeps } from './parallel.js'
 import { resolveTemplate, type TemplateContext } from './template.js'
 import { resolveLLMClientForAgent, buildAgentOverrideStatsIdentity } from '../agents/model-overrides.js'
@@ -430,8 +430,9 @@ export async function executeWorkflow(
     }
   }
 
-  // Emit workflow-started marker into the feed (skip on resume)
-  if (!isResume) {
+  const startsNewExecution = !executionId
+
+  if (startsNewExecution) {
     const startMsgId = crypto.randomUUID()
     const startWindowOpts = getCurrentWindowMessageOptions(sessionId)
     eventStore.append(
@@ -513,6 +514,10 @@ export async function executeWorkflow(
         sessionId,
         ...(session.projectId ? { projectId: session.projectId } : {}),
       }),
+      gitDiff:
+        step.type === 'sub_agent' && (step as SubAgentStep).subAgentType === 'code_reviewer'
+          ? await formatGitReviewDiff(sessionManager.getEffectiveWorkdir(sessionId))
+          : '',
       stepOutput: lastStepOutput,
       params: options.params ?? {},
     }

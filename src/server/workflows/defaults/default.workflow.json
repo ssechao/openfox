@@ -3,7 +3,7 @@
     "id": "default",
     "name": "Build & Verify",
     "description": "Standard build-verify loop. Builder implements criteria, verifier checks them.",
-    "version": "1.3.2",
+    "version": "1.3.3",
     "color": "#3b82f6"
   },
   "entryStep": "work_location",
@@ -96,7 +96,7 @@
       "phase": "verification",
       "subAgentType": "code_reviewer",
       "subGroup": "code review",
-      "prompt": "## Modified Files\n{{modifiedFiles}}\n\nReview the **git diff** of the modified files rather than reading the full files. Focus on:\n1. **UX interaction** — does this feel good to use? Any rough edges, confusing behavior, or unnecessary friction?\n2. **Project bloat** — does this follow project conventions? Is it maintainable? Does it add unnecessary complexity?\n\nUse session_metadata to create review_findings entries for any issues you find (status: open). If re-reviewing existing findings, update their status to resolved or dismissed as appropriate. Then call return_value with your findings.",
+      "prompt": "## Modified Files\n{{modifiedFiles}}\n\n## Git Diff\n```diff\n{{gitDiff}}\n```\n\nReview the supplied diff, which spans the branch merge-base through HEAD plus working-tree changes. Focus on:\n1. **UX interaction** — does this feel good to use? Any rough edges, confusing behavior, or unnecessary friction?\n2. **Project bloat** — does this follow project conventions? Is it maintainable? Does it add unnecessary complexity?\n\nUse session_metadata to create review_findings entries for any issues you find (status: open). If re-reviewing existing findings, update their status to resolved or dismissed as appropriate. Then call return_value with your findings.",
       "transitions": [{ "when": { "type": "always" }, "goto": "finalize" }]
     },
     {

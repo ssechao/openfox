@@ -859,36 +859,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     res.json({ sessions: sessionManager.listHomeSessions() })
   })
 
-  /**
-   * Build the session.created broadcast message shared by the create and
-   * import routes, so the payload shape cannot drift between them.
-   */
-  function buildSessionCreatedMessage(session: import('../shared/types.js').Session) {
-    return {
-      type: 'session.created' as const,
-      sessionId: session.id,
-      payload: {
-        session: {
-          id: session.id,
-          projectId: session.projectId,
-          title: session.metadata.title,
-          workdir: session.workdir,
-          workspace: session.workspace,
-          mode: session.mode,
-          phase: session.phase,
-          isRunning: session.isRunning,
-          providerId: session.providerId,
-          providerModel: session.providerModel,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-          criteriaCount: session.criteria.length,
-          criteriaCompleted: session.criteria.filter((c) => c.status.type === 'passed').length,
-          messageCount: session.messageCount ?? session.messages.length,
-        },
-      },
-    }
-  }
-
   app.post('/api/sessions', async (req, res) => {
     const { projectId, title } = req.body
     if (!projectId) {
@@ -906,7 +876,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     // maxTokens is no longer passed - it comes from providerManager.getCurrentModelContext() at query time
     const session = sessionManager.createSession(projectId, title, providerId ?? null, model ?? null)
 
-    wssExports.broadcastAll(buildSessionCreatedMessage(session))
     res.status(201).json({ session: toClientSession(session) })
   })
 
@@ -1867,7 +1836,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     try {
       const newSession = await sessionManager.importSession(projectId, payload)
-      wssExports.broadcastForProject(projectId, newSession.id, buildSessionCreatedMessage(newSession))
       return res.status(201).json({ session: toClientSession(newSession) })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)

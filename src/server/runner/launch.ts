@@ -119,14 +119,16 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
             }
           }
 
-          // For 'running' status (e.g. abort during agent step), use existing
-          // execution info without calling resumeWorkflow — status is already current.
-          return {
-            ...(Object.keys(exec.params).length > 0 ? { params: exec.params } : {}),
-            ...(Object.keys(exec.stepOutput).length > 0 ? { initialStepOutput: exec.stepOutput } : {}),
-            ...(exec.currentStepId ? { resumeFromStep: exec.currentStepId } : {}),
-            ...(exec.subGroup ? { subGroup: exec.subGroup } : {}),
+          if (exec.status === 'running') {
+            return {
+              ...(Object.keys(exec.params).length > 0 ? { params: exec.params } : {}),
+              ...(Object.keys(exec.stepOutput).length > 0 ? { initialStepOutput: exec.stepOutput } : {}),
+              ...(exec.currentStepId ? { resumeFromStep: exec.currentStepId } : {}),
+              ...(exec.subGroup ? { subGroup: exec.subGroup } : {}),
+            }
           }
+
+          return {}
         })()
       : {}),
     ...(hasUserContent || hasUserAttachments

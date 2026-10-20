@@ -62,6 +62,7 @@ import {
   serializeServerMessage,
   createErrorMessage,
   createSessionRunningMessage,
+  createSessionCreatedMessage,
   createSessionPauseMessage,
   createChatMessageMessage,
   createChatErrorMessage,
@@ -582,6 +583,10 @@ export function createWebSocketServer(
 
   // Session update events — broadcast session.state to session-specific clients
   sessionManager.subscribe((event) => {
+    if (event.type === 'session_created') {
+      broadcastAll({ ...createSessionCreatedMessage(event.session), sessionId: event.session.id })
+      return
+    }
     if (event.type === 'pause_changed') {
       // Lightweight pause-state sync (no full session.state rebuild)
       broadcastForSession(event.sessionId, createSessionPauseMessage(event.pauseState))
