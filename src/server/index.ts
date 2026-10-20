@@ -3894,6 +3894,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       new Promise<void>((resolve) => {
         logger.info('Shutting down...')
         void (async () => {
+          try {
+            getEventStore().flushAllStreaming()
+          } catch {
+            // Event store not initialized — nothing to persist
+          }
           await devServerManager.stopAll()
           await mcpManager.disconnectAll()
           taskScheduler.stop()

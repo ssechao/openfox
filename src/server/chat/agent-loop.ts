@@ -141,6 +141,9 @@ export interface TopLevelLoopConfig {
     | undefined
   /** Function to append events (provided by orchestrator) */
   append: (event: import('../events/types.js').TurnEvent) => void
+  appendStreaming?: ((event: import('../events/types.js').TurnEvent) => void) | undefined
+  flushStreaming?: (() => void) | undefined
+  snapshotIfDue?: (() => void) | undefined
   sessionManager: SessionManager
   sessionId: string
   llmClient: LLMClientWithModel
@@ -223,6 +226,7 @@ export async function runTopLevelAgentLoop(
 ): Promise<{ returnValueContent?: string; returnValueResult?: string; failed?: { error: string } }> {
   const { mode, sessionManager, sessionId, llmClient, signal, onMessage, statsIdentity } = config
   const append = config.append
+  const appendFragment = config.appendStreaming ?? append
   const agentType = config.subAgentMetadata ? ('sub-agent' as const) : undefined
   // Sub-agent identity tags spread into scoped events (assistant messages,
   // compaction prompt/summary, rejection, nudges) so they stay in the
@@ -281,6 +285,8 @@ export async function runTopLevelAgentLoop(
 
       return {}
     }
+
+    config.snapshotIfDue?.()
 
     // Pause gate: block before the next LLM request if the user requested a
     // pause. The current (in-flight) request is never aborted — the pause only
@@ -457,25 +463,32 @@ export async function runTopLevelAgentLoop(
       const editFileContentCache = new Map<string, string>()
       const liveEditTracker = new LiveEditContextTracker()
 
-      const attemptResult = await consumeStreamGenerator(streamGen, async (event) => {
-        ensureAssistantMessage()
-        // While the LLM streams an edit_file call, enrich its preparing events
-        // with a live edit context (surrounding lines) computed from the file —
-        // the same shape the final tool result carries. The file content is
-        // read once per path for the whole turn, and the context is recomputed
-        // only when the parsed edit spec changes.
-        if (event.type === 'tool.preparing' && event.data.name === 'edit_file') {
-          const editContext = await liveEditTracker.next(
-            event.data.index,
-            event.data.arguments,
-            session.workdir,
-            editFileContentCache,
-          )
-          append(editContext && editContext.length > 0 ? { ...event, data: { ...event.data, editContext } } : event)
-          return
-        }
-        append(event)
-      })
+      let attemptResult: import('./stream-pure.js').PureStreamResult
+      try {
+        attemptResult = await consumeStreamGenerator(streamGen, async (event) => {
+          ensureAssistantMessage()
+          // While the LLM streams an edit_file call, enrich its preparing events
+          // with a live edit context (surrounding lines) computed from the file —
+          // the same shape the final tool result carries. The file content is
+          // read once per path for the whole turn, and the context is recomputed
+          // only when the parsed edit spec changes.
+          if (event.type === 'tool.preparing' && event.data.name === 'edit_file') {
+            const editContext = await liveEditTracker.next(
+              event.data.index,
+              event.data.arguments,
+              session.workdir,
+              editFileContentCache,
+            )
+            appendFragment(
+              editContext && editContext.length > 0 ? { ...event, data: { ...event.data, editContext } } : event,
+            )
+            return
+          }
+          appendFragment(event)
+        })
+      } finally {
+        config.flushStreaming?.()
+      }
 
       if (!attemptResult.error) {
         ensureAssistantMessage()

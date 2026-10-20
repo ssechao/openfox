@@ -186,14 +186,20 @@ echo "line 3"
 
   it('aborts promptly even when the process ignores SIGINT', async () => {
     const controller = new AbortController()
+    let markReady: () => void = () => {}
+    const ready = new Promise<void>((resolve) => {
+      markReady = resolve
+    })
     const contextWithSignal: ToolContext = {
       sessionManager: mockSessionManager,
       workdir: tempDir,
       sessionId: 'test-session',
       signal: controller.signal,
+      onProgress: (message) => {
+        if (message.includes('ready')) markReady()
+      },
     }
 
-    const started = Date.now()
     const resultPromise = runCommandTool.execute(
       {
         command: `"${process.execPath}" -e "process.on('SIGINT', () => {}); process.stdout.write('ready\\n'); setInterval(() => {}, 1000)"`,
@@ -201,12 +207,13 @@ echo "line 3"
       contextWithSignal,
     )
 
-    await new Promise((r) => setTimeout(r, 300))
+    await ready
+    const abortedAt = Date.now()
     controller.abort()
 
     const result = await resultPromise
 
-    expect(Date.now() - started).toBeLessThan(2500)
+    expect(Date.now() - abortedAt).toBeLessThan(2500)
     expect(result.output).toContain('ready')
     expect(result.output).toContain('[interrupted by user]')
   }, 10000)

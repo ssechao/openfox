@@ -51,7 +51,7 @@ describe('project-creator', () => {
     beforeEach(async () => {
       const { initDatabase } = await import('../db/index.js')
       const { loadConfig } = await import('../config.js')
-      initDatabase(loadConfig())
+      initDatabase({ ...loadConfig(), database: { path: ':memory:' } })
     })
 
     it('creates directory and git repo (frontend flow)', async () => {
