@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
+import { getDatabasePath } from '../../cli/paths.js'
 import { loadConfig } from '../config.js'
 import { closeDatabase, initDatabase } from '../db/index.js'
 import { assertTestDatabasePath, isolateTestEnvironment } from './test-environment.js'
@@ -39,6 +40,17 @@ describe('test isolation from real OpenFox databases', () => {
       OPENFOX_PUBLISH_E2E_LLM: '1',
       PATH: '/usr/bin',
     })
+  })
+
+  it('refuses the production and development databases with an explicit error, before touching them', () => {
+    for (const mode of ['production', 'development'] as const) {
+      const path = getDatabasePath(mode)
+      const existedBefore = existsSync(path)
+      expect(() => initDatabase({ ...loadConfig(), database: { path } })).toThrow(
+        `Refusing to open the database ${path} from a test`,
+      )
+      expect(existsSync(path)).toBe(existedBefore)
+    }
   })
 
   it('refuses to open a database outside the temporary directory from a test', () => {

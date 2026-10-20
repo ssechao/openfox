@@ -226,6 +226,7 @@ export class EventStore {
   // limit the first caller happened to request.
   private static readonly PROMPTS_QUERY_LIMIT = 100
   private static readonly RECENT_PROMPTS_MAX_ENTRIES = 20
+  private static readonly APPEND_BUSY_RETRIES = 2
 
   private diagnostics: StoreDiagnostics | null
   private readonly hotPath: boolean
@@ -578,13 +579,28 @@ export class EventStore {
     )
 
     // Multi-process safety: another openfox instance may have taken our
-    // computed seq between the MAX read and the INSERT. Probe forward.
+    // computed seq between the MAX read and the INSERT. Probe forward. A
+    // database another connection keeps locked is retried a bounded number of
+    // times (each attempt already waits busy_timeout), then reported.
     let seq = this.getNextSeq(sessionId)
+    let busyRetries = 0
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
         insert.run(sessionId, seq, timestamp, event.type, payload)
         break
       } catch (error) {
+        if (isBusyError(error) && busyRetries < EventStore.APPEND_BUSY_RETRIES) {
+          busyRetries++
+          continue
+        }
+        if (isBusyError(error)) {
+          logger.error('Event not persisted: the database stayed locked', {
+            sessionId,
+            type: event.type,
+            attempts: busyRetries + 1,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
         if (!isUniqueConstraintError(error) || attempt === 99) throw error
         seq++
       }
