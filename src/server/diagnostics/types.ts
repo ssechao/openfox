@@ -9,5 +9,6 @@ export interface DiagnosticsCollector {
   recordHealthLatency(ms: number): void
   recordRead(ms: number): void
   recordWrite(ms: number): void
+  retainedIntervals(): number
   getData(): DiagnosticsData
 }

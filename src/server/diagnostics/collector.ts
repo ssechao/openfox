@@ -26,7 +26,10 @@ export interface CollectorOptions {
   historyMs?: number
   loopSampleMs?: number
   enableLoopSampler?: boolean
+  now?: () => number
 }
+
+const monotonicNow = () => performance.timeOrigin + performance.now()
 
 function walSizeBytes(dbPath: string | undefined): number | undefined {
   if (!dbPath || dbPath === ':memory:') return undefined
@@ -39,11 +42,11 @@ function walSizeBytes(dbPath: string | undefined): number | undefined {
 
 /**
  * Single owner of the health metrics. Observations land in one bucket per
- * fixed interval (wall-clock aligned), each holding mergeable histograms, so
- * window statistics sum bin counts across buckets instead of averaging
- * per-interval percentiles. Buckets are keyed by their start time and expire by
- * elapsed time; at most `historyMs / intervalMs` of them are ever kept. Readers
- * never mutate state.
+ * fixed interval, each holding mergeable histograms, so window statistics sum
+ * bin counts across buckets instead of averaging per-interval percentiles.
+ * Buckets are keyed by their start time on a monotonic clock (an injected
+ * clock is clamped so it never goes back), expire by elapsed time, and never
+ * exceed `historyMs / intervalMs`. Readers never mutate state.
  */
 export function createDiagnosticsCollector(options: CollectorOptions = {}): DiagnosticsCollector {
   const intervalMs = options.intervalMs ?? 1_000
@@ -58,18 +61,27 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
   let tickTimer: ReturnType<typeof setInterval> | null = null
   let loopTimer: ReturnType<typeof setTimeout> | null = null
 
+  const readClock = options.now ?? monotonicNow
+  let latestNow = Number.NEGATIVE_INFINITY
+
+  function clock(): number {
+    latestNow = Math.max(latestNow, readClock())
+    return latestNow
+  }
+
   function slotStart(now: number): number {
     return Math.floor(now / intervalMs) * intervalMs
   }
 
   function currentBucket(): Bucket {
-    const start = slotStart(Date.now())
+    const start = slotStart(clock())
     const last = buckets[buckets.length - 1]
     if (last && last.startMs === start) return last
     const oldest = start - (historySlots - 1) * intervalMs
     while (buckets.length > 0 && buckets[0]!.startMs < oldest) buckets.shift()
     const bucket: Bucket = { startMs: start, latencies: {}, gauges: {} }
     buckets.push(bucket)
+    if (buckets.length > historySlots) buckets.splice(0, buckets.length - historySlots)
     return bucket
   }
 
@@ -115,7 +127,7 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
   }
 
   function getData(): DiagnosticsData {
-    const now = Date.now()
+    const now = clock()
     const lastSlot = slotStart(now)
     const windowStart = lastSlot - windowSlots * intervalMs
     const window = { startMs: windowStart, endMs: now }
@@ -183,6 +195,7 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
     recordHealthLatency: (ms) => record('health', ms),
     recordRead: (ms) => record('read', ms),
     recordWrite: (ms) => record('write', ms),
+    retainedIntervals: () => buckets.length,
     getData,
   }
 }

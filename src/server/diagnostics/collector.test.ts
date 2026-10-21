@@ -11,6 +11,7 @@ describe('diagnostics collector', () => {
     vi.useFakeTimers()
     vi.setSystemTime(T0)
     collector = createDiagnosticsCollector({
+      now: () => Date.now(),
       countRunningSessions: () => 3,
       intervalMs: 1_000,
       windowMs: 10_000,
@@ -118,6 +119,25 @@ describe('diagnostics collector', () => {
     await new Promise((done) => setTimeout(done, 30))
     live.stop()
     expect(live.getData().series.eventLoopDelayMax.value).toBeGreaterThanOrEqual(150 * 0.8)
+  })
+
+  it('stays bounded and coherent when the injected clock goes backwards', () => {
+    let clock = T0
+    const jumpy = createDiagnosticsCollector({ now: () => clock, enableLoopSampler: false })
+    for (let s = 0; s < 90; s++) {
+      clock = T0 + s * 1_000
+      jumpy.recordEventLoopDelay(1)
+    }
+    for (let s = 0; s < 90; s++) {
+      clock = T0 - 3_600_000 + s * 1_000
+      jumpy.recordEventLoopDelay(7)
+    }
+    expect(jumpy.retainedIntervals()).toBeLessThanOrEqual(60)
+    const { series, history } = jumpy.getData()
+    expect(series.eventLoopDelayMax).toMatchObject({ samples: 101, value: 7 })
+    expect(series.eventLoopDelayP50.value).toBe(7)
+    expect(history).toHaveLength(60)
+    expect(history.at(-1)!.timestamp).toBe(T0 + 89_000)
   })
 
   it('keeps a fixed 60-slot history and bounded memory over a long run', () => {
