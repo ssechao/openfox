@@ -170,6 +170,17 @@ describe('SessionManager', () => {
     replay.mockRestore()
   })
 
+  it('projects the latest running event into detail and list responses', () => {
+    const session = manager.createSession(projectId)
+    getEventStore().append(session.id, { type: 'running.changed', data: { isRunning: true } })
+
+    expect(manager.getSession(session.id)?.isRunning).toBe(true)
+    expect(manager.listSessions().find((item) => item.id === session.id)?.isRunning).toBe(true)
+    expect(manager.listHomeSessions().find((item) => item.id === session.id)?.isRunning).toBe(true)
+    expect(manager.listSessionsByProject(projectId).sessions[0]?.isRunning).toBe(true)
+    expect(manager.listSessionsLimited().sessions[0]?.isRunning).toBe(true)
+  })
+
   it('updates mode, phase, and running state while emitting events', () => {
     const session = manager.createSession(projectId, 'Custom Title')
     const allEvents: string[] = []
@@ -1208,6 +1219,22 @@ describe('SessionManager', () => {
         model: 'session-model',
       })
       expect(manager.getCurrentModelSettings(session.id, 'planner')?.maxTokens).toBe(262000)
+    })
+
+    it('a fresh manual effort pick is active in the emitted session update', () => {
+      const session = manager.createSession(projectId, 'Test Session', 'session-provider', 'session-model')
+      manager.setSessionProviderActive(session.id, false)
+      const updates: Array<{ providerManualActive?: boolean; providerReasoningEffort?: string | null }> = []
+      manager.subscribe((event) => {
+        if (event.type === 'session_updated') updates.push(event.session)
+      })
+
+      manager.setSessionProvider(session.id, 'session-provider', 'session-model', true, 'high')
+
+      expect(updates.at(-1)).toMatchObject({
+        providerManualActive: true,
+        providerReasoningEffort: 'high',
+      })
     })
 
     it('an inactive manual pick yields to the agent override', () => {

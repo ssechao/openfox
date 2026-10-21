@@ -80,6 +80,7 @@ vi.mock('../../shared/stats.js', () => ({
 
 vi.mock('../git/diff.js', () => ({
   formatGitDiffFiles: vi.fn(async () => '(none)'),
+  formatGitReviewDiff: vi.fn(async () => '(none)'),
 }))
 
 import { executeWorkflow } from './executor.js'

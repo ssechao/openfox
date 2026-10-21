@@ -1,7 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Database from 'better-sqlite3'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { EventStore } from '../events/store.js'
 import { createToolProgressHandler } from '../chat/tool-streaming.js'
+import { runCommandTool } from './shell.js'
 
 describe('run_command output streaming', () => {
   let db: Database.Database
@@ -135,4 +139,65 @@ describe('run_command output streaming', () => {
     expect((events[0]!.data as any).content).toBe('streaming output 1\n')
     expect((events[1]!.data as any).content).toBe('streaming output 2\n')
   })
+})
+
+describe('run_command output streaming into a locked database', () => {
+  const sessionId = 'locked-session'
+  let directory: string
+  let writer: Database.Database
+  let holder: Database.Database
+  let lockedStore: EventStore
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'openfox-locked-store-'))
+    const path = join(directory, 'sessions.db')
+    writer = new Database(path, { timeout: 20 })
+    writer.pragma('journal_mode = WAL')
+    lockedStore = new EventStore(writer)
+    holder = new Database(path)
+    holder.exec('BEGIN IMMEDIATE')
+  })
+
+  afterEach(() => {
+    holder.exec('ROLLBACK')
+    holder.close()
+    writer.close()
+    rmSync(directory, { recursive: true, force: true })
+  })
+
+  it('keeps the process alive when SQLITE_BUSY hits while a command streams output', async () => {
+    const uncaught: unknown[] = []
+    const onUncaught = (error: unknown) => uncaught.push(error)
+    process.on('uncaughtException', onUncaught)
+    try {
+      const onProgress = createToolProgressHandler(
+        (event) => {
+          lockedStore.append(sessionId, event)
+        },
+        'msg-1',
+        'call-1',
+        sessionId,
+      )
+      const result = await runCommandTool.execute(
+        { command: 'echo first; sleep 0.1; echo second', timeout: 10000 },
+        {
+          sessionManager: {
+            recordFileRead: vi.fn(),
+            getReadFiles: vi.fn().mockReturnValue({}),
+            updateFileHash: vi.fn(),
+          } as never,
+          workdir: directory,
+          sessionId,
+          onProgress,
+        },
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.output).toContain('first')
+      expect(result.output).toContain('second')
+    } finally {
+      process.off('uncaughtException', onUncaught)
+    }
+    expect(uncaught).toEqual([])
+  }, 15000)
 })

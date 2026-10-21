@@ -4,6 +4,7 @@ import { fireEvent, render, screen, cleanup } from '@testing-library/react'
 import { MessageList } from './MessageList'
 
 const mockContinueWorkflow = vi.fn()
+const mockLaunchWorkflowAtStep = vi.fn()
 
 // Store mock state in a way that survives vi.mock hoisting
 // Using a module-level object that we mutate (not reassign)
@@ -12,7 +13,7 @@ const mockState = {
   hasWaitingWorkflow: true,
   execStatus: 'waiting' as 'waiting' | 'blocked',
   isRunning: false,
-  criteriaPending: false,
+  criteriaStatuses: [] as string[],
   displayItems: [] as Array<Record<string, unknown>>,
   pendingChoices: undefined as Array<{ id: string; label: string; goto: string; nextStepName?: string }> | undefined,
   llmRetry: null as
@@ -30,9 +31,16 @@ function buildSessionState() {
       isRunning: mockState.isRunning,
       criteria: [],
       metadata: {},
-      metadataEntries: mockState.criteriaPending
-        ? { criteria: [{ id: 'c1', description: 'x', status: 'pending' }] }
-        : {},
+      metadataEntries:
+        mockState.criteriaStatuses.length > 0
+          ? {
+              criteria: mockState.criteriaStatuses.map((status, index) => ({
+                id: `c${index + 1}`,
+                description: 'x',
+                status,
+              })),
+            }
+          : {},
     },
     panes: {},
     focusedSessionId: null,
@@ -67,6 +75,7 @@ function buildSessionState() {
     error: null,
     clearError: vi.fn(),
     continueWorkflow: mockContinueWorkflow,
+    launchWorkflowAtStep: mockLaunchWorkflowAtStep,
     exitWorkflow: vi.fn(),
     retryLLMNow: vi.fn(),
     retryLLM: vi.fn(),
@@ -128,9 +137,10 @@ describe('MessageList continue workflow button', () => {
 
   beforeEach(() => {
     mockContinueWorkflow.mockClear()
+    mockLaunchWorkflowAtStep.mockClear()
     mockState.phase = 'waiting'
     mockState.hasWaitingWorkflow = true
-    mockState.criteriaPending = false
+    mockState.criteriaStatuses = []
     mockState.displayItems = []
     mockState.pendingChoices = undefined
   })
@@ -197,7 +207,7 @@ describe('MessageList continue workflow button', () => {
   })
 
   it('hides the workflow launcher while a workflow is waiting at a user step', () => {
-    mockState.criteriaPending = true
+    mockState.criteriaStatuses = ['pending']
     mockState.displayItems = [{ type: 'message', message: { role: 'assistant', content: 'ok' } }]
     mockState.pendingChoices = [
       { id: 'Work in current workspace', label: 'Work in current workspace', goto: 'build', nextStepName: 'Implement' },
@@ -213,11 +223,30 @@ describe('MessageList continue workflow button', () => {
   })
 
   it('shows the workflow launcher when no workflow is running or waiting', () => {
-    mockState.criteriaPending = true
+    mockState.criteriaStatuses = ['pending']
     mockState.displayItems = [{ type: 'message', message: { role: 'assistant', content: 'ok' } }]
     mockState.hasWaitingWorkflow = false
     renderMessageList()
     expect(screen.getAllByTestId('workflow-run-button').length).toBeGreaterThan(0)
+  })
+
+  it('shows Verify for completed criteria and launches a tracked verify step', () => {
+    mockState.criteriaStatuses = ['completed', 'passed']
+    mockState.hasWaitingWorkflow = false
+    mockState.isRunning = false
+    renderMessageList()
+
+    screen.getByRole('button', { name: 'Verify' }).click()
+
+    expect(mockLaunchWorkflowAtStep).toHaveBeenCalledWith('s1', 'default', 'verify', 'builtin')
+  })
+
+  it('hides Verify while a workflow is active', () => {
+    mockState.criteriaStatuses = ['completed']
+    mockState.hasWaitingWorkflow = true
+    renderMessageList()
+
+    expect(screen.queryByRole('button', { name: 'Verify' })).toBeNull()
   })
 })
 

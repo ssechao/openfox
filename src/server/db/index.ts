@@ -1,18 +1,22 @@
 import Database from 'better-sqlite3'
 import type { Config } from '../config.js'
 import { logger } from '../utils/logger.js'
+import { assertTestDatabasePath } from '../utils/test-environment.js'
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
+const BUSY_TIMEOUT_MS = 5000
 
 export function initDatabase(config: Config): Database.Database {
   if (db) {
     return db
   }
 
+  assertTestDatabasePath(config.database.path)
   logger.info('Initializing database', { path: config.database.path })
 
   db = new Database(config.database.path)
+  db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
 

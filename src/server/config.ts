@@ -23,6 +23,7 @@ const envSchema = z.object({
   OPENFOX_DEV: z.coerce.boolean().default(false),
   OPENFOX_DISABLE_AUTO_SESSION_TITLE: z.coerce.boolean().optional(),
   OPENFOX_DEFAULT_AGENT: z.string().optional(),
+  OPENFOX_SNAPSHOT_EVERY_EVENTS: z.coerce.number().int().positive().default(5000),
 })
 
 export function loadConfig(): Config {
@@ -51,6 +52,7 @@ export function loadConfig(): Config {
       maxTokens: env.OPENFOX_MAX_CONTEXT,
       compactionThreshold: 0.85,
       compactionTarget: 0.6,
+      snapshotEveryEvents: env.OPENFOX_SNAPSHOT_EVERY_EVENTS,
     },
     agent: {
       maxIterations: 10,

@@ -6,6 +6,7 @@
  */
 
 import type { TurnEvent } from '../events/types.js'
+import { logger } from '../utils/logger.js'
 
 export interface ParsedProgress {
   stream: 'stdout' | 'stderr'
@@ -47,9 +48,16 @@ export function createToolProgressHandler(
     const parsed = parseProgressMessage(message)
     if (!parsed) return
 
-    append({
-      type: 'tool.output',
-      data: { messageId, toolCallId: callId, stream: parsed.stream, content: parsed.content },
-    })
+    try {
+      append({
+        type: 'tool.output',
+        data: { messageId, toolCallId: callId, stream: parsed.stream, content: parsed.content },
+      })
+    } catch (error) {
+      logger.warn('Dropped streamed tool output', {
+        toolCallId: callId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { getGitDiffFiles, formatGitDiffFiles, getGitBranch } from './diff.js'
+import { getGitDiffFiles, formatGitDiffFiles, formatGitReviewDiff, getGitBranch } from './diff.js'
 import { setPluginVcsProviders, clearPluginVcsProviders } from '../plugins/vcs-providers.js'
 import type { PluginVcsProvider } from '../../plugin/index.js'
 
@@ -38,6 +38,77 @@ function makeMockProc(stdout: string, exitCode = 0): MockProc {
 beforeEach(() => {
   vi.resetAllMocks()
   clearPluginVcsProviders()
+})
+
+describe('formatGitReviewDiff', () => {
+  it('includes committed branch changes on a clean working tree', async () => {
+    vi.mocked(spawn).mockImplementation(((_cmd: string, args: string[]) => {
+      if (args.join(' ') === 'rev-parse --verify main') {
+        return makeMockProc('main-sha\n') as unknown as ReturnType<typeof spawn>
+      }
+      if (args.join(' ') === 'merge-base HEAD main') {
+        return makeMockProc('base-sha\n') as unknown as ReturnType<typeof spawn>
+      }
+      if (args[0] === 'diff' && args.at(-1) === 'base-sha') {
+        return makeMockProc('diff --git a/src/fix.ts b/src/fix.ts\n+committed fix\n') as unknown as ReturnType<
+          typeof spawn
+        >
+      }
+      return makeMockProc('', 1) as unknown as ReturnType<typeof spawn>
+    }) as typeof spawn)
+
+    const diff = await formatGitReviewDiff('/tmp/project')
+
+    expect(diff).toContain('diff --git a/src/fix.ts b/src/fix.ts')
+    expect(diff).toContain('+committed fix')
+    expect(vi.mocked(spawn).mock.calls.flatMap((call) => call[1] as string[])).not.toContain('--binary')
+  })
+
+  it('caps the total diff and reports omitted files and bytes', async () => {
+    const oversized = `diff --git a/src/huge.ts b/src/huge.ts\n${'x'.repeat(240 * 1024)}`
+    vi.mocked(spawn).mockImplementation(((_cmd: string, args: string[]) => {
+      if (args.join(' ') === 'rev-parse --verify main') {
+        return makeMockProc('main-sha\n') as unknown as ReturnType<typeof spawn>
+      }
+      if (args.join(' ') === 'merge-base HEAD main') {
+        return makeMockProc('base-sha\n') as unknown as ReturnType<typeof spawn>
+      }
+      if (args[0] === 'diff' && args.at(-1) === 'base-sha') {
+        return makeMockProc(oversized) as unknown as ReturnType<typeof spawn>
+      }
+      return makeMockProc('') as unknown as ReturnType<typeof spawn>
+    }) as typeof spawn)
+
+    const diff = await formatGitReviewDiff('/tmp/project')
+
+    expect(Buffer.byteLength(diff)).toBeLessThanOrEqual(200 * 1024)
+    expect(diff).toMatch(/Diff truncated: 1 file, \d+ bytes omitted/)
+  })
+
+  it('caps each untracked file and represents binary changes without binary patches', async () => {
+    const oversized = `diff --git a/huge.txt b/huge.txt\n${'u'.repeat(70 * 1024)}\nUNTRACKED_TAIL`
+    vi.mocked(spawn).mockImplementation(((_cmd: string, args: string[]) => {
+      if (args.join(' ') === 'ls-files --others --exclude-standard -z') {
+        return makeMockProc('huge.txt\0image.png\0') as unknown as ReturnType<typeof spawn>
+      }
+      if (args.at(-1) === 'huge.txt') {
+        return makeMockProc(oversized, 1) as unknown as ReturnType<typeof spawn>
+      }
+      if (args.at(-1) === 'image.png') {
+        return makeMockProc('Binary files /dev/null and b/image.png differ\n', 1) as unknown as ReturnType<typeof spawn>
+      }
+      return makeMockProc('', 1) as unknown as ReturnType<typeof spawn>
+    }) as typeof spawn)
+
+    const diff = await formatGitReviewDiff('/tmp/project')
+
+    expect(diff).not.toContain('UNTRACKED_TAIL')
+    expect(diff).toContain('Binary files /dev/null and b/image.png differ')
+    expect(diff).toMatch(/Diff truncated: 1 file, \d+ bytes omitted/)
+    const args = vi.mocked(spawn).mock.calls.flatMap((call) => call[1] as string[])
+    expect(args).not.toContain('--binary')
+    expect(args).toContain('--no-textconv')
+  })
 })
 
 describe('getGitDiffFiles', () => {

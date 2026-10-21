@@ -10,6 +10,7 @@ import {
   ColumnsIcon,
   XCloseIcon,
   ChevronDownIcon,
+  HeartIcon,
 } from '../shared/icons'
 import { Link, useLocation } from 'wouter'
 import { useSessionStore } from '../../stores/session'
@@ -357,6 +358,15 @@ export function Header({ onMenuClick, onCriteriaToggle }: HeaderProps) {
                 <FolderIcon className="w-4 h-4" />
               </button>
             )}
+
+            <Link
+              href="/sante"
+              className="p-2.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition-colors"
+              title={t({ en: 'Health', fr: 'Santé' })}
+              aria-label={t({ en: 'Open health page', fr: 'Ouvrir la page Santé' })}
+            >
+              <HeartIcon className="w-4 h-4" />
+            </Link>
 
             <button
               onClick={() => {

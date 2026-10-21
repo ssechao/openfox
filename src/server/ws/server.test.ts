@@ -2099,6 +2099,40 @@ describe('createWebSocketServer', () => {
     await harness.close()
   })
 
+  it('broadcasts manager-created sessions to every open window', async () => {
+    let emitSessionEvent: ((event: Record<string, unknown>) => void) | undefined
+    const sessionManager = createSessionManager({
+      subscribe: vi.fn((callback: (event: Record<string, unknown>) => void) => {
+        emitSessionEvent = callback
+        return () => {}
+      }),
+    })
+    const harness = await createHarness({ sessionManager })
+    const windowB = await harness.connectClient()
+    const created = {
+      ...sessionManager.session,
+      id: 'forked-session',
+      metadata: { title: 'Forked session' },
+      messages: [],
+      messageCount: 0,
+    }
+
+    emitSessionEvent?.({ type: 'session_created', session: created })
+
+    expect(await harness.nextMessage((message) => message.type === 'session.created')).toMatchObject({
+      type: 'session.created',
+      sessionId: 'forked-session',
+      payload: { session: { id: 'forked-session', title: 'Forked session' } },
+    })
+    expect(await windowB.nextMessage((message) => message.type === 'session.created')).toMatchObject({
+      type: 'session.created',
+      sessionId: 'forked-session',
+    })
+
+    await windowB.close()
+    await harness.close()
+  })
+
   it('broadcastAll — the primitive tasks.update relies on — reaches clients without an active session', async () => {
     // Contract test: broadcastAll must deliver to EVERY connected client,
     // including windows with no session loaded (homepage) or a session in

@@ -16,12 +16,21 @@
 
 import type Database from 'better-sqlite3'
 import { existsSync, statSync, unlinkSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import type { TurnEvent, StoredEvent, SessionSnapshot, SnapshotMessage } from './types.js'
+import type { DiagnosticsCollector } from '../diagnostics/types.js'
 import { logger } from '../utils/logger.js'
 import { foldSessionState, buildSnapshot, trimSnapshotStreamingOutput } from './folding.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
 import { immutableSnapshot } from './immutable-snapshot.js'
 import { foldContextState } from './fold-state.js'
+import {
+  isStreamFragment,
+  mergeStreamFragments,
+  streamFragmentGrowth,
+  streamFragmentKey,
+  type StreamFragmentEvent,
+} from './stream-fragments.js'
 import {
   emptyStoreDiagnostics,
   measureStoreOperation,
@@ -35,6 +44,9 @@ import {
 // 1GB+ copy is not left on disk forever.
 const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 
+export const STREAM_FLUSH_INTERVAL_MS = 250
+export const STREAM_FLUSH_MAX_BYTES = 4096
+
 /**
  * Detect a UNIQUE constraint violation (e.g. another openfox instance writing
  * to the same database concurrently). Used to retry appends with the next seq.
@@ -42,6 +54,11 @@ const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 function isUniqueConstraintError(error: unknown): boolean {
   const err = error as NodeJS.ErrnoException
   return err?.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err?.message ?? '').includes('UNIQUE constraint failed')
+}
+
+function isBusyError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'))
 }
 
 function isUserStart(event: { type: string; data: unknown }): boolean {
@@ -84,6 +101,13 @@ interface GlobalSubscriber {
   callback: (event: StoredEvent) => void
   close: () => void
   closed: boolean
+}
+
+interface PendingStreamBatch {
+  seq: number
+  bytes: number
+  timer: ReturnType<typeof setTimeout>
+  fragments: Map<string, StreamFragmentEvent>
 }
 
 interface EventRow {
@@ -204,12 +228,17 @@ export class EventStore {
   // limit the first caller happened to request.
   private static readonly PROMPTS_QUERY_LIMIT = 100
   private static readonly RECENT_PROMPTS_MAX_ENTRIES = 20
+  private static readonly APPEND_BUSY_RETRIES = 2
 
   private diagnostics: StoreDiagnostics | null
+  private healthCollector: DiagnosticsCollector | null = null
   private readonly hotPath: boolean
   private dataVersion: number | undefined
   private projections = new Map<string, { windowId: string | undefined; userCount: number }>()
   private activeSessions = new Map<string, boolean>()
+  // Sessions whose last running.changed written by this process says running.
+  // Not a cache: never dropped with the others, so the health page can count it.
+  private runningSessionIds = new Set<string>()
   private replayPrefixes = new Map<string, { seq: number; events: StoredEvent[]; serializedBytes: number }>()
   // Write revisions, so derived per-session state can be memoized: a session's
   // revision moves on every write path that touches its events, and the global
@@ -218,6 +247,10 @@ export class EventStore {
   private globalRevision = 0
   private static instanceCount = 0
   private readonly instanceId = ++EventStore.instanceCount
+  private pendingStreams = new Map<string, PendingStreamBatch>()
+  private eventsReferenceSessions: boolean | undefined
+  private readonly streamFlushIntervalMs: number
+  private readonly streamFlushMaxBytes: number
 
   private checkExternalWrites(): void {
     if (!this.hotPath) return
@@ -251,6 +284,7 @@ export class EventStore {
    */
   getSessionRevision(sessionId: string): string | undefined {
     if (!this.hotPath) return undefined
+    this.flushStreaming(sessionId)
     this.checkExternalWrites()
     return `${this.instanceId}:${this.globalRevision}:${this.sessionRevisions.get(sessionId) ?? 0}`
   }
@@ -273,6 +307,7 @@ export class EventStore {
 
   getReplayEvents(sessionId: string): StoredEvent[] {
     if (!this.hotPath) return this.getEvents(sessionId)
+    this.flushStreaming(sessionId)
     return this.db.transaction(() => {
       const snapshot = this.getLatestSnapshot(sessionId)
       if (!snapshot) {
@@ -317,6 +352,10 @@ export class EventStore {
       if (event.type === 'message.start' && event.data.role === 'user' && !event.data.isSystemGenerated)
         projection.userCount++
     }
+    if (event.type === 'running.changed') {
+      if (event.data.isRunning) this.runningSessionIds.add(stored.sessionId)
+      else this.runningSessionIds.delete(stored.sessionId)
+    }
     if (this.hotPath && event.type === 'running.changed') {
       this.activeSessions.set(stored.sessionId, event.data.isRunning)
       this.evictSnapshots()
@@ -341,10 +380,20 @@ export class EventStore {
     return row ? (JSON.parse(row.payload) as { isRunning: boolean }).isRunning : fallback
   }
 
-  constructor(db: Database.Database, options: { diagnostics?: boolean; hotPath?: boolean } = {}) {
+  constructor(
+    db: Database.Database,
+    options: {
+      diagnostics?: boolean
+      hotPath?: boolean
+      streamFlushIntervalMs?: number
+      streamFlushMaxBytes?: number
+    } = {},
+  ) {
     this.diagnostics =
       (options.diagnostics ?? process.env['OPENFOX_SNAPSHOT_DIAGNOSTICS'] === '1') ? emptyStoreDiagnostics() : null
     this.hotPath = options.hotPath ?? process.env['OPENFOX_SNAPSHOT_HOT_PATH'] !== '0'
+    this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS
+    this.streamFlushMaxBytes = options.streamFlushMaxBytes ?? STREAM_FLUSH_MAX_BYTES
     this.db = db
     this.initSchema()
     this.checkExternalWrites()
@@ -369,8 +418,37 @@ export class EventStore {
     if (this.diagnostics) this.diagnostics = emptyStoreDiagnostics()
   }
 
+  getRunningState(sessionId: string, fallback: boolean): boolean {
+    const cached = this.activeSessions.get(sessionId)
+    if (cached !== undefined) return cached
+    const current = this.readRunning(sessionId, fallback)
+    if (this.hotPath) this.activeSessions.set(sessionId, current)
+    return current
+  }
+
   measureSnapshotOperation<T>(operation: StoreTiming, work: () => T): T {
     return measureStoreOperation(this.diagnostics, operation, work)
+  }
+
+  setHealthCollector(collector: DiagnosticsCollector | null): void {
+    this.healthCollector = collector
+  }
+
+  countRunningSessions(): number {
+    return this.runningSessionIds.size
+  }
+
+  private timed<T>(kind: 'read' | 'write', work: () => T): T {
+    const collector = this.healthCollector
+    if (!collector) return work()
+    const started = performance.now()
+    try {
+      return work()
+    } finally {
+      const elapsed = performance.now() - started
+      if (kind === 'read') collector.recordRead(elapsed)
+      else collector.recordWrite(elapsed)
+    }
   }
 
   private serializeEvent(event: TurnEvent): string {
@@ -430,7 +508,92 @@ export class EventStore {
       : this.appendEvent(sessionId, event)
   }
 
-  private appendEvent(sessionId: string, event: TurnEvent): StoredEvent {
+  appendStreaming(sessionId: string, event: TurnEvent): void {
+    if (!isStreamFragment(event)) {
+      this.append(sessionId, event)
+      return
+    }
+    this.assertValidEvent(sessionId, event)
+
+    let batch = this.pendingStreams.get(sessionId)
+    if (!batch) {
+      if (!this.sessionAcceptsEvents(sessionId)) return
+      batch = this.openStreamBatch(sessionId, new Map())
+    }
+    const key = streamFragmentKey(event)
+    const pending = batch.fragments.get(key)
+    batch.fragments.set(key, pending ? mergeStreamFragments(pending, event) : event)
+    batch.bytes += streamFragmentGrowth(pending, event)
+
+    this.notifySubscribers(sessionId, {
+      seq: batch.seq,
+      timestamp: Date.now(),
+      sessionId,
+      type: event.type,
+      data: event.data,
+    })
+
+    if (batch.bytes >= this.streamFlushMaxBytes) this.tryFlushStreaming(sessionId)
+  }
+
+  flushStreaming(sessionId: string): void {
+    const batch = this.pendingStreams.get(sessionId)
+    if (!batch) return
+    this.pendingStreams.delete(sessionId)
+    clearTimeout(batch.timer)
+    const fragments = [...batch.fragments]
+    for (const [index, [, event]] of fragments.entries()) {
+      try {
+        this.appendEvent(sessionId, event, false)
+      } catch (error) {
+        if (isBusyError(error)) this.openStreamBatch(sessionId, new Map(fragments.slice(index)))
+        throw error
+      }
+    }
+  }
+
+  tryFlushStreaming(sessionId: string): boolean {
+    try {
+      this.flushStreaming(sessionId)
+      return true
+    } catch (error) {
+      logger.warn('Failed to persist streamed fragments', {
+        sessionId,
+        kept: this.pendingStreams.has(sessionId),
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  }
+
+  flushAllStreaming(): void {
+    for (const sessionId of [...this.pendingStreams.keys()]) this.tryFlushStreaming(sessionId)
+  }
+
+  private openStreamBatch(sessionId: string, fragments: Map<string, StreamFragmentEvent>): PendingStreamBatch {
+    const timer = setTimeout(() => this.tryFlushStreaming(sessionId), this.streamFlushIntervalMs)
+    timer.unref?.()
+    const batch = { seq: this.getNextSeq(sessionId), bytes: 0, timer, fragments }
+    this.pendingStreams.set(sessionId, batch)
+    return batch
+  }
+
+  private sessionAcceptsEvents(sessionId: string): boolean {
+    this.eventsReferenceSessions ??=
+      this.db.pragma('foreign_keys', { simple: true }) === 1 &&
+      (this.db.pragma('foreign_key_list(events)') as Array<{ table: string }>).some((fk) => fk.table === 'sessions')
+    if (!this.eventsReferenceSessions) return true
+    return this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId) !== undefined
+  }
+
+  private dropStreaming(sessionId: string): void {
+    const batch = this.pendingStreams.get(sessionId)
+    if (!batch) return
+    this.pendingStreams.delete(sessionId)
+    clearTimeout(batch.timer)
+  }
+
+  private assertValidEvent(sessionId: string, event: TurnEvent): void {
     if (!sessionId || typeof sessionId !== 'string') {
       throw new Error('Invalid sessionId: must be a non-empty string')
     }
@@ -440,6 +603,11 @@ export class EventStore {
     if (!event.data || typeof event.data !== 'object') {
       throw new Error('Invalid event: must have data object')
     }
+  }
+
+  private appendEvent(sessionId: string, event: TurnEvent, notify = true): StoredEvent {
+    this.assertValidEvent(sessionId, event)
+    this.flushStreaming(sessionId)
 
     this.checkExternalWrites()
     const timestamp = Date.now()
@@ -450,13 +618,28 @@ export class EventStore {
     )
 
     // Multi-process safety: another openfox instance may have taken our
-    // computed seq between the MAX read and the INSERT. Probe forward.
+    // computed seq between the MAX read and the INSERT. Probe forward. A
+    // database another connection keeps locked is retried a bounded number of
+    // times (each attempt already waits busy_timeout), then reported.
     let seq = this.getNextSeq(sessionId)
+    let busyRetries = 0
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
-        insert.run(sessionId, seq, timestamp, event.type, payload)
+        this.timed('write', () => insert.run(sessionId, seq, timestamp, event.type, payload))
         break
       } catch (error) {
+        if (isBusyError(error) && busyRetries < EventStore.APPEND_BUSY_RETRIES) {
+          busyRetries++
+          continue
+        }
+        if (isBusyError(error)) {
+          logger.error('Event not persisted: the database stayed locked', {
+            sessionId,
+            type: event.type,
+            attempts: busyRetries + 1,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
         if (!isUniqueConstraintError(error) || attempt === 99) throw error
         seq++
       }
@@ -474,7 +657,7 @@ export class EventStore {
     }
 
     this.publishEvent(stored, payload.length)
-    this.notifySubscribers(sessionId, stored)
+    if (notify) this.notifySubscribers(sessionId, stored)
 
     return stored
   }
@@ -484,6 +667,7 @@ export class EventStore {
    */
   appendBatch(sessionId: string, events: TurnEvent[]): StoredEvent[] {
     if (events.length === 0) return []
+    this.flushStreaming(sessionId)
     this.checkExternalWrites()
     const timestamp = Date.now()
     const payloads = events.map((event) => this.serializeEvent(event))
@@ -516,7 +700,7 @@ export class EventStore {
             seq++
           }
         })
-        transaction()
+        this.timed('write', transaction)
 
         for (const stored of results) {
           const event = { type: stored.type, data: stored.data } as TurnEvent
@@ -547,6 +731,7 @@ export class EventStore {
    */
   importEvents(sessionId: string, events: StoredEvent[]): StoredEvent[] {
     if (events.length === 0) return []
+    this.flushStreaming(sessionId)
     this.checkExternalWrites()
     const payloads = new Map(
       events.map((event) => [event.seq, this.serializeEvent({ type: event.type, data: event.data } as TurnEvent)]),
@@ -591,6 +776,7 @@ export class EventStore {
    * Get all events for a session, optionally starting from a specific seq
    */
   getEvents(sessionId: string, fromSeq?: number): StoredEvent[] {
+    this.flushStreaming(sessionId)
     if (this.diagnostics && fromSeq === undefined) this.diagnostics.fullReads++
     const query =
       fromSeq !== undefined
@@ -603,10 +789,11 @@ export class EventStore {
            WHERE e.session_id = ? AND t.seq IS NULL
            ORDER BY e.seq`
 
-    const rows =
+    const rows = this.timed('read', () =>
       fromSeq !== undefined
         ? (this.db.prepare(query).all(sessionId, fromSeq) as EventRow[])
-        : (this.db.prepare(query).all(sessionId) as EventRow[])
+        : (this.db.prepare(query).all(sessionId) as EventRow[]),
+    )
 
     return rows.map((row) => this.rowToStoredEvent(row))
   }
@@ -621,6 +808,7 @@ export class EventStore {
    */
   tombstoneEvents(sessionId: string, seqs: number[]): number {
     if (seqs.length === 0) return 0
+    this.flushStreaming(sessionId)
 
     const timestamp = Date.now()
     const insert = this.db.prepare(
@@ -646,6 +834,7 @@ export class EventStore {
    * Used to persist enriched data (e.g., vision fallback descriptions) back to the store.
    */
   updateEventPayload(sessionId: string, seq: number, data: unknown): void {
+    this.flushStreaming(sessionId)
     this.db
       .prepare(`UPDATE events SET payload = ? WHERE session_id = ? AND seq = ?`)
       .run(JSON.stringify(data), sessionId, seq)
@@ -656,6 +845,7 @@ export class EventStore {
    * Get the latest sequence number for a session
    */
   getLatestSeq(sessionId: string): number | undefined {
+    this.flushStreaming(sessionId)
     const row = this.db.prepare(`SELECT MAX(seq) as max_seq FROM events WHERE session_id = ?`).get(sessionId) as
       { max_seq: number | null } | undefined
 
@@ -674,13 +864,17 @@ export class EventStore {
     }
 
     if (this.diagnostics) this.diagnostics.snapshotCacheMisses++
-    const row = this.db
-      .prepare(
-        `SELECT e.* FROM events e LEFT JOIN tombstones t ON e.session_id=t.session_id AND e.seq=t.seq
+    const row = this.timed(
+      'read',
+      () =>
+        this.db
+          .prepare(
+            `SELECT e.* FROM events e LEFT JOIN tombstones t ON e.session_id=t.session_id AND e.seq=t.seq
          WHERE e.session_id = ? AND e.event_type = 'turn.snapshot' AND t.seq IS NULL
          ORDER BY e.seq DESC LIMIT 1`,
-      )
-      .get(sessionId) as EventRow | undefined
+          )
+          .get(sessionId) as EventRow | undefined,
+    )
 
     if (!row) return undefined
 
@@ -1107,8 +1301,10 @@ export class EventStore {
    * Delete all events for a session
    */
   deleteSession(sessionId: string): void {
+    this.dropStreaming(sessionId)
     this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
     this.invalidateSessionCache(sessionId)
+    this.runningSessionIds.delete(sessionId)
 
     // Close all subscribers for this session
     const sessionSubs = this.subscribers.get(sessionId)
@@ -1130,6 +1326,7 @@ export class EventStore {
    * @returns The number of events deleted
    */
   deleteEventsUpToSeq(sessionId: string, upToSeq: number): number {
+    this.flushStreaming(sessionId)
     const result = this.db.prepare(`DELETE FROM events WHERE session_id = ? AND seq <= ?`).run(sessionId, upToSeq)
     this.invalidateSessionCache(sessionId)
 
@@ -1146,6 +1343,7 @@ export class EventStore {
    * @returns The number of events deleted
    */
   deleteEventsAfterSeq(sessionId: string, fromSeq: number): number {
+    this.flushStreaming(sessionId)
     const result = this.db.prepare(`DELETE FROM events WHERE session_id = ? AND seq > ?`).run(sessionId, fromSeq)
     this.invalidateSessionCache(sessionId)
 
@@ -1165,6 +1363,7 @@ export class EventStore {
    * @returns The number of events deleted
    */
   cleanupOldEvents(sessionId: string): number {
+    this.flushStreaming(sessionId)
     // Get the latest snapshot sequence
     this.checkExternalWrites()
     const latestSnapshotSeq = this.getLatestSnapshotSeq(sessionId)
@@ -1193,9 +1392,15 @@ export class EventStore {
           'context.state',
           'metadata.set'
         )
+        AND NOT (
+          event_type = 'running.changed' AND seq = (
+            SELECT MAX(seq) FROM events
+            WHERE session_id = ? AND event_type = 'running.changed' AND seq < ?
+          )
+        )
       `,
       )
-      .run(sessionId, latestSnapshotSeq)
+      .run(sessionId, latestSnapshotSeq, sessionId, latestSnapshotSeq)
 
     if (this.hotPath) {
       this.replayPrefixes.delete(sessionId)
@@ -1250,6 +1455,15 @@ export class EventStore {
       .get(sessionId) as { seq: number } | undefined
 
     return row?.seq ?? 0
+  }
+
+  /** Number of stored events after the latest snapshot (all events when there is none). */
+  countEventsSinceSnapshot(sessionId: string): number {
+    this.flushStreaming(sessionId)
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM events WHERE session_id = ? AND seq > ?`)
+      .get(sessionId, this.getLatestSnapshotSeq(sessionId)) as { count: number }
+    return row.count
   }
 
   /**

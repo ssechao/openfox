@@ -13,7 +13,7 @@ import { createProject, updateProject } from '../db/projects.js'
 
 describe('session-overrides', () => {
   beforeEach(() => {
-    initDatabase(loadConfig())
+    initDatabase({ ...loadConfig(), database: { path: ':memory:' } })
     setGlobalMcpServersProvider(null)
   })
 

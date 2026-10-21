@@ -1,6 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import { createServer as createHttpServer } from 'node:http'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
@@ -69,6 +70,7 @@ import { createPluginRoutes } from './routes/plugins.js'
 import { createNotificationRoutes } from './routes/notifications.js'
 import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
+import { createDiagnosticsCollector } from './diagnostics/collector.js'
 import { logger, setLogLevel } from './utils/logger.js'
 import { VERSION } from '../constants.js'
 import {
@@ -168,6 +170,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // Create SessionManager instance (not singleton!)
   const sessionManager = new SessionManager(providerManager)
+
+  const diagnosticsCollector = createDiagnosticsCollector({
+    dbPath: db.name,
+    countRunningSessions: () => getEventStore().countRunningSessions(),
+  })
+  getEventStore().setHealthCollector(diagnosticsCollector)
+  diagnosticsCollector.start()
 
   // Wire sessionManager to devServerManager for inspect proxy feedback
   devServerManager.setSessionManager(sessionManager)
@@ -351,8 +360,23 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // Health check (public)
   app.get('/api/health', (_req, res) => {
+    const started = performance.now()
+    res.once('finish', () => diagnosticsCollector.recordHealthLatency(performance.now() - started))
     res.json({ status: 'ok', timestamp: new Date().toISOString() })
   })
+
+  app.get('/api/diagnostics', (_req, res) => {
+    res.json(diagnosticsCollector.getData())
+  })
+
+  if (config.mode === 'test' && process.env['OPENFOX_TEST_BLOCK_LOOP'] === '1') {
+    app.post('/api/test/block-loop', (req, res) => {
+      const requested = (req.body as { ms?: unknown }).ms
+      const ms = typeof requested === 'number' && requested > 0 ? Math.min(requested, 5_000) : 100
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+      res.json({ blockedMs: ms })
+    })
+  }
 
   // Changelog (public)
   app.get('/api/changelog', async (req, res) => {
@@ -859,36 +883,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     res.json({ sessions: sessionManager.listHomeSessions() })
   })
 
-  /**
-   * Build the session.created broadcast message shared by the create and
-   * import routes, so the payload shape cannot drift between them.
-   */
-  function buildSessionCreatedMessage(session: import('../shared/types.js').Session) {
-    return {
-      type: 'session.created' as const,
-      sessionId: session.id,
-      payload: {
-        session: {
-          id: session.id,
-          projectId: session.projectId,
-          title: session.metadata.title,
-          workdir: session.workdir,
-          workspace: session.workspace,
-          mode: session.mode,
-          phase: session.phase,
-          isRunning: session.isRunning,
-          providerId: session.providerId,
-          providerModel: session.providerModel,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-          criteriaCount: session.criteria.length,
-          criteriaCompleted: session.criteria.filter((c) => c.status.type === 'passed').length,
-          messageCount: session.messageCount ?? session.messages.length,
-        },
-      },
-    }
-  }
-
   app.post('/api/sessions', async (req, res) => {
     const { projectId, title } = req.body
     if (!projectId) {
@@ -906,7 +900,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     // maxTokens is no longer passed - it comes from providerManager.getCurrentModelContext() at query time
     const session = sessionManager.createSession(projectId, title, providerId ?? null, model ?? null)
 
-    wssExports.broadcastAll(buildSessionCreatedMessage(session))
     res.status(201).json({ session: toClientSession(session) })
   })
 
@@ -1867,7 +1860,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     try {
       const newSession = await sessionManager.importSession(projectId, payload)
-      wssExports.broadcastForProject(projectId, newSession.id, buildSessionCreatedMessage(newSession))
       return res.status(201).json({ session: toClientSession(newSession) })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -3855,7 +3847,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Return the handle with start/close methods
   return {
     httpServer,
-    ctx: { config, sessionManager, llmClient: getLLMClient(), toolRegistry, providerManager },
+    ctx: { config, sessionManager, llmClient: getLLMClient(), toolRegistry, providerManager, diagnosticsCollector },
 
     start: (port?: number) =>
       new Promise((resolve, reject) => {
@@ -3894,6 +3886,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       new Promise<void>((resolve) => {
         logger.info('Shutting down...')
         void (async () => {
+          diagnosticsCollector.stop()
+          try {
+            getEventStore().flushAllStreaming()
+          } catch {
+            // Event store not initialized — nothing to persist
+          }
           await devServerManager.stopAll()
           await mcpManager.disconnectAll()
           taskScheduler.stop()

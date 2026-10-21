@@ -28,6 +28,11 @@ function createEventStore(initialEvents: any[] = []) {
     append: vi.fn((_sessionId: string, event: any) => {
       events.push(event)
     }),
+    appendStreaming: vi.fn((_sessionId: string, event: any) => {
+      events.push(event)
+    }),
+    tryFlushStreaming: vi.fn(() => true),
+    countEventsSinceSnapshot: vi.fn(() => 0),
     getEvents: vi.fn(() => events),
     getCurrentWindowId: vi.fn(() => foldContextState(events, '').currentContextWindowId || undefined),
     getReplayEvents: vi.fn(() => events),
