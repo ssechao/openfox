@@ -99,6 +99,12 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
     }
   }
 
+  // Event-loop delay is sampled with a timer, not monitorEventLoopDelay: every
+  // `loopSampleMs` (20 ms by default) a setTimeout records how late it fired
+  // (actual minus scheduled time). Resolution is therefore ~`loopSampleMs`; a
+  // stall of B ms yields one sample of about B ms. This is the reference method
+  // for the multithread demos; its figures are not the API latencies of the
+  // stream bench (e.g. the p99 of GET /api/sessions/:id).
   function scheduleLoopSample(): void {
     const expected = performance.now() + loopSampleMs
     loopTimer = setTimeout(() => {

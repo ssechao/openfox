@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { DiagnosticsData } from '../src/shared/diagnostics.js'
+import { pause, runBench, withProbes, type Probe } from './utils/load-run.js'
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../..')
 const MIN_PORT = 10600
@@ -250,46 +251,48 @@ describe('health dashboard demo (isolated instance)', () => {
 
   it('keeps /api/health answering while the stream bench runs against this instance', async () => {
     const startedAt = performance.now()
-    const stop = { done: false }
     const health = { requests: 0, timeouts: 0, errors: 0, latencies: [] as number[] }
     const timeline: Array<ReturnType<typeof snapshot> & { phase: string }> = []
     let phase = 'idle'
 
-    const probeHealth = async () => {
-      while (!stop.done) {
+    const probeHealth: Probe = async (signal) => {
+      while (!signal.aborted) {
         const sent = performance.now()
-        health.requests++
         try {
-          const res = await fetch(`${instance.url}/api/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+          const res = await fetch(`${instance.url}/api/health`, {
+            signal: AbortSignal.any([signal, AbortSignal.timeout(HEALTH_TIMEOUT_MS)]),
+          })
           await res.arrayBuffer()
+          health.requests++
           health.latencies.push(performance.now() - sent)
         } catch (error) {
+          if (signal.aborted) break
+          health.requests++
           if ((error as Error).name === 'TimeoutError') health.timeouts++
           else health.errors++
         }
-        await sleep(100)
+        await pause(100, signal)
       }
     }
     let diagnosticsFailures = 0
-    const sampleDiagnostics = async () => {
-      while (!stop.done) {
+    const sampleDiagnostics: Probe = async (signal) => {
+      while (!signal.aborted) {
         try {
           timeline.push({ phase, ...snapshot(await diagnostics(instance.url), startedAt) })
         } catch {
           diagnosticsFailures++
         }
-        await sleep(1_000)
+        await pause(1_000, signal)
       }
     }
-    const loops = [probeHealth(), sampleDiagnostics()]
-    await sleep(3_000)
 
-    phase = 'bench'
     const benchOut = join(instance.root, 'bench.json')
-    const bench = track(
-      fork(
-        join(REPO_ROOT, 'scripts/bench/stream-batching.ts'),
-        [
+    await withProbes([probeHealth, sampleDiagnostics], async () => {
+      await sleep(3_000)
+      phase = 'bench'
+      await runBench({
+        script: join(REPO_ROOT, 'scripts/bench/stream-batching.ts'),
+        args: [
           `--server-url=${instance.url}`,
           `--out=${benchOut}`,
           '--fragments=40000',
@@ -299,26 +302,19 @@ describe('health dashboard demo (isolated instance)', () => {
           '--idle-probe=1000',
           '--label=etape1-demo',
         ],
-        {
-          cwd: REPO_ROOT,
-          env: isolatedEnv(instance.root, {}),
-          execArgv: ['--import', 'tsx/esm'],
-          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        cwd: REPO_ROOT,
+        env: isolatedEnv(instance.root, {}),
+        execArgv: ['--import', 'tsx/esm'],
+        timeoutMs: 150_000,
+        logs: instance.logs,
+        during: async (bench) => {
+          await sleep(2_000)
+          if (bench.exitCode === null) expect(productionFiles(await openFiles(bench.pid!))).toEqual([])
         },
-      ),
-      'bench',
-      instance.logs,
-    )
-    const benchExit = new Promise<number | null>((done) => bench.once('exit', done))
-    await sleep(2_000)
-    if (bench.exitCode === null) expect(productionFiles(await openFiles(bench.pid!))).toEqual([])
-    const code = await Promise.race([benchExit, sleep(150_000).then(() => 'timeout' as const)])
-    if (code !== 0) throw new Error(`Bench ended with ${code}:\n${instance.logs.join('')}`)
-
-    phase = 'rest'
-    await sleep(12_000)
-    stop.done = true
-    await Promise.all(loops)
+      })
+      phase = 'rest'
+      await sleep(12_000)
+    })
 
     const sorted = [...health.latencies].sort((a, b) => a - b)
     const pick = (p: number) => round(sorted[Math.max(0, Math.ceil(sorted.length * p) - 1)] ?? null)

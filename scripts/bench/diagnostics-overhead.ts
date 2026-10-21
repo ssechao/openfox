@@ -1,3 +1,9 @@
+/**
+ * CPU cost of the health collector, enabled vs disabled, over `--seconds`
+ * (30 by default) per scenario, with /api/diagnostics-style reads every 2 s.
+ * Deliberate scope: the collector alone in an idle process, not a full server.
+ * dbPath is ':memory:', so the per-second stat() of the WAL file is excluded.
+ */
 import { performance } from 'node:perf_hooks'
 import { createDiagnosticsCollector } from '../../src/server/diagnostics/collector.js'
 

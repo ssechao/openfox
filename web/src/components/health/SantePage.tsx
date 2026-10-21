@@ -10,7 +10,7 @@ const SERIES_LABELS: Record<DiagnosticsSeriesName, Translation> = {
   eventLoopDelayP50: { en: 'Event loop delay p50', fr: 'Retard de la boucle p50' },
   eventLoopDelayP99: { en: 'Event loop delay p99', fr: 'Retard de la boucle p99' },
   eventLoopDelayMax: { en: 'Event loop delay max', fr: 'Retard de la boucle max' },
-  healthLatencyP99: { en: '/api/health latency p99', fr: 'Latence /api/health p99' },
+  healthLatencyP99: { en: '/api/health server handling p99', fr: 'Traitement serveur /api/health p99' },
   eventStoreReadP99: { en: 'EventStore read p99', fr: 'Lecture EventStore p99' },
   eventStoreWriteP99: { en: 'EventStore write p99', fr: 'Écriture EventStore p99' },
   walSize: { en: 'WAL size', fr: 'Taille du WAL' },
