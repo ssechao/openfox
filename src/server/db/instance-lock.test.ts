@@ -1,5 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm, realpath, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -27,10 +27,10 @@ function createDbFile(path: string): void {
   db.close()
 }
 
-function spawnLocker(dbPath: string): ChildProcess {
+function spawnLocker(dbPath: string, extra: Record<string, string> = {}): ChildProcess {
   const child = fork(CHILD, [], {
     execArgv: ['--import', 'tsx/esm'],
-    env: { ...process.env, OPENFOX_LOCK_DB_PATH: dbPath },
+    env: { ...process.env, OPENFOX_LOCK_DB_PATH: dbPath, ...extra },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     detached: true,
   })
@@ -218,15 +218,13 @@ describe('instance lock', () => {
 
   it('leaves the new holder sidecar intact when the previous owner releases', async () => {
     acquireInstanceLock(dbPath)
-    const waiter = spawnLocker(dbPath)
+    const waiter = spawnLocker(dbPath, { OPENFOX_LOCK_RETRY: '1' })
     children.push(waiter)
-    const first = await waitForLockResult(waiter)
-    expect(first.ok).toBe(false)
+    await new Promise((r) => setTimeout(r, 150))
     releaseInstanceLock()
-    const winner = spawnLocker(dbPath)
-    children.push(winner)
-    const held = await waitForLockResult(winner)
+    const held = await waitForLockResult(waiter)
     expect(held.ok).toBe(true)
+    expect(existsSync(`${dbPath}.instance-lock`)).toBe(true)
     const sidecar = readFileSync(`${dbPath}.instance-lock.info`, 'utf-8')
     expect(sidecar.startsWith(`${held.pid}\n`)).toBe(true)
   })
