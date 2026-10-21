@@ -1,5 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm, realpath, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,10 +7,19 @@ import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { closeDatabase, initDatabase } from './index.js'
-import { acquireInstanceLock, getLockOwnerInfo, InstanceLockError, releaseInstanceLock } from './instance-lock.js'
+import {
+  acquireInstanceLock,
+  formatInstanceLockRefusal,
+  getLockOwnerInfo,
+  InstanceLockError,
+  instanceLockRefusalTx,
+  releaseInstanceLock,
+} from './instance-lock.js'
 import { loadConfig } from '../config.js'
 
-const CHILD = join(dirname(fileURLToPath(import.meta.url)), 'instance-lock-child.ts')
+const DIR = dirname(fileURLToPath(import.meta.url))
+const CHILD = join(DIR, 'instance-lock.test-child.ts')
+const PARENT = join(DIR, 'instance-lock.test-parent.ts')
 
 function createDbFile(path: string): void {
   const db = new Database(path)
@@ -22,7 +31,8 @@ function spawnLocker(dbPath: string): ChildProcess {
   const child = fork(CHILD, [], {
     execArgv: ['--import', 'tsx/esm'],
     env: { ...process.env, OPENFOX_LOCK_DB_PATH: dbPath },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    detached: true,
   })
   const logs: string[] = []
   const keep = (data: Buffer) => logs.push(data.toString())
@@ -30,6 +40,19 @@ function spawnLocker(dbPath: string): ChildProcess {
   child.stderr?.on('data', keep)
   ;(child as ChildProcess & { logs: string[] }).logs = logs
   return child
+}
+
+function killTree(child: ChildProcess): void {
+  if (child.exitCode !== null || child.pid === undefined) return
+  try {
+    process.kill(-child.pid, 'SIGKILL')
+  } catch {
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      // gone
+    }
+  }
 }
 
 function waitForLockResult(
@@ -63,6 +86,15 @@ function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
   })
 }
 
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 describe('instance lock', () => {
   let root: string
   let dbPath: string
@@ -74,9 +106,7 @@ describe('instance lock', () => {
   })
 
   afterEach(async () => {
-    for (const child of children) {
-      if (child.exitCode === null) child.kill('SIGKILL')
-    }
+    for (const child of children) killTree(child)
     children.length = 0
     releaseInstanceLock()
     closeDatabase()
@@ -99,8 +129,10 @@ describe('instance lock', () => {
       acquireInstanceLock(dbPath)
     } catch (error) {
       expect(error).toBeInstanceOf(InstanceLockError)
-      expect((error as InstanceLockError).message).toMatch(/base déjà utilisée par l'instance PID \d+/)
-      expect((error as InstanceLockError).ownerPid).toBe(process.pid)
+      const locked = error as InstanceLockError
+      expect(locked.ownerPid).toBe(process.pid)
+      expect(locked.message).toMatch(new RegExp(`PID ${process.pid}`))
+      expect(locked.message).toContain(dbPath)
     }
   })
 
@@ -141,6 +173,16 @@ describe('instance lock', () => {
     expect(acquireInstanceLock(asDirectory).acquired).toBe(true)
   })
 
+  it('does not report a collision when the parent directory is missing', () => {
+    const missing = join(root, 'no-such-dir', 'sessions.db')
+    expect(() => acquireInstanceLock(missing)).toThrow()
+    try {
+      acquireInstanceLock(missing)
+    } catch (error) {
+      expect(error).not.toBeInstanceOf(InstanceLockError)
+    }
+  })
+
   it('lets only one of two concurrent processes win the lock', async () => {
     const first = spawnLocker(dbPath)
     const second = spawnLocker(dbPath)
@@ -148,17 +190,9 @@ describe('instance lock', () => {
     const results = await Promise.all([waitForLockResult(first), waitForLockResult(second)])
     const winners = results.filter((result) => result.ok)
     const losers = results.filter((result) => !result.ok)
-    if (winners.length !== 1) {
-      throw new Error(
-        `expected one winner, got ${JSON.stringify(results)} logs=${JSON.stringify({
-          first: (first as ChildProcess & { logs: string[] }).logs,
-          second: (second as ChildProcess & { logs: string[] }).logs,
-        })}`,
-      )
-    }
     expect(winners).toHaveLength(1)
     expect(losers).toHaveLength(1)
-    expect(losers[0]?.error).toMatch(/base déjà utilisée par l'instance PID/)
+    expect(losers[0]?.error).toMatch(/database already in use by instance PID/)
     expect(losers[0]?.error).toMatch(new RegExp(`PID ${winners[0]?.pid}`))
   })
 
@@ -168,7 +202,7 @@ describe('instance lock', () => {
     const held = await waitForLockResult(holder)
     expect(held.ok).toBe(true)
 
-    holder.kill('SIGKILL')
+    killTree(holder)
     await waitForExit(holder)
 
     const first = spawnLocker(dbPath)
@@ -177,16 +211,67 @@ describe('instance lock', () => {
     const results = await Promise.all([waitForLockResult(first), waitForLockResult(second)])
     const winners = results.filter((result) => result.ok)
     const losers = results.filter((result) => !result.ok)
-    if (winners.length !== 1) {
-      throw new Error(
-        `reclaim expected one winner, got ${JSON.stringify(results)} logs=${JSON.stringify({
-          first: (first as ChildProcess & { logs: string[] }).logs,
-          second: (second as ChildProcess & { logs: string[] }).logs,
-        })}`,
-      )
-    }
     expect(winners).toHaveLength(1)
     expect(losers).toHaveLength(1)
-    expect(losers[0]?.error).toMatch(/base déjà utilisée par l'instance PID/)
+    expect(losers[0]?.error).toMatch(/database already in use by instance PID/)
+  })
+
+  it('leaves the new holder sidecar intact when the previous owner releases', async () => {
+    acquireInstanceLock(dbPath)
+    const waiter = spawnLocker(dbPath)
+    children.push(waiter)
+    const first = await waitForLockResult(waiter)
+    expect(first.ok).toBe(false)
+    releaseInstanceLock()
+    const winner = spawnLocker(dbPath)
+    children.push(winner)
+    const held = await waitForLockResult(winner)
+    expect(held.ok).toBe(true)
+    const sidecar = readFileSync(`${dbPath}.instance-lock.info`, 'utf-8')
+    expect(sidecar.startsWith(`${held.pid}\n`)).toBe(true)
+  })
+
+  it('exits the lock child within 2s when its parent is killed', async () => {
+    const parent = fork(PARENT, [], {
+      execArgv: ['--import', 'tsx/esm'],
+      env: { ...process.env, OPENFOX_LOCK_DB_PATH: dbPath },
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      detached: true,
+    })
+    children.push(parent)
+    const message = await new Promise<{ childPid?: number; ok?: boolean }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('parent timed out')), 10_000)
+      parent.once('message', (value) => {
+        clearTimeout(timer)
+        resolve(value as { childPid?: number; ok?: boolean })
+      })
+      parent.once('exit', (code) => {
+        clearTimeout(timer)
+        reject(new Error(`parent exited ${code}`))
+      })
+    })
+    expect(message.ok).toBe(true)
+    const childPid = message.childPid
+    expect(childPid).toBeGreaterThan(0)
+    parent.kill('SIGKILL')
+    await waitForExit(parent)
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline && pidAlive(childPid!)) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    expect(pidAlive(childPid!)).toBe(false)
+  })
+
+  it('formats the refusal in English and French with path and PID', () => {
+    const owner = { pid: 4242, startedAt: '2026-10-21T00:00:00.000Z' }
+    const error = new InstanceLockError('/tmp/sessions.db', owner)
+    const tx = instanceLockRefusalTx(error)
+    expect(tx.en).toContain('/tmp/sessions.db')
+    expect(tx.en).toMatch(/PID 4242/)
+    expect(tx.en).toMatch(/Use that instance, or stop PID 4242/)
+    expect(tx.fr).toMatch(/base déjà utilisée par l'instance PID 4242/)
+    expect(tx.fr).toContain('/tmp/sessions.db')
+    expect(formatInstanceLockRefusal('en', '/tmp/sessions.db')).not.toMatch(/PID 0/)
+    expect(formatInstanceLockRefusal('en', '/tmp/sessions.db')).toMatch(/already in use/)
   })
 })

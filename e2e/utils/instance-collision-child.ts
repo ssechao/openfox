@@ -1,36 +1,10 @@
 /**
  * Isolated OpenFox instance for the instance-collision e2e test.
- *
- * The parent sets HOME, XDG_*, OPENFOX_DB_PATH and OPENFOX_GLOBAL_CONFIG_PATH
- * to a temporary directory before forking, so they are in place before any
- * module opens SQLite. The child refuses to start if any of them points outside
- * tmpdir().
  */
-import { realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, relative } from 'node:path'
+import { InstanceLockError, instanceLockRefusalTx } from '../../src/server/db/instance-lock.js'
+import { bootIsolatedChild } from './isolated-child-boot.js'
 
-function isTemporary(path: string | undefined, isFile: boolean): boolean {
-  if (!path || !isAbsolute(path)) return false
-  try {
-    const fromRoot = relative(realpathSync(tmpdir()), realpathSync(isFile ? dirname(path) : path))
-    return !fromRoot.startsWith('..') && !isAbsolute(fromRoot)
-  } catch {
-    return false
-  }
-}
-
-const guarded: Array<[string, boolean]> = [
-  ['HOME', false],
-  ['OPENFOX_DB_PATH', true],
-  ['OPENFOX_GLOBAL_CONFIG_PATH', true],
-]
-for (const [name, isFile] of guarded) {
-  if (!isTemporary(process.env[name], isFile)) {
-    process.stderr.write(`[instance-collision-child] refusing to start: ${name} must point under ${tmpdir()}\n`)
-    process.exit(2)
-  }
-}
+bootIsolatedChild('instance-collision-child')
 
 const { createServerHandle } = await import('../../src/server/index.js')
 const { loadConfig } = await import('../../src/server/config.js')
@@ -58,13 +32,22 @@ const config = {
 }
 
 let handle: Awaited<ReturnType<typeof createServerHandle>> | null = null
+const lockStarted = Date.now()
 try {
   handle = await createServerHandle(config)
   const { port } = await handle.start(Number(process.env['OPENFOX_PORT'] ?? 0))
   process.send?.({ port, pid: process.pid })
 } catch (error) {
-  const message = error instanceof Error ? error.message : String(error)
-  process.send?.({ error: message, pid: process.pid })
+  const refuseMs = Date.now() - lockStarted
+  if (error instanceof InstanceLockError) {
+    const message = instanceLockRefusalTx(error).en
+    process.stderr.write(`${message}\n`)
+    process.send?.({ error: message, pid: process.pid, refuseMs })
+  } else {
+    const message = error instanceof Error ? error.message : String(error)
+    process.stderr.write(`${message}\n`)
+    process.send?.({ error: message, pid: process.pid, refuseMs })
+  }
   process.exit(1)
 }
 

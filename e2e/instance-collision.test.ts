@@ -4,33 +4,28 @@
  * first instance is killed, the database can be reopened immediately.
  *
  * Environment is fully temporary (HOME, database, config), ports >= 10620.
+ * Set ETAPE2_DEMO_REPORT=<file> to keep the measured figures as JSON.
  */
 import { fork, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
-import { tmpdir, userInfo } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Session } from '../src/shared/types.js'
+import { freePort, isolatedEnv, killProcessTree, openFiles, productionFiles } from './utils/isolated-env.js'
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../..')
 const CHILD = join(REPO_ROOT, 'e2e/utils/instance-collision-child.ts')
-const LOCK_CHILD = join(REPO_ROOT, 'src/server/db/instance-lock-child.ts')
+const LOCK_CHILD = join(REPO_ROOT, 'src/server/db/instance-lock.test-child.ts')
 const MIN_PORT = 10620
-const REAL_HOME = userInfo().homedir
-const PRODUCTION_FILES = [
-  join(REAL_HOME, 'Library', 'Application Support', 'openfox', 'sessions.db'),
-  join(REAL_HOME, 'Library', 'Application Support', 'openfox', 'config.json'),
-  join(REAL_HOME, '.config', 'openfox', 'config.json'),
-  join(REAL_HOME, '.local', 'share', 'openfox', 'sessions.db'),
-]
 
 interface ChildResult {
   port?: number
   error?: string
   pid?: number
   running?: boolean
+  refuseMs?: number
 }
 
 interface ChildInstance {
@@ -41,35 +36,6 @@ interface ChildInstance {
 }
 
 const children = new Set<ChildProcess>()
-
-async function freePort(from: number): Promise<number> {
-  for (let port = from; port < from + 500; port++) {
-    const free = await new Promise<boolean>((done) => {
-      const probe = createServer()
-      probe.once('error', () => done(false))
-      probe.listen(port, '127.0.0.1', () => probe.close(() => done(true)))
-    })
-    if (free) return port
-  }
-  throw new Error(`No free port from ${from}`)
-}
-
-function isolatedEnv(root: string, extra: Record<string, string>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith('OPENFOX_') && !key.startsWith('XDG_')) env[key] = value
-  }
-  return {
-    ...env,
-    HOME: join(root, 'home'),
-    XDG_CONFIG_HOME: join(root, 'home', '.config'),
-    XDG_DATA_HOME: join(root, 'home', '.local', 'share'),
-    OPENFOX_LOG_LEVEL: 'error',
-    OPENFOX_MOCK_LLM: 'true',
-    OPENFOX_DISABLE_AUTO_SESSION_TITLE: 'true',
-    ...extra,
-  }
-}
 
 async function buildConfigFile(
   root: string,
@@ -116,9 +82,11 @@ function forkChild(
       OPENFOX_HOST: '127.0.0.1',
       OPENFOX_PORT: String(port),
       OPENFOX_MODE: mode,
+      OPENFOX_MOCK_LLM: 'true',
     }),
     execArgv: ['--import', 'tsx/esm'],
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    detached: true,
   })
   children.add(child)
   child.once('exit', () => children.delete(child))
@@ -148,6 +116,17 @@ function waitForResult(child: ChildProcess, logs: string[], timeoutMs = 60_000):
   })
 }
 
+async function waitForExit(child: ChildProcess, timeoutMs = 15_000): Promise<number | null> {
+  if (child.exitCode !== null) return child.exitCode
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(child.exitCode), timeoutMs)
+    child.once('exit', (code) => {
+      clearTimeout(timer)
+      resolve(code)
+    })
+  })
+}
+
 async function startInstance(
   root: string,
   port: number,
@@ -163,23 +142,12 @@ async function startInstance(
   return { url: `http://127.0.0.1:${result.port}`, port: result.port, child, logs }
 }
 
-async function tryStartInstance(
-  root: string,
-  port: number,
-  mode: 'test' | 'development',
-  configPath: string,
-): Promise<{ result: ChildResult; child: ChildProcess; logs: string[] }> {
-  const { child, logs } = forkChild(root, port, mode, configPath)
-  const result = await waitForResult(child, logs, 30_000)
-  return { result, child, logs }
-}
-
 async function stopInstance(instance: ChildInstance | ChildProcess | undefined): Promise<void> {
   const child = instance && 'child' in instance ? instance.child : instance
   if (!child || child.exitCode !== null) return
   await new Promise<void>((done) => {
     const timer = setTimeout(() => {
-      child.kill('SIGKILL')
+      killProcessTree(child)
       done()
     }, 5_000)
     child.once('exit', () => {
@@ -189,7 +157,7 @@ async function stopInstance(instance: ChildInstance | ChildProcess | undefined):
     try {
       child.send('close')
     } catch {
-      child.kill('SIGKILL')
+      killProcessTree(child)
     }
   })
 }
@@ -203,7 +171,7 @@ async function killAndWait(child: ChildProcess): Promise<number> {
         clearTimeout(timer)
         done()
       })
-      child.kill('SIGKILL')
+      killProcessTree(child)
     })
   }
   return Date.now() - started
@@ -276,27 +244,6 @@ function setRunning(child: ChildProcess, sessionId: string): Promise<void> {
   })
 }
 
-function touchesProductionFiles(files: string[]): boolean {
-  return files.some((file) => PRODUCTION_FILES.some((production) => file === production))
-}
-
-async function openFiles(pid: number): Promise<string[]> {
-  const { execFile } = await import('node:child_process')
-  const { promisify } = await import('node:util')
-  const run = promisify(execFile)
-  if (process.platform === 'linux') {
-    const { readdir, readlink } = await import('node:fs/promises')
-    const fds = await readdir(`/proc/${pid}/fd`)
-    const targets = await Promise.all(fds.map((fd) => readlink(`/proc/${pid}/fd/${fd}`).catch(() => '')))
-    return targets.filter(Boolean)
-  }
-  const { stdout } = await run('lsof', ['-n', '-P', '-Fn', '-p', String(pid)], { maxBuffer: 16 * 1024 * 1024 })
-  return stdout
-    .split('\n')
-    .filter((line) => line.startsWith('n'))
-    .map((line) => line.slice(1))
-}
-
 describe('instance collision demo (isolated instances)', () => {
   let root: string
   let instanceA: ChildInstance
@@ -325,10 +272,10 @@ describe('instance collision demo (isolated instances)', () => {
 
   afterAll(async () => {
     try {
-      for (const child of [...children]) {
-        if (child.exitCode === null) child.kill('SIGKILL')
-      }
+      for (const child of [...children]) killProcessTree(child)
       if (root) await rm(root, { recursive: true, force: true })
+      const out = process.env['ETAPE2_DEMO_REPORT']
+      if (out) await writeFile(out, JSON.stringify(report, null, 2) + '\n', 'utf-8')
     } finally {
       children.clear()
     }
@@ -338,25 +285,31 @@ describe('instance collision demo (isolated instances)', () => {
     const files = await openFiles(instanceA.child.pid!)
     const realDbPath = await realpath(join(root, 'sessions.db'))
     expect(files).toContain(realDbPath)
-    expect(touchesProductionFiles(files)).toBe(false)
-    expect(touchesProductionFiles(await openFiles(process.pid))).toBe(false)
+    expect(productionFiles(files)).toEqual([])
+    expect(productionFiles(await openFiles(process.pid))).toEqual([])
     report['database'] = realDbPath
   })
 
   it('refuses a second instance on the same database and reports the holder PID', async () => {
     const secondPort = await freePort(MIN_PORT + 1)
     const devConfigPath = await buildConfigFile(root, 'dev-unknown-provider', 'dev-unknown-model', 'dev-config.json')
-    const { result, child } = await tryStartInstance(root, secondPort, 'development', devConfigPath)
-    try {
-      expect(result.error).toMatch(/base déjà utilisée par l'instance PID/)
-      expect(result.error).toMatch(new RegExp(`PID ${instanceA.child.pid}`))
-      expect(child.exitCode === null || child.exitCode !== 0).toBe(true)
-      report['refusal'] = result.error
-      report['portB'] = secondPort
-    } finally {
-      if (child.exitCode === null) child.kill('SIGKILL')
-      await new Promise((r) => setTimeout(r, 50))
-    }
+    const started = Date.now()
+    const { child, logs } = forkChild(root, secondPort, 'development', devConfigPath)
+    const result = await waitForResult(child, logs, 30_000)
+    const fullMs = Date.now() - started
+    const exitCode = await waitForExit(child, 5_000)
+    const stderr = logs.join('')
+    expect(result.error).toMatch(/database already in use by instance PID/)
+    expect(result.error).toMatch(new RegExp(`PID ${instanceA.child.pid}`))
+    expect(stderr).toMatch(/database already in use by instance PID/)
+    expect(stderr).toMatch(new RegExp(`PID ${instanceA.child.pid}`))
+    expect(exitCode).toBe(1)
+    expect(result.refuseMs).toBeLessThan(2_000)
+    report['refusal'] = result.error
+    report['portB'] = secondPort
+    report['refuseMs'] = result.refuseMs
+    report['fullStartupMs'] = fullMs
+    report['exitCodeB'] = exitCode
   }, 60_000)
 
   it('keeps the first instance healthy, the session provider, and running state', async () => {
@@ -377,7 +330,8 @@ describe('instance collision demo (isolated instances)', () => {
       cwd: REPO_ROOT,
       execArgv: ['--import', 'tsx/esm'],
       env: { ...process.env, OPENFOX_LOCK_DB_PATH: join(root, 'sessions.db') },
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      detached: true,
     })
     children.add(lockChild)
     const lockStarted = Date.now()
@@ -393,15 +347,8 @@ describe('instance collision demo (isolated instances)', () => {
       })
     })
     const lockReacquireMs = Date.now() - lockStarted
-    lockChild.kill('SIGKILL')
-    await new Promise<void>((done) => {
-      if (lockChild.exitCode !== null) return done()
-      const timer = setTimeout(() => done(), 2_000)
-      lockChild.once('exit', () => {
-        clearTimeout(timer)
-        done()
-      })
-    })
+    killProcessTree(lockChild)
+    await waitForExit(lockChild, 2_000)
     expect(lockResult.ok).toBe(true)
     expect(lockReacquireMs).toBeLessThan(2_000)
 

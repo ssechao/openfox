@@ -8,7 +8,10 @@
  * - Sequence numbers are assigned by the unique writer of a session. The
  *   UNIQUE(session_id, seq) constraint in `events` is the source of truth.
  * - A worker writes its own events, using the token the gateway gave it.
- * - The gateway invalidates its session caches when a worker notifies it.
+ * - The gateway invalidates its session caches when a worker notifies it,
+ *   and only AFTER the event has been committed. If a worker reconnects and
+ *   the gateway missed an invalidation, it resynchronizes from the worker's
+ *   last seq / revision instead of assuming its cache is current.
  * - A worker never runs global maintenance: is_running reset, provider
  *   reconciliation, VACUUM, or schema migrations.
  *
@@ -17,28 +20,20 @@
  * is held until this connection closes, and is released automatically when
  * the process dies. A sidecar `<db>.instance-lock.info` stores the holder PID
  * and start time so a refused opener can name the owner without reading the
- * exclusively-locked SQLite file.
+ * exclusively-locked SQLite file. The sidecar is unlinked while the kernel
+ * lock is still held.
  *
  * Paths are canonicalized (parent directory realpath) so aliases and symlinks
- * share one lock. If the holder's identity cannot be read, we still refuse.
+ * share one lock. SQLITE_BUSY / SQLITE_LOCKED mean contention; every other
+ * SQLite or filesystem error propagates. If the holder's identity cannot be
+ * read, we still refuse, without inventing a PID.
  */
 
 import { closeSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import Database from 'better-sqlite3'
+import type { Locale, Translation } from '../../shared/i18n/index.js'
 import { logger } from '../utils/logger.js'
-
-export class InstanceLockError extends Error {
-  readonly ownerPid: number
-  readonly ownerStartedAt: string
-
-  constructor(ownerPid: number, ownerStartedAt: string) {
-    super(`base déjà utilisée par l'instance PID ${ownerPid} (démarrée à ${ownerStartedAt})`)
-    this.ownerPid = ownerPid
-    this.ownerStartedAt = ownerStartedAt
-    this.name = 'InstanceLockError'
-  }
-}
 
 export interface LockOwner {
   pid: number
@@ -48,6 +43,42 @@ export interface LockOwner {
 export interface LockResult {
   acquired: boolean
   owner: LockOwner | null
+}
+
+export class InstanceLockError extends Error {
+  readonly dbPath: string
+  readonly ownerPid: number | undefined
+  readonly ownerStartedAt: string | undefined
+
+  constructor(dbPath: string, owner?: LockOwner) {
+    super(formatInstanceLockRefusal('en', dbPath, owner))
+    this.dbPath = dbPath
+    this.ownerPid = owner?.pid
+    this.ownerStartedAt = owner?.startedAt
+    this.name = 'InstanceLockError'
+  }
+}
+
+export function formatInstanceLockRefusal(locale: Locale, dbPath: string, owner?: LockOwner): string {
+  if (owner && Number.isFinite(owner.pid) && owner.pid > 0 && owner.startedAt) {
+    return locale === 'fr'
+      ? `base déjà utilisée par l'instance PID ${owner.pid} (démarrée à ${owner.startedAt}) : ${dbPath}. Utilisez cette instance, ou arrêtez le PID ${owner.pid}.`
+      : `database already in use by instance PID ${owner.pid} (started ${owner.startedAt}): ${dbPath}. Use that instance, or stop PID ${owner.pid}.`
+  }
+  return locale === 'fr'
+    ? `base déjà utilisée : ${dbPath}. Une autre instance OpenFox la détient.`
+    : `database already in use: ${dbPath}. Another OpenFox instance is holding it.`
+}
+
+export function instanceLockRefusalTx(error: InstanceLockError): Translation {
+  const owner =
+    error.ownerPid !== undefined && error.ownerStartedAt !== undefined
+      ? { pid: error.ownerPid, startedAt: error.ownerStartedAt }
+      : undefined
+  return {
+    en: formatInstanceLockRefusal('en', error.dbPath, owner),
+    fr: formatInstanceLockRefusal('fr', error.dbPath, owner),
+  }
 }
 
 let lockDb: Database.Database | null = null
@@ -78,12 +109,18 @@ function infoFilePath(dbPath: string): string {
   return `${dbPath}.instance-lock.info`
 }
 
+function isBusyError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'))
+}
+
+function sleepMs(ms: number): void {
+  const buf = new Int32Array(new SharedArrayBuffer(4))
+  Atomics.wait(buf, 0, 0, ms)
+}
+
 function writeOwnerInfo(path: string, owner: LockOwner): void {
-  try {
-    writeFileSync(path, `${owner.pid}\n${owner.startedAt}\n`, 'utf-8')
-  } catch {
-    // Best-effort advisory metadata; the kernel lock remains the authority.
-  }
+  writeFileSync(path, `${owner.pid}\n${owner.startedAt}\n`, 'utf-8')
 }
 
 function removeOwnerInfo(path: string): void {
@@ -99,7 +136,7 @@ function readOwnerInfo(path: string): LockOwner | null {
     const content = readFileSync(path, 'utf-8').trim()
     const [pidLine, startedAtLine] = content.split('\n')
     const pid = Number(pidLine)
-    if (Number.isFinite(pid) && startedAtLine) {
+    if (Number.isFinite(pid) && pid > 0 && startedAtLine) {
       return { pid, startedAt: startedAtLine }
     }
   } catch {
@@ -112,19 +149,18 @@ function readOwnerInfoSoon(path: string): LockOwner | null {
   for (let attempt = 0; attempt < 15; attempt++) {
     const owner = readOwnerInfo(path)
     if (owner) return owner
-    const until = Date.now() + 10
-    while (Date.now() < until) {
-      // The winner writes the sidecar immediately after taking the kernel lock.
-    }
+    sleepMs(10)
   }
   return null
 }
 
-function refuse(owner: LockOwner | null): never {
-  if (owner && Number.isFinite(owner.pid) && owner.startedAt) {
-    throw new InstanceLockError(owner.pid, owner.startedAt)
-  }
-  throw new InstanceLockError(0, 'inconnue')
+function liveOwner(owner: LockOwner | null): LockOwner | undefined {
+  if (owner && pidIsAlive(owner.pid)) return owner
+  return undefined
+}
+
+function refuse(dbPath: string, owner?: LockOwner): never {
+  throw new InstanceLockError(dbPath, owner)
 }
 
 function pidIsAlive(pid: number): boolean {
@@ -163,30 +199,19 @@ export function acquireInstanceLock(dbPath: string): LockResult {
   const path = lockFilePath(canonical)
   const info = infoFilePath(canonical)
 
-  // Kernel fcntl locks are per-process; a second connection in this process
-  // would succeed. Track canonical paths so we refuse that too.
   if (lockedCanonicalPaths.has(canonical)) {
-    refuse(ownerInfo ?? readOwnerInfo(info))
+    refuse(canonical, liveOwner(ownerInfo ?? readOwnerInfo(info)))
   }
 
   const startedAt = new Date().toISOString()
   const holdingPid = process.pid
 
   const takeLock = (): LockResult => {
-    try {
-      closeSync(openSync(path, 'a'))
-    } catch {
-      // Directory should already exist next to the database file.
-    }
-    // A short busy timeout lets a concurrent creator lose cleanly after the
-    // winner has taken the kernel lock, instead of both failing on a new file.
+    closeSync(openSync(path, 'a'))
     lockDb = new Database(path, { timeout: 100 })
     lockDb.pragma('busy_timeout = 100')
     lockDb.pragma('journal_mode = DELETE')
     lockDb.pragma('synchronous = NORMAL')
-    // EXCLUSIVE locking mode takes a kernel file lock on the first write and
-    // holds it until this connection closes (or the process dies). No open
-    // transaction, so a crash does not leave a hot journal.
     lockDb.pragma('locking_mode = EXCLUSIVE')
     lockDb.exec(`
       CREATE TABLE IF NOT EXISTS instance_lock (
@@ -209,45 +234,40 @@ export function acquireInstanceLock(dbPath: string): LockResult {
 
   try {
     return takeLock()
-  } catch {
+  } catch (error) {
     closeLockConnection()
-    const owner = readOwnerInfoSoon(info)
-    if (owner && pidIsAlive(owner.pid)) {
-      refuse(owner)
-    }
-    // No live owner: the file may still be settling after a crash or a create
-    // race. Retry a few times, then refuse if identity is still unknown.
+    if (!isBusyError(error)) throw error
+    const owner = liveOwner(readOwnerInfoSoon(info))
+    if (owner) refuse(canonical, owner)
     for (let attempt = 0; attempt < 5; attempt++) {
-      const until = Date.now() + 20
-      while (Date.now() < until) {
-        /* wait */
-      }
+      sleepMs(20)
       try {
         return takeLock()
-      } catch {
+      } catch (retryError) {
         closeLockConnection()
-        const again = readOwnerInfo(info)
-        if (again && pidIsAlive(again.pid)) {
-          refuse(again)
-        }
+        if (!isBusyError(retryError)) throw retryError
+        const again = liveOwner(readOwnerInfo(info))
+        if (again) refuse(canonical, again)
       }
     }
-    refuse(readOwnerInfo(info))
+    refuse(canonical, liveOwner(readOwnerInfo(info)))
   }
 }
 
 /**
  * Release the instance lock. Safe to call multiple times. Only the owner
  * should call this, and only after closing the main SQLite connection.
+ * The sidecar is removed while the kernel lock is still held, so a waiter
+ * cannot have its new sidecar deleted by this process.
  */
 export function releaseInstanceLock(): void {
   if (lockDb || lockPath) {
     logger.info('Released instance lock', { path: lockPath })
   }
-  closeLockConnection()
   if (infoPath) {
     removeOwnerInfo(infoPath)
   }
+  closeLockConnection()
   lockDb = null
   lockPath = null
   infoPath = null

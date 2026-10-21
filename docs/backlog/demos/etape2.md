@@ -1,7 +1,6 @@
 # Démo — Étape 2 : une seule instance par base
 
-Mesures prises le 2026-10-21 sur le worktree `mt/etape2-verrou` (HOME, config et
-`OPENFOX_DB_PATH` temporaires, ports ≥ 10620).
+Mesures du 2026-10-21. HOME, config et `OPENFOX_DB_PATH` temporaires, ports ≥ 10620.
 
 ## Commandes
 
@@ -11,36 +10,39 @@ npx vitest run src/server/session/provider-reconcile.test.ts
 npx vitest run --config e2e/vitest.config.ts e2e/instance-collision.test.ts
 ```
 
+Linux : Docker `node:24-bookworm` sur `ssechao@192.168.71.122` (pas de VM locale).
+
 ## Résultats
 
-| Critère                         | Commande                                        | Résultat                                                                                         |
-| ------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| C1 Verrou noyau                 | `src/server/db/instance-lock.test.ts`           | 9/9 pass (deux processus concurrents, symlink, SIGKILL puis deux repreneurs, échec d'init)       |
-| C2 Réconciliation conservatrice | `src/server/session/provider-reconcile.test.ts` | 7/7 pass (config vide, 1 provider inconnu, orphelin isolé, suppression explicite, base sans pin) |
-| C3 Incident reproduit           | `e2e/instance-collision.test.ts`                | 4/4 pass                                                                                         |
+| Critère                         | macOS (worktree) | Linux (.122 Docker) |
+| ------------------------------- | ---------------- | ------------------- |
+| C1 `instance-lock.test.ts`      | 13/13            | 13/13               |
+| C2 `provider-reconcile.test.ts` | 7/7              | 7/7 (hook)          |
+| C3 `instance-collision.test.ts` | 4/4              | 4/4                 |
 
 ## Chiffres C3
 
-Dernière exécution isolée de `e2e/instance-collision.test.ts` (2026-10-21 19:49) :
+| Grandeur                                      | macOS    | Linux  |
+| --------------------------------------------- | -------- | ------ |
+| Refus de B, verrou seul (`refuseMs`)          | 815 ms   | 106 ms |
+| Refus de B, process complet (`fullStartupMs`) | 4 793 ms | 757 ms |
+| Exit code de B (sans SIGKILL)                 | 1        | 1      |
+| Réacquisition du verrou après `kill -9`       | 400 ms   | 84 ms  |
+| Redémarrage complet de A                      | 6 531 ms | 753 ms |
 
-| Grandeur                  | Valeur                               |
-| ------------------------- | ------------------------------------ |
-| Durée totale du fichier   | 49,47 s de tests (53,11 s wall)      |
-| Refus de B (message PID)  | 13,58 s                              |
-| kill -9 de A puis reprise | 13,64 s (dont sonde de verrou < 2 s) |
+B s'arrête tout seul (`exit 1`) avec, sur stderr :
+`database already in use by instance PID … : <db>. Use that instance, or stop PID …`.
+A reste HTTP 200, `provider_id` / `provider_model` et `isRunning` intacts.
 
-Le verrou est un fcntl noyau (`locking_mode=EXCLUSIVE` sur `<db>.instance-lock`).
-Après `SIGKILL`, une sonde dédiée réacquiert le verrou en moins de 2 s ; le
-redémarrage complet de l'instance réussit ensuite. B s'arrête avec
-`base déjà utilisée par l'instance PID …`. A reste à HTTP 200, conserve
-`provider_id` / `provider_model`, et la session reste `isRunning`.
+Rapport JSON : `ETAPE2_DEMO_REPORT=<file>`.
 
 ## Contrat gateway / workers
 
-Documenté dans `src/server/db/instance-lock.ts` :
+Dans `src/server/db/instance-lock.ts` :
 
 - la gateway détient le verrou ;
 - les seq sont attribuées par l'écrivain unique d'une session (`UNIQUE(session_id, seq)`) ;
 - un worker écrit ses propres événements avec un jeton remis par la gateway ;
-- la gateway invalide ses caches sur notification ;
+- la gateway invalide ses caches **après commit**, sur notification du worker ;
+- si une invalidation est perdue, reconnexion du worker → resynchronisation par seq / révision ;
 - un worker n'exécute jamais les remises à zéro globales (`is_running`, réconciliation, maintenance).
