@@ -82,7 +82,12 @@ describe('session provider reconciliation', () => {
     expect(getSession(pinned.id)?.providerModel).toBe('live-model')
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Provider reconciliation skipped'),
-      expect.objectContaining({ sessions: 1, configuredProviders: 0 }),
+      expect.objectContaining({
+        sessions: 1,
+        pinnedProviderIds: ['live-provider'],
+        configuredProviderIds: [],
+        databasePath: ':memory:',
+      }),
     )
     expect(warnSpy).not.toHaveBeenCalled()
   })
@@ -96,7 +101,12 @@ describe('session provider reconciliation', () => {
     expect(getSession(pinned.id)?.providerModel).toBe('prod-model')
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Provider reconciliation skipped'),
-      expect.objectContaining({ sessions: 1, configuredProviders: 1 }),
+      expect.objectContaining({
+        sessions: 1,
+        pinnedProviderIds: ['prod-provider'],
+        configuredProviderIds: ['dev-unknown-provider'],
+        databasePath: ':memory:',
+      }),
     )
     expect(warnSpy).not.toHaveBeenCalled()
   })
@@ -131,11 +141,13 @@ describe('session provider reconciliation', () => {
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const pinned = createSession(projectId, '/tmp/test', 'pinned', 'prod-provider', 'prod-model')
 
-    expect(reconcileSessionProviders(['dev-unknown-provider'])).toBe(0)
+    expect(reconcileSessionProviders(['dev-unknown-provider'], '/tmp/prod/sessions.db')).toBe(0)
     expect(getSession(pinned.id)?.providerId).toBe('prod-provider')
-    expect(consoleError.mock.calls.some((call) => String(call[0]).includes('Provider reconciliation skipped'))).toBe(
-      true,
-    )
+    const line = consoleError.mock.calls.map((call) => String(call[0])).join('\n')
+    expect(line).toContain('Provider reconciliation skipped')
+    expect(line).toContain('prod-provider')
+    expect(line).toContain('dev-unknown-provider')
+    expect(line).toContain('/tmp/prod/sessions.db')
     expect(consoleWarn).not.toHaveBeenCalled()
     consoleError.mockRestore()
     consoleWarn.mockRestore()

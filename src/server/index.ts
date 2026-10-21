@@ -164,7 +164,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // Repair sessions still pinned to a provider that is gone (deleted before the delete
   // cascade existed, or dropped from a hand-edited config).
-  const repairedSessions = reconcileSessionProviders(providerManager.getProviders().map((p) => p.id))
+  const repairedSessions = reconcileSessionProviders(
+    providerManager.getProviders().map((p) => p.id),
+    config.database.path,
+  )
   if (repairedSessions > 0) {
     logger.warn('Cleared unknown provider from sessions', { sessions: repairedSessions })
   }
