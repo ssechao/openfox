@@ -20,6 +20,7 @@ import { loadConfig } from '../config.js'
 const DIR = dirname(fileURLToPath(import.meta.url))
 const CHILD = join(DIR, 'instance-lock.test-child.ts')
 const PARENT = join(DIR, 'instance-lock.test-parent.ts')
+const RUNNER = join(DIR, 'instance-lock.test-runner.ts')
 
 function createDbFile(path: string): void {
   const db = new Database(path)
@@ -259,6 +260,39 @@ describe('instance lock', () => {
     }
     expect(pidAlive(childPid!)).toBe(false)
   })
+
+  it('exits parent and grandchild within 2s when the runner is killed', async () => {
+    const runner = fork(RUNNER, [], {
+      execArgv: ['--import', 'tsx/esm'],
+      env: { ...process.env, OPENFOX_LOCK_DB_PATH: dbPath },
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      detached: true,
+    })
+    children.push(runner)
+    const message = await new Promise<{ parentPid?: number; childPid?: number; ok?: boolean }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('runner timed out')), 10_000)
+      runner.once('message', (value) => {
+        clearTimeout(timer)
+        resolve(value as { parentPid?: number; childPid?: number; ok?: boolean })
+      })
+      runner.once('exit', (code) => {
+        clearTimeout(timer)
+        reject(new Error(`runner exited ${code}`))
+      })
+    })
+    expect(message.ok).toBe(true)
+    expect(message.parentPid).toBeGreaterThan(0)
+    expect(message.childPid).toBeGreaterThan(0)
+    runner.kill('SIGKILL')
+    await waitForExit(runner)
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline && (pidAlive(message.parentPid!) || pidAlive(message.childPid!))) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    expect(pidAlive(message.parentPid!)).toBe(false)
+    expect(pidAlive(message.childPid!)).toBe(false)
+    expect(acquireInstanceLock(dbPath).acquired).toBe(true)
+  }, 15_000)
 
   it('formats the refusal in English and French with path and PID', () => {
     const owner = { pid: 4242, startedAt: '2026-10-21T00:00:00.000Z' }

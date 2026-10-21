@@ -1,8 +1,7 @@
 import { createServer } from '../server/index.js'
-import { InstanceLockError, instanceLockRefusalTx } from '../server/db/instance-lock.js'
+import { InstanceLockError, reportInstanceLockRefusal } from '../server/db/instance-lock.js'
 import { loadConfig } from '../server/config.js'
 import { logger } from '../server/utils/logger.js'
-import { cliT } from './i18n.js'
 import { displayStartupBanner } from '../server/utils/network.js'
 import { detectProviderDefaultsFromUrl } from '../server/llm/backend.js'
 import { loadGlobalConfig, getActiveProvider, getDefaultModel } from './config.js'
@@ -111,7 +110,7 @@ export async function runServe(options: ServeOptions): Promise<void> {
     await createServer(merged)
   } catch (error) {
     if (error instanceof InstanceLockError) {
-      process.stderr.write(`${cliT(instanceLockRefusalTx(error))}\n`)
+      reportInstanceLockRefusal(error)
       process.exit(1)
     }
     throw error

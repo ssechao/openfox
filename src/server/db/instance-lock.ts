@@ -26,13 +26,14 @@
  * Paths are canonicalized (parent directory realpath) so aliases and symlinks
  * share one lock. SQLITE_BUSY / SQLITE_LOCKED mean contention; every other
  * SQLite or filesystem error propagates. If the holder's identity cannot be
- * read, we still refuse, without inventing a PID.
+ * read, we still refuse, without inventing a PID. Formatting the refusal never
+ * opens the sessions database.
  */
 
 import { closeSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import Database from 'better-sqlite3'
-import type { Locale, Translation } from '../../shared/i18n/index.js'
+import { getLocale, type Locale, type Translation } from '../../shared/i18n/index.js'
 import { logger } from '../utils/logger.js'
 
 export interface LockOwner {
@@ -79,6 +80,20 @@ export function instanceLockRefusalTx(error: InstanceLockError): Translation {
     en: formatInstanceLockRefusal('en', error.dbPath, owner),
     fr: formatInstanceLockRefusal('fr', error.dbPath, owner),
   }
+}
+
+/**
+ * Print the refusal without opening the sessions database. Uses an in-memory
+ * locale if one is already selected; otherwise English (`automatic` → en).
+ */
+export function reportInstanceLockRefusal(error: InstanceLockError): string {
+  const owner =
+    error.ownerPid !== undefined && error.ownerStartedAt !== undefined
+      ? { pid: error.ownerPid, startedAt: error.ownerStartedAt }
+      : undefined
+  const line = getLocale() === 'fr' ? formatInstanceLockRefusal('fr', error.dbPath, owner) : error.message
+  process.stderr.write(`${line}\n`)
+  return line
 }
 
 let lockDb: Database.Database | null = null
