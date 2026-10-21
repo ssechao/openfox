@@ -1,5 +1,6 @@
 import { authFetch } from './api'
 import { refreshPrefix, resource, snapshot } from './resourceCache'
+import type { DiagnosticsData } from '@shared/diagnostics.js'
 import {
   fetchPluginList,
   fetchNotifications,
@@ -898,6 +899,18 @@ export const pluginToolsResource = resource<{ tools: PluginToolInfo[] }, []>({
   key: () => 'plugins:tools',
   fetch: fetchPluginTools,
   maxAgeMs: 0,
+})
+
+export async function fetchDiagnostics(): Promise<DiagnosticsData> {
+  const res = await authFetch('/api/diagnostics')
+  if (!res.ok) throw new Error(`Failed to load diagnostics (${res.status})`)
+  return (await res.json()) as DiagnosticsData
+}
+
+export const diagnosticsResource = resource<DiagnosticsData, []>({
+  key: () => 'diagnostics',
+  fetch: fetchDiagnostics,
+  maxAgeMs: 2_000,
 })
 
 /**

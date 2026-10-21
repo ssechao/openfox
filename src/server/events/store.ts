@@ -16,7 +16,9 @@
 
 import type Database from 'better-sqlite3'
 import { existsSync, statSync, unlinkSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import type { TurnEvent, StoredEvent, SessionSnapshot, SnapshotMessage } from './types.js'
+import type { DiagnosticsCollector } from '../diagnostics/types.js'
 import { logger } from '../utils/logger.js'
 import { foldSessionState, buildSnapshot, trimSnapshotStreamingOutput } from './folding.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
@@ -229,10 +231,14 @@ export class EventStore {
   private static readonly APPEND_BUSY_RETRIES = 2
 
   private diagnostics: StoreDiagnostics | null
+  private healthCollector: DiagnosticsCollector | null = null
   private readonly hotPath: boolean
   private dataVersion: number | undefined
   private projections = new Map<string, { windowId: string | undefined; userCount: number }>()
   private activeSessions = new Map<string, boolean>()
+  // Sessions whose last running.changed written by this process says running.
+  // Not a cache: never dropped with the others, so the health page can count it.
+  private runningSessionIds = new Set<string>()
   private replayPrefixes = new Map<string, { seq: number; events: StoredEvent[]; serializedBytes: number }>()
   // Write revisions, so derived per-session state can be memoized: a session's
   // revision moves on every write path that touches its events, and the global
@@ -346,6 +352,10 @@ export class EventStore {
       if (event.type === 'message.start' && event.data.role === 'user' && !event.data.isSystemGenerated)
         projection.userCount++
     }
+    if (event.type === 'running.changed') {
+      if (event.data.isRunning) this.runningSessionIds.add(stored.sessionId)
+      else this.runningSessionIds.delete(stored.sessionId)
+    }
     if (this.hotPath && event.type === 'running.changed') {
       this.activeSessions.set(stored.sessionId, event.data.isRunning)
       this.evictSnapshots()
@@ -418,6 +428,27 @@ export class EventStore {
 
   measureSnapshotOperation<T>(operation: StoreTiming, work: () => T): T {
     return measureStoreOperation(this.diagnostics, operation, work)
+  }
+
+  setHealthCollector(collector: DiagnosticsCollector | null): void {
+    this.healthCollector = collector
+  }
+
+  countRunningSessions(): number {
+    return this.runningSessionIds.size
+  }
+
+  private timed<T>(kind: 'read' | 'write', work: () => T): T {
+    const collector = this.healthCollector
+    if (!collector) return work()
+    const started = performance.now()
+    try {
+      return work()
+    } finally {
+      const elapsed = performance.now() - started
+      if (kind === 'read') collector.recordRead(elapsed)
+      else collector.recordWrite(elapsed)
+    }
   }
 
   private serializeEvent(event: TurnEvent): string {
@@ -594,7 +625,7 @@ export class EventStore {
     let busyRetries = 0
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
-        insert.run(sessionId, seq, timestamp, event.type, payload)
+        this.timed('write', () => insert.run(sessionId, seq, timestamp, event.type, payload))
         break
       } catch (error) {
         if (isBusyError(error) && busyRetries < EventStore.APPEND_BUSY_RETRIES) {
@@ -669,7 +700,7 @@ export class EventStore {
             seq++
           }
         })
-        transaction()
+        this.timed('write', transaction)
 
         for (const stored of results) {
           const event = { type: stored.type, data: stored.data } as TurnEvent
@@ -758,10 +789,11 @@ export class EventStore {
            WHERE e.session_id = ? AND t.seq IS NULL
            ORDER BY e.seq`
 
-    const rows =
+    const rows = this.timed('read', () =>
       fromSeq !== undefined
         ? (this.db.prepare(query).all(sessionId, fromSeq) as EventRow[])
-        : (this.db.prepare(query).all(sessionId) as EventRow[])
+        : (this.db.prepare(query).all(sessionId) as EventRow[]),
+    )
 
     return rows.map((row) => this.rowToStoredEvent(row))
   }
@@ -832,13 +864,17 @@ export class EventStore {
     }
 
     if (this.diagnostics) this.diagnostics.snapshotCacheMisses++
-    const row = this.db
-      .prepare(
-        `SELECT e.* FROM events e LEFT JOIN tombstones t ON e.session_id=t.session_id AND e.seq=t.seq
+    const row = this.timed(
+      'read',
+      () =>
+        this.db
+          .prepare(
+            `SELECT e.* FROM events e LEFT JOIN tombstones t ON e.session_id=t.session_id AND e.seq=t.seq
          WHERE e.session_id = ? AND e.event_type = 'turn.snapshot' AND t.seq IS NULL
          ORDER BY e.seq DESC LIMIT 1`,
-      )
-      .get(sessionId) as EventRow | undefined
+          )
+          .get(sessionId) as EventRow | undefined,
+    )
 
     if (!row) return undefined
 
@@ -1268,6 +1304,7 @@ export class EventStore {
     this.dropStreaming(sessionId)
     this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
     this.invalidateSessionCache(sessionId)
+    this.runningSessionIds.delete(sessionId)
 
     // Close all subscribers for this session
     const sessionSubs = this.subscribers.get(sessionId)

@@ -25,6 +25,8 @@ interface Options {
   timeoutMs: number
   out: string | undefined
   label: string
+  serverUrl: string | undefined
+  llmUrl: string | undefined
 }
 
 interface LlmStats {
@@ -57,6 +59,8 @@ function parseOptions(): Options {
     timeoutMs: numberOption('timeout', 'BENCH_TIMEOUT_MS', 45 * 60_000),
     out: argument('out') ?? process.env['BENCH_OUT'],
     label: argument('label') ?? process.env['BENCH_LABEL'] ?? 'run',
+    serverUrl: argument('server-url') ?? process.env['BENCH_SERVER_URL'],
+    llmUrl: argument('llm-url') ?? process.env['BENCH_LLM_URL'],
   }
 }
 
@@ -360,44 +364,60 @@ async function orchestrate(): Promise<void> {
   }
 
   try {
-    const llm = track(forkRole('llm', [`--options=${JSON.stringify(options)}`], env, root), 'llm')
-    const llmPort = await waitForMessage<number>(llm, 'port', 30_000)
-    const server = track(
-      forkRole(
-        'server',
-        [`--repo=${options.repo}`, `--global-config=${join(root, 'config.json')}`],
-        { ...env, OPENFOX_LLM_URL: `http://127.0.0.1:${llmPort}/v1` },
-        root,
-      ),
-      'server',
-    )
-    const port = await waitForMessage<number>(server, 'port', 120_000)
-    const base = `http://127.0.0.1:${port}`
+    let llmPort: number | undefined
+    let base = options.serverUrl
+    let llmUrl = options.llmUrl
+    let llm: ChildProcess | null = null
+    let server: ChildProcess | null = null
 
-    await api(base, '/api/providers', {
+    if (!llmUrl) {
+      llm = track(forkRole('llm', [`--options=${JSON.stringify(options)}`], env, root), 'llm')
+      llmPort = await waitForMessage<number>(llm, 'port', 30_000)
+      llmUrl = `http://127.0.0.1:${llmPort}/v1`
+    }
+
+    if (!base) {
+      server = track(
+        forkRole(
+          'server',
+          [`--repo=${options.repo}`, `--global-config=${join(root, 'config.json')}`],
+          { ...env, OPENFOX_LLM_URL: llmUrl },
+          root,
+        ),
+        'server',
+      )
+      const port = await waitForMessage<number>(server, 'port', 120_000)
+      base = `http://127.0.0.1:${port}`
+    }
+
+    if (!base || !llmUrl) throw new Error('Missing server or LLM URL')
+    const apiBase = base
+
+    await api(apiBase, '/api/providers', {
       method: 'POST',
       body: {
         name: 'Bench',
-        url: `http://127.0.0.1:${llmPort}/v1`,
+        url: llmUrl,
         backend: 'vllm',
         model: MODEL,
         isLocal: true,
         apiProtocol: 'chat-completions',
       },
     })
-    const { project } = await api<{ project: { id: string } }>(base, '/api/projects', {
+    const { project } = await api<{ project: { id: string } }>(apiBase, '/api/projects', {
       method: 'POST',
       body: { name: 'Stream bench', workdir },
     })
     const createSession = async (title: string) =>
       (
-        await api<{ session: { id: string } }>(base, '/api/sessions', {
+        await api<{ session: { id: string } }>(apiBase, '/api/sessions', {
           method: 'POST',
           body: { projectId: project.id, title },
         })
       ).session.id
 
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
+    const wsUrl = apiBase.replace(/^http/, 'ws') + '/ws'
+    const ws = new WebSocket(wsUrl)
     await new Promise<void>((done, fail) => {
       ws.once('open', () => done())
       ws.once('error', fail)
@@ -428,7 +448,7 @@ async function orchestrate(): Promise<void> {
 
     const warmup = await createSession('Warm-up')
     const warmupStartedAt = performance.now()
-    await api(base, `/api/sessions/${warmup}/message`, { method: 'POST', body: { content: WARMUP } })
+    await api(apiBase, `/api/sessions/${warmup}/message`, { method: 'POST', body: { content: WARMUP } })
     if ((await waitForTurn(warmup, warmupStartedAt)) === undefined) throw new Error('Warm-up turn did not finish')
     liveThinking = 0
 
@@ -436,7 +456,7 @@ async function orchestrate(): Promise<void> {
 
     const idle: number[] = []
     const idleStop = { done: false }
-    const idleLoop = probeLoop(`${base}/api/config`, options.probeIntervalMs, idle, idleStop)
+    const idleLoop = probeLoop(`${apiBase}/api/config`, options.probeIntervalMs, idle, idleStop)
     await sleep(options.idleProbeMs)
     idleStop.done = true
     await idleLoop
@@ -444,14 +464,14 @@ async function orchestrate(): Promise<void> {
     const configSamples: number[] = []
     const sessionSamples: number[] = []
     const stop = { done: false }
-    const probes = [probeLoop(`${base}/api/config`, options.probeIntervalMs, configSamples, stop)]
+    const probes = [probeLoop(`${apiBase}/api/config`, options.probeIntervalMs, configSamples, stop)]
     if (options.sessionPollMs > 0) {
-      probes.push(probeLoop(`${base}/api/sessions/${sessionId}`, options.sessionPollMs, sessionSamples, stop))
+      probes.push(probeLoop(`${apiBase}/api/sessions/${sessionId}`, options.sessionPollMs, sessionSamples, stop))
     }
 
-    server.send('loop-reset')
+    if (server) server.send('loop-reset')
     const startedAt = performance.now()
-    await api(base, `/api/sessions/${sessionId}/message`, {
+    await api(apiBase, `/api/sessions/${sessionId}/message`, {
       method: 'POST',
       body: { content: 'Run the long task.' },
     })
@@ -461,22 +481,31 @@ async function orchestrate(): Promise<void> {
     stop.done = true
     await Promise.all(probes)
 
-    server.send('loop-stats')
-    const serverEventLoopDelayMs = await waitForMessage<Record<string, number>>(server, 'loop', 30_000)
-    llm.send('stats')
-    const llmStats = await waitForMessage<LlmStats>(llm, 'stats', 10_000)
+    let serverEventLoopDelayMs: Record<string, number> | null = null
+    if (server) {
+      server.send('loop-stats')
+      serverEventLoopDelayMs = await waitForMessage<Record<string, number>>(server, 'loop', 30_000)
+    }
+    let llmStats: LlmStats = { callsServed: 0, fragmentsSent: 0 }
+    if (llm) {
+      llm.send('stats')
+      llmStats = await waitForMessage<LlmStats>(llm, 'stats', 10_000)
+    }
     ws.close()
-    server.send('close')
-    await new Promise<void>((done) => {
-      const timer = setTimeout(() => {
-        server.kill('SIGKILL')
-        done()
-      }, 15_000)
-      server.once('exit', () => {
-        clearTimeout(timer)
-        done()
+    if (server) {
+      server.send('close')
+      await new Promise<void>((done) => {
+        const timer = setTimeout(() => {
+          server!.kill('SIGKILL')
+          done()
+        }, 15_000)
+        server!.once('exit', () => {
+          clearTimeout(timer)
+          done()
+        })
       })
-    })
+    }
+    if (llm) llm.kill('SIGKILL')
 
     const result = {
       label: options.label,
@@ -497,7 +526,7 @@ async function orchestrate(): Promise<void> {
       apiConfigStreamingMs: quantiles(configSamples),
       sessionGetStreamingMs: quantiles(sessionSamples),
       serverEventLoopDelayMs,
-      database: databaseStats(dbPath, sessionId),
+      database: server ? databaseStats(dbPath, sessionId) : null,
     }
     const json = JSON.stringify(result, null, 2)
     console.log(json)

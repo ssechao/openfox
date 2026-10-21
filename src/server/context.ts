@@ -13,6 +13,7 @@ import type { Config } from './config.js'
 import type { LLMClientWithModel } from './llm/client.js'
 import type { ToolRegistry } from './tools/types.js'
 import type { ProviderManager } from './provider-manager.js'
+import type { DiagnosticsCollector } from './diagnostics/types.js'
 import { SessionManager } from './session/manager.js'
 
 // ============================================================================
@@ -25,6 +26,7 @@ export interface ServerContext {
   llmClient: LLMClientWithModel
   toolRegistry: ToolRegistry
   providerManager?: ProviderManager // Optional for backwards compat
+  diagnosticsCollector?: DiagnosticsCollector
 }
 
 export interface ServerHandle {
