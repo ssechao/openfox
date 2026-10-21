@@ -239,28 +239,9 @@ export async function formatGitReviewDiff(cwd: string): Promise<string> {
   return renderReviewDiff(entries)
 }
 
-export function nativeGetGitBranch(cwd: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const proc = spawn('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      cwd,
-      env: gitSpawnEnv(),
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-    })
-
-    let stdout = ''
-    proc.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString()
-    })
-    proc.on('close', (code) => {
-      if (code === 0 && stdout.trim()) {
-        resolve(stdout.trim())
-      } else {
-        resolve(null)
-      }
-    })
-    proc.on('error', () => resolve(null))
-  })
+export async function nativeGetGitBranch(cwd: string): Promise<string | null> {
+  const { code, stdout } = await runGitText(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])
+  return code === 0 && stdout.trim() ? stdout.trim() : null
 }
 
 export async function getGitBranch(

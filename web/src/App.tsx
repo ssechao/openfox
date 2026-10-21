@@ -34,6 +34,7 @@ import { Header } from './components/layout/Header'
 import { Sidebar } from './components/layout/Sidebar'
 import { PageTitle } from './components/layout/PageTitle'
 import { HomePage } from './components/HomePage'
+import { SantePage } from './components/health/SantePage'
 import { NewSessionHandler } from './components/NewSessionHandler'
 import { EmptyProjectView } from './components/EmptyProjectView'
 import { PlanPanel } from './components/plan/PlanPanel'
@@ -541,6 +542,9 @@ function App() {
                 sidebarOverlay={leftOverlay}
                 onSidebarToggle={handleLeftToggle}
               />
+            </Route>
+            <Route path="/sante">
+              <SantePage />
             </Route>
             <Route path="/">
               <HomePage />

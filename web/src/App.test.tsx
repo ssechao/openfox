@@ -166,6 +166,7 @@ vi.mock('./components/layout/Sidebar', () => ({
 
 const noop = () => null
 vi.mock('./components/HomePage', () => ({ HomePage: noop }))
+vi.mock('./components/health/SantePage', () => ({ SantePage: noop }))
 vi.mock('./components/EmptyProjectView', () => ({ EmptyProjectView: noop }))
 vi.mock('./components/plan/PlanPanel', () => ({
   PlanPanel: (props: { criteriaSidebarOpen?: boolean; criteriaSidebarOverlay?: boolean }) => {
