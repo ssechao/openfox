@@ -16,6 +16,7 @@ import {
   releaseInstanceLock,
 } from './instance-lock.js'
 import { loadConfig } from '../config.js'
+import { killProcessTree } from '../../../e2e/utils/isolated-env.js'
 
 const DIR = dirname(fileURLToPath(import.meta.url))
 const CHILD = join(DIR, 'instance-lock.test-child.ts')
@@ -41,19 +42,6 @@ function spawnLocker(dbPath: string, extra: Record<string, string> = {}): ChildP
   child.stderr?.on('data', keep)
   ;(child as ChildProcess & { logs: string[] }).logs = logs
   return child
-}
-
-function killTree(child: ChildProcess): void {
-  if (child.exitCode !== null || child.pid === undefined) return
-  try {
-    process.kill(-child.pid, 'SIGKILL')
-  } catch {
-    try {
-      child.kill('SIGKILL')
-    } catch {
-      // gone
-    }
-  }
 }
 
 function waitForLockResult(
@@ -107,7 +95,7 @@ describe('instance lock', () => {
   })
 
   afterEach(async () => {
-    for (const child of children) killTree(child)
+    for (const child of children) killProcessTree(child)
     children.length = 0
     releaseInstanceLock()
     closeDatabase()
@@ -203,7 +191,7 @@ describe('instance lock', () => {
     const held = await waitForLockResult(holder)
     expect(held.ok).toBe(true)
 
-    killTree(holder)
+    killProcessTree(holder)
     await waitForExit(holder)
 
     const first = spawnLocker(dbPath)

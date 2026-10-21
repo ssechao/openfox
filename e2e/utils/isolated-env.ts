@@ -5,7 +5,7 @@
 import { execFile, type ChildProcess } from 'node:child_process'
 import { readdir, readlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { tmpdir, userInfo } from 'node:os'
+import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 

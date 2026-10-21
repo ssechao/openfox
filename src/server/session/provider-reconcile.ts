@@ -55,7 +55,7 @@ export function reconcileSessionProviders(configuredProviderIds: readonly string
   const configured = new Set(configuredProviderIds)
   const recognized = pinned.filter((session) => configured.has(session.providerId!))
   if (recognized.length === 0) {
-    logger.warn(
+    logger.error(
       'Provider reconciliation skipped: none of the session-pinned providers are in the current configuration. Leaving session pins intact.',
       { sessions: pinned.length, configuredProviders: configuredProviderIds.length },
     )

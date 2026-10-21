@@ -11,11 +11,12 @@ import { createProject } from '../db/projects.js'
 import { initEventStore } from '../events/index.js'
 import { createSession, getSession } from '../db/sessions.js'
 import { clearSessionsForDeletedProvider, reconcileSessionProviders } from './provider-reconcile.js'
-import * as loggerModule from '../utils/logger.js'
+import { setLogLevel, logger } from '../utils/logger.js'
 
 describe('session provider reconciliation', () => {
   let projectId: string
   let warnSpy: ReturnType<typeof vi.spyOn>
+  let errorSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
     closeDatabase()
@@ -25,11 +26,14 @@ describe('session provider reconciliation', () => {
     initEventStore(getDatabase())
 
     projectId = createProject('Test', '/tmp/test').id
-    warnSpy = vi.spyOn(loggerModule.logger, 'warn').mockImplementation(() => {})
+    warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
   })
 
   afterEach(() => {
     warnSpy?.mockRestore()
+    errorSpy?.mockRestore()
+    setLogLevel('info')
     closeDatabase()
   })
 
@@ -76,10 +80,11 @@ describe('session provider reconciliation', () => {
 
     expect(getSession(pinned.id)?.providerId).toBe('live-provider')
     expect(getSession(pinned.id)?.providerModel).toBe('live-model')
-    expect(warnSpy).toHaveBeenCalledWith(
+    expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Provider reconciliation skipped'),
       expect.objectContaining({ sessions: 1, configuredProviders: 0 }),
     )
+    expect(warnSpy).not.toHaveBeenCalled()
   })
 
   it('does not clear providers when the only configured provider is unknown to sessions', () => {
@@ -89,10 +94,11 @@ describe('session provider reconciliation', () => {
 
     expect(getSession(pinned.id)?.providerId).toBe('prod-provider')
     expect(getSession(pinned.id)?.providerModel).toBe('prod-model')
-    expect(warnSpy).toHaveBeenCalledWith(
+    expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('Provider reconciliation skipped'),
       expect.objectContaining({ sessions: 1, configuredProviders: 1 }),
     )
+    expect(warnSpy).not.toHaveBeenCalled()
   })
 
   it('does not alert when no sessions are pinned', () => {
@@ -101,6 +107,7 @@ describe('session provider reconciliation', () => {
     expect(reconcileSessionProviders([])).toBe(0)
     expect(reconcileSessionProviders(['some-provider'])).toBe(0)
     expect(warnSpy).not.toHaveBeenCalled()
+    expect(errorSpy).not.toHaveBeenCalled()
   })
 
   it('still clears an isolated orphan when other sessions reference unknown providers', () => {
@@ -112,5 +119,25 @@ describe('session provider reconciliation', () => {
 
     expect(getSession(isolated.id)?.providerId).toBe('orphan-provider')
     expect(getSession(mismatched.id)?.providerId).toBeNull()
+    expect(errorSpy).not.toHaveBeenCalled()
+    expect(warnSpy).not.toHaveBeenCalled()
+  })
+
+  it('prints the skip on stderr at logging.level error', () => {
+    errorSpy.mockRestore()
+    warnSpy.mockRestore()
+    setLogLevel('error')
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const pinned = createSession(projectId, '/tmp/test', 'pinned', 'prod-provider', 'prod-model')
+
+    expect(reconcileSessionProviders(['dev-unknown-provider'])).toBe(0)
+    expect(getSession(pinned.id)?.providerId).toBe('prod-provider')
+    expect(consoleError.mock.calls.some((call) => String(call[0]).includes('Provider reconciliation skipped'))).toBe(
+      true,
+    )
+    expect(consoleWarn).not.toHaveBeenCalled()
+    consoleError.mockRestore()
+    consoleWarn.mockRestore()
   })
 })
