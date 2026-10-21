@@ -11,6 +11,7 @@ import type { Config, ModelConfig, ProviderBackend } from '../shared/types.js'
 import type { ServerHandle } from './context.js'
 import type { VisionBackend } from './llm/vision-fallback.js'
 import { initDatabase } from './db/index.js'
+import { InstanceLockError } from './db/instance-lock.js'
 import { getProject, deleteProject } from './db/projects.js'
 import { initEventStore, getEventStore, combineEventsWithSnapshot } from './events/index.js'
 import { buildMessagesFromStoredEvents } from './events/folding.js'
@@ -3926,7 +3927,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
  * Sets up SIGINT/SIGTERM handlers.
  */
 export async function createServer(config: Config): Promise<void> {
-  const handle = await createServerHandle(config)
+  let handle: ServerHandle
+  try {
+    handle = await createServerHandle(config)
+  } catch (error) {
+    if (error instanceof InstanceLockError) {
+      logger.error(error.message)
+      process.stderr.write(`${error.message}\n`)
+      process.exit(1)
+    }
+    throw error
+  }
   await handle.start()
 
   // Graceful shutdown with force exit timeout

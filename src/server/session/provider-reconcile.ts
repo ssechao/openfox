@@ -8,9 +8,18 @@
  *
  * Clearing the pin puts the session back on the global provider, which is what an unpinned
  * session already does.
+ *
+ * Heuristic, not a guarantee against partial configs: if NONE of the providers referenced
+ * by existing sessions appear in the current configuration, we do not clear any pins.
+ * That is the 2026-10-20 incident (a development config with one unknown provider pointed
+ * at a production database and wiped 72 session pins). Isolated orphans are still repaired
+ * when at least one session pin matches a configured provider. Explicit deletion via
+ * clearSessionsForDeletedProvider is unchanged. A database with no pinned providers is a
+ * no-op and does not log.
  */
 
 import { listSessions, updateSessionProvider } from '../db/sessions.js'
+import { logger } from '../utils/logger.js'
 
 function clearSessionProviderWhere(isDangling: (providerId: string) => boolean): number {
   let cleared = 0
@@ -37,6 +46,21 @@ export function clearSessionsForDeletedProvider(providerId: string): number {
  * Returns how many sessions were repaired.
  */
 export function reconcileSessionProviders(configuredProviderIds: readonly string[]): number {
+  const sessions = listSessions()
+  const pinned = sessions.filter((session) => session.providerId != null)
+  if (pinned.length === 0) {
+    return 0
+  }
+
   const configured = new Set(configuredProviderIds)
-  return clearSessionProviderWhere((pinned) => !configured.has(pinned))
+  const recognized = pinned.filter((session) => configured.has(session.providerId!))
+  if (recognized.length === 0) {
+    logger.warn(
+      'Provider reconciliation skipped: none of the session-pinned providers are in the current configuration. Leaving session pins intact.',
+      { sessions: pinned.length, configuredProviders: configuredProviderIds.length },
+    )
+    return 0
+  }
+
+  return clearSessionProviderWhere((id) => !configured.has(id))
 }
