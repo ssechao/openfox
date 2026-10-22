@@ -137,6 +137,27 @@ const INCOMPLETE_SUMMARY = [
   },
 ]
 
+const COMPLETED_SUMMARY = [
+  { type: 'response.created', response_id: 'resp_sum' },
+  { type: 'response.output_text.delta', response_id: 'resp_sum', delta: '## Conversation Summary\nDone' },
+  {
+    type: 'response.completed',
+    response_id: 'resp_sum',
+    response: {
+      id: 'resp_sum',
+      status: 'completed',
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '## Conversation Summary\nDone' }],
+        },
+      ],
+      usage: { input_tokens: 20, output_tokens: 10, total_tokens: 30 },
+    },
+  },
+]
+
 async function startResponsesSequence(
   streams: unknown[][],
 ): Promise<{ server: Server; port: number; hits: () => number }> {
@@ -384,6 +405,58 @@ describe('wrapper-compat C3 agent loop surfaces incomplete in chat', () => {
         relayed.some((m: any) => m?.type === 'chat.done' && m.payload?.reason === 'truncated'),
     ).toBe(true)
     expect(JSON.stringify(events)).toMatch(/keeping the previous context|tronqu/)
+  })
+
+  it('signals truncation before auto-compaction when incomplete crosses the threshold', async () => {
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    ;(shouldCompact as any).mockReturnValueOnce(true)
+    const mock = await startResponsesSequence([INCOMPLETE_TURN, COMPLETED_SUMMARY])
+    servers.push(mock.server)
+    const llmClient = createLLMClient({
+      llm: {
+        baseUrl: `http://127.0.0.1:${mock.port}`,
+        timeout: 5000,
+        idleTimeout: 5000,
+        model: 'gpt-5.6-luna',
+        apiKey: 'test-key',
+        backend: 'opencode-go',
+      },
+      context: { maxTokens: 8192, compactionThreshold: 0.85, compactionTarget: 0.6 },
+    } as never)
+    const append = vi.fn()
+    const onMessage = vi.fn()
+    const config: TopLevelLoopConfig = {
+      mode: 'builder',
+      append,
+      onMessage,
+      sessionManager: mockSessionManager,
+      sessionId: 'incomplete-then-compact',
+      llmClient,
+      statsIdentity: { providerId: 'test', providerName: 'Test', backend: 'unknown' as const, model: 'gpt-5.6-luna' },
+      assembleRequest: vi.fn().mockResolvedValue({ systemPrompt: 'sys', messages: [] }),
+      getToolRegistry: () => ({ tools: [], definitions: [], execute: vi.fn() }) as any,
+      getConversationMessages: vi.fn().mockResolvedValue([]),
+      llmRetryPolicy: FAST_POLICY,
+    }
+    await runTopLevelAgentLoop(config, mockTurnMetrics)
+    const events = append.mock.calls.map((c: any[]) => c[0])
+    const relayed = onMessage.mock.calls.map((c: any[]) => c[0])
+    const truncIdx = events.findIndex(
+      (e: any) =>
+        (e?.type === 'message.start' &&
+          typeof e.data?.content === 'string' &&
+          /truncated|tronqu/i.test(e.data.content)) ||
+        e?.type === 'chat.error',
+    )
+    const compactIdx = events.findIndex((e: any) => e?.type === 'context.compacted')
+    expect(truncIdx).toBeGreaterThanOrEqual(0)
+    expect(
+      relayed.some((m: any) => m?.type === 'chat.llm_retry') ||
+        events.some((e: any) => e?.type === 'message.done' && e.data?.partial),
+    ).toBe(true)
+    expect(appendCompactionPrompt).toHaveBeenCalled()
+    expect(compactIdx).toBeGreaterThan(truncIdx)
+    expect(events.some((e: any) => e?.type === 'chat.done' && e.data.reason === 'complete')).toBe(true)
   })
 })
 

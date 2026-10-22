@@ -702,31 +702,21 @@ export async function runTopLevelAgentLoop(
     pendingToolResultTokens = 0
     currentMaxTokensOverride = undefined
 
-    // Check compaction threshold with fresh promptTokens from LLM.
-    // When exceeded, append compaction prompt and let the next iteration
-    // handle summarization — same agent, same loop, no nested call.
-    if (!compacting) {
-      const contextState = sessionManager.getContextState(sessionId)
-      const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
-      const compactionTokens = config.subAgentMetadata
-        ? (sessionManager.getSubAgentContextTokens?.(config.subAgentMetadata.subAgentId) ?? 0)
-        : contextState.currentTokens
-      const compactionWindow = config.subAgentMetadata
-        ? sessionManager.getCurrentModelContext(sessionId, config.mode)
-        : contextState.maxTokens
-      if (
-        shouldCompact(
-          compactionTokens,
-          compactionWindow,
-          sessionManager.getModelCompactionThreshold(sessionId, config.mode) ??
-            runtimeConfig.context.compactionThreshold,
-        )
-      ) {
-        appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
-        compacting = true
-        continue
-      }
-    }
+    const { shouldCompact, appendCompactionPrompt } = await import('../context/compactor.js')
+    const contextStateForCompact = sessionManager.getContextState(sessionId)
+    const compactionTokens = config.subAgentMetadata
+      ? (sessionManager.getSubAgentContextTokens?.(config.subAgentMetadata.subAgentId) ?? 0)
+      : contextStateForCompact.currentTokens
+    const compactionWindow = config.subAgentMetadata
+      ? sessionManager.getCurrentModelContext(sessionId, config.mode)
+      : contextStateForCompact.maxTokens
+    const overCompactionThreshold =
+      !compacting &&
+      shouldCompact(
+        compactionTokens,
+        compactionWindow,
+        sessionManager.getModelCompactionThreshold(sessionId, config.mode) ?? runtimeConfig.context.compactionThreshold,
+      )
 
     if (result.finishReason === 'length') {
       const truncatedNotice = serverT({
@@ -736,36 +726,43 @@ export async function runTopLevelAgentLoop(
       if (!config.subAgentMetadata) {
         onMessage?.(createChatLLMRetryMessage(truncationRetryCount + 1, 0, truncatedNotice))
       }
+      const interimStats = turnMetrics.buildStats(statsIdentity, mode)
+      append(
+        createMessageDoneEvent(assistantMsgId, {
+          segments: result.segments,
+          stats: interimStats,
+          partial: true,
+        }),
+      )
+      onMessage?.(
+        createChatMessageUpdatedMessage(assistantMsgId, { isStreaming: false, partial: true, stats: interimStats }),
+      )
+      const continueMsgId = crypto.randomUUID()
+      append(
+        createMessageStartEvent(continueMsgId, 'user', truncatedNotice, {
+          ...(currentWindowMessageOptions ?? {}),
+          isSystemGenerated: true,
+          messageKind: 'correction',
+          ...subAgentTags(),
+        }),
+      )
+      append({ type: 'message.done', data: { messageId: continueMsgId } })
+
+      if (overCompactionThreshold) {
+        appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
+        compacting = true
+        continue
+      }
       if (truncationRetryCount < MAX_TRUNCATION_RETRIES) {
         truncationRetryCount += 1
         const currentMaxTokens =
           result.modelParams?.maxTokens ?? getModelProfile(resolveClient().getModel()).defaultMaxTokens
         const promptTokens = result.usage.promptTokens
         const contextWindow = sessionManager.getCurrentModelContext(sessionId, config.mode)
-        const newMaxTokens = Math.min(
+        currentMaxTokensOverride = Math.min(
           Math.floor(currentMaxTokens * 1.5),
           Math.max(256, contextWindow - promptTokens - OUTPUT_RESERVE_TOKENS),
         )
-        currentMaxTokensOverride = newMaxTokens
-        const interimStats = turnMetrics.buildStats(statsIdentity, mode)
-        append(
-          createMessageDoneEvent(assistantMsgId, {
-            segments: result.segments,
-            stats: interimStats,
-            partial: true,
-          }),
-        )
-        onMessage?.(createChatMessageUpdatedMessage(assistantMsgId, { isStreaming: false, partial: true }))
-        const continueMsgId = crypto.randomUUID()
-        append(
-          createMessageStartEvent(continueMsgId, 'user', truncatedNotice, {
-            ...(currentWindowMessageOptions ?? {}),
-            isSystemGenerated: true,
-            messageKind: 'correction',
-            ...subAgentTags(),
-          }),
-        )
-        append({ type: 'message.done', data: { messageId: continueMsgId } })
         continue
       }
       if (compacting) {
@@ -780,24 +777,15 @@ export async function runTopLevelAgentLoop(
           },
         })
       }
-      const stats = turnMetrics.buildStats(statsIdentity, mode)
-      append(
-        createMessageDoneEvent(assistantMsgId, {
-          segments: result.segments,
-          stats,
-          partial: true,
-        }),
-      )
-      append(createChatDoneEvent(assistantMsgId, 'truncated', stats, agentType))
-      onMessage?.(
-        createChatMessageUpdatedMessage(assistantMsgId, {
-          isStreaming: false,
-          partial: true,
-          stats,
-        }),
-      )
-      onMessage?.(createChatDoneMessage(assistantMsgId, 'truncated', stats, agentType))
+      append(createChatDoneEvent(assistantMsgId, 'truncated', interimStats, agentType))
+      onMessage?.(createChatDoneMessage(assistantMsgId, 'truncated', interimStats, agentType))
       break
+    }
+
+    if (overCompactionThreshold) {
+      appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
+      compacting = true
+      continue
     }
 
     if (result.toolCalls.length > 0) {
