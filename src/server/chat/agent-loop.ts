@@ -352,6 +352,7 @@ export async function runTopLevelAgentLoop(
             ...(currentWindowMessageOptions ?? {}),
             isSystemGenerated: true,
             messageKind: 'correction',
+            ...subAgentTags(),
           }),
         )
         append({ type: 'message.done', data: { messageId: continueMsgId } })
@@ -370,6 +371,7 @@ export async function runTopLevelAgentLoop(
             ...(currentWindowMessageOptions ?? {}),
             isSystemGenerated: true,
             messageKind: 'correction',
+            ...subAgentTags(),
           }),
         )
         append({ type: 'message.done', data: { messageId: continueMsgId } })
@@ -547,6 +549,7 @@ export async function runTopLevelAgentLoop(
             ...(currentWindowMessageOptions ?? {}),
             isSystemGenerated: true,
             messageKind: 'correction',
+            ...subAgentTags(),
           }),
         )
         append({ type: 'message.done', data: { messageId: continueMsgId } })
