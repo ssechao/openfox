@@ -218,7 +218,12 @@ function rollbackRestoreJournal(journal: RestoreJournal): void {
     parkAtBlobBarrier('after-restore-rollback-db-file')
     renameSync(journal.bakDb, journal.destDbPath)
     parkAtBlobBarrier('after-restore-rollback-db-renamed')
-    renameSqliteSidecars(journal.bakDb, journal.destDbPath)
+    for (const suffix of SQLITE_SIDECARS) {
+      const src = `${journal.bakDb}${suffix}`
+      if (!existsSync(src)) continue
+      renameSync(src, `${journal.destDbPath}${suffix}`)
+      parkAtBlobBarrier(`after-restore-rollback-sidecar${suffix}`)
+    }
   }
   parkAtBlobBarrier('after-restore-rollback-db')
   if (existsSync(journal.bakBlobs)) {

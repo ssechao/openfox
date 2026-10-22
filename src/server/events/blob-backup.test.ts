@@ -2,6 +2,7 @@ import { execFileSync, fork, type ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -24,7 +25,8 @@ import {
   restoreDatabaseAndBlobs,
   restoreJournalPath,
 } from './blob-backup.js'
-import { closeDatabase } from '../db/index.js'
+import { loadConfig } from '../config.js'
+import { closeDatabase, getDatabase, initDatabase } from '../db/index.js'
 import { acquireInstanceLock, releaseInstanceLock } from '../db/instance-lock.js'
 import { collectBlobRefs } from './blob-codec.js'
 import { hydrateAttachmentData } from './blob-codec.js'
@@ -441,41 +443,80 @@ describe('blob backup / restore', () => {
     60_000,
   )
 
-  it('SIGKILL after bakDb rename restores the old WAL sidecar on resume', async () => {
-    const { backupDir, destPath } = await seedRestorePair(dir)
-    const oldWal = Buffer.from('old-base-wal')
-    writeFileSync(`${destPath}-wal`, oldWal)
-    writeFileSync(`${destPath}-shm`, Buffer.from('old-base-shm'))
+  it.each([
+    'after-restore-rollback-db-renamed',
+    'after-restore-rollback-sidecar-wal',
+    'after-restore-rollback-sidecar-shm',
+  ] as const)(
+    'SIGKILL at %s restores a live WAL witness via initDatabase',
+    async (recoverBarrier) => {
+      const src = openStore(dir, 'src.db')
+      appendPng(src.events)
+      src.db.close()
+      const backupDir = join(dir, 'backup')
+      await backupDatabaseAndBlobs(src.dbPath, backupDir)
 
-    await killAtBarrier(
-      {
-        OPENFOX_DB_PATH: destPath,
-        OPENFOX_BLOB_CRASH_MODE: 'restore',
-        OPENFOX_BLOB_BACKUP_FROM: backupDir,
-      },
-      'after-restore-db-file-retired',
-      join(dir, 'barrier-db-file-retired'),
-    )
-    await killAtBarrier(
-      {
-        OPENFOX_DB_PATH: destPath,
-        OPENFOX_BLOB_CRASH_MODE: 'restore-recover',
-      },
-      'after-restore-rollback-db-renamed',
-      join(dir, 'barrier-rollback-db-renamed'),
-    )
+      closeDatabase()
+      const destPath = join(dir, 'dest.db')
+      const config = loadConfig()
+      config.database.path = destPath
+      initDatabase(config)
+      const live = getDatabase()
+      live.pragma('wal_autocheckpoint = 0')
+      live.exec(`CREATE TABLE IF NOT EXISTS restore_witness (id TEXT PRIMARY KEY, note TEXT NOT NULL)`)
+      live.prepare('INSERT INTO restore_witness (id, note) VALUES (?, ?)').run('keep-me', 'old-wal-witness')
+      expect(existsSync(`${destPath}-wal`)).toBe(true)
+      const frozen = `${destPath}.wal-freeze`
+      copyFileSync(destPath, frozen)
+      copyFileSync(`${destPath}-wal`, `${frozen}-wal`)
+      if (existsSync(`${destPath}-shm`)) copyFileSync(`${destPath}-shm`, `${frozen}-shm`)
+      closeDatabase()
+      unlinkSync(destPath)
+      if (existsSync(`${destPath}-wal`)) unlinkSync(`${destPath}-wal`)
+      if (existsSync(`${destPath}-shm`)) unlinkSync(`${destPath}-shm`)
+      copyFileSync(frozen, destPath)
+      copyFileSync(`${frozen}-wal`, `${destPath}-wal`)
+      if (existsSync(`${frozen}-shm`)) copyFileSync(`${frozen}-shm`, `${destPath}-shm`)
+      expect(existsSync(`${destPath}-wal`)).toBe(true)
 
-    expect(existsSync(destPath)).toBe(true)
-    expect(existsSync(`${destPath}.pre-restore`)).toBe(false)
-    expect(existsSync(`${destPath}.pre-restore-wal`)).toBe(true)
+      await killAtBarrier(
+        {
+          OPENFOX_DB_PATH: destPath,
+          OPENFOX_BLOB_CRASH_MODE: 'restore',
+          OPENFOX_BLOB_BACKUP_FROM: backupDir,
+        },
+        'after-restore-db-file-retired',
+        join(dir, `barrier-db-file-retired-${recoverBarrier}`),
+      )
+      await killAtBarrier(
+        {
+          OPENFOX_DB_PATH: destPath,
+          OPENFOX_BLOB_CRASH_MODE: 'restore-recover',
+        },
+        recoverBarrier,
+        join(dir, `barrier-${recoverBarrier}`),
+      )
 
-    resumeViaBoot(destPath)
+      if (recoverBarrier === 'after-restore-rollback-db-renamed') {
+        expect(existsSync(`${destPath}.pre-restore-wal`)).toBe(true)
+      }
 
-    expect(existsSync(`${destPath}.pre-restore-wal`)).toBe(false)
-    expect(readFileSync(`${destPath}-wal`)).toEqual(oldWal)
-    expect(readFileSync(`${destPath}-shm`)).toEqual(Buffer.from('old-base-shm'))
-    assertEntirelyOld(destPath)
-  }, 60_000)
+      closeDatabase()
+      const resumeConfig = loadConfig()
+      resumeConfig.database.path = destPath
+      initDatabase(resumeConfig)
+      const resumed = getDatabase()
+      const witness = resumed.prepare('SELECT note FROM restore_witness WHERE id = ?').get('keep-me') as {
+        note: string
+      }
+      expect(witness.note).toBe('old-wal-witness')
+      expect(existsSync(restoreJournalPath(destPath))).toBe(false)
+      expect(existsSync(`${destPath}.pre-restore`)).toBe(false)
+      expect(existsSync(`${destPath}.pre-restore-wal`)).toBe(false)
+      closeDatabase()
+    },
+    60_000,
+  )
 
   it('restore refuses a duplicate manifest entry for a second database blob ref', async () => {
     const src = openStore(dir, 'src.db')
