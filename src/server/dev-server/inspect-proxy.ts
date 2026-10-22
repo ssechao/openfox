@@ -1,6 +1,12 @@
 import net from 'net'
 import zlib from 'zlib'
+import { promisify } from 'node:util'
 import { logger } from '../utils/logger.js'
+
+const gunzipAsync = promisify(zlib.gunzip)
+const gzipAsync = promisify(zlib.gzip)
+const inflateAsync = promisify(zlib.inflate)
+const deflateAsync = promisify(zlib.deflate)
 import type { SessionManager } from '../session/manager.js'
 import { getProjectByWorkdir } from '../db/projects.js'
 
@@ -93,6 +99,28 @@ function buildResponse(status: number, headers: Record<string, string>, body: Bu
     .join('\r\n')
   const head = Buffer.from(`${statusLine}\r\n${headerLines}\r\n\r\n`, 'utf8')
   return Buffer.concat([head, body])
+}
+
+async function inflateBody(enc: string | null, buf: Buffer): Promise<Buffer> {
+  if (enc === 'gzip') return gunzipAsync(buf)
+  if (enc === 'deflate') return inflateAsync(buf)
+  return buf
+}
+
+async function deflateBody(enc: string | null, buf: Buffer): Promise<Buffer> {
+  if (enc === 'gzip') return gzipAsync(buf)
+  if (enc === 'deflate') return deflateAsync(buf)
+  return buf
+}
+
+async function injectScript(buf: Buffer): Promise<Buffer | null> {
+  const bodyTag = Buffer.from('</body>')
+  const headTag = Buffer.from('</head>')
+  const inject = Buffer.from(INJECT_SCRIPT, 'utf8')
+  let idx = buf.indexOf(bodyTag)
+  if (idx < 0) idx = buf.indexOf(headTag)
+  if (idx < 0) return null
+  return Buffer.concat([buf.subarray(0, idx), inject, buf.subarray(idx)])
 }
 
 function dechunk(buf: Buffer): Buffer {
@@ -227,7 +255,9 @@ export async function startInspectProxy(
       const reqEnd = clientHead.indexOf('\r\n\r\n')
       const forwardHead = clientHead.slice(0, reqEnd) + connClose + clientHead.slice(reqEnd)
       targetSocket.write(forwardHead)
+      let injecting = false
       targetSocket.on('close', () => {
+        if (injecting) return
         if (!client.destroyed) client.end()
       })
 
@@ -303,42 +333,47 @@ export async function startInspectProxy(
         }
 
         if (isHtml && enc) {
-          const fullBody = Buffer.concat(bodyBuf)
-          const isChunked = (resHeaders['transfer-encoding'] || '').toLowerCase() === 'chunked'
-          const decoded = isChunked ? dechunk(fullBody) : fullBody
-          let text: string
-          try {
-            if (enc === 'gzip') text = zlib.gunzipSync(decoded).toString('utf8')
-            else if (enc === 'deflate') text = zlib.inflateSync(decoded).toString('utf8')
-            else text = decoded.toString('utf8')
-          } catch {
-            client.end()
-            return
-          }
+          injecting = true
+          void (async () => {
+            if (responded) return
+            const fullBody = Buffer.concat(bodyBuf)
+            const isChunked = (resHeaders['transfer-encoding'] || '').toLowerCase() === 'chunked'
+            const framed = isChunked ? dechunk(fullBody) : fullBody
+            let decoded: Buffer
+            try {
+              decoded = await inflateBody(enc, framed)
+            } catch {
+              injecting = false
+              client.end()
+              return
+            }
 
-          const bi = text.indexOf('</body>')
-          const hi = text.indexOf('</head>')
-          let modified: string
-          if (bi >= 0) modified = text.slice(0, bi) + INJECT_SCRIPT + text.slice(bi)
-          else if (hi >= 0) modified = text.slice(0, hi) + INJECT_SCRIPT + text.slice(hi)
-          else {
-            // No injection point found — send original body through (still compressed)
-            const headStr = buildHttpHeaders(resHeaders, status)
+            const modified = await injectScript(decoded)
+            if (!modified) {
+              // No injection point found — send original body through (still compressed)
+              const headStr = buildHttpHeaders(resHeaders, status)
+              client.write(Buffer.from(headStr, 'utf8'))
+              client.write(fullBody)
+              injecting = false
+              client.end()
+              return
+            }
+
+            let compressed: Buffer
+            try {
+              compressed = await deflateBody(enc, modified)
+            } catch {
+              injecting = false
+              client.end()
+              return
+            }
+
+            const headStr = buildHttpHeaders(resHeaders, status, compressed.length)
             client.write(Buffer.from(headStr, 'utf8'))
-            client.write(fullBody)
+            client.write(compressed)
+            injecting = false
             client.end()
-            return
-          }
-
-          let compressed: Buffer
-          if (enc === 'gzip') compressed = zlib.gzipSync(Buffer.from(modified, 'utf8'))
-          else if (enc === 'deflate') compressed = zlib.deflateSync(Buffer.from(modified, 'utf8'))
-          else compressed = Buffer.from(modified, 'utf8')
-
-          const headStr = buildHttpHeaders(resHeaders, status)
-          client.write(Buffer.from(headStr, 'utf8'))
-          client.write(compressed)
-          client.end()
+          })()
         } else if (isHtml && bodyBuf.length > 0) {
           const fullBody = Buffer.concat(bodyBuf)
           const isChunked = (resHeaders['transfer-encoding'] || '').toLowerCase() === 'chunked'

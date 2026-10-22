@@ -73,6 +73,7 @@ import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { createDiagnosticsCollector } from './diagnostics/collector.js'
 import { logger, setLogLevel } from './utils/logger.js'
+import { requestAbortSignal } from './utils/request-abort.js'
 import { VERSION } from '../constants.js'
 import {
   loadServerAuthConfig,
@@ -462,7 +463,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const { loadGlobalConfig } = await import('../cli/config.js')
     const globalConfig = await loadGlobalConfig(config.mode ?? 'production', config.globalConfigPath)
     try {
-      const project = await createProjectDirectory(name, workdir, globalConfig.workspace?.autoGitInit ?? true)
+      const project = await createProjectDirectory(name, workdir, globalConfig.workspace?.autoGitInit ?? true, {
+        signal: requestAbortSignal(req, res),
+      })
       res.status(201).json({ project })
     } catch (err) {
       const eaccError = err as Error & { code?: string; cause?: unknown }
@@ -481,7 +484,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { checkPermissions } = await import('./utils/permissions.js')
-    const result = await checkPermissions(targetPath)
+    const result = await checkPermissions(targetPath, { signal: requestAbortSignal(req, res) })
 
     if (result.success) {
       res.json(result)
@@ -503,7 +506,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { fixPermissions } = await import('./utils/permissions.js')
-    const result = await fixPermissions(targetPath, action)
+    const result = await fixPermissions(targetPath, action, { signal: requestAbortSignal(req, res) })
 
     if (result.success) {
       res.json(result)
@@ -923,7 +926,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     try {
-      const updated = await sessionManager.switchWorkspace(req.params.id, target, branch, sourceBranch)
+      const updated = await sessionManager.switchWorkspace(req.params.id, target, branch, sourceBranch, {
+        signal: requestAbortSignal(req, res),
+      })
       res.json({ session: toClientSession(updated) })
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to switch workspace' })
@@ -946,7 +951,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     try {
-      const updated = await sessionManager.deleteWorkspace(req.params.id, target, force === true)
+      const updated = await sessionManager.deleteWorkspace(req.params.id, target, force === true, {
+        signal: requestAbortSignal(req, res),
+      })
       res.json({ session: toClientSession(updated) })
     } catch (err) {
       if (err instanceof WorkspaceInUseError) {

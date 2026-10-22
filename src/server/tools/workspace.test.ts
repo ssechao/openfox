@@ -75,7 +75,7 @@ describe('workspaceTool', () => {
       expect(result.success).toBe(true)
       expect(result.output).toContain('feat-x')
       expect(result.output).toContain('main')
-      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', undefined, undefined)
+      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', undefined, undefined, undefined)
     })
 
     it('switches to original after user confirmation', async () => {
@@ -86,7 +86,7 @@ describe('workspaceTool', () => {
       const result = await workspaceTool.execute({ action: 'switch', target: 'original' }, makeContext())
       expect(result.success).toBe(true)
       expect(result.output).toContain('"workspace": "original"')
-      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'original', undefined, undefined)
+      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'original', undefined, undefined, undefined)
     })
 
     it('switches with optional branch after user confirmation', async () => {
@@ -100,7 +100,7 @@ describe('workspaceTool', () => {
       )
       expect(result.success).toBe(true)
       expect(result.output).toContain('develop')
-      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', 'develop', undefined)
+      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', 'develop', undefined, undefined)
     })
 
     it('changes branch on the current workspace without recreating', async () => {
@@ -112,7 +112,7 @@ describe('workspaceTool', () => {
       const result = await workspaceTool.execute({ action: 'switch', target: 'feat-x', branch: 'toto' }, makeContext())
       expect(result.success).toBe(true)
       expect(result.output).toContain('toto')
-      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', 'toto', undefined)
+      expect(mockSwitchWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', 'toto', undefined, undefined)
     })
 
     it('returns error when user denies switch', async () => {
@@ -181,7 +181,7 @@ describe('workspaceTool', () => {
       const result = await workspaceTool.execute({ action: 'delete', target: 'feat-x' }, makeContext())
       expect(result.success).toBe(true)
       expect(result.output).toContain('feat-x')
-      expect(mockDeleteWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', false)
+      expect(mockDeleteWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', false, undefined)
     })
 
     it('force deletes a workspace with force=true', async () => {
@@ -192,7 +192,7 @@ describe('workspaceTool', () => {
       const result = await workspaceTool.execute({ action: 'delete', target: 'feat-x', force: true }, makeContext())
       expect(result.success).toBe(true)
       expect(result.output).toContain('feat-x')
-      expect(mockDeleteWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', true)
+      expect(mockDeleteWorkspace).toHaveBeenCalledWith('session-1', 'feat-x', true, undefined)
     })
 
     it('propagates error from deleteWorkspace', async () => {
