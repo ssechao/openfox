@@ -89,8 +89,8 @@ function renameSqliteSidecars(fromDb: string, toDb: string): void {
 }
 
 function removeSqliteAndSidecars(dbPath: string): void {
-  unlinkQuiet(dbPath)
   unlinkSqliteSidecars(dbPath)
+  unlinkQuiet(dbPath)
 }
 
 type RestorePhase = 'prepared' | 'db-retired' | 'old-retired' | 'db-published' | 'published' | 'rolling-back'
@@ -147,8 +147,14 @@ function stagingBlobsPath(journal: RestoreJournal): string {
 }
 
 function finishPublishedRestore(journal: RestoreJournal): void {
-  removeSqliteAndSidecars(journal.bakDb)
+  for (const suffix of SQLITE_SIDECARS) {
+    unlinkQuiet(`${journal.bakDb}${suffix}`)
+    parkAtBlobBarrier(`after-restore-published-drop${suffix}`)
+  }
+  unlinkQuiet(journal.bakDb)
+  parkAtBlobBarrier('after-restore-published-drop-db')
   rmSync(journal.bakBlobs, { recursive: true, force: true })
+  parkAtBlobBarrier('after-restore-published-drop-blobs')
   unlinkQuiet(restoreJournalPath(journal.destDbPath))
   rmSync(journal.staging, { recursive: true, force: true })
   new FileBlobStore(journal.destBlobsDir, { ownerDbPath: journal.destDbPath })
@@ -274,10 +280,13 @@ export function recoverRestoreIfNeeded(destDbPath: string): 'noop' | 'completed'
   const journal = readRestoreJournal(destDbPath)
   if (!journal) return 'noop'
   parkAtBlobBarrier('before-restore-recover')
-  reuniteSqliteSidecars(journal)
   if (journal.phase === 'prepared' || journal.phase === 'rolling-back') {
     rollbackRestoreJournal(journal)
     return 'rolled-back'
+  }
+  if (journal.phase === 'published') {
+    finishPublishedRestore(journal)
+    return 'completed'
   }
   return replayRestoreForward(journal)
 }

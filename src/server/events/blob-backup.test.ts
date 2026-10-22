@@ -409,6 +409,55 @@ describe('blob backup / restore', () => {
   )
 
   it.each([
+    'after-restore-published-drop-wal',
+    'after-restore-published-drop-shm',
+    'after-restore-published-drop-journal',
+    'after-restore-published-drop-db',
+  ] as const)(
+    'SIGKILL at %s in published phase keeps the new sqlite and drops old WAL',
+    async (barrier) => {
+      const src = openStore(dir, 'src.db')
+      appendPng(src.events)
+      src.db.close()
+      const backupDir = join(dir, 'backup')
+      await backupDatabaseAndBlobs(src.dbPath, backupDir)
+      const dest = openStore(dir, 'dest.db')
+      dest.db.pragma('wal_autocheckpoint = 0')
+      dest.db.prepare('INSERT INTO sessions (id) VALUES (?)').run('keep-me')
+      dest.db.prepare('INSERT INTO sessions (id) VALUES (?)').run('old-wal-only')
+      const destPath = dest.dbPath
+      const frozen = `${destPath}.wal-freeze`
+      copyFileSync(destPath, frozen)
+      expect(existsSync(`${destPath}-wal`)).toBe(true)
+      copyFileSync(`${destPath}-wal`, `${frozen}-wal`)
+      if (existsSync(`${destPath}-shm`)) copyFileSync(`${destPath}-shm`, `${frozen}-shm`)
+      dest.db.close()
+      unlinkSync(destPath)
+      if (existsSync(`${destPath}-wal`)) unlinkSync(`${destPath}-wal`)
+      if (existsSync(`${destPath}-shm`)) unlinkSync(`${destPath}-shm`)
+      copyFileSync(frozen, destPath)
+      copyFileSync(`${frozen}-wal`, `${destPath}-wal`)
+      if (existsSync(`${frozen}-shm`)) copyFileSync(`${frozen}-shm`, `${destPath}-shm`)
+      await killAtBarrier(
+        {
+          OPENFOX_DB_PATH: destPath,
+          OPENFOX_BLOB_CRASH_MODE: 'restore',
+          OPENFOX_BLOB_BACKUP_FROM: backupDir,
+        },
+        barrier,
+        join(dir, `barrier-${barrier}`),
+      )
+      resumeViaBoot(destPath)
+      assertEntirelyNew(destPath)
+      expect(existsSync(`${destPath}.pre-restore`)).toBe(false)
+      expect(existsSync(`${destPath}.pre-restore-wal`)).toBe(false)
+      expect(existsSync(`${destPath}.pre-restore-shm`)).toBe(false)
+      expect(sessionIds(destPath)).not.toContain('keep-me')
+    },
+    30_000,
+  )
+
+  it.each([
     ['after-restore-db-retired', 'after-restore-recover-db'],
     ['after-restore-old-retired', 'after-restore-recover-db'],
     ['after-restore-db-publish', 'after-restore-recover-db'],
