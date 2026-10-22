@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { EventStore, initEventStore, getStaleRunningSessionIds } from './store.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
 import type { TurnEvent, StoredEvent, SessionSnapshot } from './types.js'
+import { isBlobRef } from '../../shared/blob.js'
 
 describe('EventStore', () => {
   let db: Database.Database
@@ -1871,15 +1872,27 @@ describe('EventStore - Event Cleanup', () => {
       const stored = store.getLatestSnapshot('session-1')!.data
       const closed = stored.messages.find((message) => message.id === 'closed')!.toolCalls![0]!
       const active = stored.messages.find((message) => message.id === 'active')!.toolCalls![0]!
+      const closedJson = JSON.stringify(closed.result)
       expect(closed.result!.output).toContain('[Archived output truncated:')
+      expect(closed.result!.truncated).toBe(true)
       expect(closed.result!.metadata).not.toHaveProperty('base64Data')
+      expect(closedJson).not.toContain('data:image')
+      expect(closedJson).not.toContain('A'.repeat(64))
       expect(closed.result!.metadata).toMatchObject({ archivedDataOmitted: true })
+      expect(isBlobRef(closed.result!.metadata?.['blob'])).toBe(true)
+      const closedBlob = closed.result!.metadata!['blob'] as { hash: string; mime: string; size: number }
+      expect(closedBlob).toMatchObject({ mime: 'image/png', size: 3072 })
+      const closedBytes = store.blobStore.get(closedBlob.hash)
+      expect(closedBytes.bytes.length).toBe(3072)
+      expect(closedBytes.mime).toBe('image/png')
+
       expect(active.result!.output).toBe(result.output)
       expect(active.result!.metadata).not.toHaveProperty('base64Data')
-      expect(active.result!.metadata).toMatchObject({
-        mimeType: 'image/png',
-        blob: { mime: 'image/png', size: 3072 },
-      })
+      expect(JSON.stringify(active.result)).not.toContain('data:image')
+      expect(isBlobRef(active.result!.metadata?.['blob'])).toBe(true)
+      const activeBlob = active.result!.metadata!['blob'] as { hash: string; mime: string; size: number }
+      expect(activeBlob).toMatchObject({ mime: 'image/png', size: 3072 })
+      expect(store.blobStore.get(activeBlob.hash).bytes.length).toBe(3072)
       expect(stored.currentContextWindowId).toBe('active-window')
       expect(stored.messages).toHaveLength(2)
 
