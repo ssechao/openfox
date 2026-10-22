@@ -16,6 +16,7 @@ import type { LLMToolDefinition } from '../llm/types.js'
 import type { StoredEvent } from '../events/types.js'
 import { getProject } from '../db/projects.js'
 import { getSessionState, getEventStore } from '../events/index.js'
+import { collectBlobRefs } from '../events/blob-codec.js'
 import { VERSION } from '../../constants.js'
 import type { SessionManager } from './manager.js'
 
@@ -64,6 +65,7 @@ export interface SessionExportPayload {
   }
   messages: Message[]
   events: StoredEvent[]
+  blobs?: Array<{ hash: string; mime: string; size: number; data: string }>
 }
 
 const cachedLayoutSchema = z.object({
@@ -120,6 +122,16 @@ const sessionExportSchema = z.object({
       data: z.unknown(),
     }),
   ),
+  blobs: z
+    .array(
+      z.object({
+        hash: z.string(),
+        mime: z.string(),
+        size: z.number().int().nonnegative(),
+        data: z.string(),
+      }),
+    )
+    .optional(),
 })
 
 export type ParsedSessionExport = z.infer<typeof sessionExportSchema>
@@ -151,6 +163,24 @@ export function buildSessionExport(sessionManager: SessionManager, sessionId: st
         .getProviders()
         .find((p) => p.id === session.providerId)
     : undefined
+
+  const eventStore = getEventStore()
+  const events = eventStore.getEvents(sessionId)
+  const seen = new Set<string>()
+  const exportBlobs: Array<{ hash: string; mime: string; size: number; data: string }> = []
+  for (const event of events) {
+    for (const ref of collectBlobRefs(event.data)) {
+      if (seen.has(ref.hash)) continue
+      seen.add(ref.hash)
+      const record = eventStore.blobStore.get(ref.hash)
+      exportBlobs.push({
+        hash: record.hash,
+        mime: record.mime,
+        size: record.size,
+        data: record.bytes.toString('base64'),
+      })
+    }
+  }
 
   return {
     format: SESSION_EXPORT_FORMAT,
@@ -190,6 +220,7 @@ export function buildSessionExport(sessionManager: SessionManager, sessionId: st
         }
       : {}),
     messages: sessionManager.getCurrentWindowMessages(sessionId),
-    events: getEventStore().getEvents(sessionId),
+    events,
+    ...(exportBlobs.length > 0 ? { blobs: exportBlobs } : {}),
   }
 }

@@ -6,14 +6,17 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { BlobRef } from '../../shared/blob.js'
 import { isBlobHash } from '../../shared/blob.js'
+import { pidIsAlive } from '../db/instance-lock.js'
 
 export class BlobMissingError extends Error {
   readonly hash: string
@@ -40,6 +43,13 @@ export class BlobHashError extends Error {
   }
 }
 
+export class BlobStoreOwnerError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BlobStoreOwnerError'
+  }
+}
+
 export function hashBytes(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex')
 }
@@ -55,6 +65,21 @@ export interface BlobStore {
   put(bytes: Buffer, mime: string): BlobRef
   get(hash: string): BlobRecord
   has(hash: string): boolean
+  clearPending?(hash: string): void
+}
+
+export const BLOB_DIR_MARKER = '.openfox-db'
+
+export function blobDirForDatabase(dbPath: string): string {
+  return `${dbPath}.blobs`
+}
+
+export function ownerIdForDatabase(dbPath: string): string {
+  try {
+    return realpathSync(dbPath)
+  } catch {
+    return resolve(dbPath)
+  }
 }
 
 let singleton: BlobStore | null = null
@@ -74,7 +99,7 @@ function assertHash(hash: string): void {
   if (!isBlobHash(hash)) throw new BlobHashError(hash)
 }
 
-function durableWriteFile(finalPath: string, bytes: Buffer): void {
+export function durableWriteFile(finalPath: string, bytes: Buffer): void {
   const dir = dirname(finalPath)
   mkdirSync(dir, { recursive: true })
   const tmp = join(dir, `.tmp-${randomUUID()}`)
@@ -96,9 +121,17 @@ function durableWriteFile(finalPath: string, bytes: Buffer): void {
   }
 }
 
+interface BlobDirMarker {
+  owners: string[]
+}
+
 export class FileBlobStore implements BlobStore {
-  constructor(readonly root: string) {
+  constructor(
+    readonly root: string,
+    options: { ownerDbPath?: string } = {},
+  ) {
     mkdirSync(root, { recursive: true })
+    if (options.ownerDbPath) this.registerOwner(options.ownerDbPath)
   }
 
   private dirFor(hash: string): string {
@@ -113,8 +146,115 @@ export class FileBlobStore implements BlobStore {
     return `${this.bodyPath(hash)}.mime`
   }
 
+  private pendingPath(hash: string): string {
+    return join(this.root, '.pending', hash)
+  }
+
+  private markerPath(): string {
+    return join(this.root, BLOB_DIR_MARKER)
+  }
+
+  readMarker(): BlobDirMarker | null {
+    const path = this.markerPath()
+    if (!existsSync(path)) return null
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as { owner?: string; owners?: string[] }
+      if (Array.isArray(parsed.owners) && parsed.owners.every((item) => typeof item === 'string')) {
+        return { owners: parsed.owners }
+      }
+      if (typeof parsed.owner === 'string' && parsed.owner.length > 0) {
+        return { owners: [parsed.owner] }
+      }
+    } catch {
+      return null
+    }
+    return null
+  }
+
+  registerOwner(dbPath: string): void {
+    const owner = ownerIdForDatabase(dbPath)
+    const current = this.readMarker()
+    const owners = new Set(current?.owners ?? [])
+    owners.add(owner)
+    durableWriteFile(this.markerPath(), Buffer.from(JSON.stringify({ owners: [...owners] }, null, 2), 'utf8'))
+  }
+
+  assertOwner(dbPath: string): void {
+    const marker = this.readMarker()
+    if (!marker) {
+      throw new BlobStoreOwnerError(`Blob store marker missing in ${this.root}`)
+    }
+    const owner = ownerIdForDatabase(dbPath)
+    if (!marker.owners.includes(owner) && !marker.owners.includes(resolve(dbPath))) {
+      throw new BlobStoreOwnerError(`Blob store marker does not list ${owner} (owners: ${marker.owners.join(', ')})`)
+    }
+  }
+
+  ownerDatabases(): string[] {
+    return this.readMarker()?.owners ?? []
+  }
+
+  private writePending(hash: string): void {
+    mkdirSync(join(this.root, '.pending'), { recursive: true })
+    durableWriteFile(this.pendingPath(hash), Buffer.from(String(process.pid), 'utf8'))
+  }
+
+  clearPending(hash: string): void {
+    if (!isBlobHash(hash)) return
+    unlinkQuiet(this.pendingPath(hash))
+  }
+
+  livePendingHashes(): Set<string> {
+    const pendingDir = join(this.root, '.pending')
+    const live = new Set<string>()
+    if (!existsSync(pendingDir)) return live
+    for (const name of readdirSync(pendingDir)) {
+      if (!isBlobHash(name)) continue
+      const raw = readFileSync(join(pendingDir, name), 'utf8').trim()
+      const pid = Number(raw)
+      if (pidIsAlive(pid)) live.add(name)
+    }
+    return live
+  }
+
+  listStoredHashes(): string[] {
+    if (!existsSync(this.root)) return []
+    const hashes: string[] = []
+    for (const ent of readdirSync(this.root, { withFileTypes: true })) {
+      if (!ent.isDirectory() || !/^[a-f0-9]{2}$/.test(ent.name)) continue
+      for (const file of readdirSync(join(this.root, ent.name))) {
+        if (isBlobHash(file)) hashes.push(file)
+      }
+    }
+    return hashes
+  }
+
+  removeBlob(hash: string): void {
+    assertHash(hash)
+    unlinkQuiet(this.bodyPath(hash))
+    unlinkQuiet(this.mimePath(hash))
+    unlinkQuiet(this.pendingPath(hash))
+  }
+
+  removeStaleTempFiles(): number {
+    if (this.livePendingHashes().size > 0) return 0
+    if (!existsSync(this.root)) return 0
+    let removed = 0
+    for (const ent of readdirSync(this.root, { withFileTypes: true })) {
+      if (!ent.isDirectory() || !/^[a-f0-9]{2}$/.test(ent.name)) continue
+      const dir = join(this.root, ent.name)
+      for (const file of readdirSync(dir)) {
+        if (!file.startsWith('.tmp-')) continue
+        unlinkQuiet(join(dir, file))
+        removed++
+      }
+    }
+    return removed
+  }
+
   put(bytes: Buffer, mime: string): BlobRef {
     const hash = hashBytes(bytes)
+    this.writePending(hash)
     const body = this.bodyPath(hash)
     if (!existsSync(body)) {
       durableWriteFile(body, bytes)
@@ -176,6 +316,8 @@ export class MemoryBlobStore implements BlobStore {
     return { bytes: entry.bytes, mime: entry.mime, size: entry.bytes.length, hash }
   }
 
+  clearPending(_hash: string): void {}
+
   corruptForTest(hash: string): void {
     const entry = this.files.get(hash)
     if (!entry) throw new BlobMissingError(hash)
@@ -185,7 +327,7 @@ export class MemoryBlobStore implements BlobStore {
 
 export function blobStoreForDatabase(dbPath: string | undefined): BlobStore {
   if (!dbPath || dbPath === ':memory:') return new MemoryBlobStore()
-  return new FileBlobStore(join(dirname(dbPath), 'blobs'))
+  return new FileBlobStore(blobDirForDatabase(dbPath), { ownerDbPath: dbPath })
 }
 
 export function unlinkQuiet(path: string): void {

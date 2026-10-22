@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { BlobStore } from './blob-store.js'
 import { extractBinaries, payloadHasInlineBinary } from './blob-codec.js'
-import { parkAtBlobBarrier } from './blob-barrier.js'
+import { rewriteSessionPayloads } from './blob-rewrite.js'
 
 export type BlobMigrationStatus = 'copied' | 'switched'
 
@@ -41,42 +41,23 @@ function setStatus(db: Database.Database, sessionId: string, status: BlobMigrati
 export function migrateSessionBlobs(db: Database.Database, sessionId: string, store: BlobStore): BlobMigrationReport {
   ensureBlobMigrationSchema(db)
   const existing = getBlobMigrationStatus(db, sessionId)
-  const rows = db.prepare('SELECT id, payload FROM events WHERE session_id = ?').all(sessionId) as Array<{
-    id: number
+  const rows = db.prepare('SELECT payload FROM events WHERE session_id = ?').all(sessionId) as Array<{
     payload: string
   }>
-
   if (existing === 'switched' && !rows.some((row) => payloadHasInlineBinary(row.payload))) {
     return { sessionId, scanned: rows.length, rewritten: 0, status: 'switched' }
   }
 
-  const updates: Array<{ id: number; payload: string }> = []
-  for (const row of rows) {
-    if (!payloadHasInlineBinary(row.payload)) continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(row.payload)
-    } catch {
-      continue
-    }
-    const extracted = extractBinaries(parsed, store)
-    const payload = JSON.stringify(extracted)
-    if (payload !== row.payload) updates.push({ id: row.id, payload })
-  }
-
-  parkAtBlobBarrier('after-blob-write')
-  setStatus(db, sessionId, 'copied')
-  parkAtBlobBarrier('before-switch')
-
-  const switchTx = db.transaction(() => {
-    const update = db.prepare('UPDATE events SET payload = ? WHERE id = ?')
-    for (const row of updates) update.run(row.payload, row.id)
-    setStatus(db, sessionId, 'switched')
+  const { scanned, rewritten } = rewriteSessionPayloads(db, sessionId, {
+    shouldRewrite: payloadHasInlineBinary,
+    transform: (parsed) => extractBinaries(parsed, store),
+    afterPrepBarrier: 'after-blob-write',
+    beforeSwitchBarrier: 'before-switch',
+    afterSwitchBarrier: 'after-switch',
+    markPrepared: () => setStatus(db, sessionId, 'copied'),
+    markSwitched: () => setStatus(db, sessionId, 'switched'),
   })
-  switchTx()
-  parkAtBlobBarrier('after-switch')
-
-  return { sessionId, scanned: rows.length, rewritten: updates.length, status: 'switched' }
+  return { sessionId, scanned, rewritten, status: 'switched' }
 }
 
 export function migrateAllBlobs(db: Database.Database, store: BlobStore): BlobMigrationReport[] {

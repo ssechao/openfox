@@ -636,6 +636,12 @@ export class SessionManager {
     )
 
     const eventStore = getEventStore()
+    if (payload.blobs) {
+      for (const blob of payload.blobs) {
+        eventStore.blobStore.put(Buffer.from(blob.data, 'base64'), blob.mime)
+        eventStore.blobStore.clearPending?.(blob.hash)
+      }
+    }
     eventStore.importEvents(session.id, payload.events as unknown as import('../events/types.js').StoredEvent[])
 
     // Mode fallback: the restored source mode is only kept when the agent

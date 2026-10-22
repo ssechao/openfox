@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
-import { FileBlobStore, hashBytes } from './blob-store.js'
+import { FileBlobStore, blobDirForDatabase, hashBytes } from './blob-store.js'
 import { EventStore } from './store.js'
 import { getBlobMigrationStatus } from './blob-migrate.js'
 
@@ -65,12 +65,12 @@ function spawnCrashChild(env: Record<string, string>): ChildProcess {
   return child
 }
 
-export async function killAtBarrier(
+export async function parkAtBarrier(
   env: Record<string, string>,
   barrier: string,
   barrierFile: string,
   timeoutMs = 15_000,
-): Promise<void> {
+): Promise<ChildProcess> {
   const child = spawnCrashChild({ ...env, OPENFOX_BLOB_BARRIER: barrier, OPENFOX_BLOB_BARRIER_FILE: barrierFile })
   await new Promise<void>((resolve, reject) => {
     let settled = false
@@ -101,6 +101,16 @@ export async function killAtBarrier(
       finish(new Error(`child exited ${code} before barrier ${barrier}`))
     })
   })
+  return child
+}
+
+export async function killAtBarrier(
+  env: Record<string, string>,
+  barrier: string,
+  barrierFile: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const child = await parkAtBarrier(env, barrier, barrierFile, timeoutMs)
   try {
     child.kill('SIGKILL')
   } catch {
@@ -117,7 +127,7 @@ export async function killAtBarrier(
 
 export function reopenCrashStore(dbPath: string): { db: Database.Database; events: EventStore; blobs: FileBlobStore } {
   const db = new Database(dbPath)
-  const blobs = new FileBlobStore(join(dirname(dbPath), 'blobs'))
+  const blobs = new FileBlobStore(blobDirForDatabase(dbPath), { ownerDbPath: dbPath })
   const events = new EventStore(db, { blobStore: blobs })
   return { db, events, blobs }
 }

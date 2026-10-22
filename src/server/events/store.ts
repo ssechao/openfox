@@ -38,9 +38,11 @@ import {
   type StoreTiming,
 } from './store-diagnostics.js'
 import { blobStoreForDatabase, setBlobStore, type BlobStore } from './blob-store.js'
-import { extractBinaries } from './blob-codec.js'
+import { collectBlobRefs, extractBinaries } from './blob-codec.js'
 import { parkAtBlobBarrier } from './blob-barrier.js'
 import { migrateAllBlobs, migrateSessionBlobs, type BlobMigrationReport } from './blob-migrate.js'
+import { gcBlobs, type BlobGcReport } from './blob-gc.js'
+import { rollbackAllBlobs, rollbackSessionBlobs, type BlobRollbackReport } from './blob-rollback.js'
 
 // Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
 // auto-pruned on the next migration invocation (startup auto-run or manual
@@ -614,6 +616,12 @@ export class EventStore {
     }
   }
 
+  private releaseBlobPending(data: unknown): void {
+    const clear = this.blobStore.clearPending
+    if (!clear) return
+    for (const ref of collectBlobRefs(data)) clear.call(this.blobStore, ref.hash)
+  }
+
   private appendEvent(sessionId: string, event: TurnEvent, notify = true): StoredEvent {
     this.assertValidEvent(sessionId, event)
     this.flushStreaming(sessionId)
@@ -657,6 +665,7 @@ export class EventStore {
       }
     }
 
+    this.releaseBlobPending(toStore.data)
     this.updateRecentUserPrompts(sessionId, event, timestamp)
     this.invalidateSessionCache(sessionId, event)
 
@@ -718,6 +727,8 @@ export class EventStore {
           }
         })
         this.timed('write', transaction)
+
+        for (const stored of results) this.releaseBlobPending(stored.data)
 
         for (const stored of results) {
           const event = { type: stored.type, data: stored.data } as TurnEvent
@@ -1906,6 +1917,22 @@ export class EventStore {
 
   migrateAllBlobs(): BlobMigrationReport[] {
     const reports = migrateAllBlobs(this.db, this.blobStore)
+    this.clearSnapshotCache()
+    return reports
+  }
+
+  gcBlobs(): BlobGcReport {
+    return gcBlobs(this.db, this.blobStore)
+  }
+
+  rollbackSessionBlobs(sessionId: string): BlobRollbackReport {
+    const report = rollbackSessionBlobs(this.db, sessionId, this.blobStore)
+    this.clearSnapshotCache()
+    return report
+  }
+
+  rollbackAllBlobs(): BlobRollbackReport[] {
+    const reports = rollbackAllBlobs(this.db, this.blobStore)
     this.clearSnapshotCache()
     return reports
   }

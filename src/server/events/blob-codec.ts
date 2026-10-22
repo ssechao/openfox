@@ -107,6 +107,71 @@ export function extractBinaries(data: unknown, store: BlobStore): unknown {
   return extractNode(data, store)
 }
 
+export function collectBlobRefs(value: unknown, out: BlobRef[] = []): BlobRef[] {
+  if (isBlobRef(value)) {
+    out.push(value)
+    return out
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectBlobRefs(item, out)
+    return out
+  }
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value as Record<string, unknown>)) collectBlobRefs(child, out)
+  }
+  return out
+}
+
+export function payloadHasBlobRef(payload: string): boolean {
+  try {
+    return collectBlobRefs(JSON.parse(payload)).length > 0
+  } catch {
+    return false
+  }
+}
+
+function dataUrlFromRecord(mime: string, bytes: Buffer): string {
+  return `data:${mime};base64,${bytes.toString('base64')}`
+}
+
+function reinlineNode(value: unknown, store: BlobStore): unknown {
+  if (Array.isArray(value)) return value.map((item) => reinlineNode(item, store))
+  if (isBlobRef(value)) {
+    const record = store.get(value.hash)
+    return dataUrlFromRecord(record.mime, record.bytes)
+  }
+  if (!value || typeof value !== 'object') return value
+  const obj = value as Record<string, unknown>
+  const blob = obj['blob']
+  if (isBlobRef(blob)) {
+    const record = store.get(blob.hash)
+    const dataUrl = dataUrlFromRecord(record.mime, record.bytes)
+    const next: Record<string, unknown> = { ...obj }
+    delete next['blob']
+    const hasFilename = typeof next['filename'] === 'string'
+    if (hasFilename || typeof next['id'] === 'string') {
+      next['data'] = dataUrl
+    }
+    if (typeof next['mimeType'] === 'string' && !hasFilename) {
+      next['base64Data'] = record.bytes.toString('base64')
+      next['dataUrl'] = dataUrl
+    }
+    if (!hasFilename && typeof next['data'] !== 'string' && typeof next['mimeType'] !== 'string') {
+      next['dataUrl'] = dataUrl
+    }
+    return next
+  }
+  const next: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(obj)) {
+    next[key] = reinlineNode(child, store)
+  }
+  return next
+}
+
+export function reinlineBinaries(data: unknown, store: BlobStore): unknown {
+  return reinlineNode(data, store)
+}
+
 export function payloadHasInlineBinary(payload: string): boolean {
   return payload.includes('data:image') || payload.includes('data:application/pdf') || payload.includes('"base64Data"')
 }
@@ -157,4 +222,16 @@ export function attachmentFromToolImageMetadata(metadata: Record<string, unknown
     return { ...base, data: `data:${mime};base64,${base64Data}` }
   }
   return undefined
+}
+
+export function collectBlobRefsFromJsonStrings(payloads: Iterable<string>): BlobRef[] {
+  const out: BlobRef[] = []
+  for (const payload of payloads) {
+    try {
+      collectBlobRefs(JSON.parse(payload), out)
+    } catch {
+      continue
+    }
+  }
+  return out
 }

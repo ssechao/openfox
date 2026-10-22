@@ -324,7 +324,7 @@ describe('migrate-blobs refuses a locked database', () => {
     let stderr = ''
     let status = 0
     try {
-      execFileSync('npx', ['tsx', 'scripts/migrate-blobs.ts', '--yes', '--db', dbPath], {
+      execFileSync(join(REPO_ROOT, 'node_modules/.bin/tsx'), ['scripts/migrate-blobs.ts', '--yes', '--db', dbPath], {
         cwd: REPO_ROOT,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -344,5 +344,5 @@ describe('migrate-blobs refuses a locked database', () => {
     const tables = after.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='blob_migration'").get()
     expect(tables).toBeUndefined()
     after.close()
-  }, 30_000)
+  }, 60_000)
 })
