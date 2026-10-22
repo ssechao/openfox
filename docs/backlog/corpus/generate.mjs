@@ -2,7 +2,7 @@
 import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -227,8 +227,175 @@ export function generateCorpus(dbPath, options = {}) {
   }
 }
 
-const out = process.argv[2]
-if (out) {
-  const info = generateCorpus(out)
-  process.stdout.write(JSON.stringify(info, null, 2) + '\n')
+/** ~100 sessions / ~12 000 events for lot 4b search demo. Reuses this generator's schema and seed. */
+export function generateSearchCorpus(dbPath, options = {}) {
+  mkdirSync(dirname(dbPath), { recursive: true })
+  const rng = mulberry32(manifest.seed)
+  const db = new Database(dbPath)
+  db.exec('PRAGMA journal_mode = WAL')
+  db.exec('PRAGMA foreign_keys = ON')
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      workdir TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      workdir TEXT NOT NULL,
+      phase TEXT NOT NULL DEFAULT 'idle',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      title TEXT,
+      mode TEXT NOT NULL DEFAULT 'builder',
+      is_running INTEGER NOT NULL DEFAULT 0,
+      workflow_phase TEXT NOT NULL DEFAULT 'build',
+      message_count INTEGER NOT NULL DEFAULT 0,
+      recent_user_prompts TEXT,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      timestamp INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      UNIQUE(session_id, seq)
+    );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT
+    );
+  `)
+  const now = '2026-10-22T00:00:00.000Z'
+  const ts = Date.parse(now)
+  const workdir = options.workdir || '/tmp/openfox-4b-search-corpus'
+  const sessionCount = options.sessionCount || 100
+  const postPairs = options.postPairs ?? 59
+  db.prepare('INSERT INTO projects (id, name, workdir, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(
+    'search-project',
+    'search-corpus',
+    workdir,
+    now,
+    now,
+  )
+  db.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run(
+    'display.maxVisibleItems',
+    String(manifest.maxVisibleItems),
+    now,
+  )
+
+  const insertSession = db.prepare(
+    `INSERT INTO sessions (id, project_id, workdir, phase, created_at, updated_at, title, mode, is_running, workflow_phase, message_count, recent_user_prompts)
+     VALUES (?, 'search-project', ?, 'idle', ?, ?, ?, 'builder', 0, 'build', ?, ?)`,
+  )
+  const insertEvent = db.prepare(
+    `INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, ?, ?, ?, ?)`,
+  )
+
+  const fixtures = {
+    xylophoneSessionId: 'search-s0',
+    ancientSessionId: 'search-s1',
+    cafeSessionId: 'search-s2',
+    prefixSessionId: 'search-s3',
+    multiSessionId: 'search-s4',
+  }
+
+  const insertMany = db.transaction(() => {
+    for (let i = 0; i < sessionCount; i++) {
+      const sessionId = `search-s${i}`
+      let title = `synthetic session ${i}`
+      if (i === 0) title = 'xylophone-alpha session'
+      if (i === 3) title = 'prefixable-term session'
+      if (i === 4) title = 'alpha bravo session'
+      const snapshotMessages = []
+      const recent = []
+      for (let m = 0; m < 20; m++) {
+        const id = `${sessionId}-old-${m}`
+        let content = `synthetic prompt ${i} ${m}`
+        if (i === 1 && m === 0) content = 'ancient-prompt-omega hidden in snapshot'
+        if (i === 2 && m === 0) content = 'un café crème for accents'
+        snapshotMessages.push({
+          id,
+          role: 'user',
+          content,
+          timestamp: now,
+        })
+        snapshotMessages.push({
+          id: `${sessionId}-old-a-${m}`,
+          role: 'assistant',
+          content: `synthetic reply ${i} ${m}`,
+          timestamp: now,
+        })
+        if (m < 10) recent.push({ id, content, timestamp: now })
+      }
+      insertSession.run(sessionId, workdir, now, now, title, 20 + postPairs, JSON.stringify(recent))
+      insertEvent.run(
+        sessionId,
+        1,
+        ts,
+        'session.initialized',
+        JSON.stringify({ projectId: 'search-project', workdir, contextWindowId: 'win-1', title }),
+      )
+      const snap = {
+        mode: 'builder',
+        phase: 'build',
+        isRunning: false,
+        messages: snapshotMessages,
+        criteria: [],
+        todos: [],
+        metadataEntries: {},
+        contextState: {
+          currentTokens: 0,
+          maxTokens: 200000,
+          compactionCount: 0,
+          dangerZone: false,
+          canCompact: false,
+          dynamicContextChanged: false,
+        },
+        currentContextWindowId: 'win-1',
+        snapshotSeq: 1,
+        snapshotAt: ts,
+        sessionInit: { projectId: 'search-project', workdir, contextWindowId: 'win-1' },
+        sessionTitle: title,
+      }
+      insertEvent.run(sessionId, 2, ts, 'turn.snapshot', JSON.stringify(snap))
+      let seq = 3
+      for (let p = 0; p < postPairs; p++) {
+        const id = `${sessionId}-new-${p}`
+        let content = `live prompt ${i} ${p} ${rng().toFixed(4)}`
+        if (i === 4 && p === 0) content = 'alpha bravo charlie live'
+        if (i === 0 && p === 0) content = 'hello, world! punctuation'
+        insertEvent.run(
+          sessionId,
+          seq++,
+          ts + p,
+          'message.start',
+          JSON.stringify({ messageId: id, role: 'user', content }),
+        )
+        insertEvent.run(sessionId, seq++, ts + p, 'message.done', JSON.stringify({ messageId: id }))
+      }
+    }
+  })
+  insertMany()
+  const eventCount = db.prepare('SELECT COUNT(*) AS n FROM events').get().n
+  const sessionRows = db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n
+  db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+  db.close()
+  return { dbPath, sessionCount: sessionRows, eventCount, fixtures, manifest }
+}
+
+const invokedDirectly = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1])
+if (invokedDirectly) {
+  const out = process.argv[2]
+  if (out) {
+    const mode = process.argv[3]
+    const info = mode === 'search' ? generateSearchCorpus(out) : generateCorpus(out)
+    process.stdout.write(JSON.stringify(info, null, 2) + '\n')
+  }
 }

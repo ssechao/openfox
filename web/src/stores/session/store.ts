@@ -45,6 +45,7 @@ const loadingSessionIds = new Set<string>()
 const loadedSessionIds = new Set<string>()
 const listingSessionsForProject = new Map<string, Promise<void>>()
 let fullSessionListPromise: Promise<void> | null = null
+let searchRequestGen = 0
 
 interface SessionLoadData {
   session: Session
@@ -383,6 +384,10 @@ export const useSessionStore = create<SessionState>((set, get) => {
     passwordModalRetry: false,
     sessions: [],
     searchSessions: null,
+    searchResults: null,
+    searchIndexReady: null,
+    searchIndexMessage: null,
+    searchHasMore: false,
     currentSession: null,
     unreadSessionIds: [],
     messages: [],
@@ -763,6 +768,40 @@ export const useSessionStore = create<SessionState>((set, get) => {
         }
       })()
       return fullSessionListPromise
+    },
+
+    searchFromServer: async (query, opts = {}) => {
+      const trimmed = query.trim()
+      if (!trimmed) {
+        searchRequestGen++
+        set({ searchResults: null, searchIndexReady: null, searchIndexMessage: null, searchHasMore: false })
+        return
+      }
+      const gen = ++searchRequestGen
+      const params = new URLSearchParams()
+      params.set('q', trimmed)
+      params.set('limit', String(opts.limit ?? 20))
+      params.set('offset', String(opts.offset ?? 0))
+      if (opts.projectId) params.set('projectId', opts.projectId)
+      try {
+        const res = await authFetch(`/api/sessions?${params.toString()}`)
+        const data = (await res.json()) as {
+          sessions?: SessionSummary[]
+          hasMore?: boolean
+          indexReady?: boolean
+          message?: { en: string; fr: string }
+        }
+        if (gen !== searchRequestGen) return
+        const incoming = data.sessions ?? []
+        set({
+          searchResults: opts.append ? [...(get().searchResults ?? []), ...incoming] : incoming,
+          searchHasMore: Boolean(data.hasMore),
+          searchIndexReady: data.indexReady !== false,
+          searchIndexMessage: data.message ?? null,
+        })
+      } catch {
+        if (gen !== searchRequestGen) return
+      }
     },
 
     loadMoreSessions: async (projectId) => {

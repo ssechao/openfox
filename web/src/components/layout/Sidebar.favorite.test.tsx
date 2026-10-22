@@ -32,6 +32,10 @@ const sessionStoreState = {
   deleteAllSessions: vi.fn(),
   renameSession: vi.fn(),
   toggleFavorite: mockToggleFavorite,
+  searchFromServer: vi.fn(async () => {}),
+  searchResults: null as SessionSummary[] | null,
+  searchIndexReady: null as boolean | null,
+  searchIndexMessage: null as { en: string; fr: string } | null,
 }
 
 vi.mock('../../stores/session', () => ({

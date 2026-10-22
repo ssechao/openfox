@@ -617,5 +617,23 @@ function runMigrations(db: Database.Database): void {
     )
   `)
 
+  // FTS5 search index: create the empty table, never rebuild at startup.
+  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+    session_id UNINDEXED,
+    message_id UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+  )`)
+  const ready = db.prepare('SELECT value FROM settings WHERE key = ?').get('search.indexReady') as
+    { value: string } | undefined
+  if (!ready) {
+    db.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run(
+      'search.indexReady',
+      JSON.stringify({ version: 1, ready: false }),
+      new Date().toISOString(),
+    )
+  }
+
   logger.info('Database migrations completed')
 }

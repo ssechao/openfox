@@ -43,6 +43,7 @@ import { collectBlobRefs, extractBinaries } from './blob-codec.js'
 import { parkAtBlobBarrier } from './blob-barrier.js'
 import { migrateAllBlobs, migrateSessionBlobs, type BlobMigrationReport } from './blob-migrate.js'
 import { gcBlobs, type BlobGcReport } from './blob-gc.js'
+import { SearchIndexer } from '../search/fts-index.js'
 import type { BlobScanProgress } from './blob-scan.js'
 import { rollbackAllBlobs, rollbackSessionBlobs, type BlobRollbackReport } from './blob-rollback.js'
 
@@ -212,6 +213,7 @@ function createSubscriber(
 
 export class EventStore {
   private db: Database.Database
+  readonly searchIndex: SearchIndexer
   private subscribers: Map<string, Set<Subscriber>> = new Map()
   private globalSubscribers: Map<number, GlobalSubscriber> = new Map()
   private globalSubscriberIdCounter = 0
@@ -410,6 +412,7 @@ export class EventStore {
     this.blobStore = options.blobStore ?? blobStoreForDatabase(db.name)
     setBlobStore(this.blobStore)
     this.initSchema()
+    this.searchIndex = new SearchIndexer(this.db)
     this.checkExternalWrites()
   }
 
@@ -648,7 +651,12 @@ export class EventStore {
     let busyRetries = 0
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
-        this.timed('write', () => insert.run(sessionId, seq, timestamp, event.type, payload))
+        this.timed('write', () =>
+          this.db.transaction(() => {
+            insert.run(sessionId, seq, timestamp, event.type, payload)
+            this.searchIndex.apply(sessionId, toStore, timestamp)
+          })(),
+        )
         break
       } catch (error) {
         if (isBusyError(error) && busyRetries < EventStore.APPEND_BUSY_RETRIES) {
@@ -718,6 +726,7 @@ export class EventStore {
           let seq = baseSeq
           for (const event of toStore) {
             insert.run(sessionId, seq, timestamp, event.type, payloads[seq - baseSeq])
+            this.searchIndex.apply(sessionId, event, timestamp)
             const stored: StoredEvent = {
               seq,
               timestamp,
@@ -775,6 +784,9 @@ export class EventStore {
     const transaction = this.db.transaction(() => {
       for (const event of events) {
         insert.run(sessionId, event.seq, event.timestamp, event.type, payloads.get(event.seq))
+        this.searchIndex.apply(sessionId, { type: event.type, data: event.data } as TurnEvent, event.timestamp, {
+          allowSnapshot: true,
+        })
       }
     })
     transaction()
@@ -1333,7 +1345,10 @@ export class EventStore {
    */
   deleteSession(sessionId: string): void {
     this.dropStreaming(sessionId)
-    this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
+      this.searchIndex.removeSession(sessionId)
+    })()
     this.invalidateSessionCache(sessionId)
     this.runningSessionIds.delete(sessionId)
 

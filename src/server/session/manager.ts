@@ -26,6 +26,7 @@ import {
   listSessionsByProject as dbListSessionsByProject,
   listSessionsLimited as dbListSessionsLimited,
   listHomeSessions as dbListHomeSessions,
+  getSessionSummariesByIds as dbGetSessionSummariesByIds,
   deleteSession as dbDeleteSession,
   updateSessionMetadata,
   updateSessionProvider,
@@ -48,6 +49,8 @@ import {
   type DangerLevel,
 } from '../db/sessions.js'
 import { getProject } from '../db/projects.js'
+import { getDatabase } from '../db/index.js'
+import { isSearchIndexReady, searchSessionIds, SEARCH_INDEX_UNAVAILABLE } from '../search/fts-index.js'
 import {
   initSessionMcpOverrides,
   clearSessionOverrides,
@@ -796,6 +799,33 @@ export class SessionManager {
   listSessionsLimited(limit = 20, offset = 0): { sessions: SessionSummary[]; hasMore: boolean } {
     const result = dbListSessionsLimited(limit, offset)
     return { ...result, sessions: this.projectRunningState(result.sessions) }
+  }
+
+  searchSessions(
+    query: string,
+    limit = 20,
+    offset = 0,
+    projectId?: string,
+  ): {
+    sessions: SessionSummary[]
+    hasMore: boolean
+    indexReady: boolean
+    message?: { en: string; fr: string }
+  } {
+    const db = getDatabase()
+    if (!isSearchIndexReady(db)) {
+      return { sessions: [], hasMore: false, indexReady: false, message: SEARCH_INDEX_UNAVAILABLE }
+    }
+    const page = searchSessionIds(db, query, {
+      limit,
+      offset,
+      ...(projectId ? { projectId } : {}),
+    })
+    return {
+      sessions: this.projectRunningState(dbGetSessionSummariesByIds(page.sessionIds)),
+      hasMore: page.hasMore,
+      indexReady: true,
+    }
   }
 
   /**

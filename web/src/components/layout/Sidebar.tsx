@@ -27,7 +27,7 @@ import {
   EditSmallIcon,
 } from '../shared/icons'
 import { groupSessionsByDate, formatDateHeader, formatTime } from '../../lib/format-date.js'
-import { fuzzyMatch, highlightMatches } from '../../lib/modal-utils.js'
+import { highlightMatches } from '../../lib/modal-utils.js'
 import { shouldAutofocus } from '../../lib/device'
 import { useBinding, useKeybindings } from '../../hooks/useKeybindings.js'
 import { hasStoredToken, downloadSessionExport, importSession } from '../../lib/api'
@@ -58,6 +58,10 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
   const importFileInputRef = useRef<HTMLInputElement>(null)
 
   const sessions = useSessionStore((state) => state.sessions)
+  const searchResults = useSessionStore((state) => state.searchResults)
+  const searchIndexReady = useSessionStore((state) => state.searchIndexReady)
+  const searchIndexMessage = useSessionStore((state) => state.searchIndexMessage)
+  const searchFromServer = useSessionStore((state) => state.searchFromServer)
   const currentSession = useSessionStore((state) => state.currentSession)
   const unreadSessionIds = useSessionStore((state) => state.unreadSessionIds)
   const deleteSession = useSessionStore((state) => state.deleteSession)
@@ -72,6 +76,7 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
   const currentProject = useCurrentProject()
 
   const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [focusedIndex, setFocusedIndex] = useState(-1)
   const searchRef = useRef<HTMLInputElement>(null)
   const sessionListRef = useRef<HTMLDivElement>(null)
@@ -144,22 +149,26 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
     return [favs, others]
   }, [projectSessions])
 
-  const applySearch = (list: SessionSummary[]) => {
-    if (!searchQuery) return list
-    return list.filter((s) => {
-      const title = s.title ?? ''
-      const promptsJoined = (s.recentUserPrompts?.map((p) => p.content) ?? []).join(' ')
-      return fuzzyMatch(title, searchQuery) || fuzzyMatch(promptsJoined, searchQuery)
-    })
-  }
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 150)
+    return () => clearTimeout(timer)
+  }, [searchQuery])
 
-  const filteredFavorites = useMemo(() => applySearch(favoriteSessions), [favoriteSessions, searchQuery])
-  const filteredOthers = useMemo(() => applySearch(otherSessions), [otherSessions, searchQuery])
+  useEffect(() => {
+    void searchFromServer(debouncedQuery, { projectId })
+  }, [debouncedQuery, projectId, searchFromServer])
+
+  const filteredFavorites = useMemo(() => (debouncedQuery ? [] : favoriteSessions), [favoriteSessions, debouncedQuery])
+  const filteredOthers = useMemo(() => {
+    if (debouncedQuery) return searchResults ?? []
+    return otherSessions
+  }, [otherSessions, debouncedQuery, searchResults])
 
   const allFiltered = [...filteredFavorites, ...filteredOthers]
 
-  const isSearching = searchQuery.length > 0
-  const hasNoResults = isSearching && allFiltered.length === 0
+  const isSearching = debouncedQuery.length > 0
+  const indexUnavailable = isSearching && searchIndexReady === false
+  const hasNoResults = isSearching && !indexUnavailable && searchResults !== null && allFiltered.length === 0
 
   // Reset focused index when search results change
   useEffect(() => {
@@ -392,7 +401,17 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
                   </button>
                 )}
               </div>
-              {isSearching && !hasNoResults && (
+              {indexUnavailable && (
+                <div className="mt-1 text-xs text-text-muted px-1">
+                  {t(
+                    searchIndexMessage ?? {
+                      en: 'Search index is unavailable. Run scripts/rebuild-search-index.ts to enable search.',
+                      fr: "L'index de recherche est indisponible. Exécutez scripts/rebuild-search-index.ts pour activer la recherche.",
+                    },
+                  )}
+                </div>
+              )}
+              {isSearching && !hasNoResults && !indexUnavailable && (
                 <div className="mt-1 text-xs text-text-muted px-1">
                   {t(
                     {
