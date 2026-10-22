@@ -223,10 +223,10 @@ export interface SnapshotCacheStats {
 }
 
 function resolvePositiveInt(option: number | undefined, envValue: string | undefined, fallback: number): number {
-  if (option !== undefined) return Number.isFinite(option) && option > 0 ? Math.floor(option) : fallback
-  if (envValue === undefined || envValue === '') return fallback
-  const parsed = Number(envValue)
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
+  const raw = option !== undefined ? option : envValue === undefined || envValue === '' ? Number.NaN : Number(envValue)
+  if (!Number.isFinite(raw)) return fallback
+  const normalized = Math.floor(raw)
+  return normalized >= 1 ? normalized : fallback
 }
 
 export class EventStore {

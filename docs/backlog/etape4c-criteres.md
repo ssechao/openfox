@@ -32,7 +32,7 @@ Commande :
 npx vitest run src/server/events/store-snapshot-cache.test.ts
 ```
 
-- **Limite configurable** : option constructeur **et** env `OPENFOX_SNAPSHOT_CACHE_MAX_BYTES` / `OPENFOX_SNAPSHOT_CACHE_MAX_ENTRIES`. Défaut inchangé : 128 MiB / 16. Option > env > défaut. Valeurs ≤ 0 ou non numériques → défaut.
+- **Limite configurable** : option constructeur **et** env `OPENFOX_SNAPSHOT_CACHE_MAX_BYTES` / `OPENFOX_SNAPSHOT_CACHE_MAX_ENTRIES`. Défaut inchangé : 128 MiB / 16. Option > env > défaut. `Math.floor` d’abord, puis entier normalisé **≥ 1** (sinon défaut) pour les deux limites. `0.5` → défaut, pas 0. Tests : valeur fractionnaire ; plafond d’entrées seul, sans pression d’octets.
 - **Plafond d’octets** : après `cacheSnapshot` / `evictSnapshots`, la somme des `bytes` des sessions **inactives** est ≤ la limite. Un payload plus gros que la limite n’est **pas** gardé (miss au GET suivant). Les sessions `isRunning` restent épinglées (test `store-hot-path.test.ts` « active snapshots bypass capacity eviction » reste vert).
 - **Plafond d’entrées** : même règle sur le nombre d’entrées inactives.
 - **Métriques toujours actives** (indépendantes de `OPENFOX_SNAPSHOT_DIAGNOSTICS`) : `hits`, `misses`, `bytes` (somme courante), `evictions` (capacité seulement : dépassement d’entrées ou d’octets). Invalidation d’écriture, `clearSnapshotCache`, `deleteSession` **ne comptent pas** comme évictions. Compteurs persistants jusqu’à `resetDiagnostics` / process.
@@ -73,7 +73,7 @@ Le test unique vérifie :
 2. **Instance isolée** : `e2e/utils/health-server-child.ts`, HOME / XDG / `OPENFOX_DB_PATH` sous `os.tmpdir()`, `OPENFOX_MOCK_LLM`, plafond **< snapshot lourd** : `OPENFOX_SNAPSHOT_CACHE_MAX_BYTES=16777216` (16 Mio) et `OPENFOX_SNAPSHOT_CACHE_MAX_ENTRIES=4` (ou équivalent option). 3 × 5 Mio = 15 Mio ≤ 16 Mio ; la 4e moyenne évince.
 3. **Charge** :
    - les **6 sessions moyennes** : `GET /api/sessions/:id` **deux fois** chacune (froid puis chaud) → hits, misses et évictions se font **sur elles** ;
-   - la **session lourde (~107 Mio)** : `GET /api/sessions/:id` → **miss, non conservée** (payload > limite). Un second GET reste un miss. `snapshotCacheBytes` ne saute pas à 107 Mio.
+   - la **session lourde (~107 Mio)** : deux `GET /api/sessions/:id`. Avant/après **chaque** GET, comparer hits/misses : misses augmente, hits inchangé (miss répété, non conservée). `snapshotCacheBytes` ≤ 16 Mio après chaque GET, jamais 107 Mio.
 4. **Après charge**, `GET /api/diagnostics` :
    - `snapshotCacheBytes.value` ≤ `snapshotCacheLimitBytes.value` (16 Mio)
    - `snapshotCacheLimitBytes.value === 16777216`

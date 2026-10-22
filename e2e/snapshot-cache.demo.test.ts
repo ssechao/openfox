@@ -149,6 +149,31 @@ async function stopInstance(instance: Instance): Promise<void> {
 
 const authed = { 'x-session-token': TOKEN }
 
+async function cacheSeries(url: string): Promise<{
+  hits: number | null
+  misses: number | null
+  bytes: number | null
+  evictions: number | null
+  limit: number | null
+}> {
+  const res = await fetch(`${url}/api/diagnostics`, { headers: authed })
+  expect(res.status).toBe(200)
+  const data = (await res.json()) as DiagnosticsData
+  return {
+    hits: data.series.snapshotCacheHits.value,
+    misses: data.series.snapshotCacheMisses.value,
+    bytes: data.series.snapshotCacheBytes.value,
+    evictions: data.series.snapshotCacheEvictions.value,
+    limit: data.series.snapshotCacheLimitBytes.value,
+  }
+}
+
+async function getSession(url: string, id: string): Promise<void> {
+  const res = await fetch(`${url}/api/sessions/${id}`, { headers: authed })
+  expect(res.status).toBe(200)
+  await res.arrayBuffer()
+}
+
 describe('4c snapshot cache demo', () => {
   let corpusDir: string
   let dbPath: string
@@ -180,34 +205,33 @@ describe('4c snapshot cache demo', () => {
       expect(productionFiles(files)).toEqual([])
 
       for (const id of mediumIds) {
-        const first = await fetch(`${instance.url}/api/sessions/${id}`, { headers: authed })
-        expect(first.status).toBe(200)
-        await first.arrayBuffer()
-        const second = await fetch(`${instance.url}/api/sessions/${id}`, { headers: authed })
-        expect(second.status).toBe(200)
-        await second.arrayBuffer()
+        await getSession(instance.url, id)
+        await getSession(instance.url, id)
       }
 
-      const heavy = await fetch(`${instance.url}/api/sessions/${heavyId}`, { headers: authed })
-      expect(heavy.status).toBe(200)
-      await heavy.arrayBuffer()
+      const beforeHeavy = await cacheSeries(instance.url)
+      expect(beforeHeavy.limit).toBe(LIMIT_BYTES)
+      expect(beforeHeavy.bytes).not.toBeNull()
+      expect(beforeHeavy.bytes!).toBeLessThanOrEqual(LIMIT_BYTES)
 
-      const res = await fetch(`${instance.url}/api/diagnostics`, { headers: authed })
-      expect(res.status).toBe(200)
-      const data = (await res.json()) as DiagnosticsData
-      const hits = data.series.snapshotCacheHits.value
-      const misses = data.series.snapshotCacheMisses.value
-      const bytes = data.series.snapshotCacheBytes.value
-      const evictions = data.series.snapshotCacheEvictions.value
-      const limit = data.series.snapshotCacheLimitBytes.value
-      report['diagnostics'] = { hits, misses, bytes, evictions, limit }
-      expect(limit).toBe(LIMIT_BYTES)
-      expect(bytes).not.toBeNull()
-      expect(bytes!).toBeLessThanOrEqual(LIMIT_BYTES)
-      expect(evictions).toBeGreaterThanOrEqual(1)
-      expect(hits).toBeGreaterThanOrEqual(1)
-      expect(misses).toBeGreaterThanOrEqual(1)
-      expect(bytes!).toBeLessThan(80_000_000)
+      await getSession(instance.url, heavyId)
+      const afterFirstHeavy = await cacheSeries(instance.url)
+      expect(afterFirstHeavy.misses).not.toBeNull()
+      expect(beforeHeavy.misses).not.toBeNull()
+      expect(afterFirstHeavy.misses!).toBeGreaterThan(beforeHeavy.misses!)
+      expect(afterFirstHeavy.hits).toBe(beforeHeavy.hits)
+      expect(afterFirstHeavy.bytes!).toBeLessThanOrEqual(LIMIT_BYTES)
+
+      await getSession(instance.url, heavyId)
+      const afterSecondHeavy = await cacheSeries(instance.url)
+      expect(afterSecondHeavy.misses).not.toBeNull()
+      expect(afterSecondHeavy.misses!).toBeGreaterThan(afterFirstHeavy.misses!)
+      expect(afterSecondHeavy.hits).toBe(afterFirstHeavy.hits)
+      expect(afterSecondHeavy.bytes!).toBeLessThanOrEqual(LIMIT_BYTES)
+      expect(afterSecondHeavy.limit).toBe(LIMIT_BYTES)
+      expect(afterSecondHeavy.evictions).toBeGreaterThanOrEqual(1)
+      expect(afterSecondHeavy.hits).toBeGreaterThanOrEqual(1)
+      report['diagnostics'] = { beforeHeavy, afterFirstHeavy, afterSecondHeavy }
 
       const live = await openFiles(instance.child.pid!)
       expect(productionFiles(live)).toEqual([])

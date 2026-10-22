@@ -49,6 +49,38 @@ describe('EventStore snapshot cache sizing', () => {
     expect(opted.getSnapshotCacheStats().limitBytes).toBe(200)
   })
 
+  it('floors then requires a normalized integer ≥ 1, otherwise the default', () => {
+    vi.stubEnv('OPENFOX_SNAPSHOT_CACHE_MAX_ENTRIES', '0.5')
+    vi.stubEnv('OPENFOX_SNAPSHOT_CACHE_MAX_BYTES', '0.9')
+    const fromEnv = fixture().store
+    expect(fromEnv.getSnapshotCacheStats().limitBytes).toBe(SNAPSHOT_CACHE_DEFAULT_MAX_BYTES)
+    fromEnv.append('a', { type: 'turn.snapshot', data: snapshot('a') })
+    fromEnv.append('b', { type: 'turn.snapshot', data: snapshot('b') })
+    expect(fromEnv.getSnapshotCacheStats().entries).toBe(2)
+
+    const fromOption = fixture({ snapshotCacheMaxEntries: 0.5, snapshotCacheMaxBytes: 10_000_000 }).store
+    fromOption.append('a', { type: 'turn.snapshot', data: snapshot('a') })
+    fromOption.append('b', { type: 'turn.snapshot', data: snapshot('b') })
+    expect(fromOption.getSnapshotCacheStats().entries).toBe(2)
+
+    vi.stubEnv('OPENFOX_SNAPSHOT_CACHE_MAX_BYTES', '1.9')
+    vi.stubEnv('OPENFOX_SNAPSHOT_CACHE_MAX_ENTRIES', '1.9')
+    expect(fixture().store.getSnapshotCacheStats().limitBytes).toBe(1)
+    expect(fixture({ snapshotCacheMaxBytes: 1.9 }).store.getSnapshotCacheStats().limitBytes).toBe(1)
+  })
+
+  it('enforces the entry cap without byte pressure', () => {
+    const { store } = fixture({ snapshotCacheMaxEntries: 2, snapshotCacheMaxBytes: 50_000_000 })
+    for (const id of ['a', 'b', 'c', 'd']) {
+      store.append(id, { type: 'turn.snapshot', data: snapshot(id) })
+    }
+    const stats = store.getSnapshotCacheStats()
+    expect(stats.entries).toBeLessThanOrEqual(2)
+    expect(stats.evictions).toBeGreaterThanOrEqual(2)
+    expect(stats.bytes).toBeLessThanOrEqual(50_000_000)
+    expect(stats.limitBytes).toBe(50_000_000)
+  })
+
   it('falls back to defaults for zero, negative or non-numeric bounds', () => {
     vi.stubEnv('OPENFOX_SNAPSHOT_CACHE_MAX_BYTES', '0')
     vi.stubEnv('OPENFOX_SNAPSHOT_CACHE_MAX_ENTRIES', '-2')
