@@ -6,6 +6,7 @@ import type {
   DiagnosticsSeries,
   DiagnosticsUnit,
 } from '../../shared/diagnostics.js'
+import type { SessionRuntimeRegistry } from '../session/index.js'
 import type { DiagnosticsCollector } from './types.js'
 import { LatencyHistogram, mergedCount, mergedMax, mergedPercentile } from './histogram.js'
 
@@ -20,6 +21,7 @@ interface Bucket {
 
 export interface CollectorOptions {
   countRunningSessions?: () => number
+  runtimeRegistry?: SessionRuntimeRegistry
   dbPath?: string
   intervalMs?: number
   windowMs?: number
@@ -174,6 +176,7 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
         heapUsed: gauge('heapUsed', 'bytes'),
       },
       history,
+      runtimes: options.runtimeRegistry?.list() ?? [],
     }
   }
 

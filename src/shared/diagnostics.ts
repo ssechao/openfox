@@ -38,6 +38,16 @@ export interface DiagnosticsHistoryPoint {
   eventLoopDelayP99: number | null
 }
 
+export type RuntimeState = 'idle' | 'running' | 'paused' | 'stopping' | 'compacting' | 'workflow'
+
+export type RuntimeLastCommand = 'launch' | 'stop' | 'pause' | 'resume' | 'answer' | 'workflow' | 'compact'
+
+export interface RuntimeSnapshot {
+  sessionId: string
+  state: RuntimeState
+  lastCommand: RuntimeLastCommand | null
+}
+
 export interface DiagnosticsData {
   collectedAt: number
   intervalMs: number
@@ -45,4 +55,5 @@ export interface DiagnosticsData {
   historyMs: number
   series: Record<DiagnosticsSeriesName, DiagnosticsSeries>
   history: DiagnosticsHistoryPoint[]
+  runtimes: RuntimeSnapshot[]
 }
