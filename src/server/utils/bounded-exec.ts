@@ -16,6 +16,9 @@ export const PERMISSIONS_COMMAND_TIMEOUT_MS = 15_000
 /** `git init` when creating a project. */
 export const GIT_INIT_TIMEOUT_MS = 30_000
 
+/** Read-only git queries (branch, diff, status) behind git status polling and review diffs. */
+export const GIT_QUERY_TIMEOUT_MS = 10_000
+
 /** Bytes of stdout/stderr kept after draining. Earlier output is discarded. */
 export const CAPTURED_OUTPUT_LIMIT = 64 * 1024
 

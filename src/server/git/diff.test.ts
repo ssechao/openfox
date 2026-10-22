@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { getGitDiffFiles, formatGitDiffFiles, formatGitReviewDiff, getGitBranch } from './diff.js'
 import { setPluginVcsProviders, clearPluginVcsProviders } from '../plugins/vcs-providers.js'
 import type { PluginVcsProvider } from '../../plugin/index.js'
+import { GIT_QUERY_TIMEOUT_MS } from '../utils/bounded-exec.js'
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
@@ -11,7 +12,17 @@ vi.mock('./env.js', () => ({
   gitSpawnEnv: () => ({}),
 }))
 
+vi.mock('../utils/process-tree.js', () => ({
+  terminateProcessTree: vi.fn(),
+}))
+
+vi.mock('../utils/logger.js', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}))
+
 import { spawn } from 'node:child_process'
+import { terminateProcessTree } from '../utils/process-tree.js'
+import { logger } from '../utils/logger.js'
 
 type MockProc = {
   stdout: { on: (event: string, cb: (d: Buffer) => void) => void }
@@ -214,5 +225,43 @@ describe('getGitDiffFiles', () => {
     const branch = await getGitBranch('/tmp/native-repo')
     expect(branch).toBe('feature-x')
     expect(vi.mocked(spawn)).toHaveBeenCalled()
+  })
+})
+
+describe('git command timeout', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('kills a git that does not answer, logs it, and lets the next call run', async () => {
+    const hung = { stdout: { on: () => {} }, stderr: { on: () => {} }, on: () => {} }
+    vi.mocked(spawn)
+      .mockReturnValueOnce(hung as unknown as ReturnType<typeof spawn>)
+      .mockReturnValue(makeMockProc('main\n') as unknown as ReturnType<typeof spawn>)
+    vi.mocked(terminateProcessTree).mockResolvedValue()
+    vi.useFakeTimers()
+
+    let settled = false
+    const first = getGitBranch('/tmp/hung').finally(() => {
+      settled = true
+    })
+    await vi.advanceTimersByTimeAsync(GIT_QUERY_TIMEOUT_MS - 1)
+    expect(settled).toBe(false)
+    expect(terminateProcessTree).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(first).resolves.toBeNull()
+    expect(terminateProcessTree).toHaveBeenCalledWith(hung)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('timed out'),
+      expect.objectContaining({
+        cwd: '/tmp/hung',
+        args: ['rev-parse', '--abbrev-ref', 'HEAD'],
+        timeoutMs: GIT_QUERY_TIMEOUT_MS,
+      }),
+    )
+
+    vi.useRealTimers()
+    await expect(getGitBranch('/tmp/hung')).resolves.toBe('main')
   })
 })

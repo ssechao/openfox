@@ -97,6 +97,13 @@ let moduleEnqueueSend: ((client: ClientConnection, data: string, seq: number) =>
 
 const moduleGitRefreshQueue = new Map<string, boolean>()
 let moduleGitRefreshRunning = false
+let moduleGitTail: Promise<unknown> = Promise.resolve()
+
+function moduleWithGitLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = moduleGitTail.then(task)
+  moduleGitTail = run.catch(() => undefined)
+  return run
+}
 
 function moduleIsWorkdirWatched(workdir: string): boolean {
   for (const client of moduleClients?.values() ?? []) {
@@ -137,7 +144,7 @@ function moduleQueueGitRefresh(workdir: string, notifyUnchanged: boolean): void 
       for (const [queued, notify] of moduleGitRefreshQueue) {
         moduleGitRefreshQueue.delete(queued)
         try {
-          await moduleRefreshGitStatus(queued, notify)
+          await moduleWithGitLock(() => moduleRefreshGitStatus(queued, notify))
         } catch {
           /* skip */
         }
@@ -942,8 +949,11 @@ async function handleClientMessage(
 
       // Send initial git status immediately
       if (effectiveWorkdir) {
-        const branch = await moduleGitBranch(effectiveWorkdir)
-        const { files } = await moduleGitDiff(effectiveWorkdir)
+        const { branch, files } = await moduleWithGitLock(async () => {
+          const current = await moduleGitBranch(effectiveWorkdir)
+          const diff = await moduleGitDiff(effectiveWorkdir)
+          return { branch: current, files: diff.files }
+        })
         const msg = createGitStatusMessage(branch, files)
         send(msg)
         if (branch && moduleIsWorkdirWatched(effectiveWorkdir)) moduleStartGitPolling(effectiveWorkdir)

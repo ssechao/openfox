@@ -2,6 +2,9 @@ import { spawn } from 'node:child_process'
 import type { GitDiffFile } from '../../shared/protocol.js'
 import type { PluginVcsContext } from '../../plugin/index.js'
 import { gitSpawnEnv } from './env.js'
+import { GIT_QUERY_TIMEOUT_MS } from '../utils/bounded-exec.js'
+import { logger } from '../utils/logger.js'
+import { terminateProcessTree } from '../utils/process-tree.js'
 import { resolveVcsBranch, resolveVcsDiffFiles, resolveVcsModifiedFiles } from '../plugins/vcs-providers.js'
 
 function toVcsContext(cwd: string, context?: { sessionId?: string; projectId?: string }): PluginVcsContext {
@@ -80,13 +83,33 @@ function runGitText(cwd: string, args: string[]): Promise<{ code: number | null;
       env: gitSpawnEnv(),
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
+      ...(process.platform !== 'win32' ? { detached: true } : {}),
     })
     let stdout = ''
-    proc.stdout.on('data', (data: Buffer) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      logger.warn('git command timed out, killing its process tree', {
+        cwd,
+        args,
+        timeoutMs: GIT_QUERY_TIMEOUT_MS,
+      })
+      void terminateProcessTree(proc)
+        .catch(() => undefined)
+        .then(() => resolve({ code: null, stdout: '' }))
+    }, GIT_QUERY_TIMEOUT_MS)
+    const finish = (code: number | null, output: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code, stdout: output })
+    }
+    proc.stdout?.on('data', (data: Buffer) => {
       stdout += data.toString()
     })
-    proc.on('close', (code) => resolve({ code, stdout }))
-    proc.on('error', () => resolve({ code: null, stdout: '' }))
+    proc.on('close', (code) => finish(code, stdout))
+    proc.on('error', () => finish(null, ''))
   })
 }
 

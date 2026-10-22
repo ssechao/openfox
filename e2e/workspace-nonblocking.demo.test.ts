@@ -1,12 +1,15 @@
 /**
  * Étape 3 demo: create then delete a large workspace on an isolated instance
- * while /sante, /api/diagnostics and /api/health stay responsive. A dedicated
- * 20 ms timer in the server and the same timer in an idle witness process
- * record timestamped loop delays over three disjoint phases (create, delete,
- * then an idle reference of the same total length under the same probe load).
- * CPU contention delays both processes; a blocked event loop only delays the
- * server. The per-phase gap to the witness, over aligned windows, must stay
- * ≤ 100 ms on every platform; the gap to the reference is enforced on Linux.
+ * while /sante, /api/diagnostics and /api/health stay responsive and a
+ * WebSocket client is subscribed to the session, so git status polling (every
+ * second here) follows the session from the project into the workspace and
+ * back. A dedicated 20 ms timer in the server and the same timer in an idle
+ * witness process record timestamped loop delays over four disjoint phases
+ * (create, workspace watched by the client, delete, then a reference of the
+ * same total length under the same probe and polling load). CPU contention
+ * delays both processes; a blocked event loop only delays the server. The
+ * per-phase gap to the witness, over aligned windows, must stay ≤ 100 ms on
+ * every platform; on Linux the absolute delay must also stay ≤ 100 ms.
  */
 import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
@@ -14,6 +17,7 @@ import { loadavg, tmpdir, uptime } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { WebSocket } from 'ws'
 import type { DiagnosticsData } from '../src/shared/diagnostics.js'
 import { freePort, isolatedEnv, killProcessTree, openFiles, productionFiles, track } from './utils/isolated-env.js'
 
@@ -23,6 +27,9 @@ const FILE_COUNT = 5_000
 const ENFORCE_LOOP_MAX = process.platform === 'linux'
 const LOOP_MAX_MS = 100
 const WINDOW_MS = 1_000
+const GIT_POLL_MS = 1_000
+const WORKSPACE_DWELL_MS = 3_000
+const MARKER_FILE = 'dwell-marker.txt'
 const HEALTH_TIMEOUT_MS = ENFORCE_LOOP_MAX ? 2_000 : 10_000
 
 const WITNESS_SOURCE = `
@@ -131,6 +138,55 @@ function witnessSamples(child: ChildProcess): Promise<LoopSample[]> {
   })
 }
 
+interface SessionWatcher {
+  statuses: Array<{ at: number; paths: string[] }>
+  close: () => Promise<void>
+}
+
+async function watchSession(base: string, sessionId: string): Promise<SessionWatcher> {
+  const socket = new WebSocket(`${base.replace(/^http/, 'ws')}/ws`)
+  const statuses: SessionWatcher['statuses'] = []
+  await new Promise<void>((done, fail) => {
+    const timer = setTimeout(() => fail(new Error('WebSocket did not open')), 30_000)
+    socket.once('open', () => {
+      clearTimeout(timer)
+      done()
+    })
+    socket.once('error', (error) => {
+      clearTimeout(timer)
+      fail(error)
+    })
+  })
+  const loaded = new Promise<void>((done, fail) => {
+    const timer = setTimeout(() => fail(new Error('session.load was not acknowledged')), 60_000)
+    socket.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as {
+        id?: string
+        type: string
+        payload?: { diff?: { files?: Array<{ path: string }> } }
+      }
+      if (message.type === 'git.status') {
+        statuses.push({ at: Date.now(), paths: (message.payload?.diff?.files ?? []).map((file) => file.path) })
+      }
+      if (message.id !== 'demo-session-load') return
+      clearTimeout(timer)
+      if (message.type === 'ack') done()
+      else fail(new Error(`session.load failed: ${raw.toString()}`))
+    })
+  })
+  socket.send(JSON.stringify({ id: 'demo-session-load', type: 'session.load', payload: { sessionId } }))
+  await loaded
+  return {
+    statuses,
+    close: () =>
+      new Promise<void>((done) => {
+        if (socket.readyState === WebSocket.CLOSED) return done()
+        socket.once('close', () => done())
+        socket.close()
+      }),
+  }
+}
+
 interface Instance {
   url: string
   port: number
@@ -177,6 +233,7 @@ async function startInstance(): Promise<Instance> {
         OPENFOX_LLM_URL: 'http://127.0.0.1:9/v1',
         OPENFOX_HEALTH_DEMO_MODE: 'development',
         OPENFOX_DEMO_LOOP_PROBE: '1',
+        OPENFOX_GIT_POLL_INTERVAL: String(GIT_POLL_MS),
       }),
       execArgv: [
         '--import',
@@ -346,7 +403,8 @@ describe('workspace non-blocking demo (isolated instance)', () => {
           await sleep(200)
         }
       })()
-      await sleep(1_000)
+      const watcher = await watchSession(instance.url, sessionId)
+      await sleep(2 * GIT_POLL_MS)
 
       const createStarted = Date.now()
       const switched = await json(instance.url, `/api/sessions/${sessionId}/switch-workspace`, {
@@ -355,8 +413,22 @@ describe('workspace non-blocking demo (isolated instance)', () => {
         body: JSON.stringify({ target: 'heavy' }),
       })
       expect(switched.status).toBe(200)
-      expect(String(switched.body.session.workspace)).toContain('heavy')
+      const workspacePath = String(switched.body.session.workspace)
+      expect(workspacePath).toContain('heavy')
       const createEnded = Date.now()
+
+      const statusDeadline = Date.now() + 30_000
+      const workspaceSeen = () =>
+        watcher.statuses.some((status) => status.paths.some((path) => path.startsWith('bulk')))
+      while (!workspaceSeen() && Date.now() < statusDeadline) await sleep(50)
+      const markerWritten = Date.now()
+      await writeFile(join(workspacePath, MARKER_FILE), 'polled\n')
+      const markerSeen = () =>
+        watcher.statuses.some((status) => status.at >= markerWritten && status.paths.includes(MARKER_FILE))
+      while (!markerSeen() && Date.now() < statusDeadline) await sleep(50)
+      const dwellRemaining = createEnded + WORKSPACE_DWELL_MS - Date.now()
+      if (dwellRemaining > 0) await sleep(dwellRemaining)
+      const dwellEnded = Date.now()
 
       const deleted = await json(instance.url, `/api/sessions/${sessionId}/delete-workspace`, {
         method: 'POST',
@@ -372,6 +444,7 @@ describe('workspace non-blocking demo (isolated instance)', () => {
 
       probeAc.abort()
       await Promise.race([probe, sleep(2_000)])
+      await watcher.close()
 
       const [server, witnessed] = await Promise.all([serverSamples(createStarted - 60_000), witnessSamples(witness)])
       const openfox = server.samples
@@ -382,40 +455,59 @@ describe('workspace non-blocking demo (isolated instance)', () => {
           join(profDir, `stalls-${server.clock.wallMs}.json`),
           JSON.stringify({
             clock: server.clock,
-            phases: { createStarted, createEnded, deleteEnded, referenceEnded },
+            phases: { createStarted, createEnded, dwellEnded, deleteEnded, referenceEnded },
             openfox: stalls(openfox),
             witness: stalls(witnessed),
           }),
         )
       }
       const create = phaseStats(openfox, witnessed, createStarted, createEnded)
-      const remove = phaseStats(openfox, witnessed, createEnded, deleteEnded)
+      const dwell = phaseStats(openfox, witnessed, createEnded, dwellEnded)
+      const remove = phaseStats(openfox, witnessed, dwellEnded, deleteEnded)
       const reference = phaseStats(openfox, witnessed, deleteEnded, referenceEnded)
 
-      const opMax = Math.max(create.openfoxMaxMs, remove.openfoxMaxMs)
+      const opMax = Math.max(create.openfoxMaxMs, dwell.openfoxMaxMs, remove.openfoxMaxMs)
       const overheadMs = opMax - reference.openfoxMaxMs
+      const statusesIn = (from: number, to: number) =>
+        watcher.statuses.filter((status) => status.at >= from && status.at < to)
+      const workspaceStatuses = statusesIn(createStarted, deleteEnded).filter((status) =>
+        status.paths.some((path) => path.startsWith('bulk')),
+      )
 
       // eslint-disable-next-line no-console
       console.log(
         JSON.stringify({
           platform: process.platform,
           create: roundStats(create),
+          workspace: roundStats(dwell),
           delete: roundStats(remove),
           reference: roundStats(reference),
+          opMaxMs: round(opMax),
           overheadMs: round(overheadMs),
           durationCreateMs: createEnded - createStarted,
-          durationDeleteMs: deleteEnded - createEnded,
+          durationWorkspaceMs: dwellEnded - createEnded,
+          durationDeleteMs: deleteEnded - dwellEnded,
+          gitStatus: {
+            create: statusesIn(createStarted, createEnded).length,
+            workspace: statusesIn(createEnded, dwellEnded).length,
+            delete: statusesIn(dwellEnded, deleteEnded).length,
+            reference: statusesIn(deleteEnded, referenceEnded).length,
+            withWorkspaceFiles: workspaceStatuses.length,
+            markerSeen: markerSeen(),
+          },
           samples: { openfox: openfox.length, witness: witnessed.length },
           health,
           loadAvg: loadavg(),
           uptimeS: uptime(),
-          enforceReference: ENFORCE_LOOP_MAX,
+          enforceAbsolute: ENFORCE_LOOP_MAX,
         }),
       )
 
       expect(health.errors).toBe(0)
       expect(health.requests).toBeGreaterThan(3)
       expect(opDuration).toBeGreaterThan(500)
+      expect(markerSeen(), 'a git status poll of the watched workspace reached the client').toBe(true)
+      expect(workspaceStatuses.length).toBeGreaterThan(0)
       expect(
         openfox.filter(([firedAt]) => firedAt >= createStarted && firedAt <= referenceEnded).length,
       ).toBeGreaterThan(0)
@@ -425,6 +517,7 @@ describe('workspace non-blocking demo (isolated instance)', () => {
 
       for (const [phase, stats] of [
         ['create', create],
+        ['workspace', dwell],
         ['delete', remove],
         ['reference', reference],
       ] as const) {
@@ -436,6 +529,7 @@ describe('workspace non-blocking demo (isolated instance)', () => {
 
       if (ENFORCE_LOOP_MAX) {
         expect(health.timeouts).toBe(0)
+        expect(opMax, `eventLoopDelay max ${opMax} ms during the operation on Linux`).toBeLessThanOrEqual(LOOP_MAX_MS)
         expect(overheadMs, `eventLoopDelay overhead ${overheadMs} ms on Linux`).toBeLessThanOrEqual(LOOP_MAX_MS)
       }
     } finally {

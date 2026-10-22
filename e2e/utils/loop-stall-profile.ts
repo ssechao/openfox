@@ -21,7 +21,13 @@ interface CpuProfile {
 
 interface StallDump {
   clock: { wallMs: number; hrtimeUs: number }
-  phases: { createStarted: number; createEnded: number; deleteEnded: number; referenceEnded: number }
+  phases: {
+    createStarted: number
+    createEnded: number
+    dwellEnded?: number
+    deleteEnded: number
+    referenceEnded: number
+  }
   openfox: Array<[number, number]>
   witness: Array<[number, number]>
 }
@@ -68,16 +74,19 @@ function analyse(dir: string): void {
 
   const toProfileUs = (wallMs: number) => dump.clock.hrtimeUs - (dump.clock.wallMs - wallMs) * 1000
   const { createStarted, createEnded, deleteEnded, referenceEnded } = dump.phases
+  const dwellEnded = dump.phases.dwellEnded ?? createEnded
   const phaseOf = (wallMs: number) =>
     wallMs < createStarted
       ? null
       : wallMs < createEnded
         ? 'create'
-        : wallMs < deleteEnded
-          ? 'delete'
-          : wallMs < referenceEnded
-            ? 'reference'
-            : null
+        : wallMs < dwellEnded
+          ? 'workspace'
+          : wallMs < deleteEnded
+            ? 'delete'
+            : wallMs < referenceEnded
+              ? 'reference'
+              : null
 
   console.log(`\n${dir}: witness stalls > 100 ms: ${dump.witness.filter(([firedAt]) => phaseOf(firedAt)).length}`)
   for (const [firedAt, delay] of dump.openfox) {

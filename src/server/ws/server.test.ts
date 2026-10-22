@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import WebSocket from 'ws'
 import { recordLLMFailure, clearLLMFailure, sleepThroughRetryBackoff } from '../chat/stream-pure.js'
 
@@ -29,6 +29,7 @@ const {
   applyDynamicContextMock,
   getGitBranchMock,
   getGitDiffFilesMock,
+  spawnMock,
 } = vi.hoisted(() => ({
   createProjectMock: vi.fn(),
   getProjectMock: vi.fn(),
@@ -54,6 +55,18 @@ const {
   applyDynamicContextMock: vi.fn(),
   getGitBranchMock: vi.fn(),
   getGitDiffFilesMock: vi.fn(),
+  spawnMock: vi.fn(),
+}))
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  spawnMock.mockImplementation(actual.spawn)
+  return { ...actual, spawn: spawnMock }
+})
+
+vi.mock('../utils/bounded-exec.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/bounded-exec.js')>()),
+  GIT_QUERY_TIMEOUT_MS: 50,
 }))
 
 vi.mock('../db/projects.js', () => ({
@@ -2214,17 +2227,21 @@ describe('createWebSocketServer', () => {
   describe('git status polling', () => {
     const GIT_POLL_MS = 10_000
     type GitSession = { id: string; workdir: string; workspace?: string }
+    const heldGit: Array<() => void> = []
+    const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 20))
 
     beforeEach(() => {
       vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
       getGitBranchMock.mockResolvedValue('main')
     })
 
-    afterEach(() => {
+    afterEach(async () => {
+      while (heldGit.length > 0) {
+        heldGit.shift()!()
+        await settle()
+      }
       vi.useRealTimers()
     })
-
-    const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 20))
 
     async function until(condition: () => boolean): Promise<void> {
       const deadline = Date.now() + 2_000
@@ -2242,6 +2259,31 @@ describe('createWebSocketServer', () => {
     }
 
     const gitCalls = (workdir: string) => getGitBranchMock.mock.calls.filter(([cwd]) => cwd === workdir).length
+
+    function holdGit() {
+      const releases = heldGit
+      const state = { inFlight: 0, maxInFlight: 0 }
+      const enter = () => {
+        state.inFlight++
+        state.maxInFlight = Math.max(state.maxInFlight, state.inFlight)
+      }
+      getGitBranchMock.mockImplementation(() => {
+        enter()
+        return new Promise<string>((resolve) =>
+          releases.push(() => {
+            state.inFlight--
+            resolve('main')
+          }),
+        )
+      })
+      getGitDiffFilesMock.mockImplementation(async () => {
+        enter()
+        await settle()
+        state.inFlight--
+        return []
+      })
+      return { releases, state }
+    }
 
     const hasFile = (message: TestMessage, path: string) =>
       message.type === 'git.status' &&
@@ -2315,13 +2357,15 @@ describe('createWebSocketServer', () => {
       await closeAll(harness)
     })
 
-    it('stops polling once the last client watching the directory disconnects', async () => {
+    it('keeps one timer for two clients on a directory and polls until the last one leaves', async () => {
       const workdir = '/tmp/git-poll-last-client'
       const { manager } = createGitSessionManager({ 'session-1': workdir })
       const harness = await createHarness({ sessionManager: manager })
       const second = await harness.connectClient()
+      const timersBefore = vi.getTimerCount()
       await loadSession(harness, 'session-1')
       await loadSession(second, 'session-1')
+      expect(vi.getTimerCount() - timersBefore).toBe(1)
 
       getGitBranchMock.mockClear()
       await pollCycles(1)
@@ -2329,17 +2373,64 @@ describe('createWebSocketServer', () => {
 
       await second.close()
       await until(() => harness.wsServer.clients.size === 1)
+      expect(vi.getTimerCount() - timersBefore).toBe(1)
       getGitBranchMock.mockClear()
       await pollCycles(1)
       expect(gitCalls(workdir)).toBe(1)
 
       harness.client.close()
       await until(() => harness.wsServer.clients.size === 0)
+      expect(vi.getTimerCount() - timersBefore).toBe(0)
       getGitBranchMock.mockClear()
       getGitDiffFilesMock.mockClear()
       await pollCycles(3)
       expect(getGitBranchMock).not.toHaveBeenCalled()
       expect(getGitDiffFilesMock).not.toHaveBeenCalled()
+      await closeAll(harness)
+    })
+
+    it('does not start a poll pass while the previous one is still running', async () => {
+      const workdir = '/tmp/git-poll-overlap'
+      const { manager } = createGitSessionManager({ 'session-1': workdir })
+      const harness = await createHarness({ sessionManager: manager })
+      await loadSession(harness, 'session-1')
+
+      getGitBranchMock.mockClear()
+      const git = holdGit()
+      await pollCycles(3)
+      expect(gitCalls(workdir)).toBe(1)
+
+      git.releases.shift()!()
+      await until(() => gitCalls(workdir) === 2)
+      git.releases.shift()!()
+      await settle()
+      expect(gitCalls(workdir)).toBe(2)
+      expect(git.state.maxInFlight).toBe(1)
+      await closeAll(harness)
+    })
+
+    it('does not run the session.load git status alongside a poll pass', async () => {
+      const left = '/tmp/git-poll-load-left'
+      const right = '/tmp/git-poll-load-right'
+      const { manager } = createGitSessionManager({ 'session-1': left, 'session-2': right })
+      const harness = await createHarness({ sessionManager: manager })
+      const second = await harness.connectClient()
+      await loadSession(harness, 'session-1')
+
+      getGitBranchMock.mockClear()
+      const git = holdGit()
+      await pollCycles(1)
+      second.send({ id: 'load-right', type: 'session.load', payload: { sessionId: 'session-2' } })
+      await settle()
+      expect(getGitBranchMock.mock.calls.map(([cwd]) => cwd)).toEqual([left])
+
+      git.releases.shift()!()
+      await until(() => getGitBranchMock.mock.calls.length === 2)
+      expect(getGitBranchMock.mock.calls[1]![0]).toBe(right)
+      git.releases.shift()!()
+      await second.nextMessage((message) => message.id === 'load-right')
+      expect(git.state.maxInFlight).toBe(1)
+      await second.close()
       await closeAll(harness)
     })
 
@@ -2416,19 +2507,74 @@ describe('createWebSocketServer', () => {
       await loadSession(harness, 'session-1')
       await loadSession(second, 'session-2')
 
-      const releases: Array<() => void> = []
       getGitBranchMock.mockClear()
-      getGitBranchMock.mockImplementation(() => new Promise<string>((resolve) => releases.push(() => resolve('main'))))
+      const git = holdGit()
       await pollCycles(1)
       expect(getGitBranchMock).toHaveBeenCalledTimes(1)
 
-      releases.shift()!()
+      git.releases.shift()!()
       await until(() => getGitBranchMock.mock.calls.length === 2)
       expect(new Set(getGitBranchMock.mock.calls.map(([cwd]) => cwd))).toEqual(new Set([left, right]))
-      releases.shift()!()
+      git.releases.shift()!()
       await settle()
+      expect(git.state.maxInFlight).toBe(1)
       await second.close()
       await closeAll(harness)
+    })
+
+    it('kills a git process that never answers and runs the next poll pass', async () => {
+      const workdir = '/tmp/git-poll-hung'
+      const actualGit = await vi.importActual<typeof import('../git/diff.js')>('../git/diff.js')
+      const actualSpawn = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).spawn
+      getGitBranchMock.mockImplementation(actualGit.getGitBranch)
+      getGitDiffFilesMock.mockImplementation(actualGit.getGitDiffFiles)
+      const fakeGit = (stdout: string | null) => {
+        const proc = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() })
+        if (stdout !== null) {
+          setTimeout(() => {
+            proc.stdout.emit('data', Buffer.from(stdout))
+            proc.emit('close', 0)
+          }, 0)
+        }
+        return proc
+      }
+      let hangNext = false
+      let untracked = ''
+      spawnMock.mockImplementation((_command: string, args: string[]) => {
+        if (hangNext) {
+          hangNext = false
+          return fakeGit(null)
+        }
+        if (args[0] === 'rev-parse') return fakeGit('main\n')
+        if (args[0] === 'status') return fakeGit(untracked)
+        return fakeGit('')
+      })
+      const branchCalls = () => spawnMock.mock.calls.filter(([, args]) => (args as string[])[0] === 'rev-parse').length
+
+      const { manager } = createGitSessionManager({ 'session-1': workdir })
+      const harness = await createHarness({ sessionManager: manager })
+      try {
+        await loadSession(harness, 'session-1')
+        expect(await harness.nextMessage((message) => message.type === 'git.status')).toMatchObject({
+          payload: { branch: 'main', diff: { files: [] } },
+        })
+
+        spawnMock.mockClear()
+        hangNext = true
+        await pollCycles(1)
+        await new Promise<void>((resolve) => setTimeout(resolve, 200))
+        expect(branchCalls()).toBe(1)
+
+        untracked = '?? after-hang.txt\n'
+        await pollCycles(1)
+        expect(await harness.nextMessage((message) => hasFile(message, 'after-hang.txt'))).toMatchObject({
+          payload: { branch: 'main', diff: { files: [{ path: 'after-hang.txt', status: 'added' }] } },
+        })
+        expect(branchCalls()).toBe(2)
+      } finally {
+        spawnMock.mockImplementation(actualSpawn)
+        await closeAll(harness)
+      }
     })
   })
 })
