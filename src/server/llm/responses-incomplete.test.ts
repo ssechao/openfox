@@ -86,6 +86,57 @@ const INCOMPLETE_TURN = [
   },
 ]
 
+const INCOMPLETE_WITH_TOOLS = [
+  { type: 'response.created', response_id: 'resp_inc_tools' },
+  {
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'function_call', id: 'fc_1', call_id: 'call-1', name: 'read_file', arguments: '' },
+  },
+  { type: 'response.function_call_arguments.delta', output_index: 0, delta: '{"path":"a.ts"}' },
+  {
+    type: 'response.incomplete',
+    response_id: 'resp_inc_tools',
+    response: {
+      id: 'resp_inc_tools',
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        {
+          type: 'function_call',
+          id: 'fc_1',
+          call_id: 'call-1',
+          name: 'read_file',
+          arguments: '{"path":"a.ts"}',
+        },
+      ],
+      usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 },
+    },
+  },
+]
+
+const INCOMPLETE_SUMMARY = [
+  { type: 'response.created', response_id: 'resp_inc_sum' },
+  { type: 'response.output_text.delta', response_id: 'resp_inc_sum', delta: '## Conversation Summary\nPartial' },
+  {
+    type: 'response.incomplete',
+    response_id: 'resp_inc_sum',
+    response: {
+      id: 'resp_inc_sum',
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '## Conversation Summary\nPartial' }],
+        },
+      ],
+      usage: { input_tokens: 20, output_tokens: 8, total_tokens: 28 },
+    },
+  },
+]
+
 async function startResponsesSequence(
   streams: unknown[][],
 ): Promise<{ server: Server; port: number; hits: () => number }> {
@@ -240,5 +291,178 @@ describe('wrapper-compat C3 agent loop surfaces incomplete in chat', () => {
         relayed.some((m: any) => m?.type === 'chat.llm_retry') ||
         JSON.stringify(events).toLowerCase().includes('truncat'),
     ).toBe(true)
+  })
+
+  it('surfaces incomplete with tools as truncation and does not execute the tools', async () => {
+    const mock = await startResponsesSequence([INCOMPLETE_WITH_TOOLS])
+    servers.push(mock.server)
+    const execute = vi.fn()
+    const llmClient = createLLMClient({
+      llm: {
+        baseUrl: `http://127.0.0.1:${mock.port}`,
+        timeout: 5000,
+        idleTimeout: 5000,
+        model: 'gpt-5.6-luna',
+        apiKey: 'test-key',
+        backend: 'opencode-go',
+      },
+      context: { maxTokens: 8192, compactionThreshold: 0.85, compactionTarget: 0.6 },
+    } as never)
+    const append = vi.fn()
+    const onMessage = vi.fn()
+    const config: TopLevelLoopConfig = {
+      mode: 'builder',
+      append,
+      onMessage,
+      sessionManager: mockSessionManager,
+      sessionId: 'incomplete-with-tools',
+      llmClient,
+      statsIdentity: { providerId: 'test', providerName: 'Test', backend: 'unknown' as const, model: 'gpt-5.6-luna' },
+      assembleRequest: vi.fn().mockResolvedValue({
+        systemPrompt: 'sys',
+        messages: [],
+        tools: [
+          { type: 'function', function: { name: 'read_file', description: 'Read', parameters: { type: 'object' } } },
+        ],
+      }),
+      getToolRegistry: () => ({ tools: [{ name: 'read_file' }], definitions: [], execute }) as any,
+      getConversationMessages: vi.fn().mockResolvedValue([]),
+      llmRetryPolicy: FAST_POLICY,
+    }
+    const result = await runTopLevelAgentLoop(config, mockTurnMetrics)
+    const events = append.mock.calls.map((c: any[]) => c[0])
+    const relayed = onMessage.mock.calls.map((c: any[]) => c[0])
+    expect(execute).not.toHaveBeenCalled()
+    expect(result.failed).toBeUndefined()
+    expect(events.some((e: any) => e?.type === 'chat.done' && e.data.reason === 'complete')).toBe(false)
+    expect(
+      events.some((e: any) => e?.type === 'chat.done' && e.data.reason === 'truncated') ||
+        relayed.some((m: any) => m?.type === 'chat.done' && m.payload?.reason === 'truncated'),
+    ).toBe(true)
+  })
+
+  it('does not commit a truncated compaction summary; previous context is kept', async () => {
+    const mock = await startResponsesSequence([INCOMPLETE_SUMMARY])
+    servers.push(mock.server)
+    const rebuildCachedContext = vi.fn()
+    const llmClient = createLLMClient({
+      llm: {
+        baseUrl: `http://127.0.0.1:${mock.port}`,
+        timeout: 5000,
+        idleTimeout: 5000,
+        model: 'gpt-5.6-luna',
+        apiKey: 'test-key',
+        backend: 'opencode-go',
+      },
+      context: { maxTokens: 8192, compactionThreshold: 0.85, compactionTarget: 0.6 },
+    } as never)
+    const append = vi.fn()
+    const onMessage = vi.fn()
+    const config: TopLevelLoopConfig = {
+      mode: 'builder',
+      append,
+      onMessage,
+      sessionManager: mockSessionManager,
+      sessionId: 'incomplete-compaction',
+      llmClient,
+      statsIdentity: { providerId: 'test', providerName: 'Test', backend: 'unknown' as const, model: 'gpt-5.6-luna' },
+      assembleRequest: vi.fn().mockResolvedValue({ systemPrompt: 'sys', messages: [] }),
+      getToolRegistry: () => ({ tools: [], definitions: [], execute: vi.fn() }) as any,
+      getConversationMessages: vi.fn().mockResolvedValue([]),
+      llmRetryPolicy: FAST_POLICY,
+      initialCompacting: true,
+      rebuildCachedContext,
+    }
+    await runTopLevelAgentLoop(config, mockTurnMetrics)
+    const events = append.mock.calls.map((c: any[]) => c[0])
+    const relayed = onMessage.mock.calls.map((c: any[]) => c[0])
+    expect(events.filter((e: any) => e?.type === 'context.compacted')).toHaveLength(0)
+    expect(rebuildCachedContext).not.toHaveBeenCalled()
+    expect(events.some((e: any) => e?.type === 'chat.done' && e.data.reason === 'complete')).toBe(false)
+    expect(
+      events.some((e: any) => e?.type === 'chat.done' && e.data.reason === 'truncated') ||
+        relayed.some((m: any) => m?.type === 'chat.done' && m.payload?.reason === 'truncated'),
+    ).toBe(true)
+    expect(JSON.stringify(events)).toMatch(/keeping the previous context|tronqu/)
+  })
+})
+
+async function startJsonServer(payload: unknown): Promise<{ server: Server; port: number; hits: () => number }> {
+  let count = 0
+  const server = createServer((req, res) => {
+    req.on('data', () => {})
+    req.on('end', () => {
+      count += 1
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(payload))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return { server, port: (server.address() as AddressInfo).port, hits: () => count }
+}
+
+describe('wrapper-compat C3 incomplete beats tool_calls (non-stream)', () => {
+  const servers: Server[] = []
+
+  afterAll(() => {
+    for (const server of servers) server.close()
+  })
+
+  it('maps incomplete with function_call output to length, never tool_calls', () => {
+    const response = parseResponsesResponse({
+      id: 'resp_inc_tools',
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        {
+          type: 'function_call',
+          id: 'fc_1',
+          call_id: 'call-1',
+          name: 'read_file',
+          arguments: '{"path":"a.ts"}',
+        },
+      ],
+    })
+    expect(response.choices[0]?.finish_reason).toBe('length')
+    expect(response.choices[0]?.finish_reason).not.toBe('tool_calls')
+    expect(response.choices[0]?.message['tool_calls']).toHaveLength(1)
+  })
+
+  it('maps a non-stream incomplete HTTP body with tools to finishReason length', async () => {
+    const mock = await startJsonServer({
+      id: 'resp_ns',
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        {
+          type: 'function_call',
+          id: 'fc_1',
+          call_id: 'call-1',
+          name: 'read_file',
+          arguments: '{"path":"a.ts"}',
+        },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'cut' }] },
+      ],
+      usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 },
+    })
+    servers.push(mock.server)
+    const llmClient = createLLMClient({
+      llm: {
+        baseUrl: `http://127.0.0.1:${mock.port}`,
+        timeout: 5000,
+        idleTimeout: 5000,
+        model: 'gpt-5.6-luna',
+        apiKey: 'test-key',
+        backend: 'opencode-go',
+      },
+      context: { maxTokens: 8192, compactionThreshold: 0.85, compactionTarget: 0.6 },
+    } as never)
+    const result = await llmClient.complete({
+      sessionId: 'incomplete-nonstream',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    expect(mock.hits()).toBe(1)
+    expect(result.finishReason).toBe('length')
+    expect(result.toolCalls?.length).toBe(1)
   })
 })

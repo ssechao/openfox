@@ -241,7 +241,11 @@ export function parseResponsesResponse(data: ResponsesApiResponse): ChatCompleti
     choices: [
       {
         finish_reason:
-          toolCalls.length > 0 ? 'tool_calls' : mapResponseStatus(data.status, data.incomplete_details?.reason),
+          data.status === 'incomplete'
+            ? mapResponseStatus(data.status, data.incomplete_details?.reason)
+            : toolCalls.length > 0
+              ? 'tool_calls'
+              : mapResponseStatus(data.status, data.incomplete_details?.reason),
         message,
       },
     ],

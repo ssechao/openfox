@@ -728,7 +728,7 @@ export async function runTopLevelAgentLoop(
       }
     }
 
-    if (!compacting && result.finishReason === 'length' && result.toolCalls.length === 0) {
+    if (result.finishReason === 'length') {
       const truncatedNotice = serverT({
         en: 'The model response was truncated before it finished.',
         fr: 'La réponse du modèle a été tronquée avant d’être terminée.',
@@ -762,30 +762,42 @@ export async function runTopLevelAgentLoop(
             ...(currentWindowMessageOptions ?? {}),
             isSystemGenerated: true,
             messageKind: 'correction',
+            ...subAgentTags(),
           }),
         )
         append({ type: 'message.done', data: { messageId: continueMsgId } })
         continue
-      } else {
-        const stats = turnMetrics.buildStats(statsIdentity, mode)
-        append(
-          createMessageDoneEvent(assistantMsgId, {
-            segments: result.segments,
-            stats,
-            partial: true,
-          }),
-        )
-        append(createChatDoneEvent(assistantMsgId, 'truncated', stats, agentType))
-        onMessage?.(
-          createChatMessageUpdatedMessage(assistantMsgId, {
-            isStreaming: false,
-            partial: true,
-            stats,
-          }),
-        )
-        onMessage?.(createChatDoneMessage(assistantMsgId, 'truncated', stats, agentType))
-        break
       }
+      if (compacting) {
+        append({
+          type: 'chat.error',
+          data: {
+            error: serverT({
+              en: 'Compaction summary was truncated; keeping the previous context.',
+              fr: 'Le résumé de compaction a été tronqué ; le contexte précédent est conservé.',
+            }),
+            recoverable: true,
+          },
+        })
+      }
+      const stats = turnMetrics.buildStats(statsIdentity, mode)
+      append(
+        createMessageDoneEvent(assistantMsgId, {
+          segments: result.segments,
+          stats,
+          partial: true,
+        }),
+      )
+      append(createChatDoneEvent(assistantMsgId, 'truncated', stats, agentType))
+      onMessage?.(
+        createChatMessageUpdatedMessage(assistantMsgId, {
+          isStreaming: false,
+          partial: true,
+          stats,
+        }),
+      )
+      onMessage?.(createChatDoneMessage(assistantMsgId, 'truncated', stats, agentType))
+      break
     }
 
     if (result.toolCalls.length > 0) {
