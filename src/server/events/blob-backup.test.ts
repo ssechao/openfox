@@ -15,20 +15,29 @@ import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventStore } from './store.js'
-import { FileBlobStore, blobDirForDatabase, setBlobStore } from './blob-store.js'
+import { FileBlobStore, blobDirForDatabase, hashBytes, setBlobStore } from './blob-store.js'
 import {
   BLOB_BACKUP_MANIFEST,
   BlobBackupError,
   backupDatabaseAndBlobs,
+  recoverRestoreIfNeeded,
   restoreDatabaseAndBlobs,
   restoreJournalPath,
 } from './blob-backup.js'
+import { closeDatabase } from '../db/index.js'
+import { acquireInstanceLock, releaseInstanceLock } from '../db/instance-lock.js'
 import { collectBlobRefs } from './blob-codec.js'
 import { hydrateAttachmentData } from './blob-codec.js'
 import { CRASH_HASH, CRASH_PNG, CRASH_PNG_URL, killAtBarrier } from './blob-crash-harness.js'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..')
 const LOCK_CHILD = join(dirname(fileURLToPath(import.meta.url)), '../db/instance-lock.test-child.ts')
+
+const JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==',
+  'base64',
+)
+const JPEG_HASH = hashBytes(JPEG)
 
 function liveOpenfoxHits(): number {
   const root = join(homedir(), 'Library/Application Support/openfox')
@@ -83,6 +92,92 @@ function appendPng(events: EventStore, sessionId = 's1') {
   })
 }
 
+function appendJpeg(events: EventStore, sessionId = 's1') {
+  return events.append(sessionId, {
+    type: 'message.start',
+    data: {
+      messageId: 'm2',
+      role: 'user',
+      content: 'jpeg',
+      attachments: [
+        {
+          id: 'j',
+          filename: 'dot.jpg',
+          mimeType: 'image/jpeg',
+          size: JPEG.length,
+          data: `data:image/jpeg;base64,${JPEG.toString('base64')}`,
+        },
+      ],
+    },
+  })
+}
+
+function sessionIds(dbPath: string): string[] {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+  try {
+    return (db.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>).map((row) => row.id)
+  } finally {
+    db.close()
+  }
+}
+
+function eventCount(dbPath: string): number {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+  try {
+    return (db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n
+  } finally {
+    db.close()
+  }
+}
+
+function assertEntirelyNew(destPath: string): void {
+  expect(existsSync(restoreJournalPath(destPath))).toBe(false)
+  expect(sessionIds(destPath)).toEqual(['s1'])
+  expect(eventCount(destPath)).toBeGreaterThan(0)
+  const db = new Database(destPath, { readonly: true, fileMustExist: true })
+  try {
+    const payload = db.prepare('SELECT payload FROM events').get() as { payload: string }
+    expect(payload.payload).toContain(CRASH_HASH)
+  } finally {
+    db.close()
+  }
+  const blobs = new FileBlobStore(blobDirForDatabase(destPath), { ownerDbPath: destPath })
+  expect(blobs.get(CRASH_HASH).bytes.equals(CRASH_PNG)).toBe(true)
+}
+
+function assertEntirelyOld(destPath: string): void {
+  expect(existsSync(restoreJournalPath(destPath))).toBe(false)
+  expect(sessionIds(destPath)).toContain('keep-me')
+  expect(eventCount(destPath)).toBe(0)
+  const destBlobs = blobDirForDatabase(destPath)
+  if (existsSync(destBlobs)) {
+    const store = new FileBlobStore(destBlobs, { ownerDbPath: destPath })
+    expect(store.has(CRASH_HASH)).toBe(false)
+  }
+}
+
+async function seedRestorePair(dir: string) {
+  const src = openStore(dir, 'src.db')
+  appendPng(src.events)
+  src.db.close()
+  const backupDir = join(dir, 'backup')
+  await backupDatabaseAndBlobs(src.dbPath, backupDir)
+  const dest = openStore(dir, 'dest.db')
+  dest.db.prepare('INSERT INTO sessions (id) VALUES (?)').run('keep-me')
+  dest.db.close()
+  return { backupDir, destPath: dest.dbPath }
+}
+
+function resumeViaBoot(destPath: string): void {
+  closeDatabase()
+  acquireInstanceLock(destPath)
+  try {
+    recoverRestoreIfNeeded(destPath)
+  } finally {
+    releaseInstanceLock()
+  }
+}
+
 describe('blob backup / restore', () => {
   let dir: string
   beforeEach(() => {
@@ -91,6 +186,11 @@ describe('blob backup / restore', () => {
   afterEach(() => {
     delete process.env['OPENFOX_BLOB_RESTORE_FAIL']
     setBlobStore(null)
+    try {
+      closeDatabase()
+    } catch {
+      // not opened through initDatabase
+    }
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -213,7 +313,7 @@ describe('blob backup / restore', () => {
     }
   }, 30_000)
 
-  it('rolls back to the old sqlite+WAL+blobs when the blobs rename fails', async () => {
+  it('completes to the new sqlite+blobs when the blobs rename fails after the db is published', async () => {
     const src = openStore(dir, 'src.db')
     appendPng(src.events)
     src.db.close()
@@ -225,7 +325,7 @@ describe('blob backup / restore', () => {
     dest.pragma('journal_mode = WAL')
     dest.pragma('wal_autocheckpoint = 0')
     schema(dest)
-    dest.prepare('INSERT INTO sessions (id) VALUES (?)').run('old')
+    dest.prepare('INSERT INTO sessions (id) VALUES (?)').run('keep-me')
     dest.close()
     writeFileSync(`${destPath}-wal`, Buffer.from('preserved-old-wal'))
     writeFileSync(`${destPath}-shm`, Buffer.from('preserved-old-shm'))
@@ -234,24 +334,13 @@ describe('blob backup / restore', () => {
     process.env['OPENFOX_BLOB_RESTORE_FAIL'] = 'blobs-rename'
     expect(() => restoreDatabaseAndBlobs(backupDir, destPath)).toThrow(/blobs-rename/)
 
-    expect(existsSync(restoreJournalPath(destPath))).toBe(false)
-    expect(readFileSync(`${destPath}-wal`)).toEqual(Buffer.from('preserved-old-wal'))
-    expect(readFileSync(`${destPath}-shm`)).toEqual(Buffer.from('preserved-old-shm'))
-    expect(readFileSync(`${destPath}-journal`)).toEqual(Buffer.from('preserved-old-journal'))
-    unlinkSync(`${destPath}-wal`)
-    unlinkSync(`${destPath}-shm`)
-    unlinkSync(`${destPath}-journal`)
-    const still = new Database(destPath, { readonly: true, fileMustExist: true })
-    try {
-      expect(still.prepare('SELECT id FROM sessions').all()).toEqual([{ id: 'old' }])
-    } finally {
-      still.close()
+    if (existsSync(`${destPath}-wal`)) {
+      expect(readFileSync(`${destPath}-wal`)).not.toEqual(Buffer.from('preserved-old-wal'))
     }
-    const destBlobs = blobDirForDatabase(destPath)
-    if (existsSync(destBlobs)) {
-      const store = new FileBlobStore(destBlobs, { ownerDbPath: destPath })
-      expect(store.has(CRASH_HASH)).toBe(false)
+    if (existsSync(`${destPath}-journal`)) {
+      expect(readFileSync(`${destPath}-journal`)).not.toEqual(Buffer.from('preserved-old-journal'))
     }
+    assertEntirelyNew(destPath)
   })
 
   it('SIGKILL between db and blobs publish then resume is entirely new', async () => {
@@ -284,19 +373,98 @@ describe('blob backup / restore', () => {
     }
     expect(existsSync(blobDirForDatabase(dest.dbPath))).toBe(false)
 
-    const restored = new Database(dest.dbPath)
-    const events = new EventStore(restored)
-    try {
-      expect(restored.prepare('SELECT id FROM sessions ORDER BY id').all()).toEqual([{ id: 's1' }])
-      const payload = restored.prepare('SELECT payload FROM events').get() as { payload: string }
-      expect(payload.payload).toContain(CRASH_HASH)
-      expect(events.blobStore.get(CRASH_HASH).bytes.equals(CRASH_PNG)).toBe(true)
-      expect(existsSync(restoreJournalPath(dest.dbPath))).toBe(false)
-      expect(existsSync(`${dest.dbPath}.pre-restore`)).toBe(false)
-    } finally {
-      restored.close()
-    }
+    resumeViaBoot(dest.dbPath)
+    assertEntirelyNew(dest.dbPath)
+    expect(existsSync(`${dest.dbPath}.pre-restore`)).toBe(false)
   }, 30_000)
+
+  it.each([
+    ['before-restore-publish', 'old'],
+    ['after-restore-db-file-retired', 'old'],
+    ['after-restore-wal-retired', 'old'],
+    ['after-restore-db-retired', 'new'],
+    ['after-restore-old-retired', 'new'],
+    ['after-restore-db-publish', 'new'],
+    ['after-restore-blobs-publish', 'new'],
+  ] as const)(
+    'SIGKILL at %s then boot recover is entirely %s',
+    async (barrier, expected) => {
+      const { backupDir, destPath } = await seedRestorePair(dir)
+      await killAtBarrier(
+        {
+          OPENFOX_DB_PATH: destPath,
+          OPENFOX_BLOB_CRASH_MODE: 'restore',
+          OPENFOX_BLOB_BACKUP_FROM: backupDir,
+        },
+        barrier,
+        join(dir, `barrier-${barrier}`),
+      )
+      resumeViaBoot(destPath)
+      if (expected === 'new') assertEntirelyNew(destPath)
+      else assertEntirelyOld(destPath)
+    },
+    30_000,
+  )
+
+  it.each([
+    ['after-restore-db-retired', 'after-restore-recover-db'],
+    ['after-restore-old-retired', 'after-restore-recover-db'],
+    ['after-restore-db-publish', 'after-restore-recover-db'],
+    ['after-restore-db-publish', 'after-restore-recover-blobs'],
+    ['before-restore-publish', 'before-restore-rollback'],
+    ['before-restore-publish', 'after-restore-rollback-db'],
+  ] as const)(
+    'SIGKILL restore at %s then recover at %s then resume is consistent',
+    async (restoreBarrier, recoverBarrier) => {
+      const { backupDir, destPath } = await seedRestorePair(dir)
+      await killAtBarrier(
+        {
+          OPENFOX_DB_PATH: destPath,
+          OPENFOX_BLOB_CRASH_MODE: 'restore',
+          OPENFOX_BLOB_BACKUP_FROM: backupDir,
+        },
+        restoreBarrier,
+        join(dir, `barrier-${restoreBarrier}`),
+      )
+      await killAtBarrier(
+        {
+          OPENFOX_DB_PATH: destPath,
+          OPENFOX_BLOB_CRASH_MODE: 'restore-recover',
+        },
+        recoverBarrier,
+        join(dir, `barrier-recover-${recoverBarrier}`),
+      )
+      resumeViaBoot(destPath)
+      if (restoreBarrier === 'before-restore-publish') assertEntirelyOld(destPath)
+      else assertEntirelyNew(destPath)
+    },
+    60_000,
+  )
+
+  it('restore refuses a duplicate manifest entry for a second database blob ref', async () => {
+    const src = openStore(dir, 'src.db')
+    appendPng(src.events)
+    appendJpeg(src.events)
+    src.db.close()
+    const backupDir = join(dir, 'backup')
+    await backupDatabaseAndBlobs(src.dbPath, backupDir)
+    const manifestPath = join(backupDir, BLOB_BACKUP_MANIFEST)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      blobs: Array<{ hash: string; mime: string; size: number }>
+    }
+    const png = manifest.blobs.find((blob) => blob.hash === CRASH_HASH)
+    expect(png).toBeDefined()
+    expect(manifest.blobs.some((blob) => blob.hash === JPEG_HASH)).toBe(true)
+    manifest.blobs = [png!, png!]
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const dest = openStore(dir, 'dest.db')
+    dest.db.prepare('INSERT INTO sessions (id) VALUES (?)').run('keep-me')
+    dest.db.close()
+    expect(() => restoreDatabaseAndBlobs(backupDir, dest.dbPath)).toThrow(/duplicate|missing/)
+    expect(sessionIds(dest.dbPath)).toEqual(['keep-me', 's1'])
+    expect(eventCount(dest.dbPath)).toBe(0)
+    expect(existsSync(restoreJournalPath(dest.dbPath))).toBe(false)
+  })
 
   it('fails backup when a blob body is corrupt and publishes nothing', async () => {
     const { dbPath, db, events, blobs } = openStore(dir, 'sessions.db')

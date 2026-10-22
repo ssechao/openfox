@@ -28,13 +28,35 @@ export interface BlobBackupReport {
   blobs: number
 }
 
+function uniqueManifestHashes(listed: Array<{ hash: string }>): Set<string> {
+  const hashes = new Set<string>()
+  for (const item of listed) {
+    if (hashes.has(item.hash)) {
+      throw new BlobBackupError(`Backup manifest duplicate ref: ${item.hash}`)
+    }
+    hashes.add(item.hash)
+  }
+  return hashes
+}
+
+function assertExactRefSets(listedHashes: Set<string>, fromDb: Iterable<string>): void {
+  const dbHashes = new Set(fromDb)
+  if (listedHashes.size !== dbHashes.size) {
+    throw new BlobBackupError('Backup manifest does not match database blob refs')
+  }
+  for (const hash of dbHashes) {
+    if (!listedHashes.has(hash)) {
+      throw new BlobBackupError(`Backup manifest missing or mismatched ref: ${hash}`)
+    }
+  }
+}
+
 function assertManifestMatchesRefs(
   listed: Array<{ hash: string; mime: string; size: number }>,
   fromDb: Map<string, { hash: string; mime: string; size: number }>,
 ): void {
-  if (listed.length !== fromDb.size) {
-    throw new BlobBackupError('Backup manifest does not match database blob refs')
-  }
+  const listedHashes = uniqueManifestHashes(listed)
+  assertExactRefSets(listedHashes, fromDb.keys())
   for (const item of listed) {
     const ref = fromDb.get(item.hash)
     if (!ref || ref.mime !== item.mime || ref.size !== item.size) {
@@ -71,7 +93,7 @@ function removeSqliteAndSidecars(dbPath: string): void {
   unlinkSqliteSidecars(dbPath)
 }
 
-type RestorePhase = 'prepared' | 'old-retired' | 'db-published' | 'published'
+type RestorePhase = 'prepared' | 'db-retired' | 'old-retired' | 'db-published' | 'published' | 'rolling-back'
 
 interface RestoreJournal {
   version: 1
@@ -105,10 +127,23 @@ function writeRestoreJournal(journal: RestoreJournal): void {
   durableWriteFile(restoreJournalPath(journal.destDbPath), Buffer.from(JSON.stringify(journal), 'utf8'))
 }
 
+function setRestorePhase(journal: RestoreJournal, phase: RestorePhase): void {
+  journal.phase = phase
+  writeRestoreJournal(journal)
+}
+
 function failRestoreIfInjected(step: string): void {
   if (process.env['OPENFOX_BLOB_RESTORE_FAIL'] === step) {
     throw new BlobBackupError(`injected restore failure: ${step}`)
   }
+}
+
+function stagingDbPath(journal: RestoreJournal): string {
+  return join(journal.staging, 'sessions.db')
+}
+
+function stagingBlobsPath(journal: RestoreJournal): string {
+  return join(journal.staging, 'blobs')
 }
 
 function finishPublishedRestore(journal: RestoreJournal): void {
@@ -119,77 +154,122 @@ function finishPublishedRestore(journal: RestoreJournal): void {
   new FileBlobStore(journal.destBlobsDir, { ownerDbPath: journal.destDbPath })
 }
 
+function reuniteSqliteSidecars(journal: RestoreJournal): void {
+  if (existsSync(journal.bakDb)) {
+    renameSqliteSidecars(journal.destDbPath, journal.bakDb)
+  }
+}
+
+function retireDestDb(journal: RestoreJournal): void {
+  if (!existsSync(journal.bakDb) && existsSync(journal.destDbPath)) {
+    renameSync(journal.destDbPath, journal.bakDb)
+    parkAtBlobBarrier('after-restore-db-file-retired')
+    renameSqliteSidecars(journal.destDbPath, journal.bakDb)
+    parkAtBlobBarrier('after-restore-wal-retired')
+  } else {
+    reuniteSqliteSidecars(journal)
+  }
+}
+
+function retireDestBlobs(journal: RestoreJournal): void {
+  if (!existsSync(journal.bakBlobs) && existsSync(journal.destBlobsDir)) {
+    renameSync(journal.destBlobsDir, journal.bakBlobs)
+  }
+}
+
+function publishDestDb(journal: RestoreJournal): void {
+  const stagingDb = stagingDbPath(journal)
+  reuniteSqliteSidecars(journal)
+  unlinkSqliteSidecars(journal.destDbPath)
+  if (!existsSync(journal.destDbPath) && existsSync(stagingDb)) {
+    mkdirSync(dirname(journal.destDbPath), { recursive: true })
+    renameSync(stagingDb, journal.destDbPath)
+  }
+}
+
+function publishDestBlobs(journal: RestoreJournal): void {
+  const stagingBlobs = stagingBlobsPath(journal)
+  if (!existsSync(journal.destBlobsDir) && existsSync(stagingBlobs)) {
+    renameSync(stagingBlobs, journal.destBlobsDir)
+  }
+}
+
+function dropRestoreWork(journal: RestoreJournal): void {
+  unlinkQuiet(restoreJournalPath(journal.destDbPath))
+  rmSync(journal.staging, { recursive: true, force: true })
+}
+
 function rollbackRestoreJournal(journal: RestoreJournal): void {
-  const stagingDb = join(journal.staging, 'sessions.db')
-  const stagingBlobs = join(journal.staging, 'blobs')
+  setRestorePhase(journal, 'rolling-back')
+  parkAtBlobBarrier('before-restore-rollback')
+  reuniteSqliteSidecars(journal)
   if (existsSync(journal.bakDb)) {
     if (existsSync(journal.destDbPath)) {
       mkdirSync(journal.staging, { recursive: true })
+      const stagingDb = stagingDbPath(journal)
       if (existsSync(stagingDb)) unlinkQuiet(stagingDb)
       renameSync(journal.destDbPath, stagingDb)
       unlinkSqliteSidecars(journal.destDbPath)
     }
+    parkAtBlobBarrier('after-restore-rollback-db-file')
     renameSync(journal.bakDb, journal.destDbPath)
     renameSqliteSidecars(journal.bakDb, journal.destDbPath)
   }
+  parkAtBlobBarrier('after-restore-rollback-db')
   if (existsSync(journal.bakBlobs)) {
     if (existsSync(journal.destBlobsDir)) {
       mkdirSync(journal.staging, { recursive: true })
+      const stagingBlobs = stagingBlobsPath(journal)
       if (existsSync(stagingBlobs)) rmSync(stagingBlobs, { recursive: true, force: true })
       renameSync(journal.destBlobsDir, stagingBlobs)
     }
     renameSync(journal.bakBlobs, journal.destBlobsDir)
   }
-  unlinkQuiet(restoreJournalPath(journal.destDbPath))
-  rmSync(journal.staging, { recursive: true, force: true })
+  parkAtBlobBarrier('after-restore-rollback-blobs')
+  dropRestoreWork(journal)
 }
 
-function completeRestoreFromStaging(journal: RestoreJournal): boolean {
-  const stagingDb = join(journal.staging, 'sessions.db')
-  const stagingBlobs = join(journal.staging, 'blobs')
-  if (!existsSync(journal.destDbPath) && existsSync(stagingDb)) {
-    mkdirSync(dirname(journal.destDbPath), { recursive: true })
-    renameSync(stagingDb, journal.destDbPath)
+function replayRestoreForward(journal: RestoreJournal): 'completed' | 'rolled-back' {
+  if (journal.phase === 'db-retired') {
+    retireDestBlobs(journal)
+    setRestorePhase(journal, 'old-retired')
   }
-  if (!existsSync(journal.destBlobsDir) && existsSync(stagingBlobs)) {
-    renameSync(stagingBlobs, journal.destBlobsDir)
-  }
-  return existsSync(journal.destDbPath) && existsSync(journal.destBlobsDir)
-}
-
-export function recoverRestoreIfNeeded(
-  destDbPath: string,
-  options: { liveDbOpen?: boolean } = {},
-): 'noop' | 'completed' | 'rolled-back' {
-  const journal = readRestoreJournal(destDbPath)
-  if (!journal) return 'noop'
-  const destDbExists = existsSync(journal.destDbPath)
-  const destBlobsExist = existsSync(journal.destBlobsDir)
-  const stagingBlobsExist = existsSync(join(journal.staging, 'blobs'))
-  const stagingDbExists = existsSync(join(journal.staging, 'sessions.db'))
-  const canComplete =
-    (destDbExists && destBlobsExist) ||
-    (destDbExists && !destBlobsExist && stagingBlobsExist) ||
-    (!destDbExists && stagingDbExists && stagingBlobsExist && !options.liveDbOpen)
-  if (canComplete) {
-    if (!completeRestoreFromStaging(journal)) {
-      if (options.liveDbOpen) return 'noop'
+  if (journal.phase === 'old-retired') {
+    publishDestDb(journal)
+    if (!existsSync(journal.destDbPath)) {
       rollbackRestoreJournal(journal)
       return 'rolled-back'
     }
+    setRestorePhase(journal, 'db-published')
+  }
+  if (journal.phase === 'db-published') {
+    parkAtBlobBarrier('after-restore-recover-db')
+    publishDestBlobs(journal)
+    if (!existsSync(journal.destBlobsDir)) {
+      rollbackRestoreJournal(journal)
+      return 'rolled-back'
+    }
+    setRestorePhase(journal, 'published')
+    parkAtBlobBarrier('after-restore-recover-blobs')
+  }
+  if (journal.phase === 'published') {
     finishPublishedRestore(journal)
     return 'completed'
   }
-  if (options.liveDbOpen) {
-    if (journal.phase === 'prepared') {
-      unlinkQuiet(restoreJournalPath(journal.destDbPath))
-      rmSync(journal.staging, { recursive: true, force: true })
-      return 'rolled-back'
-    }
-    return 'noop'
-  }
   rollbackRestoreJournal(journal)
   return 'rolled-back'
+}
+
+export function recoverRestoreIfNeeded(destDbPath: string): 'noop' | 'completed' | 'rolled-back' {
+  const journal = readRestoreJournal(destDbPath)
+  if (!journal) return 'noop'
+  parkAtBlobBarrier('before-restore-recover')
+  reuniteSqliteSidecars(journal)
+  if (journal.phase === 'prepared' || journal.phase === 'rolling-back') {
+    rollbackRestoreJournal(journal)
+    return 'rolled-back'
+  }
+  return replayRestoreForward(journal)
 }
 
 export async function backupDatabaseAndBlobs(
@@ -304,28 +384,28 @@ export function restoreDatabaseAndBlobs(backupDir: string, destDbPath: string): 
 
     removeSqliteAndSidecars(journal.bakDb)
     rmSync(journal.bakBlobs, { recursive: true, force: true })
-    if (existsSync(destDbPath)) {
-      renameSync(destDbPath, journal.bakDb)
-      renameSqliteSidecars(destDbPath, journal.bakDb)
-    }
-    if (existsSync(destBlobsDir)) renameSync(destBlobsDir, journal.bakBlobs)
-    journal.phase = 'old-retired'
-    writeRestoreJournal(journal)
-
-    mkdirSync(dirname(destDbPath), { recursive: true })
-    renameSync(join(staging, 'sessions.db'), destDbPath)
-    journal.phase = 'db-published'
-    writeRestoreJournal(journal)
+    retireDestDb(journal)
+    setRestorePhase(journal, 'db-retired')
+    parkAtBlobBarrier('after-restore-db-retired')
+    retireDestBlobs(journal)
+    setRestorePhase(journal, 'old-retired')
+    parkAtBlobBarrier('after-restore-old-retired')
+    publishDestDb(journal)
+    setRestorePhase(journal, 'db-published')
     parkAtBlobBarrier('after-restore-db-publish')
     failRestoreIfInjected('blobs-rename')
-    renameSync(join(staging, 'blobs'), destBlobsDir)
-    journal.phase = 'published'
-    writeRestoreJournal(journal)
+    publishDestBlobs(journal)
+    setRestorePhase(journal, 'published')
+    parkAtBlobBarrier('after-restore-blobs-publish')
     finishPublishedRestore(journal)
   } catch (error) {
     const current = readRestoreJournal(destDbPath) ?? journal
     try {
-      rollbackRestoreJournal(current)
+      if (current.phase === 'prepared' || current.phase === 'rolling-back') {
+        rollbackRestoreJournal(current)
+      } else {
+        recoverRestoreIfNeeded(destDbPath)
+      }
     } catch {
       recoverRestoreIfNeeded(destDbPath)
     }

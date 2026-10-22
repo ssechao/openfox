@@ -5,7 +5,8 @@
 import Database from 'better-sqlite3'
 import { EventStore } from './store.js'
 import { FileBlobStore, blobDirForDatabase } from './blob-store.js'
-import { backupDatabaseAndBlobs, restoreDatabaseAndBlobs } from './blob-backup.js'
+import { backupDatabaseAndBlobs, recoverRestoreIfNeeded, restoreDatabaseAndBlobs } from './blob-backup.js'
+import { acquireInstanceLock, releaseInstanceLock } from '../db/instance-lock.js'
 
 const dbPath = process.env['OPENFOX_DB_PATH']
 const mode = process.env['OPENFOX_BLOB_CRASH_MODE']
@@ -44,6 +45,18 @@ async function main(): Promise<void> {
       process.exit(2)
     }
     restoreDatabaseAndBlobs(from, resolvedDbPath)
+    process.send?.({ done: true, mode: resolvedMode, pid: process.pid })
+    setInterval(() => {}, 60_000)
+    return
+  }
+
+  if (resolvedMode === 'restore-recover') {
+    acquireInstanceLock(resolvedDbPath)
+    try {
+      recoverRestoreIfNeeded(resolvedDbPath)
+    } finally {
+      releaseInstanceLock()
+    }
     process.send?.({ done: true, mode: resolvedMode, pid: process.pid })
     setInterval(() => {}, 60_000)
     return

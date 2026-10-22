@@ -3,6 +3,7 @@ import type { Config } from '../config.js'
 import { logger } from '../utils/logger.js'
 import { assertTestDatabasePath } from '../utils/test-environment.js'
 import { acquireInstanceLock, releaseInstanceLock } from './instance-lock.js'
+import { recoverRestoreIfNeeded } from '../events/blob-backup.js'
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
@@ -22,6 +23,7 @@ export function initDatabase(config: Config): Database.Database {
   // 2026-10-20 incident. The lock is released automatically when the process
   // exits; closeDatabase() also releases it cleanly.
   acquireInstanceLock(config.database.path)
+  recoverRestoreIfNeeded(config.database.path)
 
   try {
     db = new Database(config.database.path)
