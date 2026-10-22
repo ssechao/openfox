@@ -39,6 +39,7 @@ import {
 } from './store-diagnostics.js'
 import { blobStoreForDatabase, setBlobStore, type BlobStore } from './blob-store.js'
 import { extractBinaries } from './blob-codec.js'
+import { parkAtBlobBarrier } from './blob-barrier.js'
 import { migrateAllBlobs, migrateSessionBlobs, type BlobMigrationReport } from './blob-migrate.js'
 
 // Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
@@ -384,8 +385,6 @@ export class EventStore {
   }
 
   readonly blobStore: BlobStore
-  /** Test-only: throw after blobs are durable and before the event row is inserted. */
-  crashBeforeReferenceCommit = false
 
   constructor(
     db: Database.Database,
@@ -622,9 +621,7 @@ export class EventStore {
     this.checkExternalWrites()
     const timestamp = Date.now()
     const extractedData = extractBinaries(event.data, this.blobStore)
-    if (this.crashBeforeReferenceCommit) {
-      throw new Error('test crash before blob reference commit')
-    }
+    parkAtBlobBarrier('after-blob-write')
     const toStore = extractedData === event.data ? event : ({ ...event, data: extractedData } as TurnEvent)
     const payload = this.serializeEvent(toStore)
     const insert = this.db.prepare(
@@ -689,9 +686,7 @@ export class EventStore {
       const extractedData = extractBinaries(event.data, this.blobStore)
       return extractedData === event.data ? event : ({ ...event, data: extractedData } as TurnEvent)
     })
-    if (this.crashBeforeReferenceCommit) {
-      throw new Error('test crash before blob reference commit')
-    }
+    parkAtBlobBarrier('after-blob-write')
     const payloads = toStore.map((event) => this.serializeEvent(event))
 
     const insert = this.db.prepare(

@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { BlobStore } from './blob-store.js'
 import { extractBinaries, payloadHasInlineBinary } from './blob-codec.js'
+import { parkAtBlobBarrier } from './blob-barrier.js'
 
 export type BlobMigrationStatus = 'copied' | 'switched'
 
@@ -63,7 +64,9 @@ export function migrateSessionBlobs(db: Database.Database, sessionId: string, st
     if (payload !== row.payload) updates.push({ id: row.id, payload })
   }
 
+  parkAtBlobBarrier('after-blob-write')
   setStatus(db, sessionId, 'copied')
+  parkAtBlobBarrier('before-switch')
 
   const switchTx = db.transaction(() => {
     const update = db.prepare('UPDATE events SET payload = ? WHERE id = ?')
@@ -71,6 +74,7 @@ export function migrateSessionBlobs(db: Database.Database, sessionId: string, st
     setStatus(db, sessionId, 'switched')
   })
   switchTx()
+  parkAtBlobBarrier('after-switch')
 
   return { sessionId, scanned: rows.length, rewritten: updates.length, status: 'switched' }
 }

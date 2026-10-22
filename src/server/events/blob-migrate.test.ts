@@ -7,6 +7,15 @@ import { EventStore, initEventStore, getEventStore } from './store.js'
 import { FileBlobStore, hashBytes, setBlobStore } from './blob-store.js'
 import { getBlobMigrationStatus } from './blob-migrate.js'
 import { closeDatabase } from '../db/index.js'
+import {
+  CRASH_HASH,
+  assertResolvablePng,
+  eventPayloads,
+  killAtBarrier,
+  migrationStatus,
+  reopenCrashStore,
+  seedCrashDatabase,
+} from './blob-crash-harness.js'
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -76,28 +85,6 @@ describe('blob migration', () => {
     expect(rec.bytes.equals(PNG)).toBe(true)
     expect(rec.mime).toBe('image/png')
     expect(getBlobMigrationStatus(db, 's1')).toBe('switched')
-  })
-
-  it('resumes after a kill during copy without duplicating or losing bytes', () => {
-    const first = events.migrateSessionBlobs('s1')
-    expect(first.status).toBe('switched')
-    const second = events.migrateSessionBlobs('s1')
-    expect(second.rewritten).toBe(0)
-    expect(second.status).toBe('switched')
-    const n = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE session_id='s1'`).get() as { n: number }
-    expect(n.n).toBe(1)
-    expect(events.blobStore.get(hashBytes(PNG)).bytes.equals(PNG)).toBe(true)
-  })
-
-  it('keeps originals intact when the switch transaction is aborted', () => {
-    const wrapped = db.transaction(() => {
-      events.migrateSessionBlobs('s1')
-      throw new Error('killed mid switch')
-    })
-    expect(() => wrapped()).toThrow(/killed mid switch/)
-    const row = db.prepare(`SELECT payload FROM events WHERE session_id='s1'`).get() as { payload: string }
-    expect(row.payload).toBe(original)
-    expect(row.payload).toContain('data:image/png')
   })
 
   it('does not delete original event rows', () => {
@@ -174,4 +161,97 @@ describe('startup does not migrate', () => {
     )
     db.close()
   })
+})
+
+describe('C2 SIGKILL at migration barriers', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openfox-blob-sigkill-c2-'))
+  })
+
+  afterEach(() => {
+    setBlobStore(null)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  async function killAndReopen(barrier: string) {
+    const dbPath = join(dir, 'sessions.db')
+    const original = seedCrashDatabase(dbPath, 's1', true)
+    await killAtBarrier(
+      {
+        OPENFOX_DB_PATH: dbPath,
+        OPENFOX_BLOB_CRASH_MODE: 'migrate',
+        OPENFOX_BLOB_SESSION: 's1',
+      },
+      barrier,
+      join(dir, 'barrier'),
+    )
+    return { dbPath, original, ...reopenCrashStore(dbPath) }
+  }
+
+  it('SIGKILL after blob write keeps originals, resume switches once without duplicates', async () => {
+    const { db, events, blobs, original } = await killAndReopen('after-blob-write')
+    try {
+      const before = eventPayloads(db, 's1')
+      expect(before).toEqual([original])
+      expect(before[0]).toContain('data:image/png')
+      expect(migrationStatus(db, 's1')).not.toBe('switched')
+      assertResolvablePng(blobs)
+
+      const report = events.migrateSessionBlobs('s1')
+      expect(report.status).toBe('switched')
+      const after = eventPayloads(db, 's1')
+      expect(after).toHaveLength(1)
+      expect(after[0]).not.toContain('data:image')
+      expect(after[0]).toContain(CRASH_HASH)
+      assertResolvablePng(blobs)
+      expect(events.migrateSessionBlobs('s1').rewritten).toBe(0)
+      expect(eventPayloads(db, 's1')).toHaveLength(1)
+    } finally {
+      db.close()
+    }
+  }, 20_000)
+
+  it('SIGKILL before switch keeps originals, resume finishes without a half-referenced session', async () => {
+    const { db, events, blobs, original } = await killAndReopen('before-switch')
+    try {
+      const before = eventPayloads(db, 's1')
+      expect(before).toEqual([original])
+      expect(before[0]).toContain('data:image/png')
+      expect(before[0]).not.toMatch(new RegExp(CRASH_HASH + '.+data:image|data:image.+' + CRASH_HASH))
+      expect(migrationStatus(db, 's1')).toBe('copied')
+      assertResolvablePng(blobs)
+
+      const report = events.migrateSessionBlobs('s1')
+      expect(report.status).toBe('switched')
+      const after = eventPayloads(db, 's1')
+      expect(after).toHaveLength(1)
+      expect(after[0]).not.toContain('data:image')
+      expect(after[0]).toContain(CRASH_HASH)
+      assertResolvablePng(blobs)
+    } finally {
+      db.close()
+    }
+  }, 20_000)
+
+  it('SIGKILL after switch leaves a complete session, resume is a no-op', async () => {
+    const { db, events, blobs } = await killAndReopen('after-switch')
+    try {
+      const before = eventPayloads(db, 's1')
+      expect(before).toHaveLength(1)
+      expect(before[0]).not.toContain('data:image')
+      expect(before[0]).toContain(CRASH_HASH)
+      expect(migrationStatus(db, 's1')).toBe('switched')
+      assertResolvablePng(blobs)
+
+      const report = events.migrateSessionBlobs('s1')
+      expect(report.rewritten).toBe(0)
+      expect(report.status).toBe('switched')
+      expect(eventPayloads(db, 's1')).toEqual(before)
+      assertResolvablePng(blobs)
+    } finally {
+      db.close()
+    }
+  }, 20_000)
 })

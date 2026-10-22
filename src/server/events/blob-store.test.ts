@@ -16,6 +16,16 @@ import {
   setBlobStore,
 } from './blob-store.js'
 import { hydrateAttachmentData } from './blob-codec.js'
+import {
+  CRASH_HASH,
+  CRASH_PNG,
+  CRASH_PNG_URL,
+  assertResolvablePng,
+  eventPayloads,
+  killAtBarrier,
+  reopenCrashStore,
+  seedCrashDatabase,
+} from './blob-crash-harness.js'
 import type { Attachment } from '../../shared/types.js'
 import type { LLMMessage } from '../llm/types.js'
 
@@ -189,19 +199,6 @@ describe('event persistence keeps only blob refs', () => {
     expect(payload.payload).not.toContain('data:image')
     expect(payload.payload).toContain(hashBytes(PNG))
   })
-
-  it('leaves no orphan reference when a crash happens after the blob write', () => {
-    events.crashBeforeReferenceCommit = true
-    expect(() =>
-      events.append('s1', {
-        type: 'message.start',
-        data: { messageId: 'm1', role: 'user', content: 'x', attachments: [attachment()] },
-      }),
-    ).toThrow(/test crash before blob reference commit/)
-    const count = db.prepare(`SELECT COUNT(*) AS n FROM events`).get() as { n: number }
-    expect(count.n).toBe(0)
-    expect(blobs.has(hashBytes(PNG))).toBe(true)
-  })
 })
 
 describe('LLM rehydration', () => {
@@ -268,4 +265,62 @@ describe('LLM rehydration', () => {
       ),
     ).rejects.toBeInstanceOf(BlobMissingError)
   })
+})
+
+describe('C1 SIGKILL after durable blob write', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openfox-blob-sigkill-c1-'))
+  })
+
+  afterEach(() => {
+    setBlobStore(null)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('SIGKILL after blob write leaves no event reference, then resume stores one resolvable blob', async () => {
+    const dbPath = join(dir, 'sessions.db')
+    seedCrashDatabase(dbPath, 's1', false)
+    const marker = join(dir, 'barrier')
+    await killAtBarrier(
+      {
+        OPENFOX_DB_PATH: dbPath,
+        OPENFOX_BLOB_CRASH_MODE: 'append',
+        OPENFOX_BLOB_SESSION: 's1',
+      },
+      'after-blob-write',
+      marker,
+    )
+    const { db, events, blobs } = reopenCrashStore(dbPath)
+    try {
+      const payloads = eventPayloads(db, 's1')
+      expect(payloads).toEqual([])
+      expect(payloads.join('')).not.toContain(CRASH_HASH)
+      expect(blobs.has(CRASH_HASH)).toBe(true)
+      assertResolvablePng(blobs)
+
+      const stored = events.append('s1', {
+        type: 'message.start',
+        data: {
+          messageId: 'm1',
+          role: 'user',
+          content: 'see',
+          attachments: [
+            { id: 'a', filename: 'dot.png', mimeType: 'image/png', size: CRASH_PNG.length, data: CRASH_PNG_URL },
+          ],
+        },
+      })
+      const after = eventPayloads(db, 's1')
+      expect(after).toHaveLength(1)
+      expect(after[0]).not.toContain('data:image')
+      expect(after[0]).toContain(CRASH_HASH)
+      const att = (stored.data as { attachments: Array<{ blob?: { hash: string; mime: string; size: number } }> })
+        .attachments[0]
+      expect(att?.blob).toEqual({ hash: CRASH_HASH, mime: 'image/png', size: CRASH_PNG.length })
+      assertResolvablePng(blobs)
+    } finally {
+      db.close()
+    }
+  }, 20_000)
 })
