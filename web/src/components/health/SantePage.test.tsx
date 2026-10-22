@@ -46,6 +46,11 @@ function payload(): DiagnosticsData {
       runningSessions: series('count', 2, 10),
       rss: series('bytes', 300 * 1024 * 1024, 10),
       heapUsed: series('bytes', 120 * 1024 * 1024, 10),
+      snapshotCacheHits: series('count', 4, 10),
+      snapshotCacheMisses: series('count', 2, 10),
+      snapshotCacheBytes: series('bytes', 12 * 1024 * 1024, 10),
+      snapshotCacheEvictions: series('count', 1, 10),
+      snapshotCacheLimitBytes: series('bytes', 16 * 1024 * 1024, 10),
     },
     history: Array.from({ length: 60 }, (_, index) => ({
       timestamp: NOW - (59 - index) * 1_000,
@@ -93,6 +98,11 @@ describe('SantePage', () => {
     expect(text(container, 'sante-series-runningSessions')).toContain('2')
     expect(text(container, 'sante-series-healthLatencyP99')).toContain('No data')
     expect(text(container, 'sante-series-healthLatencyP99')).toContain('0 samples')
+    expect(text(container, 'sante-series-snapshotCacheHits')).toContain('4')
+    expect(text(container, 'sante-series-snapshotCacheMisses')).toContain('2')
+    expect(text(container, 'sante-series-snapshotCacheBytes')).toContain('12.0 MiB')
+    expect(text(container, 'sante-series-snapshotCacheEvictions')).toContain('1')
+    expect(text(container, 'sante-series-snapshotCacheLimitBytes')).toContain('16.0 MiB')
     expect(container.querySelector('[data-testid="sante-curve"] svg path')).not.toBeNull()
     expect(text(container, 'sante-curve')).toContain('last 60 s')
     expect(container.querySelector('[data-testid="sante-error"]')).toBeNull()

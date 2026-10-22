@@ -17,6 +17,11 @@ const SERIES_LABELS: Record<DiagnosticsSeriesName, Translation> = {
   runningSessions: { en: 'Running sessions', fr: 'Sessions en cours' },
   rss: { en: 'Memory (RSS)', fr: 'Mémoire (RSS)' },
   heapUsed: { en: 'Memory (heap)', fr: 'Mémoire (heap)' },
+  snapshotCacheHits: { en: 'Snapshot cache hits', fr: 'Cache instantanés hits' },
+  snapshotCacheMisses: { en: 'Snapshot cache misses', fr: 'Cache instantanés misses' },
+  snapshotCacheBytes: { en: 'Snapshot cache bytes', fr: 'Cache instantanés octets' },
+  snapshotCacheEvictions: { en: 'Snapshot cache evictions', fr: 'Cache instantanés évictions' },
+  snapshotCacheLimitBytes: { en: 'Snapshot cache limit', fr: 'Cache instantanés limite' },
 }
 
 function formatValue(series: DiagnosticsSeries): string {

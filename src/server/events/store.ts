@@ -210,6 +210,25 @@ function createSubscriber(
 // EventStore Implementation
 // ============================================================================
 
+export const SNAPSHOT_CACHE_DEFAULT_MAX_ENTRIES = 16
+export const SNAPSHOT_CACHE_DEFAULT_MAX_BYTES = 128 * 1024 * 1024
+
+export interface SnapshotCacheStats {
+  hits: number
+  misses: number
+  bytes: number
+  evictions: number
+  limitBytes: number
+  entries: number
+}
+
+function resolvePositiveInt(option: number | undefined, envValue: string | undefined, fallback: number): number {
+  if (option !== undefined) return Number.isFinite(option) && option > 0 ? Math.floor(option) : fallback
+  if (envValue === undefined || envValue === '') return fallback
+  const parsed = Number(envValue)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
+}
+
 export class EventStore {
   private db: Database.Database
   readonly searchIndex: SearchIndexer
@@ -224,8 +243,11 @@ export class EventStore {
   // without removing it.
   private snapshotCache: Map<string, { stored: StoredEvent; bytes: number }> = new Map()
   private snapshotCacheBytes = 0
-  private static readonly SNAPSHOT_CACHE_MAX_ENTRIES = 16
-  private static readonly SNAPSHOT_CACHE_MAX_BYTES = 128 * 1024 * 1024
+  private snapshotCacheHits = 0
+  private snapshotCacheMisses = 0
+  private snapshotCacheEvictions = 0
+  private readonly snapshotCacheMaxEntries: number
+  private readonly snapshotCacheMaxBytes: number
   // Recent user prompts per session (sidebar list). Computed once from the
   // snapshot + message.start events, then served from memory. Bounded — small
   // arrays, but a long-lived server must not accumulate one per listed
@@ -399,11 +421,23 @@ export class EventStore {
       streamFlushIntervalMs?: number
       streamFlushMaxBytes?: number
       blobStore?: BlobStore
+      snapshotCacheMaxBytes?: number
+      snapshotCacheMaxEntries?: number
     } = {},
   ) {
     this.diagnostics =
       (options.diagnostics ?? process.env['OPENFOX_SNAPSHOT_DIAGNOSTICS'] === '1') ? emptyStoreDiagnostics() : null
     this.hotPath = options.hotPath ?? process.env['OPENFOX_SNAPSHOT_HOT_PATH'] !== '0'
+    this.snapshotCacheMaxBytes = resolvePositiveInt(
+      options.snapshotCacheMaxBytes,
+      process.env['OPENFOX_SNAPSHOT_CACHE_MAX_BYTES'],
+      SNAPSHOT_CACHE_DEFAULT_MAX_BYTES,
+    )
+    this.snapshotCacheMaxEntries = resolvePositiveInt(
+      options.snapshotCacheMaxEntries,
+      process.env['OPENFOX_SNAPSHOT_CACHE_MAX_ENTRIES'],
+      SNAPSHOT_CACHE_DEFAULT_MAX_ENTRIES,
+    )
     this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS
     this.streamFlushMaxBytes = options.streamFlushMaxBytes ?? STREAM_FLUSH_MAX_BYTES
     this.db = db
@@ -426,11 +460,33 @@ export class EventStore {
       result.replayPrefixes.events += prefix.events.length
       result.replayPrefixes.serializedBytes += prefix.serializedBytes
     }
+    result.snapshotCacheHits = this.snapshotCacheHits
+    result.snapshotCacheMisses = this.snapshotCacheMisses
     return result
   }
 
   resetDiagnostics(): void {
+    this.snapshotCacheHits = 0
+    this.snapshotCacheMisses = 0
+    this.snapshotCacheEvictions = 0
     if (this.diagnostics) this.diagnostics = emptyStoreDiagnostics()
+  }
+
+  getSnapshotCacheStats(): SnapshotCacheStats {
+    return {
+      hits: this.snapshotCacheHits,
+      misses: this.snapshotCacheMisses,
+      bytes: this.snapshotCacheBytes,
+      evictions: this.snapshotCacheEvictions,
+      limitBytes: this.snapshotCacheMaxBytes,
+      entries: this.snapshotCache.size,
+    }
+  }
+
+  inspectSnapshotCacheEntry(sessionId: string): { keys: string[]; bytes: number } | undefined {
+    const entry = this.snapshotCache.get(sessionId)
+    if (!entry) return undefined
+    return { keys: Object.keys(entry).sort(), bytes: entry.bytes }
   }
 
   getRunningState(sessionId: string, fallback: boolean): boolean {
@@ -914,10 +970,12 @@ export class EventStore {
     this.checkExternalWrites()
     const cached = this.snapshotCache.get(sessionId)
     if (cached) {
+      this.snapshotCacheHits++
       if (this.diagnostics) this.diagnostics.snapshotCacheHits++
       return cached.stored as StoredEvent<Extract<TurnEvent, { type: 'turn.snapshot' }>>
     }
 
+    this.snapshotCacheMisses++
     if (this.diagnostics) this.diagnostics.snapshotCacheMisses++
     const row = this.timed(
       'read',
@@ -945,10 +1003,15 @@ export class EventStore {
     const existing = this.snapshotCache.get(sessionId)
     if (existing) {
       this.snapshotCacheBytes -= existing.bytes
+      this.snapshotCache.delete(sessionId)
+    }
+    const running = this.hotPath && this.activeSessions.get(sessionId) === true
+    if (!running && bytes > this.snapshotCacheMaxBytes) {
+      this.evictSnapshots()
+      return
     }
     this.snapshotCache.set(sessionId, { stored, bytes })
     this.snapshotCacheBytes += bytes
-
     this.evictSnapshots(sessionId)
   }
 
@@ -961,13 +1024,14 @@ export class EventStore {
       bytes += entry.bytes
     }
     for (const [id, entry] of this.snapshotCache) {
-      if (entries <= EventStore.SNAPSHOT_CACHE_MAX_ENTRIES && bytes <= EventStore.SNAPSHOT_CACHE_MAX_BYTES) break
+      if (entries <= this.snapshotCacheMaxEntries && bytes <= this.snapshotCacheMaxBytes) break
       if (id === keep || (this.hotPath && this.activeSessions.get(id))) continue
       entries--
       bytes -= entry.bytes
       this.snapshotCacheBytes -= entry.bytes
       this.snapshotCache.delete(id)
       this.replayPrefixes.delete(id)
+      this.snapshotCacheEvictions++
     }
   }
 

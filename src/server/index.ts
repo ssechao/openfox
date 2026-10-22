@@ -180,6 +180,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const diagnosticsCollector = createDiagnosticsCollector({
     dbPath: db.name,
     countRunningSessions: () => getEventStore().countRunningSessions(),
+    snapshotCacheStats: () => getEventStore().getSnapshotCacheStats(),
   })
   getEventStore().setHealthCollector(diagnosticsCollector)
   diagnosticsCollector.start()

@@ -18,6 +18,11 @@ export type DiagnosticsSeriesName =
   | 'runningSessions'
   | 'rss'
   | 'heapUsed'
+  | 'snapshotCacheHits'
+  | 'snapshotCacheMisses'
+  | 'snapshotCacheBytes'
+  | 'snapshotCacheEvictions'
+  | 'snapshotCacheLimitBytes'
 
 export const DIAGNOSTICS_SERIES_NAMES: readonly DiagnosticsSeriesName[] = [
   'eventLoopDelayP50',
@@ -30,6 +35,11 @@ export const DIAGNOSTICS_SERIES_NAMES: readonly DiagnosticsSeriesName[] = [
   'runningSessions',
   'rss',
   'heapUsed',
+  'snapshotCacheHits',
+  'snapshotCacheMisses',
+  'snapshotCacheBytes',
+  'snapshotCacheEvictions',
+  'snapshotCacheLimitBytes',
 ]
 
 export interface DiagnosticsHistoryPoint {

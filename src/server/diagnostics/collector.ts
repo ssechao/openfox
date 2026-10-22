@@ -10,7 +10,16 @@ import type { DiagnosticsCollector } from './types.js'
 import { LatencyHistogram, mergedCount, mergedMax, mergedPercentile } from './histogram.js'
 
 type LatencyMetric = 'loop' | 'health' | 'read' | 'write'
-type GaugeMetric = 'walSize' | 'runningSessions' | 'rss' | 'heapUsed'
+type GaugeMetric =
+  | 'walSize'
+  | 'runningSessions'
+  | 'rss'
+  | 'heapUsed'
+  | 'snapshotCacheHits'
+  | 'snapshotCacheMisses'
+  | 'snapshotCacheBytes'
+  | 'snapshotCacheEvictions'
+  | 'snapshotCacheLimitBytes'
 
 interface Bucket {
   startMs: number
@@ -18,8 +27,17 @@ interface Bucket {
   gauges: Partial<Record<GaugeMetric, number>>
 }
 
+export interface SnapshotCacheGauges {
+  hits: number
+  misses: number
+  bytes: number
+  evictions: number
+  limitBytes: number
+}
+
 export interface CollectorOptions {
   countRunningSessions?: () => number
+  snapshotCacheStats?: () => SnapshotCacheGauges
   dbPath?: string
   intervalMs?: number
   windowMs?: number
@@ -109,6 +127,18 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
         // Database unavailable (shutdown): leave the gauge empty for this interval.
       }
     }
+    if (options.snapshotCacheStats) {
+      try {
+        const stats = options.snapshotCacheStats()
+        bucket.gauges.snapshotCacheHits = stats.hits
+        bucket.gauges.snapshotCacheMisses = stats.misses
+        bucket.gauges.snapshotCacheBytes = stats.bytes
+        bucket.gauges.snapshotCacheEvictions = stats.evictions
+        bucket.gauges.snapshotCacheLimitBytes = stats.limitBytes
+      } catch {
+        // EventStore unavailable (shutdown): leave the gauges empty for this interval.
+      }
+    }
   }
 
   // Event-loop delay is sampled with a timer, not monitorEventLoopDelay: every
@@ -143,6 +173,22 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
       const values = recent.flatMap((bucket) => (bucket.gauges[metric] !== undefined ? [bucket.gauges[metric]] : []))
       return { unit, window, samples: values.length, value: values.at(-1) ?? null }
     }
+    const live = (() => {
+      try {
+        return options.snapshotCacheStats?.() ?? null
+      } catch {
+        return null
+      }
+    })()
+    const liveCache = (
+      metric: GaugeMetric,
+      key: 'hits' | 'misses' | 'bytes' | 'evictions' | 'limitBytes',
+      unit: DiagnosticsUnit,
+    ): DiagnosticsSeries => {
+      const sampled = gauge(metric, unit)
+      if (!live) return sampled
+      return { unit, window, samples: Math.max(sampled.samples, 1), value: live[key] }
+    }
 
     const byStart = new Map(buckets.map((bucket) => [bucket.startMs, bucket]))
     const history: DiagnosticsHistoryPoint[] = []
@@ -172,6 +218,11 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
         runningSessions: gauge('runningSessions', 'count'),
         rss: gauge('rss', 'bytes'),
         heapUsed: gauge('heapUsed', 'bytes'),
+        snapshotCacheHits: liveCache('snapshotCacheHits', 'hits', 'count'),
+        snapshotCacheMisses: liveCache('snapshotCacheMisses', 'misses', 'count'),
+        snapshotCacheBytes: liveCache('snapshotCacheBytes', 'bytes', 'bytes'),
+        snapshotCacheEvictions: liveCache('snapshotCacheEvictions', 'evictions', 'count'),
+        snapshotCacheLimitBytes: liveCache('snapshotCacheLimitBytes', 'limitBytes', 'bytes'),
       },
       history,
     }
