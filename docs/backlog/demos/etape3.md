@@ -30,13 +30,19 @@ Linux : Docker `node:24-bookworm` sur `ssechao@192.168.71.122`.
 
 ## Résultats
 
-| Critère                                                                  | macOS (worktree)                                                 | Linux (.122 Docker)                                          |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------ |
-| C1 `workspace.test.ts`                                                   | 41/41                                                            | 41/41                                                        |
-| C2 permissions / project-creator / inspect-proxy                         | 36/36                                                            | 36/36                                                        |
-| Scrutation git `ws/server.test.ts` + `git/diff.test.ts`                  | 47 réussis, 1 ignoré                                             | `ws/` + `git/` + `utils/` : 281 réussis, 1 ignoré            |
-| e2e git (`git-status-watcher`, `workspace-branch-isolation`, `git-tool`) | —                                                                | 35/35                                                        |
-| C3 `workspace-nonblocking.demo.test.ts` (client WebSocket abonné)        | 4/5, écart témoin médian 73,8 ms ; échec en référence (114,8 ms) | 3/3, écart témoin médian 3,1 ms, retard absolu médian 4,3 ms |
+| Critère                                                                  | macOS (worktree)                                                                                           | Linux (.122 Docker)                                          |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| C1 `workspace.test.ts`                                                   | 41/41                                                                                                      | 41/41                                                        |
+| C2 permissions / project-creator / inspect-proxy                         | 36/36                                                                                                      | 36/36                                                        |
+| Scrutation git `ws/server.test.ts` + `git/diff.test.ts`                  | 47 réussis, 1 ignoré                                                                                       | `ws/` + `git/` + `utils/` : 281 réussis, 1 ignoré            |
+| e2e git (`git-status-watcher`, `workspace-branch-isolation`, `git-tool`) | —                                                                                                          | 35/35                                                        |
+| C3 `workspace-nonblocking.demo.test.ts` (client WebSocket abonné)        | 4/5 au seuil de 100 ms, écart témoin médian 73,8 ms ; depuis, écart affiché sans seuil (« Écart accepté ») | 3/3, écart témoin médian 3,1 ms, retard absolu médian 4,3 ms |
+
+## Écart accepté
+
+- macOS : l’écart au témoin dépasse 100 ms dans 1 exécution sur 5 (série sans profil, 4/5) et dans 2 sur 5 (série profilée, 3/5) ; la démo le mesure et l’affiche (JSON en console) sans l’affirmer. Sous Linux, les trois seuils restent affirmés : écart au témoin, retard absolu et surcoût, chacun ≤ 100 ms.
+- Cause : le coût de `posix_spawn` (`child_process.spawn`) sur la boucle d’un Mac chargé, pour les `git` de la scrutation, ici 10 fois plus fréquente qu’en production. Le retard unique de 301 ms `(program)` en `delete` reste non attribué.
+- Traitement prévu aux étapes 6 et 7 (exécution hors du processus principal). Écart accepté par le pilote le 2026-10-22, sur le commit fc4cec0b.
 
 ## Correctif de la scrutation git
 
@@ -76,7 +82,7 @@ Méthode :
 - **Preuve que la scrutation tourne** : le test attend un premier `git.status` qui contient les fichiers du workspace, écrit ensuite un fichier témoin dans le workspace, et exige un `git.status` qui le contient. Seule une passe de scrutation peut produire ce message (aucun `session_updated` entre l’écriture et sa réception).
 - La sonde `/sante`, `/api/diagnostics` et `/api/health` (toutes les 200 ms) tourne pendant les quatre phases.
 - Indicateur de blocage par phase : max sur des fenêtres alignées de 1 s de (retard max OpenFox − retard max témoin). La contention CPU retarde les deux processus ; un blocage de la boucle ne retarde qu’OpenFox.
-- Seuils : écart témoin ≤ 100 ms dans chaque phase, **affirmé sur macOS et Linux** ; sous Linux en plus, retard absolu ≤ 100 ms pendant l’opération (`create`, `workspace`, `delete`) et surcoût par rapport à la référence ≤ 100 ms.
+- Seuils sous Linux : écart témoin ≤ 100 ms dans chaque phase, retard absolu ≤ 100 ms pendant l’opération (`create`, `workspace`, `delete`) et surcoût par rapport à la référence ≤ 100 ms. Sous macOS, l’écart témoin est mesuré et affiché sans seuil (« Écart accepté »). Les séries ci-dessous ont été mesurées alors que l’écart témoin était encore affirmé sur macOS. Sur les deux plateformes, le test affirme qu’aucune sonde n’est en timeout ni en erreur, et qu’un `git.status` produit par la scrutation est reçu.
 - Charge : moyenne sur 1 min (`uptime` ; dans le conteneur, `/proc/loadavg`, qui reflète l’hôte) avant chaque exécution.
 
 ### Linux (.122, Docker `node:24-bookworm`, 24 cœurs, 3 exécutions)
@@ -99,7 +105,7 @@ Méthode :
 | 4         | 5,66         | 88,0 ms        | 9,1 ms            | 24,6 ms        | **114,8 ms**    | 28,2 ms    | 5 291 ms     | 2 824 ms     | échec (référence) |
 | 5         | 8,00         | 85,9 ms        | 59,7 ms           | 25,4 ms        | 39,1 ms         | 30,9 ms    | 6 877 ms     | 2 884 ms     | 2/2               |
 
-Écart témoin maximal par exécution : 73,8 / 37,6 / 66,7 / 114,8 / 85,9 ms, **médiane 73,8 ms**. Médianes par phase : `create` 73,8 ms, `workspace` 11,8 ms, `delete` 25,4 ms, référence 39,1 ms. Charge médiane 8,00 pour 14 cœurs (de 5,66 à 12,19). Fichier témoin reçu par scrutation à chaque exécution ; aucune sonde en timeout ni en erreur. **1 exécution sur 5 échoue**, dans la phase de référence : OpenFox 128,7 ms contre 13,9 ms pour le témoin dans la même fenêtre. Le seuil n’est pas relâché.
+Écart témoin maximal par exécution : 73,8 / 37,6 / 66,7 / 114,8 / 85,9 ms, **médiane 73,8 ms**. Médianes par phase : `create` 73,8 ms, `workspace` 11,8 ms, `delete` 25,4 ms, référence 39,1 ms. Charge médiane 8,00 pour 14 cœurs (de 5,66 à 12,19). Fichier témoin reçu par scrutation à chaque exécution ; aucune sonde en timeout ni en erreur. **1 exécution sur 5 échoue**, dans la phase de référence : OpenFox 128,7 ms contre 13,9 ms pour le témoin dans la même fenêtre. Le seuil n’a pas été relâché pour cette série ; l’écart a ensuite été accepté (« Écart accepté »).
 
 ### Origine des dépassements restants sur macOS
 

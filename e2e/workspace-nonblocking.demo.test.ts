@@ -7,9 +7,11 @@
  * witness process record timestamped loop delays over four disjoint phases
  * (create, workspace watched by the client, delete, then a reference of the
  * same total length under the same probe and polling load). CPU contention
- * delays both processes; a blocked event loop only delays the server. The
- * per-phase gap to the witness, over aligned windows, must stay ≤ 100 ms on
- * every platform; on Linux the absolute delay must also stay ≤ 100 ms.
+ * delays both processes; a blocked event loop only delays the server. On
+ * Linux the per-phase gap to the witness over aligned windows, the absolute
+ * delay and the overhead over the reference must each stay ≤ 100 ms. On
+ * macOS the gaps are logged without a threshold; probe timeouts and errors,
+ * and the poll-driven git.status, are asserted everywhere.
  */
 import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
@@ -499,11 +501,12 @@ describe('workspace non-blocking demo (isolated instance)', () => {
           health,
           loadAvg: loadavg(),
           uptimeS: uptime(),
-          enforceAbsolute: ENFORCE_LOOP_MAX,
+          enforceThresholds: ENFORCE_LOOP_MAX,
         }),
       )
 
       expect(health.errors).toBe(0)
+      expect(health.timeouts).toBe(0)
       expect(health.requests).toBeGreaterThan(3)
       expect(opDuration).toBeGreaterThan(500)
       expect(markerSeen(), 'a git status poll of the watched workspace reached the client').toBe(true)
@@ -515,20 +518,19 @@ describe('workspace non-blocking demo (isolated instance)', () => {
         witnessed.filter(([firedAt]) => firedAt >= createStarted && firedAt <= referenceEnded).length,
       ).toBeGreaterThan(0)
 
-      for (const [phase, stats] of [
-        ['create', create],
-        ['workspace', dwell],
-        ['delete', remove],
-        ['reference', reference],
-      ] as const) {
-        expect(
-          stats.witnessGapMs,
-          `${phase}: server loop delay exceeds the witness by ${stats.witnessGapMs} ms`,
-        ).toBeLessThanOrEqual(LOOP_MAX_MS)
-      }
-
+      // macOS: gaps are logged, not asserted (posix_spawn of the git poller; see docs/backlog/demos/etape3.md, « Écart accepté »).
       if (ENFORCE_LOOP_MAX) {
-        expect(health.timeouts).toBe(0)
+        for (const [phase, stats] of [
+          ['create', create],
+          ['workspace', dwell],
+          ['delete', remove],
+          ['reference', reference],
+        ] as const) {
+          expect(
+            stats.witnessGapMs,
+            `${phase}: server loop delay exceeds the witness by ${stats.witnessGapMs} ms`,
+          ).toBeLessThanOrEqual(LOOP_MAX_MS)
+        }
         expect(opMax, `eventLoopDelay max ${opMax} ms during the operation on Linux`).toBeLessThanOrEqual(LOOP_MAX_MS)
         expect(overheadMs, `eventLoopDelay overhead ${overheadMs} ms on Linux`).toBeLessThanOrEqual(LOOP_MAX_MS)
       }
