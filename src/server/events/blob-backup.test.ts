@@ -441,6 +441,42 @@ describe('blob backup / restore', () => {
     60_000,
   )
 
+  it('SIGKILL after bakDb rename restores the old WAL sidecar on resume', async () => {
+    const { backupDir, destPath } = await seedRestorePair(dir)
+    const oldWal = Buffer.from('old-base-wal')
+    writeFileSync(`${destPath}-wal`, oldWal)
+    writeFileSync(`${destPath}-shm`, Buffer.from('old-base-shm'))
+
+    await killAtBarrier(
+      {
+        OPENFOX_DB_PATH: destPath,
+        OPENFOX_BLOB_CRASH_MODE: 'restore',
+        OPENFOX_BLOB_BACKUP_FROM: backupDir,
+      },
+      'after-restore-db-file-retired',
+      join(dir, 'barrier-db-file-retired'),
+    )
+    await killAtBarrier(
+      {
+        OPENFOX_DB_PATH: destPath,
+        OPENFOX_BLOB_CRASH_MODE: 'restore-recover',
+      },
+      'after-restore-rollback-db-renamed',
+      join(dir, 'barrier-rollback-db-renamed'),
+    )
+
+    expect(existsSync(destPath)).toBe(true)
+    expect(existsSync(`${destPath}.pre-restore`)).toBe(false)
+    expect(existsSync(`${destPath}.pre-restore-wal`)).toBe(true)
+
+    resumeViaBoot(destPath)
+
+    expect(existsSync(`${destPath}.pre-restore-wal`)).toBe(false)
+    expect(readFileSync(`${destPath}-wal`)).toEqual(oldWal)
+    expect(readFileSync(`${destPath}-shm`)).toEqual(Buffer.from('old-base-shm'))
+    assertEntirelyOld(destPath)
+  }, 60_000)
+
   it('restore refuses a duplicate manifest entry for a second database blob ref', async () => {
     const src = openStore(dir, 'src.db')
     appendPng(src.events)

@@ -155,8 +155,12 @@ function finishPublishedRestore(journal: RestoreJournal): void {
 }
 
 function reuniteSqliteSidecars(journal: RestoreJournal): void {
-  if (existsSync(journal.bakDb)) {
+  const bakExists = existsSync(journal.bakDb)
+  const destExists = existsSync(journal.destDbPath)
+  if (bakExists && !destExists) {
     renameSqliteSidecars(journal.destDbPath, journal.bakDb)
+  } else if (destExists && !bakExists) {
+    renameSqliteSidecars(journal.bakDb, journal.destDbPath)
   }
 }
 
@@ -213,6 +217,7 @@ function rollbackRestoreJournal(journal: RestoreJournal): void {
     }
     parkAtBlobBarrier('after-restore-rollback-db-file')
     renameSync(journal.bakDb, journal.destDbPath)
+    parkAtBlobBarrier('after-restore-rollback-db-renamed')
     renameSqliteSidecars(journal.bakDb, journal.destDbPath)
   }
   parkAtBlobBarrier('after-restore-rollback-db')
