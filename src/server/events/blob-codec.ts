@@ -1,4 +1,5 @@
 import type { Attachment, BlobRef } from '../../shared/types.js'
+import { isBlobRef } from '../../shared/blob.js'
 import { decodeDataUrl } from '../utils/data-url.js'
 import { BlobMissingError, getBlobStore, type BlobStore } from './blob-store.js'
 
@@ -127,4 +128,33 @@ export function hydrateAttachment(attachment: Attachment, store?: BlobStore): At
 
 export function blobRefBytes(ref: BlobRef, store?: BlobStore): Buffer {
   return (store ?? getBlobStore()).get(ref.hash).bytes
+}
+
+export function attachmentFromToolImageMetadata(metadata: Record<string, unknown> | undefined): Attachment | undefined {
+  if (!metadata) return undefined
+  const mime = typeof metadata['mimeType'] === 'string' ? metadata['mimeType'] : ''
+  if (!mime.startsWith('image/')) return undefined
+  const filename = typeof metadata['path'] === 'string' && metadata['path'] ? metadata['path'] : 'image'
+  const size = typeof metadata['size'] === 'number' ? metadata['size'] : 0
+  const description = typeof metadata['description'] === 'string' ? metadata['description'] : undefined
+  const base = {
+    id: 'tool-image',
+    filename,
+    mimeType: mime,
+    size,
+    ...(description ? { description } : {}),
+  }
+  const blob = metadata['blob']
+  if (isBlobRef(blob)) {
+    return { ...base, size: blob.size, blob }
+  }
+  const dataUrl = metadata['dataUrl']
+  if (typeof dataUrl === 'string' && dataUrl.startsWith('data:')) {
+    return { ...base, data: dataUrl }
+  }
+  const base64Data = metadata['base64Data']
+  if (typeof base64Data === 'string' && base64Data.length > 0) {
+    return { ...base, data: `data:${mime};base64,${base64Data}` }
+  }
+  return undefined
 }

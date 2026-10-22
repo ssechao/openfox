@@ -84,7 +84,11 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
   if (message.role === 'system' || message.role === 'developer') return null
 
   if (message.role === 'tool') {
-    return { type: 'function_call_output', call_id: message.tool_call_id ?? '', output: message.content ?? '' }
+    return {
+      type: 'function_call_output',
+      call_id: message.tool_call_id ?? '',
+      output: convertMessageContent(message.content, 'tool'),
+    }
   }
 
   if (message.role === 'assistant' && message.tool_calls?.length) {

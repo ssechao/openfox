@@ -193,7 +193,7 @@ describe('buildResponsesRequest', () => {
     ])
   })
 
-  it('leaves function_call_output content untouched (chat image parts preserved)', () => {
+  it('converts tool image_url parts to input_image on function_call_output', () => {
     const body = buildResponsesRequest(
       streamParams({
         messages: [
@@ -209,7 +209,7 @@ describe('buildResponsesRequest', () => {
       {
         type: 'function_call_output',
         call_id: 'call-1',
-        output: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,CCCC' } }],
+        output: [{ type: 'input_image', image_url: 'data:image/png;base64,CCCC', detail: 'auto' }],
       },
     ])
   })

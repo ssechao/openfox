@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { convertMessages } from '../llm/client-pure.js'
+import { buildContextMessagesFromStoredEvents } from './folding.js'
+import type { StoredEvent } from './types.js'
 import { buildResponsesRequest } from '../llm/responses-native.js'
 import { decodeDataUrl } from '../utils/data-url.js'
 import { EventStore } from './store.js'
@@ -323,4 +325,118 @@ describe('C1 SIGKILL after durable blob write', () => {
       db.close()
     }
   }, 20_000)
+})
+
+describe('tool result images reach Chat and Responses', () => {
+  let blobs: MemoryBlobStore
+
+  beforeEach(() => {
+    blobs = new MemoryBlobStore()
+    setBlobStore(blobs)
+  })
+
+  afterEach(() => {
+    setBlobStore(null)
+  })
+
+  function toolEvents(metadata: Record<string, unknown>): StoredEvent[] {
+    const now = Date.now()
+    return [
+      {
+        seq: 1,
+        timestamp: now,
+        sessionId: 's1',
+        type: 'message.start',
+        data: { messageId: 'm1', role: 'assistant', content: '', contextWindowId: 'win-1' },
+      },
+      {
+        seq: 2,
+        timestamp: now,
+        sessionId: 's1',
+        type: 'tool.call',
+        data: { messageId: 'm1', toolCall: { id: 'c1', name: 'read_file', arguments: { path: 'dot.png' } } },
+      },
+      {
+        seq: 3,
+        timestamp: now,
+        sessionId: 's1',
+        type: 'tool.result',
+        data: {
+          messageId: 'm1',
+          toolCallId: 'c1',
+          result: { success: true, output: 'ok', durationMs: 1, truncated: false, metadata },
+        },
+      },
+      { seq: 4, timestamp: now, sessionId: 's1', type: 'message.done', data: { messageId: 'm1' } },
+    ]
+  }
+
+  async function wireFromMetadata(metadata: Record<string, unknown>) {
+    const folded = buildContextMessagesFromStoredEvents(toolEvents(metadata), 'win-1')
+    const chat = await convertMessages(folded, true)
+    const responses = buildResponsesRequest({ model: 'gpt-test', messages: chat })
+    return { folded, chat, responses }
+  }
+
+  function imageBytesFromChat(chat: Awaited<ReturnType<typeof convertMessages>>): Buffer {
+    const tool = chat.find((msg) => msg.role === 'tool')
+    const content = tool?.content as Array<{ type: string; image_url?: { url: string } }>
+    const image = content.find((part) => part.type === 'image_url')
+    const bytes = decodeDataUrl(image!.image_url!.url)
+    if (!bytes) throw new Error('missing image bytes')
+    return bytes
+  }
+
+  it('rehydrates a tool-result blob ref into Chat and Responses, byte-identical', async () => {
+    const ref = blobs.put(PNG, 'image/png')
+    const { folded, chat, responses } = await wireFromMetadata({
+      mimeType: 'image/png',
+      size: PNG.length,
+      path: 'dot.png',
+      blob: ref,
+    })
+    expect(folded.find((msg) => msg.role === 'tool')?.attachments?.[0]?.blob).toEqual(ref)
+    expect(imageBytesFromChat(chat).equals(PNG)).toBe(true)
+    const input = JSON.stringify(responses.input)
+    expect(input).toContain('input_image')
+    const match = input.match(/data:image\/png;base64,([A-Za-z0-9+/=]+)/)
+    expect(Buffer.from(match![1]!, 'base64').equals(PNG)).toBe(true)
+  })
+
+  it('throws BlobMissingError when the tool-result blob is absent', async () => {
+    await expect(
+      wireFromMetadata({
+        mimeType: 'image/png',
+        size: PNG.length,
+        path: 'dot.png',
+        blob: { hash: hashBytes(PNG), mime: 'image/png', size: PNG.length },
+      }),
+    ).rejects.toBeInstanceOf(BlobMissingError)
+  })
+
+  it('throws BlobCorruptError when the tool-result blob bytes do not match the hash', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-blob-corrupt-tool-'))
+    const files = new FileBlobStore(dir)
+    setBlobStore(files)
+    try {
+      const ref = files.put(PNG, 'image/png')
+      files.corruptForTest(ref.hash)
+      await expect(
+        convertMessages(
+          [
+            { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'read', arguments: {} }] },
+            {
+              role: 'tool',
+              content: 'ok',
+              toolCallId: 'c1',
+              attachments: [{ id: 'a', filename: 'dot.png', mimeType: 'image/png', size: PNG.length, blob: ref }],
+            },
+          ],
+          true,
+        ),
+      ).rejects.toBeInstanceOf(BlobCorruptError)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

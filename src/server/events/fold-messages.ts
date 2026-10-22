@@ -1,8 +1,9 @@
-import type { Message, Attachment, StatsSource } from '../../shared/types.js'
+import type { Message, StatsSource } from '../../shared/types.js'
 import type { StoredEvent, TurnEvent, SessionSnapshot, SnapshotMessage } from './types.js'
 import { applyEvents } from './apply-events.js'
 import { renderToolResultContent } from '../chat/tool-result-content.js'
 import type { ContextMessage, ContextMessageBuildOptions, EventLike, MessageWithId } from './fold-types.js'
+import { attachmentFromToolImageMetadata } from './blob-codec.js'
 
 function cloneMessage(message: Message): Message {
   return {
@@ -367,25 +368,16 @@ export function handleToolResult(
 ): void {
   fulfilled.add(data.toolCallId)
   if (messageMap.has(data.messageId)) {
-    const imageMeta = data.result.metadata
+    const imageMeta = data.result.metadata as Record<string, unknown> | undefined
     const toolMsg: MessageWithId = {
       id: `tool-${data.toolCallId}`,
       role: 'tool',
       content: renderToolResultContent(data.result),
       toolCallId: data.toolCallId,
     }
-    if (imageMeta?.dataUrl && imageMeta?.mimeType?.startsWith('image/')) {
-      const description = (imageMeta as Record<string, unknown>)['description']
-      toolMsg.attachments = [
-        {
-          id: crypto.randomUUID(),
-          filename: imageMeta.path ?? 'image',
-          mimeType: imageMeta.mimeType as Attachment['mimeType'],
-          size: imageMeta.size ?? 0,
-          data: imageMeta.dataUrl,
-          ...(typeof description === 'string' ? { description } : {}),
-        },
-      ]
+    const imageAttachment = attachmentFromToolImageMetadata(imageMeta)
+    if (imageAttachment) {
+      toolMsg.attachments = [{ ...imageAttachment, id: crypto.randomUUID() }]
     }
     // Insert tool message right after its parent assistant message,
     // before any interleaved user messages (e.g. system-reminder injected

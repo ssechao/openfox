@@ -1,8 +1,10 @@
+import { execFileSync, fork, type ChildProcess } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { EventStore, initEventStore, getEventStore } from './store.js'
 import { FileBlobStore, hashBytes, setBlobStore } from './blob-store.js'
 import { getBlobMigrationStatus } from './blob-migrate.js'
@@ -254,4 +256,93 @@ describe('C2 SIGKILL at migration barriers', () => {
       db.close()
     }
   }, 20_000)
+})
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..')
+const LOCK_CHILD = join(dirname(fileURLToPath(import.meta.url)), '../db/instance-lock.test-child.ts')
+
+describe('migrate-blobs refuses a locked database', () => {
+  let dir: string
+  let child: ChildProcess | undefined
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openfox-blob-mig-lock-'))
+  })
+
+  afterEach(() => {
+    if (child && child.exitCode === null && child.pid) {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // gone
+        }
+      }
+    }
+    setBlobStore(null)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('exits without mutating the database when another instance holds the lock', async () => {
+    const dbPath = join(dir, 'sessions.db')
+    const db = new Database(dbPath)
+    db.exec(`
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        UNIQUE(session_id, seq)
+      )
+    `)
+    const original = seedInline(db, 's1')
+    db.close()
+
+    child = fork(LOCK_CHILD, [], {
+      execArgv: ['--import', 'tsx/esm'],
+      env: { ...process.env, OPENFOX_LOCK_DB_PATH: dbPath },
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      detached: true,
+    })
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('lock child timed out')), 10_000)
+      child!.once('message', (message) => {
+        clearTimeout(timer)
+        if ((message as { ok?: boolean }).ok) resolve()
+        else reject(new Error(`lock failed ${JSON.stringify(message)}`))
+      })
+      child!.once('exit', (code) => {
+        clearTimeout(timer)
+        reject(new Error(`lock child exited ${code}`))
+      })
+    })
+
+    let stderr = ''
+    let status = 0
+    try {
+      execFileSync('npx', ['tsx', 'scripts/migrate-blobs.ts', '--yes', '--db', dbPath], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      const err = error as { status?: number; stderr?: string; stdout?: string }
+      status = err.status ?? 0
+      stderr = `${err.stderr ?? ''}${err.stdout ?? ''}`
+    }
+    expect(status).toBe(1)
+    expect(stderr).toMatch(/database already in use/)
+
+    const after = new Database(dbPath, { readonly: true })
+    const row = after.prepare(`SELECT payload FROM events WHERE session_id='s1'`).get() as { payload: string }
+    expect(row.payload).toBe(original)
+    expect(row.payload).toContain('data:image/png')
+    const tables = after.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='blob_migration'").get()
+    expect(tables).toBeUndefined()
+    after.close()
+  }, 30_000)
 })
