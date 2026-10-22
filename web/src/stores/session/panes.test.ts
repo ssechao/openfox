@@ -17,7 +17,6 @@ function makeState(overrides: Partial<SessionState> = {}): SessionState {
     showPasswordModal: false,
     passwordModalRetry: false,
     sessions: [],
-    searchSessions: null,
     currentSession: null,
     unreadSessionIds: [],
     messages: [],

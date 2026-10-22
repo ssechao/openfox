@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useLocation, Link } from 'wouter'
+import { useShallow } from 'zustand/react/shallow'
 import { useSessionStore } from '../../stores/session'
+import { selectSessionSearch } from '../../stores/session/selectors'
 import type { PendingPathConfirmation } from '../../stores/session/types'
 import { useCurrentProject } from '../../hooks/useCurrentProject'
 import { useT } from '../../hooks/useT'
@@ -27,7 +29,7 @@ import {
   EditSmallIcon,
 } from '../shared/icons'
 import { groupSessionsByDate, formatDateHeader, formatTime } from '../../lib/format-date.js'
-import { fuzzyMatch, highlightMatches } from '../../lib/modal-utils.js'
+import { highlightExact } from '../../lib/modal-utils.js'
 import { shouldAutofocus } from '../../lib/device'
 import { useBinding, useKeybindings } from '../../hooks/useKeybindings.js'
 import { hasStoredToken, downloadSessionExport, importSession } from '../../lib/api'
@@ -58,6 +60,7 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
   const importFileInputRef = useRef<HTMLInputElement>(null)
 
   const sessions = useSessionStore((state) => state.sessions)
+  const searchState = useSessionStore(useShallow(selectSessionSearch))
   const currentSession = useSessionStore((state) => state.currentSession)
   const unreadSessionIds = useSessionStore((state) => state.unreadSessionIds)
   const deleteSession = useSessionStore((state) => state.deleteSession)
@@ -72,6 +75,7 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
   const currentProject = useCurrentProject()
 
   const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [focusedIndex, setFocusedIndex] = useState(-1)
   const searchRef = useRef<HTMLInputElement>(null)
   const sessionListRef = useRef<HTMLDivElement>(null)
@@ -106,13 +110,37 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
   const loadMoreRef = useRef<HTMLDivElement>(null)
 
   const handleLoadMore = useCallback(() => {
+    if (debouncedQuery) {
+      if (searchState.searchHasMore && !searchState.searchPending && searchState.searchResults) {
+        void searchState.searchFromServer(debouncedQuery, {
+          projectId,
+          offset: searchState.searchResults.length,
+          append: true,
+          limit: 20,
+        })
+      }
+      return
+    }
     if (sessionsHasMore && !sessionsPaginationLoading && currentProject) {
       loadMoreSessions(currentProject.id)
     }
-  }, [sessionsHasMore, sessionsPaginationLoading, currentProject, loadMoreSessions])
+  }, [
+    debouncedQuery,
+    searchState.searchHasMore,
+    searchState.searchPending,
+    searchState.searchResults,
+    searchState.searchFromServer,
+    projectId,
+    sessionsHasMore,
+    sessionsPaginationLoading,
+    currentProject,
+    loadMoreSessions,
+  ])
+
+  const canLoadMore = debouncedQuery ? searchState.searchHasMore : sessionsHasMore
 
   useEffect(() => {
-    if (!loadMoreRef.current || !sessionsHasMore) return
+    if (!loadMoreRef.current || !canLoadMore) return
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -126,7 +154,7 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
 
     observer.observe(loadMoreRef.current)
     return () => observer.disconnect()
-  }, [sessionsHasMore, handleLoadMore])
+  }, [canLoadMore, handleLoadMore])
 
   // Filter sessions to those belonging to the current project by ID
   const projectSessions = sessions.filter((session) => session.projectId === currentProject?.id)
@@ -144,22 +172,35 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
     return [favs, others]
   }, [projectSessions])
 
-  const applySearch = (list: SessionSummary[]) => {
-    if (!searchQuery) return list
-    return list.filter((s) => {
-      const title = s.title ?? ''
-      const promptsJoined = (s.recentUserPrompts?.map((p) => p.content) ?? []).join(' ')
-      return fuzzyMatch(title, searchQuery) || fuzzyMatch(promptsJoined, searchQuery)
-    })
-  }
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 150)
+    return () => clearTimeout(timer)
+  }, [searchQuery])
 
-  const filteredFavorites = useMemo(() => applySearch(favoriteSessions), [favoriteSessions, searchQuery])
-  const filteredOthers = useMemo(() => applySearch(otherSessions), [otherSessions, searchQuery])
+  useEffect(() => {
+    void searchState.searchFromServer(debouncedQuery, { projectId })
+  }, [debouncedQuery, projectId, searchState.searchFromServer])
+
+  const filteredFavorites = useMemo(() => {
+    if (!debouncedQuery) return favoriteSessions
+    return (searchState.searchResults ?? []).filter((session) => session.isFavorite)
+  }, [favoriteSessions, debouncedQuery, searchState.searchResults])
+  const filteredOthers = useMemo(() => {
+    if (!debouncedQuery) return otherSessions
+    return (searchState.searchResults ?? []).filter((session) => !session.isFavorite)
+  }, [otherSessions, debouncedQuery, searchState.searchResults])
 
   const allFiltered = [...filteredFavorites, ...filteredOthers]
 
-  const isSearching = searchQuery.length > 0
-  const hasNoResults = isSearching && allFiltered.length === 0
+  const isSearching = debouncedQuery.length > 0
+  const indexUnavailable = isSearching && searchState.searchIndexReady === false
+  const hasNoResults =
+    isSearching &&
+    !indexUnavailable &&
+    !searchState.searchPending &&
+    !searchState.searchError &&
+    searchState.searchResults !== null &&
+    allFiltered.length === 0
 
   // Reset focused index when search results change
   useEffect(() => {
@@ -392,14 +433,27 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
                   </button>
                 )}
               </div>
-              {isSearching && !hasNoResults && (
+              {indexUnavailable && (
+                <div className="mt-1 text-xs text-text-muted px-1">
+                  {t(
+                    searchState.searchIndexMessage ?? {
+                      en: 'Search index is unavailable. Run scripts/rebuild-search-index.ts to enable search.',
+                      fr: "L'index de recherche est indisponible. Exécutez scripts/rebuild-search-index.ts pour activer la recherche.",
+                    },
+                  )}
+                </div>
+              )}
+              {searchState.searchError && (
+                <div className="mt-1 text-xs text-text-muted px-1">{t(searchState.searchError)}</div>
+              )}
+              {isSearching && !hasNoResults && !indexUnavailable && !searchState.searchError && (
                 <div className="mt-1 text-xs text-text-muted px-1">
                   {t(
                     {
                       en: { one: '{{count}} match', other: '{{count}} matches' },
                       fr: { one: '{{count}} résultat', other: '{{count}} résultats' },
                     },
-                    { count: allFiltered.length },
+                    { count: searchState.searchTotal ?? allFiltered.length },
                   )}
                 </div>
               )}
@@ -476,11 +530,13 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
 
             <PluginZone id="sidebar.sessions_list" context={{ projectId }}>
               <ScrollArea className="flex-1">
-                {allFiltered.length === 0 ? (
+                {indexUnavailable || searchState.searchError ? null : allFiltered.length === 0 ? (
                   <div className="p-4 text-center text-text-muted text-xs">
-                    {isSearching
-                      ? t({ en: 'No matching sessions', fr: 'Aucune session correspondante' })
-                      : t({ en: 'No sessions', fr: 'Aucune session' })}
+                    {isSearching && searchState.searchPending
+                      ? t({ en: 'Searching…', fr: 'Recherche…' })
+                      : isSearching
+                        ? t({ en: 'No matching sessions', fr: 'Aucune session correspondante' })
+                        : t({ en: 'No sessions', fr: 'Aucune session' })}
                   </div>
                 ) : (
                   <>
@@ -502,7 +558,8 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
                         t,
                       )}
                     </div>
-                    {sessionsPaginationLoading && (
+                    {(sessionsPaginationLoading ||
+                      (isSearching && searchState.searchPending && searchState.searchHasMore)) && (
                       <div className="p-4 text-center text-text-muted text-xs">
                         {t({ en: 'Loading more...', fr: 'Chargement…' })}
                       </div>
@@ -585,7 +642,7 @@ function renderSessionList(
           <div className="flex justify-between items-center mb-1">
             <span className={`font-medium truncate text-sm ${isActive ? 'text-accent-primary' : 'text-text-primary'}`}>
               {searchQuery
-                ? highlightMatches(session.title ?? session.id.slice(0, 6), searchQuery)
+                ? highlightExact(session.title ?? session.id.slice(0, 6), searchQuery)
                 : (session.title ?? session.id.slice(0, 6))}
             </span>
             <div className="flex items-center gap-1">

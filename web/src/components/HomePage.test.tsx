@@ -35,28 +35,114 @@ vi.mock('../hooks/useSetting', () => ({
   useSetting: (key: string, fallback = '') => ({ value: mockSettings[key] ?? fallback, loading: false }),
 }))
 
-const { listHomeSessionsMock, listSessionsMock, ensureFullSessionListMock, navigateMock } = vi.hoisted(() => ({
-  listHomeSessionsMock: vi.fn(),
-  listSessionsMock: vi.fn(),
-  ensureFullSessionListMock: vi.fn(),
-  navigateMock: vi.fn(),
-}))
+const {
+  listHomeSessionsMock,
+  listSessionsMock,
+  searchFromServerMock,
+  navigateMock,
+  sessionStore,
+  searchStoreSubscribe,
+  searchStoreVersion,
+} = vi.hoisted(() => {
+  const listeners = new Set<() => void>()
+  let version = 0
+  const sessionStore = {
+    sessions: [] as any[],
+    sessionsWithPendingConfirmations: [] as string[],
+    searchResults: null as any[] | null,
+    searchIndexReady: null as boolean | null,
+    searchIndexMessage: null as { en: string; fr: string } | null,
+    searchHasMore: false,
+    searchTotal: null as number | null,
+    searchPending: false,
+    searchError: null as { en: string; fr: string } | null,
+  }
+  const emitSearch = () => {
+    version++
+    for (const listener of listeners) listener()
+  }
+  const searchFromServerMock = vi.fn(
+    async (query: string, opts: { offset?: number; append?: boolean; limit?: number } = {}) => {
+      const trimmed = query.trim().toLowerCase()
+      if (!trimmed) {
+        sessionStore.searchResults = null
+        sessionStore.searchIndexReady = null
+        sessionStore.searchTotal = null
+        sessionStore.searchPending = false
+        sessionStore.searchError = null
+        sessionStore.searchHasMore = false
+        emitSearch()
+        return
+      }
+      const tokens = trimmed.split(/\s+/).filter(Boolean)
+      sessionStore.searchIndexReady = true
+      sessionStore.searchPending = false
+      sessionStore.searchError = null
+      const matched = sessionStore.sessions
+        .filter((session) => {
+          const hay = [session.title, ...(session.recentUserPrompts?.map((p: { content: string }) => p.content) ?? [])]
+            .join(' ')
+            .toLowerCase()
+          return tokens.every((token) => hay.includes(token))
+        })
+        .map((session) => {
+          const title = (session.title ?? '').toLowerCase()
+          const titleHit = tokens.every((token) => title.includes(token))
+          return {
+            ...session,
+            searchMatch: titleHit
+              ? { field: 'title' as const }
+              : { field: 'body' as const, snippet: session.recentUserPrompts?.[0]?.content },
+          }
+        })
+      const limit = opts.limit ?? 20
+      const offset = opts.offset ?? 0
+      const page = matched.slice(offset, offset + limit)
+      sessionStore.searchResults = opts.append ? [...(sessionStore.searchResults ?? []), ...page] : page
+      sessionStore.searchTotal = matched.length
+      sessionStore.searchHasMore = offset + page.length < matched.length
+      emitSearch()
+    },
+  )
+  return {
+    listHomeSessionsMock: vi.fn(),
+    listSessionsMock: vi.fn(),
+    searchFromServerMock,
+    navigateMock: vi.fn(),
+    sessionStore,
+    emitSearch,
+    searchStoreSubscribe: (listener: () => void) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    searchStoreVersion: () => version,
+  }
+})
 
-const sessionStore = { sessions: [] as any[], sessionsWithPendingConfirmations: [] as string[] }
-vi.mock('../stores/session', () => ({
-  useSessionStore: (selector?: any) => {
-    const state = {
-      sessions: sessionStore.sessions,
-      searchSessions: null,
-      sessionsWithPendingConfirmations: sessionStore.sessionsWithPendingConfirmations,
-      listSessions: listSessionsMock,
-      listHomeSessions: listHomeSessionsMock,
-      ensureFullSessionList: ensureFullSessionListMock,
-      connectionStatus: 'connected',
-    }
-    return selector ? selector(state) : state
-  },
-}))
+vi.mock('../stores/session', async () => {
+  const React = await import('react')
+  return {
+    useSessionStore: (selector?: any) => {
+      React.useSyncExternalStore(searchStoreSubscribe, searchStoreVersion)
+      const state = {
+        sessions: sessionStore.sessions,
+        searchResults: sessionStore.searchResults,
+        searchIndexReady: sessionStore.searchIndexReady,
+        searchIndexMessage: sessionStore.searchIndexMessage,
+        searchHasMore: sessionStore.searchHasMore,
+        searchTotal: sessionStore.searchTotal,
+        searchPending: sessionStore.searchPending,
+        searchError: sessionStore.searchError,
+        sessionsWithPendingConfirmations: sessionStore.sessionsWithPendingConfirmations,
+        listSessions: listSessionsMock,
+        listHomeSessions: listHomeSessionsMock,
+        searchFromServer: searchFromServerMock,
+        connectionStatus: 'connected',
+      }
+      return selector ? selector(state) : state
+    },
+  }
+})
 
 const { deleteProjectMock } = vi.hoisted(() => ({
   deleteProjectMock: vi.fn(),
@@ -151,7 +237,10 @@ beforeEach(() => {
   navigateMock.mockClear()
   listHomeSessionsMock.mockClear()
   listSessionsMock.mockClear()
-  ensureFullSessionListMock.mockClear()
+  searchFromServerMock.mockClear()
+  sessionStore.searchResults = null
+  sessionStore.searchIndexReady = null
+  sessionStore.searchIndexMessage = null
   // Seed the per-project counts so useResource serves from cache and no
   // out-of-act fetch fires on mount.
   clearCache()
@@ -333,9 +422,9 @@ describe('HomePage', () => {
     const { HomePage } = await import('./HomePage')
     const container = render(<HomePage />)
     const input = container.querySelector('[placeholder="Search sessions by title or keyword..."]')!
-    await userEvent.type(input, 'beta')
+    await userEvent.type(input, 'Analysis')
     await vi.waitFor(() => expect(container.textContent).toContain('1 match'))
-    expect(container.textContent).toContain('Project Beta')
+    expect(container.textContent).toContain('Analysis')
     expect(container.textContent).not.toContain('Setup docs')
   })
 
@@ -366,7 +455,7 @@ describe('HomePage', () => {
     expect(container.textContent).toContain('Open source bug')
   })
 
-  it('shows all matching sessions when searching (no 20-session limit)', async () => {
+  it('pages search results and loads the next page without treating page size as the total', async () => {
     const sessions = Array.from({ length: 25 }, (_, i) =>
       makeSession(`s${i}`, {
         title: `Fix bug ${i}`,
@@ -379,8 +468,11 @@ describe('HomePage', () => {
     const input = container.querySelector('[placeholder="Search sessions by title or keyword..."]')!
     await userEvent.type(input, 'fix')
     await vi.waitFor(() => expect(container.textContent).toContain('25 matches'))
-    const visible = container.querySelectorAll('a[href*="/s/"]')
-    expect(visible.length).toBe(25)
+    expect(container.querySelectorAll('a[href*="/s/"]').length).toBe(20)
+    const loadMore = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.includes('Load more'))
+    expect(loadMore).toBeTruthy()
+    await userEvent.click(loadMore!)
+    await vi.waitFor(() => expect(container.querySelectorAll('a[href*="/s/"]').length).toBe(25))
   })
 
   it('shows up to 20 most recent sessions ordered by last activity', async () => {
@@ -526,6 +618,7 @@ describe('HomePage', () => {
     const input = container.querySelector('[placeholder="Search sessions by title or keyword..."]')!
     await userEvent.type(input, 'review')
     await vi.waitFor(() => expect(container.textContent).toContain('1 match'))
+    expect(container.textContent).toContain('Session alpha')
     expect(container.textContent).toContain('prompts')
   })
 
@@ -557,7 +650,9 @@ describe('HomePage', () => {
     const container = render(<HomePage />)
     const input = container.querySelector('[placeholder="Search sessions by title or keyword..."]')!
     await userEvent.type(input, 'review')
-    await vi.waitFor(() => expect(container.textContent).toContain('prompts'))
+    await vi.waitFor(() => expect(container.textContent).toContain('1 match'))
+    expect(container.textContent).toContain('QA workflow')
+    expect(container.textContent).toContain('prompts')
     expect(container.textContent).toContain('Run full code')
   })
 
@@ -579,9 +674,8 @@ describe('HomePage', () => {
     const input = container.querySelector('[placeholder="Search sessions by title or keyword..."]')!
     await userEvent.type(input, 'error')
     await vi.waitFor(() => expect(container.textContent).toContain('2 matches'))
-    const links = container.querySelectorAll('a[href*="/s/"]')
-    expect(textOf(links[0] as HTMLElement | null)).toContain('Error in checkout')
-    expect(textOf(links[1] as HTMLElement | null)).toContain('UI improvements')
+    expect(container.textContent).toContain('Error in checkout')
+    expect(container.textContent).toContain('UI improvements')
   })
 
   it('clears search on Escape key', async () => {
@@ -619,18 +713,20 @@ describe('HomePage', () => {
 
     expect(listHomeSessionsMock).toHaveBeenCalledTimes(1)
     expect(listSessionsMock).not.toHaveBeenCalled()
-    expect(ensureFullSessionListMock).not.toHaveBeenCalled()
+    expect(searchFromServerMock).toHaveBeenCalled()
 
     const input = container.querySelector('[placeholder="Search sessions by title or keyword..."]')!
     await userEvent.type(input, 'alp')
 
     await vi.waitFor(() => {
-      expect(ensureFullSessionListMock).toHaveBeenCalledTimes(1)
+      expect(searchFromServerMock).toHaveBeenCalledWith('alp')
     })
   })
 
   it('keeps the projects section visible while searching, even with no session matches', async () => {
     sessionStore.sessions = [makeSession('s1', { title: 'Some session' })]
+    sessionStore.searchResults = []
+    sessionStore.searchIndexReady = true
     const { HomePage } = await import('./HomePage')
     const container = render(<HomePage />)
 

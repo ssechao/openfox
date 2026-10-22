@@ -868,6 +868,25 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const projectId = req.query['projectId'] as string | undefined
     const rawLimit = req.query['limit'] as string | undefined
     const offset = parseInt(req.query['offset'] as string) || 0
+    const rawQuery = req.query['q']
+    const q = typeof rawQuery === 'string' ? rawQuery : undefined
+
+    if (q !== undefined && q.length > 0) {
+      const limit = Math.min(parseInt(rawLimit || '20') || 20, 100)
+      const result = sessionManager.searchSessions(q, limit, offset, projectId)
+      const sessionsWithPrompts = result.sessions.map((session) => ({
+        ...session,
+        recentUserPrompts: session.recentUserPrompts?.slice(0, 10) ?? [],
+      }))
+      return res.json({
+        sessions: sessionsWithPrompts,
+        hasMore: result.hasMore,
+        total: result.total,
+        indexReady: result.indexReady,
+        ...(result.message ? { message: result.message } : {}),
+        pendingConfirmationsBySession: {},
+      })
+    }
 
     let sessions: ReturnType<typeof sessionManager.listSessions>
     let hasMore = false

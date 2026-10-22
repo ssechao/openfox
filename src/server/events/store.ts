@@ -42,6 +42,7 @@ import { collectBlobRefs, extractBinaries } from './blob-codec.js'
 import { parkAtBlobBarrier } from './blob-barrier.js'
 import { migrateAllBlobs, migrateSessionBlobs, type BlobMigrationReport } from './blob-migrate.js'
 import { gcBlobs, type BlobGcReport } from './blob-gc.js'
+import { SearchIndexer } from '../search/fts-index.js'
 import type { BlobScanProgress } from './blob-scan.js'
 import { rollbackAllBlobs, rollbackSessionBlobs, type BlobRollbackReport } from './blob-rollback.js'
 
@@ -211,6 +212,7 @@ function createSubscriber(
 
 export class EventStore {
   private db: Database.Database
+  readonly searchIndex: SearchIndexer
   private subscribers: Map<string, Set<Subscriber>> = new Map()
   private globalSubscribers: Map<number, GlobalSubscriber> = new Map()
   private globalSubscriberIdCounter = 0
@@ -408,6 +410,7 @@ export class EventStore {
     this.blobStore = options.blobStore ?? blobStoreForDatabase(db.name)
     setBlobStore(this.blobStore)
     this.initSchema()
+    this.searchIndex = new SearchIndexer(this.db)
     this.checkExternalWrites()
   }
 
@@ -514,10 +517,14 @@ export class EventStore {
   /**
    * Append a single event to a session
    */
-  append(sessionId: string, event: TurnEvent): StoredEvent {
+  append(
+    sessionId: string,
+    event: TurnEvent,
+    options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
+  ): StoredEvent {
     return event?.type === 'turn.snapshot'
-      ? this.measureSnapshotOperation('snapshotAppend', () => this.appendEvent(sessionId, event))
-      : this.appendEvent(sessionId, event)
+      ? this.measureSnapshotOperation('snapshotAppend', () => this.appendEvent(sessionId, event, true, options))
+      : this.appendEvent(sessionId, event, true, options)
   }
 
   appendStreaming(sessionId: string, event: TurnEvent): void {
@@ -623,7 +630,12 @@ export class EventStore {
     for (const ref of collectBlobRefs(data)) clear.call(this.blobStore, ref.hash)
   }
 
-  private appendEvent(sessionId: string, event: TurnEvent, notify = true): StoredEvent {
+  private appendEvent(
+    sessionId: string,
+    event: TurnEvent,
+    notify = true,
+    options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
+  ): StoredEvent {
     this.assertValidEvent(sessionId, event)
     this.flushStreaming(sessionId)
 
@@ -646,7 +658,17 @@ export class EventStore {
     let busyRetries = 0
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
-        this.timed('write', () => insert.run(sessionId, seq, timestamp, event.type, payload))
+        this.timed('write', () =>
+          this.searchIndex.withPendingRollback(() =>
+            this.db.transaction(() => {
+              insert.run(sessionId, seq, timestamp, event.type, payload)
+              this.searchIndex.apply(sessionId, toStore, timestamp, {
+                ...(options.indexSnapshot ? { allowSnapshot: true } : {}),
+                ...(options.searchRemoveIds ? { removeMessageIds: options.searchRemoveIds } : {}),
+              })
+            })(),
+          ),
+        )
         break
       } catch (error) {
         if (isBusyError(error) && busyRetries < EventStore.APPEND_BUSY_RETRIES) {
@@ -716,6 +738,7 @@ export class EventStore {
           let seq = baseSeq
           for (const event of toStore) {
             insert.run(sessionId, seq, timestamp, event.type, payloads[seq - baseSeq])
+            this.searchIndex.apply(sessionId, event, timestamp)
             const stored: StoredEvent = {
               seq,
               timestamp,
@@ -727,7 +750,7 @@ export class EventStore {
             seq++
           }
         })
-        this.timed('write', transaction)
+        this.timed('write', () => this.searchIndex.withPendingRollback(transaction))
 
         for (const stored of results) this.releaseBlobPending(stored.data)
 
@@ -773,9 +796,12 @@ export class EventStore {
     const transaction = this.db.transaction(() => {
       for (const event of events) {
         insert.run(sessionId, event.seq, event.timestamp, event.type, payloads.get(event.seq))
+        this.searchIndex.apply(sessionId, { type: event.type, data: event.data } as TurnEvent, event.timestamp, {
+          allowSnapshot: true,
+        })
       }
     })
-    transaction()
+    this.searchIndex.withPendingRollback(() => transaction())
 
     this.projections.delete(sessionId)
     this.replayPrefixes.delete(sessionId)
@@ -1331,7 +1357,12 @@ export class EventStore {
    */
   deleteSession(sessionId: string): void {
     this.dropStreaming(sessionId)
-    this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
+    this.searchIndex.withPendingRollback(() =>
+      this.db.transaction(() => {
+        this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
+        this.searchIndex.removeSession(sessionId)
+      })(),
+    )
     this.invalidateSessionCache(sessionId)
     this.runningSessionIds.delete(sessionId)
 

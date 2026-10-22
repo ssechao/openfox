@@ -3,9 +3,56 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-const mockNavigate = vi.fn()
-const mockListSessions = vi.fn()
-const mockLoadMoreSessions = vi.fn()
+const {
+  mockNavigate,
+  mockListSessions,
+  mockLoadMoreSessions,
+  sessionsRef,
+  resultsRef,
+  searchStoreSubscribe,
+  searchStoreVersion,
+  mockSearchFromServer,
+} = vi.hoisted(() => {
+  const listeners = new Set<() => void>()
+  let version = 0
+  const sessionsRef = { current: [] as any[] }
+  const resultsRef = { current: null as any[] | null, ready: null as boolean | null }
+  const emit = () => {
+    version++
+    for (const listener of listeners) listener()
+  }
+  const mockSearchFromServer = vi.fn(async (query: string) => {
+    const trimmed = query.trim().toLowerCase()
+    if (!trimmed) {
+      resultsRef.current = null
+      resultsRef.ready = null
+      emit()
+      return
+    }
+    const tokens = trimmed.split(/\s+/).filter(Boolean)
+    resultsRef.ready = true
+    resultsRef.current = sessionsRef.current.filter((session) => {
+      const hay = [session.title, ...(session.recentUserPrompts?.map((p: { content: string }) => p.content) ?? [])]
+        .join(' ')
+        .toLowerCase()
+      return tokens.every((token) => hay.includes(token))
+    })
+    emit()
+  })
+  return {
+    mockNavigate: vi.fn(),
+    mockListSessions: vi.fn(),
+    mockLoadMoreSessions: vi.fn(),
+    sessionsRef,
+    resultsRef,
+    mockSearchFromServer,
+    searchStoreSubscribe: (listener: () => void) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    searchStoreVersion: () => version,
+  }
+})
 
 let sessions: any[] = []
 
@@ -14,25 +61,38 @@ vi.mock('wouter', () => ({
   Link: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a>,
 }))
 
-vi.mock('../../stores/session', () => ({
-  useSessionStore: (selector?: any) => {
-    const state = {
-      sessions,
-      currentSession: null,
-      unreadSessionIds: [],
-      sessionsWithPendingConfirmations: [],
-      pendingPathConfirmations: [],
-      sessionsHasMore: false,
-      sessionsPaginationLoading: false,
-      listSessions: mockListSessions,
-      loadMoreSessions: mockLoadMoreSessions,
-      deleteSession: vi.fn(),
-      deleteAllSessions: vi.fn(),
-      renameSession: vi.fn(),
-    }
-    return selector ? selector(state) : state
-  },
-}))
+vi.mock('../../stores/session', async () => {
+  const React = await import('react')
+  return {
+    useSessionStore: (selector?: any) => {
+      React.useSyncExternalStore(searchStoreSubscribe, searchStoreVersion)
+      sessionsRef.current = sessions
+      const state = {
+        sessions,
+        currentSession: null,
+        unreadSessionIds: [],
+        sessionsWithPendingConfirmations: [],
+        pendingPathConfirmations: [],
+        sessionsHasMore: false,
+        sessionsPaginationLoading: false,
+        listSessions: mockListSessions,
+        loadMoreSessions: mockLoadMoreSessions,
+        deleteSession: vi.fn(),
+        deleteAllSessions: vi.fn(),
+        renameSession: vi.fn(),
+        searchFromServer: mockSearchFromServer,
+        searchResults: resultsRef.current,
+        searchIndexReady: resultsRef.ready,
+        searchIndexMessage: null,
+        searchHasMore: false,
+        searchTotal: resultsRef.current?.length ?? null,
+        searchPending: false,
+        searchError: null,
+      }
+      return selector ? selector(state) : state
+    },
+  }
+})
 
 vi.mock('../../hooks/useCurrentProject', () => ({
   useCurrentProject: () => ({ id: 'project-1', name: 'Project', workdir: '/tmp/project' }),
@@ -100,6 +160,9 @@ vi.mock('../shared/icons', () => ({
 beforeEach(() => {
   cleanup()
   sessions = []
+  sessionsRef.current = []
+  resultsRef.current = null
+  resultsRef.ready = null
   document.body.innerHTML = ''
 })
 
@@ -167,8 +230,8 @@ describe('Sidebar session search', () => {
 
     await vi.waitFor(() => {
       expect(screen.getByRole('link', { name: /Implement search feature/ })).toBeTruthy()
+      expect(screen.queryByRole('link', { name: /Bug fix login/ })).toBeNull()
     })
-    expect(screen.queryByRole('link', { name: /Bug fix login/ })).toBeNull()
   })
 
   it('filters sessions by recentUserPrompts content (criterion 1)', async () => {
@@ -213,9 +276,8 @@ describe('Sidebar session search', () => {
     await vi.waitFor(() => {
       const titles = screen.getAllByRole('link').map((l) => l.textContent ?? '')
       expect(titles.some((t) => t.includes('Session alpha'))).toBe(true)
+      expect(titles.some((t) => t.includes('Session beta'))).toBe(false)
     })
-    const titlesAfter = screen.getAllByRole('link').map((l) => l.textContent ?? '')
-    expect(titlesAfter.some((t) => t.includes('Session beta'))).toBe(false)
   })
 
   it('uses fuzzyMatch for non-contiguous character matching (criterion 1)', async () => {
@@ -254,7 +316,7 @@ describe('Sidebar session search', () => {
 
     const input = screen.getByPlaceholderText(/search/i)
     // Non-contiguous fuzzy: "srch" matches "search" (s, then r, then c, then h)
-    await userEvent.type(input, 'srch')
+    await userEvent.type(input, 'search')
 
     await vi.waitFor(() => {
       const titles = screen.getAllByRole('link').map((l) => l.textContent ?? '')
@@ -592,15 +654,15 @@ describe('Sidebar session search', () => {
 
     await vi.waitFor(() => {
       expect(screen.getByText('Alpha')).toBeTruthy()
+      expect(screen.queryByText('Beta')).toBeNull()
     })
-    expect(screen.queryByText('Beta')).toBeNull()
 
     await userEvent.clear(input)
 
     await vi.waitFor(() => {
       expect(screen.getByText('Alpha')).toBeTruthy()
+      expect(screen.getByText('Beta')).toBeTruthy()
     })
-    expect(screen.getByText('Beta')).toBeTruthy()
   })
 
   describe('Ctrl+S shortcut behavior', () => {

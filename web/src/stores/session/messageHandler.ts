@@ -280,13 +280,7 @@ function refreshSessionSummaryActivity(
     const sessions = state.sessions.map((s) =>
       s.id === sessionId ? { ...s, messageCount: s.messageCount + 1, updatedAt: timestamp } : s,
     )
-    const searchSessions = state.searchSessions?.map((s) =>
-      s.id === sessionId ? { ...s, messageCount: s.messageCount + 1, updatedAt: timestamp } : s,
-    )
-    return {
-      sessions,
-      ...(searchSessions ? { searchSessions } : {}),
-    }
+    return { sessions }
   })
 }
 
@@ -412,8 +406,6 @@ export function handleServerMessage(
         sessions: state.sessions.some((s) => s.id === payload.session.id)
           ? state.sessions.map((s) => (s.id === payload.session.id ? { ...s, ...payload.session } : s))
           : [payload.session, ...state.sessions],
-        // the search corpus is stale now — refetch on the next search
-        searchSessions: null,
       }))
       break
     }
@@ -432,7 +424,6 @@ export function handleServerMessage(
           sessions: state.sessions.filter((s) => s.id !== deletedId),
           openSessionIds: state.openSessionIds.filter((id) => id !== deletedId),
           unreadSessionIds: removeUnreadSessionId(state.unreadSessionIds, deletedId),
-          searchSessions: null,
         }
       })
       get().listSessions(projectId)
@@ -443,7 +434,6 @@ export function handleServerMessage(
       // The server broadcasts sessionId = projectId for deletedAll
       const projectId = message.sessionId
       set((state) => ({
-        searchSessions: null,
         sessions: projectId !== undefined ? state.sessions.filter((s) => s.projectId !== projectId) : state.sessions,
       }))
       get().listSessions(projectId)

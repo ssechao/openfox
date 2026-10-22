@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js'
 import { assertTestDatabasePath } from '../utils/test-environment.js'
 import { acquireInstanceLock, releaseInstanceLock } from './instance-lock.js'
 import { recoverRestoreIfNeeded } from '../events/blob-backup.js'
+import { ensureSearchSchema } from '../search/fts-index.js'
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
@@ -618,6 +619,8 @@ function runMigrations(db: Database.Database): void {
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     )
   `)
+
+  ensureSearchSchema(db)
 
   logger.info('Database migrations completed')
 }

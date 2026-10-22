@@ -8,6 +8,7 @@
 import type { Session, SessionSummary, SessionMode, SessionPhase, DangerLevel } from '../../shared/types.js'
 import { getDatabase } from './index.js'
 import { resolveDefaultAgentId } from '../agents/registry.js'
+import { SearchIndexer } from '../search/fts-index.js'
 export type { DangerLevel } from '../../shared/types.js'
 
 function getProjectDangerLevel(projectId: string): DangerLevel {
@@ -41,25 +42,28 @@ export function createSession(
 
   const defaultAgent = resolveDefaultAgentId(projectId)
 
-  db.prepare(
-    `
+  db.transaction(() => {
+    db.prepare(
+      `
     INSERT INTO sessions (id, project_id, workdir, workspace, branch, phase, mode, workflow_phase, is_running, created_at, updated_at, title, provider_id, provider_model, danger_level)
     VALUES (?, ?, ?, ?, ?, 'idle', ?, 'plan', 0, ?, ?, ?, ?, ?, ?)
   `,
-  ).run(
-    id,
-    projectId,
-    workdir,
-    workspace ?? null,
-    branch ?? null,
-    defaultAgent,
-    now,
-    now,
-    title ?? null,
-    providerId ?? null,
-    providerModel ?? null,
-    dangerLevel,
-  )
+    ).run(
+      id,
+      projectId,
+      workdir,
+      workspace ?? null,
+      branch ?? null,
+      defaultAgent,
+      now,
+      now,
+      title ?? null,
+      providerId ?? null,
+      providerModel ?? null,
+      dangerLevel,
+    )
+    if (title) new SearchIndexer(db).updateTitle(id, title)
+  })()
 
   return {
     id,
@@ -256,11 +260,14 @@ export function updateSessionMetadata(id: string, metadata: Partial<Session['met
 
   values.push(id)
 
-  db.prepare(
-    `
+  db.transaction(() => {
+    db.prepare(
+      `
     UPDATE sessions SET ${updates.join(', ')} WHERE id = ?
   `,
-  ).run(...values)
+    ).run(...values)
+    if (metadata.title !== undefined) new SearchIndexer(db).updateTitle(id, metadata.title ?? '')
+  })()
 }
 
 export function updateSessionMcpDisabledServers(id: string, disabledServers: string[]): void {
@@ -403,6 +410,45 @@ export function listSessions(): SessionSummary[] {
   return rows.map(mapSessionSummaryRow)
 }
 
+const SESSION_SUMMARY_SELECT = `
+      s.id,
+      s.project_id,
+      s.workdir,
+      s.workspace,
+      s.branch,
+      s.mode,
+      s.workflow_phase,
+      s.is_running,
+      s.is_favorite,
+      s.created_at,
+      s.updated_at,
+      s.title,
+      s.provider_id,
+      s.provider_model,
+      s.message_count,
+      s.recent_user_prompts
+`
+
+export function getSessionSummariesByIds(ids: string[]): SessionSummary[] {
+  if (ids.length === 0) return []
+  const db = getDatabase()
+  const placeholders = ids.map(() => '?').join(',')
+  const rows = db
+    .prepare(
+      `
+    SELECT ${SESSION_SUMMARY_SELECT}
+    FROM sessions s
+    WHERE s.id IN (${placeholders})
+  `,
+    )
+    .all(...ids) as SessionSummaryRow[]
+  const byId = new Map(rows.map((row) => [row.id, mapSessionSummaryRow(row)]))
+  return ids.flatMap((id) => {
+    const summary = byId.get(id)
+    return summary ? [summary] : []
+  })
+}
+
 export function listSessionsByProject(
   projectId: string,
   limit = 20,
@@ -534,7 +580,10 @@ export function updateSessionBranch(id: string, branch: string): void {
 
 export function deleteSession(id: string): void {
   const db = getDatabase()
-  db.prepare('DELETE FROM sessions WHERE id = ?').run(id)
+  db.transaction(() => {
+    new SearchIndexer(db).removeSession(id)
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(id)
+  })()
 }
 
 function mapSessionBase(row: SessionRow | SessionSummaryRow): {

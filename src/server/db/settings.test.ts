@@ -17,7 +17,7 @@ describe('db settings', () => {
     setSetting(SETTINGS_KEYS.GLOBAL_INSTRUCTIONS, 'Always test first')
     setSetting('theme', 'dark')
     expect(getSetting(SETTINGS_KEYS.GLOBAL_INSTRUCTIONS)).toBe('Always test first')
-    expect(getAllSettings()).toEqual({
+    expect(getAllSettings()).toMatchObject({
       [SETTINGS_KEYS.GLOBAL_INSTRUCTIONS]: 'Always test first',
       theme: 'dark',
     })
@@ -27,7 +27,7 @@ describe('db settings', () => {
 
     deleteSetting('theme')
     expect(getSetting('theme')).toBeNull()
-    expect(getAllSettings()).toEqual({
+    expect(getAllSettings()).toMatchObject({
       [SETTINGS_KEYS.GLOBAL_INSTRUCTIONS]: 'Always test first',
     })
   })

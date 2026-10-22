@@ -91,7 +91,13 @@ export interface SessionState {
   showPasswordModal: boolean
   passwordModalRetry: boolean
   sessions: SessionSummary[]
-  searchSessions: SessionSummary[] | null
+  searchResults: SessionSummary[] | null
+  searchIndexReady: boolean | null
+  searchIndexMessage: { en: string; fr: string } | null
+  searchHasMore: boolean
+  searchTotal: number | null
+  searchPending: boolean
+  searchError: { en: string; fr: string } | null
   currentSession: Session | null
   unreadSessionIds: string[]
   messages: Message[]
@@ -140,7 +146,10 @@ export interface SessionState {
   exitSplitView: () => void
   listSessions: (projectId?: string, limit?: number) => Promise<void>
   listHomeSessions: () => Promise<void>
-  ensureFullSessionList: () => Promise<void>
+  searchFromServer: (
+    query: string,
+    opts?: { projectId?: string; limit?: number; offset?: number; append?: boolean },
+  ) => Promise<void>
   deleteSession: (sessionId: string) => Promise<boolean>
   renameSession: (sessionId: string, title: string) => Promise<boolean>
   toggleFavorite: (sessionId: string, isFavorite: boolean) => Promise<boolean>

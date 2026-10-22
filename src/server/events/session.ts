@@ -875,13 +875,18 @@ export function truncateSessionMessages(sessionId: string, messageIndex: number)
   // Clone before mutating: the snapshot object is shared with the in-memory
   // snapshot cache, and the cache is only invalidated by the append below.
   const truncatedSnapshot = { ...snapshot, messages: messages.slice(0, lastKept) }
+  const removedIds = messages.slice(lastKept).map((message) => message.id)
 
   eventStore.deleteEventsAfterSeq(sessionId, snapshotEvent.seq)
 
-  eventStore.append(sessionId, {
-    type: 'turn.snapshot',
-    data: truncatedSnapshot,
-  })
+  eventStore.append(
+    sessionId,
+    {
+      type: 'turn.snapshot',
+      data: truncatedSnapshot,
+    },
+    { searchRemoveIds: removedIds },
+  )
 
   const removed = messages.length - lastKept
   updateSessionMessageCount(sessionId, -removed)
