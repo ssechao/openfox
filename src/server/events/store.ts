@@ -38,6 +38,7 @@ import {
   type StoreTiming,
 } from './store-diagnostics.js'
 import { blobStoreForDatabase, setBlobStore, type BlobStore } from './blob-store.js'
+import { recoverRestoreIfNeeded } from './blob-backup.js'
 import { collectBlobRefs, extractBinaries } from './blob-codec.js'
 import { parkAtBlobBarrier } from './blob-barrier.js'
 import { migrateAllBlobs, migrateSessionBlobs, type BlobMigrationReport } from './blob-migrate.js'
@@ -405,6 +406,7 @@ export class EventStore {
     this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS
     this.streamFlushMaxBytes = options.streamFlushMaxBytes ?? STREAM_FLUSH_MAX_BYTES
     this.db = db
+    if (db.name && db.name !== ':memory:') recoverRestoreIfNeeded(db.name, { liveDbOpen: true })
     this.blobStore = options.blobStore ?? blobStoreForDatabase(db.name)
     setBlobStore(this.blobStore)
     this.initSchema()

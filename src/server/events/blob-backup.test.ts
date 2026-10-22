@@ -1,13 +1,22 @@
 import { execFileSync, fork, type ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventStore } from './store.js'
 import { FileBlobStore, blobDirForDatabase, setBlobStore } from './blob-store.js'
-import { BlobBackupError, backupDatabaseAndBlobs, restoreDatabaseAndBlobs } from './blob-backup.js'
+import { BlobBackupError, backupDatabaseAndBlobs, restoreDatabaseAndBlobs, restoreJournalPath } from './blob-backup.js'
 import { collectBlobRefs } from './blob-codec.js'
 import { hydrateAttachmentData } from './blob-codec.js'
 import { CRASH_HASH, CRASH_PNG, CRASH_PNG_URL, killAtBarrier } from './blob-crash-harness.js'
@@ -74,6 +83,7 @@ describe('blob backup / restore', () => {
     dir = mkdtempSync(join(tmpdir(), 'openfox-blob-backup-'))
   })
   afterEach(() => {
+    delete process.env['OPENFOX_BLOB_RESTORE_FAIL']
     setBlobStore(null)
     rmSync(dir, { recursive: true, force: true })
   })
@@ -194,6 +204,91 @@ describe('blob backup / restore', () => {
     if (existsSync(destBlobs)) {
       const store = new FileBlobStore(destBlobs, { ownerDbPath: dest.dbPath })
       expect(store.has(CRASH_HASH)).toBe(false)
+    }
+  }, 30_000)
+
+  it('rolls back to the old sqlite+WAL+blobs when the blobs rename fails', async () => {
+    const src = openStore(dir, 'src.db')
+    appendPng(src.events)
+    src.db.close()
+    const backupDir = join(dir, 'backup')
+    await backupDatabaseAndBlobs(src.dbPath, backupDir)
+
+    const destPath = join(dir, 'dest.db')
+    const dest = new Database(destPath)
+    dest.pragma('journal_mode = WAL')
+    dest.pragma('wal_autocheckpoint = 0')
+    schema(dest)
+    dest.prepare('INSERT INTO sessions (id) VALUES (?)').run('old')
+    dest.close()
+    writeFileSync(`${destPath}-wal`, Buffer.from('preserved-old-wal'))
+    writeFileSync(`${destPath}-shm`, Buffer.from('preserved-old-shm'))
+    writeFileSync(`${destPath}-journal`, Buffer.from('preserved-old-journal'))
+
+    process.env['OPENFOX_BLOB_RESTORE_FAIL'] = 'blobs-rename'
+    expect(() => restoreDatabaseAndBlobs(backupDir, destPath)).toThrow(/blobs-rename/)
+
+    expect(existsSync(restoreJournalPath(destPath))).toBe(false)
+    expect(readFileSync(`${destPath}-wal`)).toEqual(Buffer.from('preserved-old-wal'))
+    expect(readFileSync(`${destPath}-shm`)).toEqual(Buffer.from('preserved-old-shm'))
+    expect(readFileSync(`${destPath}-journal`)).toEqual(Buffer.from('preserved-old-journal'))
+    unlinkSync(`${destPath}-wal`)
+    unlinkSync(`${destPath}-shm`)
+    unlinkSync(`${destPath}-journal`)
+    const still = new Database(destPath, { readonly: true, fileMustExist: true })
+    try {
+      expect(still.prepare('SELECT id FROM sessions').all()).toEqual([{ id: 'old' }])
+    } finally {
+      still.close()
+    }
+    const destBlobs = blobDirForDatabase(destPath)
+    if (existsSync(destBlobs)) {
+      const store = new FileBlobStore(destBlobs, { ownerDbPath: destPath })
+      expect(store.has(CRASH_HASH)).toBe(false)
+    }
+  })
+
+  it('SIGKILL between db and blobs publish then resume is entirely new', async () => {
+    const src = openStore(dir, 'src.db')
+    appendPng(src.events)
+    src.db.close()
+    const backupDir = join(dir, 'backup')
+    await backupDatabaseAndBlobs(src.dbPath, backupDir)
+
+    const dest = openStore(dir, 'dest.db')
+    dest.db.prepare('INSERT INTO sessions (id) VALUES (?)').run('keep-me')
+    dest.db.close()
+
+    await killAtBarrier(
+      {
+        OPENFOX_DB_PATH: dest.dbPath,
+        OPENFOX_BLOB_CRASH_MODE: 'restore',
+        OPENFOX_BLOB_BACKUP_FROM: backupDir,
+      },
+      'after-restore-db-publish',
+      join(dir, 'barrier-restore-swap'),
+    )
+
+    expect(existsSync(restoreJournalPath(dest.dbPath))).toBe(true)
+    const mid = new Database(dest.dbPath, { readonly: true, fileMustExist: true })
+    try {
+      expect(mid.prepare('SELECT id FROM sessions ORDER BY id').all()).toEqual([{ id: 's1' }])
+    } finally {
+      mid.close()
+    }
+    expect(existsSync(blobDirForDatabase(dest.dbPath))).toBe(false)
+
+    const restored = new Database(dest.dbPath)
+    const events = new EventStore(restored)
+    try {
+      expect(restored.prepare('SELECT id FROM sessions ORDER BY id').all()).toEqual([{ id: 's1' }])
+      const payload = restored.prepare('SELECT payload FROM events').get() as { payload: string }
+      expect(payload.payload).toContain(CRASH_HASH)
+      expect(events.blobStore.get(CRASH_HASH).bytes.equals(CRASH_PNG)).toBe(true)
+      expect(existsSync(restoreJournalPath(dest.dbPath))).toBe(false)
+      expect(existsSync(`${dest.dbPath}.pre-restore`)).toBe(false)
+    } finally {
+      restored.close()
     }
   }, 30_000)
 
