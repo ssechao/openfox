@@ -39,9 +39,9 @@ OpenFox is a local-LLM-first agentic coding assistant. It provides:
 npm run build        # Build server (tsup) + web (vite)
 npm run dev          # Start CLI dev server (tsx watch) on port 10469
 npm run start        # Start production server
-npm run test         # Run all tests (unit + e2e)
-npm run test:unit    # Run unit tests only
-npm run test:e2e     # Run e2e tests only
+npm run test         # Run all tests (unit + e2e) — on .122 only, never on this Mac (see below)
+npm run test:unit    # Run unit tests only — on .122 only, never on this Mac
+npm run test:e2e     # Run e2e tests only — on .122 only, never on this Mac
 npm run typecheck    # TypeScript type checking
 npm run lint         # ESLint server code
 npm run lint:fix     # ESLint with auto-fix
@@ -64,6 +64,15 @@ If it is not running, use the dev_server tool to start it
 For this project, **deploy means only preparing/installing the production binary and web assets** (for example, updating the deployed checkout and running the production build). It never includes stopping, starting, restarting, booting out, or kickstarting OpenFox services.
 
 The user exclusively controls production process lifecycle, including launchd services such as ports 450 and 10550. After a deploy, report that the binary is ready and wait for the user to perform any stop/start. Do not launch a persistent/background restart helper, and do not ask another session to restart unless the user explicitly requests that communication.
+
+### STRONG RULE — test suites never run on this Mac
+
+Full test runs always fail or flake on this Mac mini: it is shared by many sessions and heavily loaded, so the suites' fixed timeouts are missed. Therefore:
+
+- **Never** run `npm run test`, `npm run test:unit`, `npm run test:e2e`, a bare `npx vitest run`, or any e2e/demo suite on this Mac.
+- Full suites, e2e tests and demos run **only on `.122`**: `scripts/test-remote.sh` (unit + e2e), `scripts/test-remote.sh --all` (check + unit + e2e), or the pre-commit hook, which delegates to `.122`.
+- On this Mac, only **targeted** runs are allowed: one to three named test files, a few seconds each (see "Single Test File" below).
+- A test failing on this Mac proves nothing: re-run it on `.122` before drawing a conclusion.
 
 ### Remote-only pre-commit on this Mac
 
