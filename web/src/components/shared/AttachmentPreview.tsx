@@ -1,6 +1,11 @@
 import type { Attachment } from '@shared/types.js'
 import { CloseButton } from './CloseButton'
-import { isPreviewableImage, formatFileSize, getFileExtension } from '../../lib/attachment-utils.js'
+import {
+  isPreviewableImage,
+  formatFileSize,
+  getFileExtension,
+  attachmentDisplaySrc,
+} from '../../lib/attachment-utils.js'
 
 interface AttachmentPreviewProps {
   attachment: Attachment
@@ -22,7 +27,7 @@ export function AttachmentPreview({ attachment, onRemove }: AttachmentPreviewPro
 
       {isPreviewableImage(attachment.mimeType) ? (
         <img
-          src={attachment.data}
+          src={attachmentDisplaySrc(attachment)}
           alt={attachment.description || attachment.filename}
           className="w-16 h-16 object-cover rounded-md bg-bg-secondary"
         />

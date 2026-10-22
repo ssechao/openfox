@@ -37,6 +37,9 @@ import {
   type StoreDiagnostics,
   type StoreTiming,
 } from './store-diagnostics.js'
+import { blobStoreForDatabase, setBlobStore, type BlobStore } from './blob-store.js'
+import { extractBinaries } from './blob-codec.js'
+import { migrateAllBlobs, migrateSessionBlobs, type BlobMigrationReport } from './blob-migrate.js'
 
 // Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
 // auto-pruned on the next migration invocation (startup auto-run or manual
@@ -380,6 +383,10 @@ export class EventStore {
     return row ? (JSON.parse(row.payload) as { isRunning: boolean }).isRunning : fallback
   }
 
+  readonly blobStore: BlobStore
+  /** Test-only: throw after blobs are durable and before the event row is inserted. */
+  crashBeforeReferenceCommit = false
+
   constructor(
     db: Database.Database,
     options: {
@@ -387,6 +394,7 @@ export class EventStore {
       hotPath?: boolean
       streamFlushIntervalMs?: number
       streamFlushMaxBytes?: number
+      blobStore?: BlobStore
     } = {},
   ) {
     this.diagnostics =
@@ -395,6 +403,8 @@ export class EventStore {
     this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS
     this.streamFlushMaxBytes = options.streamFlushMaxBytes ?? STREAM_FLUSH_MAX_BYTES
     this.db = db
+    this.blobStore = options.blobStore ?? blobStoreForDatabase(db.name)
+    setBlobStore(this.blobStore)
     this.initSchema()
     this.checkExternalWrites()
   }
@@ -611,7 +621,12 @@ export class EventStore {
 
     this.checkExternalWrites()
     const timestamp = Date.now()
-    const payload = this.serializeEvent(event)
+    const extractedData = extractBinaries(event.data, this.blobStore)
+    if (this.crashBeforeReferenceCommit) {
+      throw new Error('test crash before blob reference commit')
+    }
+    const toStore = extractedData === event.data ? event : ({ ...event, data: extractedData } as TurnEvent)
+    const payload = this.serializeEvent(toStore)
     const insert = this.db.prepare(
       `INSERT INTO events (session_id, seq, timestamp, event_type, payload)
        VALUES (?, ?, ?, ?, ?)`,
@@ -652,8 +667,8 @@ export class EventStore {
       seq,
       timestamp,
       sessionId,
-      type: event.type,
-      data: event.data,
+      type: toStore.type,
+      data: toStore.data,
     }
 
     this.publishEvent(stored, payload.length)
@@ -670,7 +685,14 @@ export class EventStore {
     this.flushStreaming(sessionId)
     this.checkExternalWrites()
     const timestamp = Date.now()
-    const payloads = events.map((event) => this.serializeEvent(event))
+    const toStore = events.map((event) => {
+      const extractedData = extractBinaries(event.data, this.blobStore)
+      return extractedData === event.data ? event : ({ ...event, data: extractedData } as TurnEvent)
+    })
+    if (this.crashBeforeReferenceCommit) {
+      throw new Error('test crash before blob reference commit')
+    }
+    const payloads = toStore.map((event) => this.serializeEvent(event))
 
     const insert = this.db.prepare(
       `INSERT INTO events (session_id, seq, timestamp, event_type, payload)
@@ -687,7 +709,7 @@ export class EventStore {
       try {
         const transaction = this.db.transaction(() => {
           let seq = baseSeq
-          for (const event of events) {
+          for (const event of toStore) {
             insert.run(sessionId, seq, timestamp, event.type, payloads[seq - baseSeq])
             const stored: StoredEvent = {
               seq,
@@ -1879,6 +1901,18 @@ export class EventStore {
     const summary = result[0] ?? { busy: 0, log: 0, checkpointed: 0 }
     logger.debug('WAL checkpoint', summary)
     return summary
+  }
+
+  migrateSessionBlobs(sessionId: string): BlobMigrationReport {
+    const report = migrateSessionBlobs(this.db, sessionId, this.blobStore)
+    this.clearSnapshotCache()
+    return report
+  }
+
+  migrateAllBlobs(): BlobMigrationReport[] {
+    const reports = migrateAllBlobs(this.db, this.blobStore)
+    this.clearSnapshotCache()
+    return reports
   }
 }
 

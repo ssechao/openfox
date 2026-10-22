@@ -13,6 +13,7 @@ import type { DiffLine as ProtocolDiffLine } from '@shared/protocol.js'
 import { ImageModal } from './ImageModal'
 import { Markdown } from './Markdown'
 import { useT } from '../../hooks/useT'
+import { metadataMediaSrc } from '../../lib/attachment-utils.js'
 
 interface DiffViewProps {
   oldString: string
@@ -256,11 +257,8 @@ export const ReadFileView = memo(function ReadFileView({ result, metadata, fileP
   const [modalOpen, setModalOpen] = useState(false)
   const language = useMemo(() => getLanguageFromPath(filePath), [filePath])
 
-  // Image file - metadata contains base64Data and mimeType
-  const mimeType = metadata?.mimeType as string | undefined
-  const base64Data = metadata?.base64Data as string | undefined
-  if (mimeType?.startsWith('image/') && base64Data) {
-    const src = `data:${mimeType};base64,${base64Data}`
+  const src = metadataMediaSrc(metadata as Record<string, unknown> | undefined)
+  if (src) {
     return (
       <>
         <div

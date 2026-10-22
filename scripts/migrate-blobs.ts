@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+/**
+ * Explicit blob migration. Disabled by default; never invoked at startup.
+ * Usage: npx tsx scripts/migrate-blobs.ts --yes --db <path>
+ */
+import Database from 'better-sqlite3'
+import { existsSync } from 'node:fs'
+import { EventStore } from '../src/server/events/store.js'
+
+const args = process.argv.slice(2)
+const yes = args.includes('--yes')
+const dbFlag = args.indexOf('--db')
+const dbPath = dbFlag >= 0 ? args[dbFlag + 1] : process.env['OPENFOX_DB_PATH']
+
+if (!yes || !dbPath) {
+  console.error('Usage: npx tsx scripts/migrate-blobs.ts --yes --db <sessions.db>')
+  console.error('Refusing to run: this command is explicit and off by default (lot 4a-1).')
+  process.exit(1)
+}
+if (!existsSync(dbPath)) {
+  console.error(`Database not found: ${dbPath}`)
+  process.exit(1)
+}
+
+const db = new Database(dbPath)
+const store = new EventStore(db)
+const reports = store.migrateAllBlobs()
+console.log(JSON.stringify({ dbPath, sessions: reports.length, reports }, null, 2))
+db.close()

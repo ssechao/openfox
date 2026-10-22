@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ImageModal } from './ImageModal'
 import { Markdown } from './Markdown'
 import { useT } from '../../hooks/useT'
+import { metadataMediaSrc } from '../../lib/attachment-utils.js'
 
 interface DescribeImageViewProps {
   args: Record<string, unknown>
@@ -20,15 +21,11 @@ export function DescribeImageView({ args, result, metadata, pending }: DescribeI
   const t = useT()
   const [modalOpen, setModalOpen] = useState(false)
 
-  const mimeType = metadata?.['mimeType'] as string | undefined
-  const base64Data = metadata?.['base64Data'] as string | undefined
-  const dataUrl = metadata?.['dataUrl'] as string | undefined
   const question = (metadata?.['question'] as string | undefined) ?? String(args['question'] ?? '')
   const filePath = String(metadata?.['path'] ?? args['path'] ?? '')
   const answer = result ?? ''
 
-  const src =
-    dataUrl ?? (mimeType?.startsWith('image/') && base64Data ? `data:${mimeType};base64,${base64Data}` : undefined)
+  const src = metadataMediaSrc(metadata)
 
   return (
     <div className="space-y-2">

@@ -7,6 +7,7 @@ import { extractPdfContent } from '../tools/pdf-utils.js'
 import type { PdfBlock } from '../tools/pdf-utils.js'
 import { contentHash, cacheSet } from '../utils/cache.js'
 import { decodeDataUrl } from '../utils/data-url.js'
+import { hydrateAttachmentData } from '../events/blob-codec.js'
 
 export interface ResolvedVisionModel {
   baseUrl: string
@@ -192,7 +193,7 @@ async function describeAttachment(
   options: ImageProcessorOptions,
   descriptions: Map<string, string>,
 ): Promise<string> {
-  return describeImageDataUrl(att.data, att.id, messageId, options, descriptions, att.filename)
+  return describeImageDataUrl(hydrateAttachmentData(att), att.id, messageId, options, descriptions, att.filename)
 }
 
 async function describePdfAttachment(
@@ -202,7 +203,7 @@ async function describePdfAttachment(
   descriptions: Map<string, string>,
 ): Promise<string> {
   const hasVision = !!options.visionModel
-  const cacheKey = `pdf:${hasVision}:${contentHash(att.data)}`
+  const cacheKey = `pdf:${hasVision}:${contentHash(hydrateAttachmentData(att))}`
   const filenameLabel = att.filename || 'document.pdf'
   if (descriptionCache.has(cacheKey)) {
     const cached = descriptionCache.get(cacheKey)!
@@ -211,7 +212,7 @@ async function describePdfAttachment(
     return output
   }
 
-  const buffer = decodeDataUrl(att.data)
+  const buffer = decodeDataUrl(hydrateAttachmentData(att))
   if (!buffer) {
     const fallback = `[PDF: ${filenameLabel}] (could not decode)`
     cacheSet(descriptionCache, cacheKey, fallback)

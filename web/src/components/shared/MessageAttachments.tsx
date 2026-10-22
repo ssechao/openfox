@@ -2,7 +2,13 @@ import { useState, useMemo } from 'react'
 import type { Attachment } from '@shared/types.js'
 import { ImageModal } from './ImageModal'
 import { useSessionStore } from '../../stores/session'
-import { isPreviewableImage, isTextMime, formatFileSize, getFileExtension } from '../../lib/attachment-utils.js'
+import {
+  isPreviewableImage,
+  isTextMime,
+  formatFileSize,
+  getFileExtension,
+  attachmentDisplaySrc,
+} from '../../lib/attachment-utils.js'
 import { useT } from '../../hooks/useT'
 
 interface MessageAttachmentsProps {
@@ -60,7 +66,7 @@ export function MessageAttachments({ attachments, messageId }: MessageAttachment
             return (
               <div key={attachment.id} className="relative inline-block">
                 <button
-                  onClick={() => handleImageClick(attachment.data)}
+                  onClick={() => handleImageClick(attachmentDisplaySrc(attachment))}
                   className="group relative inline-block"
                   title={
                     (fallback?.type === 'done' && fallback.description) || attachment.description || attachment.filename
@@ -68,7 +74,7 @@ export function MessageAttachments({ attachments, messageId }: MessageAttachment
                   disabled={fallback?.type === 'start'}
                 >
                   <img
-                    src={attachment.data}
+                    src={attachmentDisplaySrc(attachment)}
                     alt={
                       (fallback?.type === 'done' && fallback.description) ||
                       attachment.description ||

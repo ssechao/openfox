@@ -4,6 +4,7 @@ import { isTaskGateError, isTaskConflictError } from '../tasks/service.js'
 import { getGateConfig } from '../db/tasks.js'
 import { OUTPUT_LIMITS } from './types.js'
 import { decodeDataUrl } from '../utils/data-url.js'
+import { hydrateAttachmentData } from '../events/blob-codec.js'
 import { isPdfBuffer, extractPdfText, processPdfContent, formatPdfErrorMessage } from './pdf-utils.js'
 import type { Attachment, ToolResult } from '../../shared/types.js'
 import { TEXT_MIME_EXACT, TEXT_MIME_PREFIXES } from '../../shared/constants.js'
@@ -376,9 +377,10 @@ function sanitizeAttachments(raw: unknown[]): Attachment[] {
 async function attachmentContent(attachment: Attachment, helpers: ToolHelpers): Promise<ToolResult> {
   const mime = attachment.mimeType
   const filename = attachment.filename
+  const data = hydrateAttachmentData(attachment)
 
   if (mime.startsWith('image/')) {
-    const decoded = decodeDataUrl(attachment.data)
+    const decoded = decodeDataUrl(data)
     if (!decoded) return helpers.error(`Image attachment ${filename} has corrupt or undecodable data`)
     const size = attachment.size > 0 ? attachment.size : decoded.length
     if (size > OUTPUT_LIMITS.read_file.maxImageBytes || decoded.length > OUTPUT_LIMITS.read_file.maxImageBytes) {
@@ -402,8 +404,8 @@ async function attachmentContent(attachment: Attachment, helpers: ToolHelpers): 
   // Same text-MIME set as the chat attachment pipeline (TEXT_MIME_EXACT + prefixes).
   // image/* was matched first, so image/svg+xml from TEXT_MIME_EXACT never lands here.
   if (TEXT_MIME_EXACT.includes(mime) || TEXT_MIME_PREFIXES.some((p) => mime.startsWith(p))) {
-    const decoded = decodeDataUrl(attachment.data)
-    const text = decoded ? decoded.toString('utf-8') : attachment.data
+    const decoded = decodeDataUrl(data)
+    const text = decoded ? decoded.toString('utf-8') : data
     if (text.length > OUTPUT_LIMITS.read_file.maxBytes) {
       return helpers.success(
         text.slice(0, OUTPUT_LIMITS.read_file.maxBytes) + '\n\n[Output truncated due to size limit]',
@@ -422,7 +424,7 @@ async function attachmentContent(attachment: Attachment, helpers: ToolHelpers): 
         truncated,
       )
     }
-    const buffer = decodeDataUrl(attachment.data)
+    const buffer = decodeDataUrl(data)
     if (!buffer || !isPdfBuffer(buffer))
       return helpers.error(`PDF attachment ${filename} has corrupt or undecodable data`)
     try {

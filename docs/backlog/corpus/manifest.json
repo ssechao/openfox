@@ -1,0 +1,10 @@
+{
+  "seed": 41,
+  "maxVisibleItems": 50,
+  "sessionId": "4a1-heavy-synthetic",
+  "messageCount": 800,
+  "pngAttachmentsInLast50": 2,
+  "base64ImagesInLast50": 12,
+  "pngBytesEach": 120000,
+  "notes": "Deterministic stand-in for prod session 3933dc47 (107 MiB snapshot, 27.5% binary). Generated at runtime into tmp; not stored in git."
+}

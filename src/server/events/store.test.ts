@@ -1874,7 +1874,12 @@ describe('EventStore - Event Cleanup', () => {
       expect(closed.result!.output).toContain('[Archived output truncated:')
       expect(closed.result!.metadata).not.toHaveProperty('base64Data')
       expect(closed.result!.metadata).toMatchObject({ archivedDataOmitted: true })
-      expect(active.result).toEqual(result)
+      expect(active.result!.output).toBe(result.output)
+      expect(active.result!.metadata).not.toHaveProperty('base64Data')
+      expect(active.result!.metadata).toMatchObject({
+        mimeType: 'image/png',
+        blob: { mime: 'image/png', size: 3072 },
+      })
       expect(stored.currentContextWindowId).toBe('active-window')
       expect(stored.messages).toHaveLength(2)
 
