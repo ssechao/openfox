@@ -124,6 +124,29 @@ describe('getGitDiffFiles', () => {
     }
   })
 
+  it('spawns git status only after git diff has exited', async () => {
+    const order: string[] = []
+    vi.mocked(spawn).mockImplementation(((_cmd: string, args: string[]) => {
+      const name = args[0]!
+      order.push(`spawn ${name}`)
+      const proc = makeMockProc('')
+      return {
+        ...proc,
+        on: (event: string, cb: (...cbArgs: unknown[]) => void) => {
+          if (event !== 'close') return
+          setTimeout(() => {
+            order.push(`close ${name}`)
+            cb(0)
+          }, 0)
+        },
+      } as unknown as ReturnType<typeof spawn>
+    }) as typeof spawn)
+
+    await getGitDiffFiles('/tmp/project')
+
+    expect(order).toEqual(['spawn diff', 'close diff', 'spawn status', 'close status'])
+  })
+
   it('reports a modified submodule from git diff --name-status output', async () => {
     vi.mocked(spawn).mockImplementation(((_cmd: string, args: string[]) => {
       const stdout = args[0] === 'diff' ? 'M\tlibs/mod\n' : '?? untracked.txt\n'

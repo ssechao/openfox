@@ -383,7 +383,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     })
   }
 
-  const demoLoopProbe = config.mode !== 'production' && process.env['OPENFOX_DEMO_LOOP_PROBE'] === '1'
+  // Demo-only probe (OPENFOX_DEMO_LOOP_PROBE=1): dev mode only; adds /api/health/loop-delay and turns off Vite dev warmup.
+  const demoLoopProbe = config.mode === 'development' && process.env['OPENFOX_DEMO_LOOP_PROBE'] === '1'
   if (demoLoopProbe) {
     const demoLoopSamples: Array<[number, number]> = []
     let demoLoopLast = performance.now()

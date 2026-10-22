@@ -177,9 +177,6 @@ async function startInstance(): Promise<Instance> {
         OPENFOX_LLM_URL: 'http://127.0.0.1:9/v1',
         OPENFOX_HEALTH_DEMO_MODE: 'development',
         OPENFOX_DEMO_LOOP_PROBE: '1',
-        ...(process.env['ETAPE3_GIT_POLL_INTERVAL']
-          ? { OPENFOX_GIT_POLL_INTERVAL: process.env['ETAPE3_GIT_POLL_INTERVAL'] }
-          : {}),
       }),
       execArgv: [
         '--import',

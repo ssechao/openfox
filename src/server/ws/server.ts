@@ -95,34 +95,62 @@ const gitPollInterval = parseInt(process.env['OPENFOX_GIT_POLL_INTERVAL'] ?? '',
 let moduleClients: Map<WebSocket, ClientConnection> | null = null
 let moduleEnqueueSend: ((client: ClientConnection, data: string, seq: number) => void) | null = null
 
-function moduleGitPoll(workdir: string) {
-  ;(async () => {
+const moduleGitRefreshQueue = new Map<string, boolean>()
+let moduleGitRefreshRunning = false
+
+function moduleIsWorkdirWatched(workdir: string): boolean {
+  for (const client of moduleClients?.values() ?? []) {
+    if (client.activeWorkdir === workdir) return true
+  }
+  return false
+}
+
+async function moduleRefreshGitStatus(workdir: string, notifyUnchanged: boolean): Promise<void> {
+  if (!moduleIsWorkdirWatched(workdir)) return
+  const branch = await moduleGitBranch(workdir)
+  if (!moduleIsWorkdirWatched(workdir)) return
+  if (branch) moduleStartGitPolling(workdir)
+  else if (!moduleWorkdirInterval.has(workdir)) return
+  const { hash, files } = await moduleGitDiff(workdir)
+  if (!moduleIsWorkdirWatched(workdir)) return
+  const changed = hash !== moduleWorkdirLastHash.get(workdir)
+  if (moduleWorkdirInterval.has(workdir)) moduleWorkdirLastHash.set(workdir, hash)
+  if (!changed && !notifyUnchanged) return
+  const msg = createGitStatusMessage(branch, files)
+  const activeClients = moduleClients
+  const sendFn = moduleEnqueueSend
+  if (!activeClients || !sendFn) return
+  for (const [ws, client] of activeClients) {
+    if (client.activeWorkdir === workdir && ws.readyState === WebSocket.OPEN) {
+      const seq = client.lastSentSeq + 1
+      sendFn(client, serializeServerMessage({ ...msg, sessionId: client.activeSessionId ?? '' }), seq)
+    }
+  }
+}
+
+function moduleQueueGitRefresh(workdir: string, notifyUnchanged: boolean): void {
+  moduleGitRefreshQueue.set(workdir, notifyUnchanged || moduleGitRefreshQueue.get(workdir) === true)
+  if (moduleGitRefreshRunning) return
+  moduleGitRefreshRunning = true
+  void (async () => {
     try {
-      const branch = await moduleGitBranch(workdir)
-      const { hash, files } = await moduleGitDiff(workdir)
-      const lastHash = moduleWorkdirLastHash.get(workdir)
-      if (hash !== lastHash) {
-        moduleWorkdirLastHash.set(workdir, hash)
-        const msg = createGitStatusMessage(branch, files)
-        const activeClients = moduleClients
-        const sendFn = moduleEnqueueSend
-        if (!activeClients || !sendFn) return
-        for (const [ws, client] of activeClients) {
-          if (client.activeWorkdir === workdir && ws.readyState === WebSocket.OPEN) {
-            const seq = client.lastSentSeq + 1
-            sendFn(client, serializeServerMessage({ ...msg, sessionId: client.activeSessionId ?? '' }), seq)
-          }
+      for (const [queued, notify] of moduleGitRefreshQueue) {
+        moduleGitRefreshQueue.delete(queued)
+        try {
+          await moduleRefreshGitStatus(queued, notify)
+        } catch {
+          /* skip */
         }
       }
-    } catch {
-      /* skip */
+    } finally {
+      moduleGitRefreshRunning = false
     }
   })()
 }
 
 function moduleStartGitPolling(workdir: string) {
   if (moduleWorkdirInterval.has(workdir)) return
-  const interval = setInterval(() => moduleGitPoll(workdir), gitPollInterval)
+  const interval = setInterval(() => moduleQueueGitRefresh(workdir, false), gitPollInterval)
   moduleWorkdirInterval.set(workdir, interval)
 }
 
@@ -132,6 +160,12 @@ function moduleStopGitPolling(workdir: string) {
     clearInterval(interval)
     moduleWorkdirInterval.delete(workdir)
     moduleWorkdirLastHash.delete(workdir)
+  }
+}
+
+function moduleStopUnwatchedGitPolling() {
+  for (const workdir of [...moduleWorkdirInterval.keys()]) {
+    if (!moduleIsWorkdirWatched(workdir)) moduleStopGitPolling(workdir)
   }
 }
 
@@ -609,18 +643,9 @@ export function createWebSocketServer(
       const effectiveWorkdir = updatedSession.workspace ?? updatedSession.workdir
 
       for (const [, client] of clients) {
-        if (client.activeSessionId === updatedSession.id && client.activeWorkdir !== effectiveWorkdir) {
-          const prevWorkdir = client.activeWorkdir
-          client.activeWorkdir = effectiveWorkdir
-          if (prevWorkdir) {
-            const hasOtherClients = [...clients.values()].some((c) => c !== client && c.activeWorkdir === prevWorkdir)
-            if (!hasOtherClients) {
-              moduleStopGitPolling(prevWorkdir)
-            }
-          }
-        }
+        if (client.activeSessionId === updatedSession.id) client.activeWorkdir = effectiveWorkdir
       }
-      if (effectiveWorkdir) moduleStartGitPolling(effectiveWorkdir)
+      moduleStopUnwatchedGitPolling()
 
       // Broadcast session.state immediately — synchronous, no await
       broadcastForSession(
@@ -640,13 +665,8 @@ export function createWebSocketServer(
 
       // Always send git.status after a session update to sync workspace/branch in the UI,
       // even when the workspace path hasn't changed (e.g. branch-only change).
-      if (effectiveWorkdir) {
-        ;(async () => {
-          const branch = await moduleGitBranch(effectiveWorkdir)
-          if (!branch) return
-          const { files } = await moduleGitDiff(effectiveWorkdir)
-          broadcastForSession(updatedSession.id, createGitStatusMessage(branch, files))
-        })()
+      if (effectiveWorkdir && moduleIsWorkdirWatched(effectiveWorkdir)) {
+        moduleQueueGitRefresh(effectiveWorkdir, true)
       }
     }
   })
@@ -778,7 +798,6 @@ export function createWebSocketServer(
     ws.on('close', () => {
       logger.debug('WebSocket client disconnected')
       const client = clients.get(ws)
-      const disconnectedWorkdir = client?.activeWorkdir ?? null
       // Unsubscribe from global all-session subscription
       if (client?.globalSubscription) {
         client.globalSubscription()
@@ -786,13 +805,7 @@ export function createWebSocketServer(
       // Unsubscribe from all terminal sessions
       unsubscribeAllFromTerminal(ws)
       clients.delete(ws)
-      // Stop polling if no remaining clients for this workdir
-      if (disconnectedWorkdir) {
-        const hasRemaining = [...clients.values()].some((c) => c.activeWorkdir === disconnectedWorkdir)
-        if (!hasRemaining) {
-          moduleStopGitPolling(disconnectedWorkdir)
-        }
-      }
+      moduleStopUnwatchedGitPolling()
     })
 
     ws.on('error', (error) => {
@@ -925,6 +938,7 @@ async function handleClientMessage(
       client.activeSessionId = session.id
       const effectiveWorkdir = sessionManager.getEffectiveWorkdir(session.id)
       client.activeWorkdir = effectiveWorkdir
+      moduleStopUnwatchedGitPolling()
 
       // Send initial git status immediately
       if (effectiveWorkdir) {
@@ -932,7 +946,7 @@ async function handleClientMessage(
         const { files } = await moduleGitDiff(effectiveWorkdir)
         const msg = createGitStatusMessage(branch, files)
         send(msg)
-        if (branch) moduleStartGitPolling(effectiveWorkdir)
+        if (branch && moduleIsWorkdirWatched(effectiveWorkdir)) moduleStartGitPolling(effectiveWorkdir)
       }
 
       ensureEventStoreSubscription(session.id)

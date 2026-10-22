@@ -12,85 +12,32 @@ function toVcsContext(cwd: string, context?: { sessionId?: string; projectId?: s
   }
 }
 
-function nativeGetGitDiffFiles(cwd: string): Promise<GitDiffFile[]> {
-  return new Promise((resolve) => {
-    const env = gitSpawnEnv()
-    const diffProc = spawn('git', ['diff', '--ignore-submodules=none', '--name-status', 'HEAD'], {
-      cwd,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    const statusProc = spawn('git', ['status', '--porcelain', '--ignore-submodules=none'], {
-      cwd,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
+async function nativeGetGitDiffFiles(cwd: string): Promise<GitDiffFile[]> {
+  const diff = await runGitText(cwd, ['diff', '--ignore-submodules=none', '--name-status', 'HEAD'])
+  const status = await runGitText(cwd, ['status', '--porcelain', '--ignore-submodules=none'])
+  const files: GitDiffFile[] = []
 
-    let diffStdout = ''
-    let statusStdout = ''
-    let diffExited = false
-    let statusExited = false
-    let diffCode: number | null = null
-    let statusCode: number | null = null
-
-    const collect = () => {
-      if (!diffExited || !statusExited) return
-
-      const files: GitDiffFile[] = []
-
-      if (diffCode === 0) {
-        for (const line of diffStdout.split('\n')) {
-          if (!line.trim()) continue
-          const [statusChar, ...pathParts] = line.split('\t')
-          const path = pathParts.join('\t') || statusChar || ''
-          if (!path) continue
-          const status = statusChar === 'A' ? 'added' : statusChar === 'D' ? 'deleted' : 'modified'
-          files.push({ path, status, additions: 0, deletions: 0 })
-        }
-      }
-
-      if (statusCode === 0) {
-        for (const line of statusStdout.split('\n')) {
-          if (!line.startsWith('?? ')) continue
-          const path = line.slice(3).trim()
-          if (!path) continue
-          files.push({ path, status: 'added', additions: 0, deletions: 0 })
-        }
-      }
-
-      resolve(files)
+  if (diff.code === 0) {
+    for (const line of diff.stdout.split('\n')) {
+      if (!line.trim()) continue
+      const [statusChar, ...pathParts] = line.split('\t')
+      const path = pathParts.join('\t') || statusChar || ''
+      if (!path) continue
+      const fileStatus = statusChar === 'A' ? 'added' : statusChar === 'D' ? 'deleted' : 'modified'
+      files.push({ path, status: fileStatus, additions: 0, deletions: 0 })
     }
+  }
 
-    diffProc.stdout.on('data', (data: Buffer) => {
-      diffStdout += data.toString()
-    })
-    statusProc.stdout.on('data', (data: Buffer) => {
-      statusStdout += data.toString()
-    })
+  if (status.code === 0) {
+    for (const line of status.stdout.split('\n')) {
+      if (!line.startsWith('?? ')) continue
+      const path = line.slice(3).trim()
+      if (!path) continue
+      files.push({ path, status: 'added', additions: 0, deletions: 0 })
+    }
+  }
 
-    diffProc.on('close', (code) => {
-      diffExited = true
-      diffCode = code
-      collect()
-    })
-    statusProc.on('close', (code) => {
-      statusExited = true
-      statusCode = code
-      collect()
-    })
-    diffProc.on('error', () => {
-      diffExited = true
-      diffCode = 1
-      collect()
-    })
-    statusProc.on('error', () => {
-      statusExited = true
-      statusCode = 1
-      collect()
-    })
-  })
+  return files
 }
 
 export async function getGitDiffFiles(
