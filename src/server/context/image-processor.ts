@@ -7,6 +7,7 @@ import { extractPdfContent } from '../tools/pdf-utils.js'
 import type { PdfBlock } from '../tools/pdf-utils.js'
 import { contentHash, cacheSet } from '../utils/cache.js'
 import { decodeDataUrl } from '../utils/data-url.js'
+import { attachmentFromToolImageMetadata, hydrateAttachmentData } from '../events/blob-codec.js'
 
 export interface ResolvedVisionModel {
   baseUrl: string
@@ -77,11 +78,7 @@ function isPdfAttachment(att: Attachment): boolean {
 }
 
 function hasImageMetadata(result: { metadata?: Record<string, unknown> }): boolean {
-  const meta = result.metadata
-  if (!meta) return false
-  const dataUrl = meta['dataUrl']
-  const mimeType = meta['mimeType']
-  return typeof dataUrl === 'string' && typeof mimeType === 'string' && (mimeType as string).startsWith('image/')
+  return attachmentFromToolImageMetadata(result.metadata) !== undefined
 }
 
 function mapChanged<T>(values: T[], transform: (value: T) => T): T[] {
@@ -186,13 +183,37 @@ async function describeImageDataUrl(
   return placeholder
 }
 
+async function describeToolResultImage(
+  meta: Record<string, unknown>,
+  toolCallId: string,
+  messageId: string,
+  options: ImageProcessorOptions,
+  descriptions: Map<string, string>,
+): Promise<boolean> {
+  if (meta['description']) {
+    descriptions.set(toolCallId, meta['description'] as string)
+    return false
+  }
+  const image = attachmentFromToolImageMetadata(meta)!
+  const path = typeof meta['path'] === 'string' ? meta['path'] : image.filename
+  meta['description'] = await describeImageDataUrl(
+    hydrateAttachmentData(image),
+    toolCallId,
+    messageId,
+    options,
+    descriptions,
+    path,
+  )
+  return true
+}
+
 async function describeAttachment(
   att: Attachment,
   messageId: string,
   options: ImageProcessorOptions,
   descriptions: Map<string, string>,
 ): Promise<string> {
-  return describeImageDataUrl(att.data, att.id, messageId, options, descriptions, att.filename)
+  return describeImageDataUrl(hydrateAttachmentData(att), att.id, messageId, options, descriptions, att.filename)
 }
 
 async function describePdfAttachment(
@@ -202,7 +223,7 @@ async function describePdfAttachment(
   descriptions: Map<string, string>,
 ): Promise<string> {
   const hasVision = !!options.visionModel
-  const cacheKey = `pdf:${hasVision}:${contentHash(att.data)}`
+  const cacheKey = `pdf:${hasVision}:${contentHash(hydrateAttachmentData(att))}`
   const filenameLabel = att.filename || 'document.pdf'
   if (descriptionCache.has(cacheKey)) {
     const cached = descriptionCache.get(cacheKey)!
@@ -211,7 +232,7 @@ async function describePdfAttachment(
     return output
   }
 
-  const buffer = decodeDataUrl(att.data)
+  const buffer = decodeDataUrl(hydrateAttachmentData(att))
   if (!buffer) {
     const fallback = `[PDF: ${filenameLabel}] (could not decode)`
     cacheSet(descriptionCache, cacheKey, fallback)
@@ -309,29 +330,14 @@ export async function processContextImages(
       const data = event.data as Extract<TurnEvent, { type: 'tool.result' }>['data']
       if (!data.result.metadata || !hasImageMetadata(data.result)) continue
 
-      const meta = data.result.metadata
-      // Skip if already has a description
-      if (meta['description']) {
-        descriptions.set(data.toolCallId, meta['description'] as string)
-        continue
-      }
-
-      const dataUrl = meta['dataUrl'] as string
-      const path = meta['path'] as string | undefined
-
-      const description = await describeImageDataUrl(
-        dataUrl,
+      const enriched = await describeToolResultImage(
+        data.result.metadata,
         data.toolCallId,
         data.messageId,
         options,
         descriptions,
-        path,
       )
-
-      meta['description'] = description
-
-      // Persist enriched metadata back to the store
-      if (options.persistEvent) {
+      if (enriched && options.persistEvent) {
         options.persistEvent(event.sessionId, event.seq, data)
       }
     }
@@ -367,26 +373,11 @@ export async function processContextImages(
           for (const toolCall of message.toolCalls) {
             if (!toolCall.result || !toolCall.result.metadata || !hasImageMetadata(toolCall.result)) continue
 
-            const meta = toolCall.result.metadata
-            if (meta['description']) {
-              descriptions.set(toolCall.id, meta['description'] as string)
-              continue
+            if (
+              await describeToolResultImage(toolCall.result.metadata, toolCall.id, message.id, options, descriptions)
+            ) {
+              enriched = true
             }
-
-            const dataUrl = meta['dataUrl'] as string
-            const path = meta['path'] as string | undefined
-
-            const description = await describeImageDataUrl(
-              dataUrl,
-              toolCall.id,
-              message.id,
-              options,
-              descriptions,
-              path,
-            )
-
-            meta['description'] = description
-            enriched = true
           }
         }
       }

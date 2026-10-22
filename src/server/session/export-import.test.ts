@@ -83,6 +83,7 @@ import {
 import type { SnapshotMessage } from '../events/types.js'
 import { SessionManager } from './manager.js'
 import { buildSessionExport, SESSION_EXPORT_FORMAT, SESSION_EXPORT_VERSION } from './export-import.js'
+import { CRASH_PNG, CRASH_PNG_URL } from '../events/blob-crash-harness.js'
 import { injectContextDriftReminders } from '../chat/dynamic-context.js'
 import type { LLMToolDefinition } from '../llm/types.js'
 
@@ -445,6 +446,46 @@ describe('Session export / import', () => {
       await expect(manager.importSession(targetProjectId, { format: 'nope' })).rejects.toThrow()
       const payload = buildSessionExport(manager, createSourceSession())
       await expect(manager.importSession('missing-project', payload)).rejects.toThrow('Project not found')
+    })
+
+    it('rejects import blobs whose decoded hash does not match the declared hash', async () => {
+      const payload = buildSessionExport(manager, createSourceSession())
+      const mutated = {
+        ...payload,
+        blobs: [
+          {
+            hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            mime: 'image/png',
+            size: 4,
+            data: Buffer.from('nope').toString('base64'),
+          },
+        ],
+      }
+      await expect(manager.importSession(targetProjectId, mutated)).rejects.toThrow(/hash mismatch/)
+    })
+
+    it('rejects import when events require a blob that is not provided', async () => {
+      const sessionId = createSourceSession()
+      manager.addMessage(sessionId, {
+        role: 'user',
+        content: 'pic',
+        attachments: [
+          {
+            id: 'a',
+            filename: 'dot.png',
+            mimeType: 'image/png',
+            size: CRASH_PNG.length,
+            data: CRASH_PNG_URL,
+          },
+        ],
+      })
+      const payload = buildSessionExport(manager, sessionId)
+      expect(payload.blobs?.length).toBeGreaterThan(0)
+      const before = manager.listSessionsByProject(targetProjectId, 100, 0).sessions.length
+      await expect(manager.importSession(targetProjectId, { ...payload, blobs: [] })).rejects.toThrow(
+        /Imported blob missing/,
+      )
+      expect(manager.listSessionsByProject(targetProjectId, 100, 0).sessions.length).toBe(before)
     })
   })
 })

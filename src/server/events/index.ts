@@ -104,3 +104,13 @@ export {
   combineEventsWithSnapshot,
   getLegacyCompactionBaseline,
 } from './session.js'
+
+export {
+  FileBlobStore,
+  MemoryBlobStore,
+  getBlobStore,
+  setBlobStore,
+  BlobMissingError,
+  BlobCorruptError,
+} from './blob-store.js'
+export { extractBinaries, hydrateAttachmentData } from './blob-codec.js'

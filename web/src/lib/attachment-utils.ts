@@ -1,3 +1,7 @@
+import { blobUrl as blobUrlRaw, isBlobRef, attachmentDisplaySrc as attachmentDisplaySrcRaw } from '@shared/blob.js'
+import type { Attachment } from '@shared/types.js'
+import { getSessionToken } from './api.js'
+
 import { TEXT_MIME_PREFIXES, TEXT_MIME_EXACT } from '@shared/constants.js'
 
 export function isImageMime(mimeType: string): boolean {
@@ -62,4 +66,36 @@ export function mimeTypeToExtension(mimeType: string): string {
 
 export function isSupportedMimeType(mimeType: string): boolean {
   return isImageMime(mimeType) || isTextMime(mimeType) || mimeType === 'application/pdf'
+}
+
+function sessionToken(): string | undefined {
+  try {
+    return getSessionToken() ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function blobUrl(hash: string): string {
+  return blobUrlRaw(hash, sessionToken())
+}
+
+export function attachmentDisplaySrc(attachment: Attachment): string {
+  return attachmentDisplaySrcRaw(attachment, sessionToken())
+}
+
+export function metadataMediaSrc(metadata: Record<string, unknown> | undefined): string | undefined {
+  if (!metadata) return undefined
+  const mimeType = typeof metadata['mimeType'] === 'string' ? metadata['mimeType'] : undefined
+  const blob = metadata['blob']
+  if (isBlobRef(blob) && (blob.mime.startsWith('image/') || Boolean(mimeType?.startsWith('image/')))) {
+    return blobUrl(blob.hash)
+  }
+  const dataUrl = metadata['dataUrl']
+  if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) return dataUrl
+  const base64Data = metadata['base64Data']
+  if (mimeType?.startsWith('image/') && typeof base64Data === 'string') {
+    return `data:${mimeType};base64,${base64Data}`
+  }
+  return undefined
 }

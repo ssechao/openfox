@@ -1,0 +1,12 @@
+{
+  "seed": 41,
+  "maxVisibleItems": 50,
+  "sessionId": "4a1-heavy-synthetic",
+  "messageCount": 7651,
+  "pngAttachmentsInLast50": 2,
+  "base64ImagesInLast50": 36,
+  "targetSnapshotBytes": 106931629,
+  "binaryFraction": 0.275,
+  "last50BinaryBytes": 10415378,
+  "notes": "Deterministic stand-in for prod session 3933dc47: 7651 messages, ~102 MiB snapshot, 27.5% binary, ~10.4 MiB in the last 50. Generated at runtime into tmp; not stored in git."
+}

@@ -72,6 +72,7 @@ import { createNotificationRoutes } from './routes/notifications.js'
 import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { createDiagnosticsCollector } from './diagnostics/collector.js'
+import { registerBlobRoutes } from './routes/blobs.js'
 import { logger, setLogLevel } from './utils/logger.js'
 import { requestAbortSignal } from './utils/request-abort.js'
 import { VERSION } from '../constants.js'
@@ -325,6 +326,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     if (publicPaths.includes(path)) {
       return next()
     }
+    if (config.mode === 'test' && process.env['OPENFOX_TEST_REQUIRE_AUTH'] === '1') {
+      const expected = process.env['OPENFOX_TEST_AUTH_TOKEN'] ?? ''
+      const headerToken = req.headers['x-session-token'] as string | undefined
+      const token = headerToken ?? pluginAssetToken(req)
+      if (!expected || token !== expected) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      next()
+      return
+    }
     const authConfig = getAuthConfig()
     if (authConfig?.strategy === 'network' && authConfig.encryptedPassword) {
       const headerToken = req.headers['x-session-token'] as string | undefined
@@ -339,6 +351,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   app.use('/api', authMiddleware)
   app.use(express.json({ limit: '75mb' }))
+
+  registerBlobRoutes(app)
 
   // Streamable HTTP MCP endpoint. Mounted before the SPA catch-all so /mcp is
   // never swallowed; tool deps are resolved lazily per request and filled in

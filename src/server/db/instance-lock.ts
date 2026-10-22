@@ -178,7 +178,7 @@ function refuse(dbPath: string, owner?: LockOwner): never {
   throw new InstanceLockError(dbPath, owner)
 }
 
-function pidIsAlive(pid: number): boolean {
+export function pidIsAlive(pid: number): boolean {
   if (!Number.isFinite(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)

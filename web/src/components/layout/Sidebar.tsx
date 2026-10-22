@@ -220,9 +220,14 @@ export function Sidebar({ projectId, isOpen = true, overlay = false, onClose }: 
   const handleExportSession = async (sessionId: string) => {
     const session = sessions.find((s) => s.id === sessionId)
     setExportError(null)
-    const ok = await downloadSessionExport(sessionId, session?.title)
-    if (!ok) {
-      setExportError(t({ en: 'Failed to export session', fr: 'Échec de l’export de la session' }))
+    const result = await downloadSessionExport(sessionId, session?.title)
+    if (!result.ok) {
+      setExportError(
+        t({
+          en: `Failed to export session: ${result.error}`,
+          fr: `Échec de l’export de la session : ${result.error}`,
+        }),
+      )
     }
   }
 

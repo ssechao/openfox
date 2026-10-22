@@ -23,6 +23,7 @@ import {
   formatVisionFallbackDescription,
 } from './resolve-attachments.js'
 import { sanitizeToolSchema } from './schema-sanitizer.js'
+import { hydrateAttachmentData } from '../events/blob-codec.js'
 
 import type { ContentPart } from './resolve-attachments.js'
 export { resolveAttachmentsInMessages } from './resolve-attachments.js'
@@ -163,24 +164,25 @@ function buildAssistantMessage(
 
 async function convertAttachment(attachment: Attachment, modelSupportsVision: boolean): Promise<AttachmentContent> {
   const mimeType = attachment.mimeType
+  const data = hydrateAttachmentData(attachment)
 
   if (TEXT_MIME_EXACT.includes(mimeType) || TEXT_MIME_PREFIXES.some((p) => mimeType.startsWith(p))) {
-    return [{ type: 'text', text: `[File: ${attachment.filename || 'file'}]\n${attachment.data}` }]
+    return [{ type: 'text', text: `[File: ${attachment.filename || 'file'}]\n${data}` }]
   }
 
   if (mimeType === 'application/pdf') {
     if (modelSupportsVision) {
-      return extractPdfBlocksFromDataUrl(attachment.data, attachment.filename || 'document.pdf')
+      return extractPdfBlocksFromDataUrl(data, attachment.filename || 'document.pdf')
     }
     if (attachment.pdfContent) {
       return [{ type: 'text', text: attachment.pdfContent }]
     }
-    const text = await extractPdfFromDataUrl(attachment.data, attachment.filename || 'document.pdf')
+    const text = await extractPdfFromDataUrl(data, attachment.filename || 'document.pdf')
     return [{ type: 'text', text }]
   }
 
   if (modelSupportsVision) {
-    return [{ type: 'image_url', image_url: { url: attachment.data } }]
+    return [{ type: 'image_url', image_url: { url: data } }]
   }
 
   if (attachment.description) {

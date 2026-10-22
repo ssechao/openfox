@@ -4,6 +4,7 @@ import { extractPdfContent, extractPdfText } from '../tools/pdf-utils.js'
 import { TEXT_MIME_EXACT, TEXT_MIME_PREFIXES } from '../../shared/constants.js'
 import { contentHash, cacheSet } from '../utils/cache.js'
 import { decodeDataUrl } from '../utils/data-url.js'
+import { hydrateAttachmentData } from '../events/blob-codec.js'
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
 
@@ -74,9 +75,10 @@ export async function extractPdfBlocksFromDataUrl(data: string, filename: string
 
 async function resolveAttachmentToText(attachment: Attachment, supportsVision: boolean): Promise<string> {
   const mimeType = attachment.mimeType
+  const data = hydrateAttachmentData(attachment)
 
   if (TEXT_MIME_EXACT.includes(mimeType) || TEXT_MIME_PREFIXES.some((p) => mimeType.startsWith(p))) {
-    const text = decodeDataUrl(attachment.data)?.toString('utf8') ?? attachment.data
+    const text = decodeDataUrl(data)?.toString('utf8') ?? data
     return `[File: ${attachment.filename || 'file'}]\n${text}`
   }
 
@@ -84,7 +86,7 @@ async function resolveAttachmentToText(attachment: Attachment, supportsVision: b
     if (attachment.pdfContent) {
       return attachment.pdfContent
     }
-    return extractPdfFromDataUrl(attachment.data, attachment.filename || 'document.pdf')
+    return extractPdfFromDataUrl(data, attachment.filename || 'document.pdf')
   }
 
   if (supportsVision) {

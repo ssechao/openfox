@@ -471,13 +471,25 @@ export interface PreparingToolCall {
   editContext?: EditContextRegion[] // Live edit context for streaming edit_file
 }
 
+export type BlobRefOrigin = 'url' | 'dataUrl' | 'base64Data' | 'data'
+
+export interface BlobRef {
+  hash: string
+  mime: string
+  size: number
+  origin?: BlobRefOrigin
+}
+
 export interface Attachment {
   id: string
   filename: string
   /** MIME type of the file (e.g. image/png, application/pdf, text/plain, application/json, etc.) */
   mimeType: string
   size: number
-  data: string // Raw UTF-8 text for text-based types; data: URL (base64) for images and PDFs
+  /** Raw UTF-8 text for text-based types; data: URL (base64) for images and PDFs. Omitted when `blob` is set. */
+  data?: string
+  /** Content-addressed binary payload. Snapshots persist this instead of `data`. */
+  blob?: BlobRef
   description?: string // Vision fallback description (for non-vision models)
   pdfContent?: string // Enriched PDF content (text + image descriptions) for non-vision models
 }
