@@ -11,6 +11,7 @@ import type { Config, ModelConfig, ProviderBackend } from '../shared/types.js'
 import type { ServerHandle } from './context.js'
 import type { VisionBackend } from './llm/vision-fallback.js'
 import { initDatabase } from './db/index.js'
+
 import { getProject, deleteProject } from './db/projects.js'
 import { initEventStore, getEventStore, combineEventsWithSnapshot } from './events/index.js'
 import { buildMessagesFromStoredEvents } from './events/folding.js'
@@ -72,6 +73,7 @@ import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { createDiagnosticsCollector } from './diagnostics/collector.js'
 import { logger, setLogLevel } from './utils/logger.js'
+import { requestAbortSignal } from './utils/request-abort.js'
 import { VERSION } from '../constants.js'
 import {
   loadServerAuthConfig,
@@ -163,7 +165,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // Repair sessions still pinned to a provider that is gone (deleted before the delete
   // cascade existed, or dropped from a hand-edited config).
-  const repairedSessions = reconcileSessionProviders(providerManager.getProviders().map((p) => p.id))
+  const repairedSessions = reconcileSessionProviders(
+    providerManager.getProviders().map((p) => p.id),
+    config.database.path,
+  )
   if (repairedSessions > 0) {
     logger.warn('Cleared unknown provider from sessions', { sessions: repairedSessions })
   }
@@ -378,6 +383,28 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     })
   }
 
+  // Demo-only probe (OPENFOX_DEMO_LOOP_PROBE=1): dev mode only; adds /api/health/loop-delay and turns off Vite dev warmup.
+  const demoLoopProbe = config.mode === 'development' && process.env['OPENFOX_DEMO_LOOP_PROBE'] === '1'
+  if (demoLoopProbe) {
+    const demoLoopSamples: Array<[number, number]> = []
+    let demoLoopLast = performance.now()
+    const sampleDemoLoop = () => {
+      const now = performance.now()
+      demoLoopSamples.push([Date.now(), now - demoLoopLast - 20])
+      if (demoLoopSamples.length > 60_000) demoLoopSamples.splice(0, 10_000)
+      demoLoopLast = now
+      setTimeout(sampleDemoLoop, 20).unref()
+    }
+    setTimeout(sampleDemoLoop, 20).unref()
+    app.get('/api/health/loop-delay', (req, res) => {
+      const since = Number(req.query['since'] ?? 0)
+      res.json({
+        samples: demoLoopSamples.filter(([firedAt]) => firedAt >= since),
+        clock: { wallMs: Date.now(), hrtimeUs: Number(process.hrtime.bigint() / 1000n) },
+      })
+    })
+  }
+
   // Changelog (public)
   app.get('/api/changelog', async (req, res) => {
     try {
@@ -458,7 +485,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const { loadGlobalConfig } = await import('../cli/config.js')
     const globalConfig = await loadGlobalConfig(config.mode ?? 'production', config.globalConfigPath)
     try {
-      const project = await createProjectDirectory(name, workdir, globalConfig.workspace?.autoGitInit ?? true)
+      const project = await createProjectDirectory(name, workdir, globalConfig.workspace?.autoGitInit ?? true, {
+        signal: requestAbortSignal(res),
+      })
       res.status(201).json({ project })
     } catch (err) {
       const eaccError = err as Error & { code?: string; cause?: unknown }
@@ -477,7 +506,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { checkPermissions } = await import('./utils/permissions.js')
-    const result = await checkPermissions(targetPath)
+    const result = await checkPermissions(targetPath, { signal: requestAbortSignal(res) })
 
     if (result.success) {
       res.json(result)
@@ -499,7 +528,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { fixPermissions } = await import('./utils/permissions.js')
-    const result = await fixPermissions(targetPath, action)
+    const result = await fixPermissions(targetPath, action, { signal: requestAbortSignal(res) })
 
     if (result.success) {
       res.json(result)
@@ -919,7 +948,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     try {
-      const updated = await sessionManager.switchWorkspace(req.params.id, target, branch, sourceBranch)
+      const updated = await sessionManager.switchWorkspace(req.params.id, target, branch, sourceBranch, {
+        signal: requestAbortSignal(res),
+      })
       res.json({ session: toClientSession(updated) })
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to switch workspace' })
@@ -942,7 +973,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     try {
-      const updated = await sessionManager.deleteWorkspace(req.params.id, target, force === true)
+      const updated = await sessionManager.deleteWorkspace(req.params.id, target, force === true, {
+        signal: requestAbortSignal(res),
+      })
       res.json({ session: toClientSession(updated) })
     } catch (err) {
       if (err instanceof WorkspaceInUseError) {
@@ -3487,7 +3520,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     viteServer = await createViteServer({
       root: webDir,
       configFile: resolve(__dirname, '../../web/vite.config.ts'),
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, ...(demoLoopProbe ? { preTransformRequests: false } : {}) },
       appType: 'spa',
       logLevel: 'warn',
     })

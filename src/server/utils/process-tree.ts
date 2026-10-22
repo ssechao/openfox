@@ -3,43 +3,52 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 const SIGKILL_TIMEOUT_MS = 200
 
-async function getDescendantPids(rootPid: number): Promise<number[]> {
+function isAlive(pid: number): boolean {
   try {
-    const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
-      execFile('ps', ['-eo', 'pid=,ppid='], { timeout: 5000, windowsHide: true }, (err, stdout) => {
-        if (err) reject(err)
-        else resolve({ stdout })
-      })
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function execStdout(file: string, args: string[], timeout = 1000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { timeout, windowsHide: true }, (err, stdout) => {
+      if (err && !stdout) reject(err)
+      else resolve(stdout ?? '')
     })
+  })
+}
 
-    const children = new Map<number, number[]>()
-
-    for (const line of stdout.trim().split('\n')) {
-      const parts = line.trim().split(/\s+/)
-      const pid = parseInt(parts[0]!, 10)
-      const ppid = parseInt(parts[1]!, 10)
-      if (!isNaN(pid) && !isNaN(ppid) && pid > 0 && ppid >= 0) {
-        if (!children.has(ppid)) children.set(ppid, [])
-        children.get(ppid)!.push(pid)
-      }
-    }
-
-    const descendants: number[] = []
-    const queue = [rootPid]
-    while (queue.length > 0) {
-      const current = queue.shift()!
-      const kids = children.get(current)
-      if (kids) {
-        for (const kid of kids) {
-          descendants.push(kid)
-          queue.push(kid)
-        }
-      }
-    }
-    return descendants
+async function childrenOf(pid: number): Promise<number[]> {
+  try {
+    const stdout = await execStdout('pgrep', ['-P', String(pid)])
+    return stdout
+      .trim()
+      .split('\n')
+      .map((line) => parseInt(line.trim(), 10))
+      .filter((n) => n > 0)
   } catch {
     return []
   }
+}
+
+async function getDescendantPids(rootPid: number): Promise<number[]> {
+  const descendants: number[] = []
+  const seen = new Set<number>([rootPid])
+  const queue = [rootPid]
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    const kids = await childrenOf(current)
+    for (const kid of kids) {
+      if (seen.has(kid)) continue
+      seen.add(kid)
+      descendants.push(kid)
+      queue.push(kid)
+    }
+  }
+  return descendants
 }
 
 function killProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
@@ -79,32 +88,46 @@ export async function killProcessTree(pid: number, immediate = false): Promise<v
     return
   }
 
-  // Primary: kill by process group (negative PID = PGID).
-  // With detached: true the child is the process group leader,
-  // so this kills the shell and all its descendants atomically.
-  if (!immediate) {
+  // Snapshot the tree first. A child that called setsid is reparented to
+  // init as soon as its parent dies, so enumerating after the kill misses it.
+  const enumerated = await getDescendantPids(pid)
+
+  const signalTree = (signal: 'SIGTERM' | 'SIGKILL') => {
     try {
-      process.kill(-pid, 'SIGTERM')
+      process.kill(-pid, signal)
     } catch {
-      /* may already be gone */
+      /* group may already be gone */
     }
-    await sleep(SIGKILL_TIMEOUT_MS)
+    for (const childPid of enumerated) {
+      try {
+        process.kill(-childPid, signal)
+      } catch {
+        /* own group, or already gone */
+      }
+      killProcess(childPid, signal)
+    }
+    killProcess(pid, signal)
   }
 
-  try {
-    process.kill(-pid, 'SIGKILL')
-  } catch {
-    /* may already be gone */
+  if (!immediate) {
+    signalTree('SIGTERM')
+    const deadline = Date.now() + SIGKILL_TIMEOUT_MS
+    while (Date.now() < deadline && isAlive(pid)) {
+      await sleep(20)
+    }
   }
+  signalTree('SIGKILL')
 
-  // Fallback: enumerate individual PIDs for any survivors
-  // (edge case: children that called setsid to create separate groups).
+  if (enumerated.length === 0 && !isAlive(pid)) return
+
   const survivors = await getDescendantPids(pid)
-  if (survivors.length > 0) {
-    survivors.push(pid)
-    for (const p of survivors) {
-      killProcess(p, 'SIGKILL')
+  for (const p of new Set([...enumerated, ...survivors, pid])) {
+    try {
+      process.kill(-p, 'SIGKILL')
+    } catch {
+      /* ignore */
     }
+    killProcess(p, 'SIGKILL')
   }
 }
 

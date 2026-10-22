@@ -1,7 +1,9 @@
-import { execSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { access, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
+import { PERMISSIONS_COMMAND_TIMEOUT_MS, runFile } from './bounded-exec.js'
+
+export type PermissionsOptions = { signal?: AbortSignal }
 
 function sanitizeShellArg(arg: string): string {
   if (!/^[a-zA-Z0-9._-]+$/.test(arg)) {
@@ -10,12 +12,20 @@ function sanitizeShellArg(arg: string): string {
   return arg
 }
 
-function addUserToGroup(groupName: string): void {
-  const currentUser = execSync('id -un', { encoding: 'utf-8', windowsHide: true }).trim()
-  execSync(`sudo usermod -aG ${sanitizeShellArg(groupName)} ${sanitizeShellArg(currentUser)}`, {
-    stdio: 'pipe',
-    windowsHide: true,
+async function runPerm(
+  file: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string }> {
+  return runFile(file, args, {
+    timeoutMs: PERMISSIONS_COMMAND_TIMEOUT_MS,
+    ...(signal ? { signal } : {}),
   })
+}
+
+async function addUserToGroup(groupName: string, signal?: AbortSignal): Promise<void> {
+  const currentUser = (await runPerm('id', ['-un'], signal)).stdout.trim()
+  await runPerm('sudo', ['usermod', '-aG', sanitizeShellArg(groupName), sanitizeShellArg(currentUser)], signal)
 }
 
 interface DirInfo {
@@ -28,61 +38,50 @@ interface DirInfo {
   sudoAvailable: boolean
 }
 
-async function getDirInfo(targetPath: string): Promise<DirInfo> {
+async function getDirInfo(targetPath: string, signal?: AbortSignal): Promise<DirInfo> {
   const resolvedPath = resolve(targetPath)
 
-  // Check if the path exists
   try {
     await access(resolvedPath, constants.F_OK)
   } catch {
     throw new Error('Path not found')
   }
 
-  // Check if passwordless sudo is available
   let sudoAvailable: boolean
   try {
-    execSync('sudo -n true', { stdio: 'pipe', windowsHide: true })
+    await runPerm('sudo', ['-n', 'true'], signal)
     sudoAvailable = true
   } catch {
     sudoAvailable = false
   }
 
-  // Get the directory's group and permissions
   const dirStat = await stat(resolvedPath)
   const groupGid = dirStat.gid
 
-  // Get current user's groups
-  const currentUser = sanitizeShellArg(execSync('id -un', { encoding: 'utf-8', windowsHide: true }).trim())
-  const groupsOutput = execSync(`id -Gn ${currentUser}`, { encoding: 'utf-8', windowsHide: true }).trim()
+  const currentUser = sanitizeShellArg((await runPerm('id', ['-un'], signal)).stdout.trim())
+  const groupsOutput = (await runPerm('id', ['-Gn', currentUser], signal)).stdout.trim()
   const userGroups = groupsOutput.split(/\s+/)
 
-  // Get the group name for the directory's gid
   let groupName: string | null = null
   try {
-    const rawGroupName = execSync(`getent group ${groupGid}`, { encoding: 'utf-8', windowsHide: true })
-      .split(':')[0]
-      ?.trim()
+    const rawGroupName = (await runPerm('getent', ['group', String(groupGid)], signal)).stdout.split(':')[0]?.trim()
     groupName = rawGroupName ? sanitizeShellArg(rawGroupName) : null
   } catch {
     // ignore
   }
 
-  // Check if user is in the directory's group
   const userInGroup = groupName ? userGroups.includes(groupName) : false
-
-  // Check group write permission (mode & 020)
   const groupHasWrite = (dirStat.mode & 0o020) !== 0
 
   return { resolvedPath, groupGid, groupName, userGroups, userInGroup, groupHasWrite, sudoAvailable }
 }
 
-export async function checkPermissions(targetPath: string) {
+export async function checkPermissions(targetPath: string, options?: PermissionsOptions) {
   if (process.platform === 'win32') {
-    // Unix group/sudo-based permission management does not apply on Windows
     return { success: false, error: 'Automatic permission management is not supported on Windows', status: 501 }
   }
   try {
-    const info = await getDirInfo(targetPath)
+    const info = await getDirInfo(targetPath, options?.signal)
     return {
       success: true,
       sudoAvailable: info.sudoAvailable,
@@ -99,7 +98,7 @@ export async function checkPermissions(targetPath: string) {
   }
 }
 
-export async function fixPermissions(targetPath: string, action: string) {
+export async function fixPermissions(targetPath: string, action: string, options?: PermissionsOptions) {
   if (process.platform === 'win32') {
     return {
       success: false,
@@ -109,7 +108,8 @@ export async function fixPermissions(targetPath: string, action: string) {
     }
   }
   try {
-    const info = await getDirInfo(targetPath)
+    const info = await getDirInfo(targetPath, options?.signal)
+    const signal = options?.signal
 
     if (action === 'group') {
       if (!info.userInGroup) {
@@ -120,7 +120,7 @@ export async function fixPermissions(targetPath: string, action: string) {
             'You are not in the group that owns this directory. Use "Join group & extend group permissions" instead.',
         }
       }
-      execSync(`sudo chmod g+w "${info.resolvedPath}"`, { stdio: 'pipe', windowsHide: true })
+      await runPerm('sudo', ['chmod', 'g+w', info.resolvedPath], signal)
       return { success: true, sudoAvailable: info.sudoAvailable, method: 'group' }
     }
 
@@ -128,7 +128,7 @@ export async function fixPermissions(targetPath: string, action: string) {
       if (!info.groupName) {
         return { success: false, sudoAvailable: info.sudoAvailable, error: 'Could not determine group name' }
       }
-      addUserToGroup(info.groupName)
+      await addUserToGroup(info.groupName, signal)
       return { success: true, sudoAvailable: info.sudoAvailable, method: 'join_group' }
     }
 
@@ -136,17 +136,13 @@ export async function fixPermissions(targetPath: string, action: string) {
       if (!info.groupName) {
         return { success: false, sudoAvailable: info.sudoAvailable, error: 'Could not determine group name' }
       }
-      execSync(`sudo chmod g+w "${info.resolvedPath}"`, { stdio: 'pipe', windowsHide: true })
-      addUserToGroup(info.groupName)
+      await runPerm('sudo', ['chmod', 'g+w', info.resolvedPath], signal)
+      await addUserToGroup(info.groupName, signal)
       return { success: true, sudoAvailable: info.sudoAvailable, method: 'join_group_and_group' }
     }
 
-    // ownership action
-    const ownerUser = execSync('id -un', { encoding: 'utf-8', windowsHide: true }).trim()
-    execSync(`sudo chown -R ${sanitizeShellArg(ownerUser)} "${info.resolvedPath}"`, {
-      stdio: 'pipe',
-      windowsHide: true,
-    })
+    const ownerUser = (await runPerm('id', ['-un'], signal)).stdout.trim()
+    await runPerm('sudo', ['chown', '-R', sanitizeShellArg(ownerUser), info.resolvedPath], signal)
     return { success: true, sudoAvailable: info.sudoAvailable, method: 'ownership' }
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'

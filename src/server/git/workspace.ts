@@ -1,12 +1,42 @@
-import { spawn, execSync } from 'node:child_process'
-import { mkdir, rm } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { mkdir } from 'node:fs/promises'
 import { resolve, join, isAbsolute } from 'node:path'
 import { homedir, platform } from 'node:os'
 import { logger } from '../utils/logger.js'
 import { isDirectoryEntry } from '../utils/fs.js'
+import {
+  CommandAbortedError,
+  CommandTimeoutError,
+  WORKSPACE_DELETE_TIMEOUT_MS,
+  WORKSPACE_SETUP_TIMEOUT_MS,
+  runShell,
+  type BoundedExecOptions,
+} from '../utils/bounded-exec.js'
 import { gitSpawnEnv } from './env.js'
 import { loadWorkspaceConfig } from './workspace-config.js'
 import { getProjectByWorkdir } from '../db/projects.js'
+
+export { WORKSPACE_DELETE_TIMEOUT_MS, WORKSPACE_SETUP_TIMEOUT_MS }
+
+export interface WorkspaceCommandOptions {
+  signal?: AbortSignal
+  setupTimeoutMs?: number
+  deleteTimeoutMs?: number
+}
+
+export class WorkspaceDeleteIncompleteError extends Error {
+  readonly path: string
+  readonly reason: 'aborted' | 'timeout'
+  constructor(path: string, reason: 'aborted' | 'timeout', timeoutMs: number) {
+    super(
+      `Workspace deletion ${reason === 'timeout' ? `timed out after ${timeoutMs} ms` : 'was cancelled'}. ` +
+        `Files may remain at ${path}. Retry deleteWorkspace to finish removing the directory.`,
+    )
+    this.name = 'WorkspaceDeleteIncompleteError'
+    this.path = path
+    this.reason = reason
+  }
+}
 
 function captureStdout(cwd: string, args: string[]): Promise<string | null> {
   return new Promise((resolvePromise) => {
@@ -272,6 +302,7 @@ export async function ensureWorkspace(
   projectName: string,
   branch?: string,
   sourceBranch?: string,
+  options?: WorkspaceCommandOptions,
 ): Promise<WorkspaceResult> {
   const workspacesDir = await getWorkspacesDir(projectName, projectDir)
   const wsPath = resolve(workspacesDir, name)
@@ -316,11 +347,19 @@ export async function ensureWorkspace(
 
   const config = await loadWorkspaceConfig(projectDir)
   if (config?.setup && config.setup.length > 0) {
+    const setupTimeoutMs = options?.setupTimeoutMs ?? WORKSPACE_SETUP_TIMEOUT_MS
     for (const cmd of config.setup) {
-      logger.info('Running workspace setup command', { command: cmd, cwd: wsPath })
+      if (options?.signal?.aborted) throw new CommandAbortedError(cmd)
+      logger.info('Running workspace setup command', { command: cmd, cwd: wsPath, timeoutMs: setupTimeoutMs })
       try {
-        execSync(cmd, { cwd: wsPath, stdio: 'inherit', env: { ...process.env } })
+        await runShell(cmd, {
+          cwd: wsPath,
+          env: { ...process.env },
+          timeoutMs: setupTimeoutMs,
+          ...(options?.signal ? { signal: options.signal } : {}),
+        })
       } catch (err) {
+        if (err instanceof CommandAbortedError || err instanceof CommandTimeoutError) throw err
         logger.warn('Workspace setup command failed', { command: cmd, error: String(err) })
       }
     }
@@ -329,15 +368,58 @@ export async function ensureWorkspace(
   return { path: wsPath, name }
 }
 
-export async function deleteWorkspace(projectName: string, name: string, projectDir: string): Promise<void> {
+export async function deleteWorkspace(
+  projectName: string,
+  name: string,
+  projectDir: string,
+  options?: WorkspaceCommandOptions,
+): Promise<void> {
   const dir = await getWorkspacesDir(projectName, projectDir)
   const wsPath = resolve(dir, name)
   const st = await statSafe(wsPath)
   if (!st?.isDirectory()) {
     throw new Error(`Workspace "${name}" does not exist`)
   }
-  await rm(wsPath, { recursive: true, force: true, maxRetries: 3 })
+  const timeoutMs = options?.deleteTimeoutMs ?? WORKSPACE_DELETE_TIMEOUT_MS
+  if (options?.signal?.aborted) {
+    throw new WorkspaceDeleteIncompleteError(wsPath, 'aborted', timeoutMs)
+  }
+  try {
+    await removeTreeWithChild(wsPath, options?.signal, timeoutMs)
+  } catch (err) {
+    if (err instanceof CommandAbortedError || options?.signal?.aborted) {
+      throw new WorkspaceDeleteIncompleteError(wsPath, 'aborted', timeoutMs)
+    }
+    if (err instanceof CommandTimeoutError) {
+      throw new WorkspaceDeleteIncompleteError(wsPath, 'timeout', timeoutMs)
+    }
+    throw err
+  }
   logger.info('Deleted workspace', { projectName, name, path: wsPath })
+}
+
+function escapeShellArg(arg: string): string {
+  if (process.platform === 'win32') {
+    return `"${arg.replace(/"/g, '""')}"`
+  }
+  if (/^[a-zA-Z0-9_\-/.@:=]+$/.test(arg)) return arg
+  return `'${arg.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Recursively delete a directory by spawning the system `rm` command.
+ * The child process runs outside the event loop, so it never blocks timers,
+ * and abort/timeout kill the whole process tree immediately. Partial deletion
+ * is expected on abort; callers retry to finish the job.
+ */
+async function removeTreeWithChild(target: string, signal?: AbortSignal, timeoutMs?: number): Promise<void> {
+  if (signal?.aborted) throw new CommandAbortedError('rm -rf')
+  const command =
+    process.platform === 'win32' ? `rmdir /s /q ${escapeShellArg(target)}` : `rm -rf ${escapeShellArg(target)}`
+  const options: BoundedExecOptions = {}
+  if (signal) options.signal = signal
+  if (timeoutMs !== undefined) options.timeoutMs = timeoutMs
+  await runShell(command, options)
 }
 
 export async function isGitRepository(cwd: string): Promise<boolean> {

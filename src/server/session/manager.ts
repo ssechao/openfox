@@ -2138,7 +2138,13 @@ export class SessionManager {
    * Emits a single type of event — switching is always "opening" a workspace.
    * Switches are serialized per-session to prevent race conditions.
    */
-  async switchWorkspace(sessionId: string, target: string, branch?: string, sourceBranch?: string): Promise<Session> {
+  async switchWorkspace(
+    sessionId: string,
+    target: string,
+    branch?: string,
+    sourceBranch?: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<Session> {
     if (target !== 'original') validateWorkspaceName(target)
 
     const existingLock = this.switchLocks.get(sessionId)
@@ -2197,7 +2203,7 @@ export class SessionManager {
             // not silently drop it onto the clone's default (main/develop).
             const inheritedBranch =
               branch ?? (await getGitBranch(this.getEffectiveWorkdir(sessionId))) ?? session.branch ?? undefined
-            await ensureWorkspace(project.workdir, target, project.name, inheritedBranch, sourceBranch)
+            await ensureWorkspace(project.workdir, target, project.name, inheritedBranch, sourceBranch, options)
           } else if (branch) {
             await this.applyBranchIfNeeded(project.workdir, project.name, target, branch, sourceBranch)
           }
@@ -2292,7 +2298,12 @@ export class SessionManager {
    * switches to original first. Throws if target is "original".
    * Refuses deletion if other sessions reference this workspace.
    */
-  async deleteWorkspace(sessionId: string, target: string, force = false): Promise<Session> {
+  async deleteWorkspace(
+    sessionId: string,
+    target: string,
+    force = false,
+    options?: { signal?: AbortSignal },
+  ): Promise<Session> {
     if (target === 'original') throw new Error('Cannot delete the original workspace')
     validateWorkspaceName(target)
 
@@ -2309,7 +2320,7 @@ export class SessionManager {
         // Switch all conflicting sessions to original first
         for (const other of otherSessionsUsingIt) {
           try {
-            await this.switchWorkspace(other.id, 'original')
+            await this.switchWorkspace(other.id, 'original', undefined, undefined, options)
           } catch (err) {
             throw new Error(
               `Failed to switch session ${other.id} to original: ${err instanceof Error ? err.message : String(err)}`,
@@ -2328,7 +2339,7 @@ export class SessionManager {
     // If currently in the workspace being deleted, switch to original first
     const currentWsName = session.workspace?.split('/').pop()
     if (currentWsName === target) {
-      await this.switchWorkspace(sessionId, 'original')
+      await this.switchWorkspace(sessionId, 'original', undefined, undefined, options)
     }
 
     const wsDir = await getWorkspacesDir(project.name, project.workdir)
@@ -2339,7 +2350,7 @@ export class SessionManager {
       // ignore
     }
 
-    await deleteWorkspaceDir(project.name, target, project.workdir)
+    await deleteWorkspaceDir(project.name, target, project.workdir, options)
     const updated = this.requireSession(sessionId)
     this.emit({ type: 'session_updated', session: updated })
     return updated

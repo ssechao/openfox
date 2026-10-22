@@ -97,7 +97,13 @@ export const workspaceTool = createTool<WorkspaceArgs>(
             `User denied: ${isBranchChange ? 'branch change' : `switch to ${label}`}`,
           )
 
-        const updated = await sessionManager.switchWorkspace(sessionId, args.target, args.branch, args.sourceBranch)
+        const updated = await sessionManager.switchWorkspace(
+          sessionId,
+          args.target,
+          args.branch,
+          args.sourceBranch,
+          context.signal ? { signal: context.signal } : undefined,
+        )
         const wsName = args.target === 'original' ? 'original' : (updated.workspace?.split('/').pop() ?? args.target)
         const branch = await getGitBranch(updated.workspace ?? updated.workdir)
         return helpers.success(
@@ -162,7 +168,12 @@ export const workspaceTool = createTool<WorkspaceArgs>(
             `User denied: delete workspace "${args.target}"`,
           )
 
-        await sessionManager.deleteWorkspace(sessionId, args.target, args.force === true)
+        await sessionManager.deleteWorkspace(
+          sessionId,
+          args.target,
+          args.force === true,
+          context.signal ? { signal: context.signal } : undefined,
+        )
         return helpers.success(
           JSON.stringify(
             {

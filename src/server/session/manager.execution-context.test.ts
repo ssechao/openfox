@@ -357,7 +357,14 @@ describe('SessionManager.switchWorkspace – execution context integrity (issue 
 
       await manager.switchWorkspace(session.id, 'brand-new-ws')
 
-      expect(mockEnsureWorkspace).toHaveBeenCalledWith(workdir, 'brand-new-ws', 'OpenFox', 'feat-x', undefined)
+      expect(mockEnsureWorkspace).toHaveBeenCalledWith(
+        workdir,
+        'brand-new-ws',
+        'OpenFox',
+        'feat-x',
+        undefined,
+        undefined,
+      )
     })
 
     it('does not force a branch checkout into an existing workspace when no branch is given', async () => {

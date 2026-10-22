@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   getGitBranch,
@@ -18,6 +19,12 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
   execSync: vi.fn(),
   execFileSync: vi.fn(),
+  execFile: vi.fn(
+    (_file: string, _args: string[], _opts: unknown, cb?: (err: Error | null, stdout: string) => void) => {
+      if (typeof _opts === 'function') (_opts as (err: Error | null, stdout: string) => void)(null, '')
+      else cb?.(null, '')
+    },
+  ),
 }))
 
 vi.mock('node:fs/promises', () => ({
@@ -41,7 +48,7 @@ vi.mock('../db/projects.js', () => ({
 }))
 
 import { spawn, execSync, execFileSync } from 'node:child_process'
-import { readFile, readdir, mkdir, rm, stat } from 'node:fs/promises'
+import { readFile, readdir, mkdir, stat } from 'node:fs/promises'
 import { loadWorkspaceConfig } from './workspace-config.js'
 import { getProjectByWorkdir } from '../db/projects.js'
 
@@ -51,8 +58,10 @@ type MockProc = {
   on: (event: string, cb: (...args: unknown[]) => void) => void
 }
 
-function makeMockProc(stdout: string, stderr = '', exitCode = 0): MockProc {
+function makeMockProc(stdout: string, stderr = '', exitCode = 0): MockProc & { pid: number; kill: () => boolean } {
   return {
+    pid: 4242,
+    kill: () => true,
     stdout: {
       on: (event, cb) => {
         if (event === 'data') setTimeout(() => cb(Buffer.from(stdout)), 0)
@@ -202,18 +211,24 @@ describe('listWorkspaces', () => {
 
 describe('ensureWorkspace', () => {
   it('creates workspace via shared clone', async () => {
-    vi.mocked(spawn).mockReturnValueOnce(makeMockProc('') as any) // git clone --shared
+    vi.mocked(spawn)
+      .mockReturnValueOnce(makeMockProc('') as any) // git clone --shared
+      .mockReturnValueOnce(makeMockProc('') as any) // setup: sh -c 'echo hello'
     vi.mocked(mkdir).mockResolvedValue(undefined)
     vi.mocked(stat)
       .mockResolvedValueOnce(null as any) // wsPath doesn't exist → triggers clone
       .mockResolvedValueOnce({ isDirectory: () => true } as any) // post-clone check
     vi.mocked(loadWorkspaceConfig).mockResolvedValue({ setup: ['echo hello'] })
-    vi.mocked(execSync).mockReturnValue(Buffer.from('') as any)
 
     const result = await ensureWorkspace(CWD, 'my-experiment', PROJECT_NAME)
     expect(result.name).toBe('my-experiment')
     expect(result.path).toContain('my-experiment')
-    expect(execSync).toHaveBeenCalledWith('echo hello', expect.any(Object))
+    expect(execSync).not.toHaveBeenCalled()
+    expect(spawn).toHaveBeenCalledWith(
+      'sh',
+      ['-c', 'echo hello'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-experiment') }),
+    )
   })
 
   it('checks out specific branch when requested', async () => {
@@ -412,17 +427,30 @@ describe('isGitRepository', () => {
   })
 })
 
+function lastSpawnCommand(): string | null {
+  const calls = vi.mocked(spawn).mock.calls
+  if (calls.length === 0) return null
+  const last = calls[calls.length - 1]!
+  if (last[0] === 'sh' && Array.isArray(last[1]) && last[1][0] === '-c' && typeof last[1][1] === 'string') {
+    return last[1][1]
+  }
+  return null
+}
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 describe('deleteWorkspace', () => {
-  it('deletes via fs.rm without spawning any process', async () => {
+  it('deletes via a child rm process without execSync', async () => {
     vi.mocked(stat).mockResolvedValue({ isDirectory: () => true } as any)
+    vi.mocked(spawn).mockReturnValue(makeMockProc('') as any)
 
     await deleteWorkspace(PROJECT_NAME, 'test-ws', CWD)
 
-    expect(rm).toHaveBeenCalledWith(expect.stringContaining('test-ws'), {
-      recursive: true,
-      force: true,
-      maxRetries: 3,
-    })
+    const command = lastSpawnCommand()
+    expect(command).toContain('rm -rf')
+    expect(command).toContain('test-ws')
     expect(execSync).not.toHaveBeenCalled()
     expect(execFileSync).not.toHaveBeenCalled()
   })
@@ -434,19 +462,14 @@ describe('deleteWorkspace', () => {
     ['command substitution', '$(touch ~/.malicious_substitution)'],
   ])('does not shell-interpret workspace name - %s', async (_label, maliciousName) => {
     vi.mocked(stat).mockResolvedValue({ isDirectory: () => true } as any)
+    vi.mocked(spawn).mockReturnValue(makeMockProc('') as any)
 
-    // fs.rm takes the path as plain data — shell metacharacters are inert
     await deleteWorkspace(PROJECT_NAME, maliciousName, CWD)
 
-    // deleteWorkspace runs the name through resolve(), which rewrites "/" to the
-    // native separator; the metacharacters themselves must survive untouched.
+    const command = lastSpawnCommand()
     const inertName = maliciousName.split('/').join(sep)
-    expect(rm).toHaveBeenCalledTimes(1)
-    expect(rm).toHaveBeenCalledWith(expect.stringContaining(inertName), {
-      recursive: true,
-      force: true,
-      maxRetries: 3,
-    })
+    expect(command).toContain(inertName)
+    expect(command).toMatch(new RegExp(`'[^']*${escapeRegex(inertName)}[^']*'`))
     expect(execSync).not.toHaveBeenCalled()
     expect(execFileSync).not.toHaveBeenCalled()
   })
@@ -458,4 +481,36 @@ describe('deleteWorkspace', () => {
       'Workspace "nonexistent" does not exist',
     )
   })
+})
+
+describe('workspace setup and delete (real fs)', () => {
+  it('does not import execSync or spawnSync', async () => {
+    const { readFile } = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    const src = await readFile(fileURLToPath(new URL('./workspace.ts', import.meta.url)), 'utf8')
+    expect(src).not.toMatch(/\bexecSync\b/)
+    expect(src).not.toMatch(/\bspawnSync\b/)
+  })
+
+  it('runs setup, abort, timeout and bounded delete without blocking the event loop', async () => {
+    const { spawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    const root = resolve(fileURLToPath(import.meta.url), '../../../..')
+    const script = resolve(root, 'src/server/git/workspace.async.test.ts')
+    const vitestCli = resolve(root, 'node_modules/vitest/vitest.mjs')
+    const result = await new Promise<{ code: number | null; out: string }>((done) => {
+      const child = spawn(process.execPath, [vitestCli, 'run', '--reporter=dot', script], {
+        cwd: root,
+        env: { ...process.env },
+      })
+      let out = ''
+      child.stdout?.on('data', (d: Buffer) => {
+        out += d.toString()
+      })
+      child.stderr?.on('data', (d: Buffer) => {
+        out += d.toString()
+      })
+      child.on('close', (code) => done({ code, out }))
+      child.on('error', (err) => done({ code: 1, out: String(err) }))
+    })
+    expect(result.code, result.out).toBe(0)
+  }, 120_000)
 })

@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
+import { randomBytes } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import http from 'http'
 import zlib from 'zlib'
 
@@ -156,6 +159,16 @@ describe('InspectProxy', () => {
   })
 
   describe('HTML injection', () => {
+    it('does not use execSync, spawnSync, or zlib *Sync helpers', async () => {
+      const src = await readFile(fileURLToPath(new URL('./inspect-proxy.ts', import.meta.url)), 'utf8')
+      expect(src).not.toMatch(/\bexecSync\b/)
+      expect(src).not.toMatch(/\bspawnSync\b/)
+      expect(src).not.toMatch(/\bgunzipSync\b/)
+      expect(src).not.toMatch(/\binflateSync\b/)
+      expect(src).not.toMatch(/\bgzipSync\b/)
+      expect(src).not.toMatch(/\bdeflateSync\b/)
+    })
+
     it('injects script before </body> in uncompressed HTML', async () => {
       const targetPort = await createMockTarget((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html' })
@@ -199,7 +212,7 @@ describe('InspectProxy', () => {
       }
     })
 
-    it('injects script in gzip-compressed HTML', async () => {
+    it('injects script in gzip-compressed HTML with matching headers', async () => {
       const targetPort = await createMockTarget((_req, res) => {
         const compressed = zlib.gzipSync('<html><body><h1>Hello</h1></body></html>')
         res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip' })
@@ -212,15 +225,20 @@ describe('InspectProxy', () => {
         targetPort,
       )
       try {
-        const result = await httpGet('127.0.0.1', port, '/')
-        expect(result.status).toBe(200)
-        expect(result.body).toContain('__inspect__.js')
+        const raw = await httpGetRaw('127.0.0.1', port, '/')
+        expect(raw.status).toBe(200)
+        expect((raw.headers['content-encoding'] || '').toLowerCase()).toBe('gzip')
+        expect(Number(raw.headers['content-length'])).toBe(raw.body.length)
+        const body = zlib.gunzipSync(raw.body).toString('utf8')
+        expect(body).toContain('__inspect__.js')
+        expect(body).toContain('</body>')
+        expect(body.indexOf('__inspect__.js')).toBeLessThan(body.indexOf('</body>'))
       } finally {
         cleanup()
       }
     })
 
-    it('injects script in deflate-compressed HTML', async () => {
+    it('injects script in deflate-compressed HTML with matching headers', async () => {
       const targetPort = await createMockTarget((_req, res) => {
         const compressed = zlib.deflateSync('<html><body><h1>Hello</h1></body></html>')
         res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'deflate' })
@@ -233,13 +251,58 @@ describe('InspectProxy', () => {
         targetPort,
       )
       try {
-        const result = await httpGet('127.0.0.1', port, '/')
-        expect(result.status).toBe(200)
-        expect(result.body).toContain('__inspect__.js')
+        const raw = await httpGetRaw('127.0.0.1', port, '/')
+        expect(raw.status).toBe(200)
+        expect((raw.headers['content-encoding'] || '').toLowerCase()).toBe('deflate')
+        expect(Number(raw.headers['content-length'])).toBe(raw.body.length)
+        const body = zlib.inflateSync(raw.body).toString('utf8')
+        expect(body).toContain('__inspect__.js')
+        expect(body.indexOf('__inspect__.js')).toBeLessThan(body.indexOf('</body>'))
       } finally {
         cleanup()
       }
     })
+
+    it('decompresses a 2 MiB gzip body without blocking a 20ms timer', async () => {
+      const html = `<html><body>${randomBytes(3 * 1024 * 1024).toString('base64')}</body></html>`
+      const compressed = zlib.gzipSync(html)
+      expect(compressed.length).toBeGreaterThanOrEqual(2 * 1024 * 1024)
+      const targetPort = await createMockTarget((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip' })
+        res.end(compressed)
+      })
+
+      const { port, cleanup } = await startInspectProxy(
+        `http://127.0.0.1:${targetPort}`,
+        mockSessionManager as any,
+        targetPort,
+      )
+      try {
+        const pending = httpGetRaw('127.0.0.1', port, '/')
+        let watching = true
+        let maxDelay = 0
+        const watch = (async () => {
+          while (watching) {
+            const fired = await new Promise<number>((resolve) => {
+              const t0 = performance.now()
+              setTimeout(() => resolve(performance.now() - t0), 20)
+            })
+            if (fired > maxDelay) maxDelay = fired
+          }
+        })()
+        const raw = await pending
+        watching = false
+        await watch
+        expect(maxDelay).toBeLessThan(100)
+        expect(raw.status).toBe(200)
+        expect((raw.headers['content-encoding'] || '').toLowerCase()).toBe('gzip')
+        const body = zlib.gunzipSync(raw.body).toString('utf8')
+        expect(body).toContain('__inspect__.js')
+        expect(body.indexOf('__inspect__.js')).toBeLessThan(body.indexOf('</body>'))
+      } finally {
+        cleanup()
+      }
+    }, 30_000)
 
     it('injects script in chunked transfer encoded HTML', async () => {
       const targetPort = await createMockTarget((_req, res) => {

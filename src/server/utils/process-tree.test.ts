@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { spawn, execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { terminateProcessTree } from './process-tree.js'
 
@@ -242,4 +245,48 @@ describe('terminateProcessTree', () => {
       expect(isAlive(pid)).toBe(false)
     }
   }, 30000)
+
+  it('kills a SIGTERM-ignoring detached descendant by the time terminate returns', async () => {
+    if (process.platform === 'win32') return
+
+    const dir = await mkdtemp(join(tmpdir(), 'openfox-ptree-'))
+    const pidFile = join(dir, 'child.pid')
+    const marker = join(dir, 'late.txt')
+    const grandchild = [
+      `process.on('SIGTERM',()=>{});`,
+      `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'late'),2000);`,
+      `setInterval(()=>{},1000);`,
+    ].join('')
+    const parent = [
+      `process.on('SIGTERM',()=>{});`,
+      `const {spawn}=require('child_process');`,
+      `const child=spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{detached:true,stdio:'ignore'});`,
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
+      `child.unref();`,
+      `setInterval(()=>{},1000);`,
+    ].join('')
+
+    const proc = spawn(process.execPath, ['-e', parent], { stdio: 'ignore', detached: true })
+    expect(proc.pid).toBeTruthy()
+
+    let childPid = 0
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline && childPid === 0) {
+      try {
+        childPid = Number((await readFile(pidFile, 'utf8')).trim())
+      } catch {
+        await sleep(20)
+      }
+    }
+    expect(childPid).toBeGreaterThan(0)
+    expect(isAlive(childPid)).toBe(true)
+
+    await terminateProcessTree(proc)
+    expect(isAlive(proc.pid!)).toBe(false)
+    expect(isAlive(childPid)).toBe(false)
+
+    await sleep(2_200)
+    await expect(readFile(marker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await rm(dir, { recursive: true, force: true })
+  }, 20_000)
 })

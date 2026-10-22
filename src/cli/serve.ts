@@ -1,4 +1,5 @@
 import { createServer } from '../server/index.js'
+import { InstanceLockError, reportInstanceLockRefusal } from '../server/db/instance-lock.js'
 import { loadConfig } from '../server/config.js'
 import { logger } from '../server/utils/logger.js'
 import { displayStartupBanner } from '../server/utils/network.js'
@@ -105,7 +106,15 @@ export async function runServe(options: ServeOptions): Promise<void> {
       : {}),
   }
 
-  await createServer(merged)
+  try {
+    await createServer(merged)
+  } catch (error) {
+    if (error instanceof InstanceLockError) {
+      reportInstanceLockRefusal(error)
+      process.exit(1)
+    }
+    throw error
+  }
 
   // Display startup banner
   displayStartupBanner({

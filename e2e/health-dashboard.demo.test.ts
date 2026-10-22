@@ -5,31 +5,23 @@
  *
  * Set HEALTH_DEMO_REPORT=<file> to keep the measured figures as JSON.
  */
-import { execFile, fork, type ChildProcess } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
-import { tmpdir, userInfo } from 'node:os'
+import { fork, type ChildProcess } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { DiagnosticsData } from '../src/shared/diagnostics.js'
+import { freePort, isolatedEnv, killProcessTree, openFiles, productionFiles, track } from './utils/isolated-env.js'
 import { pause, runBench, withProbes, type Probe } from './utils/load-run.js'
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../..')
 const MIN_PORT = 10600
 const BLOCK_MS = 500
 const HEALTH_TIMEOUT_MS = 2_000
-const REAL_HOME = userInfo().homedir
-const PRODUCTION_PREFIXES = [
-  join(REAL_HOME, 'Library', 'Application Support', 'openfox'),
-  join(REAL_HOME, '.config', 'openfox'),
-  join(REAL_HOME, '.local', 'share', 'openfox'),
-]
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
-const run = promisify(execFile)
 
 interface Instance {
   url: string
@@ -38,44 +30,6 @@ interface Instance {
   dbPath: string
   child: ChildProcess
   logs: string[]
-}
-
-async function freePort(from: number): Promise<number> {
-  for (let port = from; port < from + 500; port++) {
-    const free = await new Promise<boolean>((done) => {
-      const probe = createServer()
-      probe.once('error', () => done(false))
-      probe.listen(port, '127.0.0.1', () => probe.close(() => done(true)))
-    })
-    if (free) return port
-  }
-  throw new Error(`No free port from ${from}`)
-}
-
-function isolatedEnv(root: string, extra: Record<string, string>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith('OPENFOX_') && !key.startsWith('XDG_')) env[key] = value
-  }
-  return {
-    ...env,
-    HOME: join(root, 'home'),
-    XDG_CONFIG_HOME: join(root, 'home', '.config'),
-    XDG_DATA_HOME: join(root, 'home', '.local', 'share'),
-    OPENFOX_LOG_LEVEL: 'error',
-    OPENFOX_DISABLE_AUTO_SESSION_TITLE: 'true',
-    ...extra,
-  }
-}
-
-function track(child: ChildProcess, name: string, logs: string[]): ChildProcess {
-  const keep = (data: Buffer) => {
-    logs.push(`[${name}] ${data.toString()}`)
-    if (logs.length > 200) logs.shift()
-  }
-  child.stdout?.on('data', keep)
-  child.stderr?.on('data', keep)
-  return child
 }
 
 async function startInstance(): Promise<Instance> {
@@ -96,7 +50,8 @@ async function startInstance(): Promise<Instance> {
         OPENFOX_TEST_BLOCK_LOOP: '1',
       }),
       execArgv: ['--import', 'tsx/esm'],
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      detached: true,
     }),
     'server',
     logs,
@@ -122,34 +77,22 @@ async function stopInstance(instance: Instance): Promise<void> {
   if (instance.child.exitCode === null) {
     await new Promise<void>((done) => {
       const timer = setTimeout(() => {
-        instance.child.kill('SIGKILL')
+        killProcessTree(instance.child)
         done()
       }, 15_000)
       instance.child.once('exit', () => {
         clearTimeout(timer)
         done()
       })
-      instance.child.send('close')
+      try {
+        instance.child.send('close')
+      } catch {
+        killProcessTree(instance.child)
+      }
     })
   }
   await rm(instance.root, { recursive: true, force: true })
 }
-
-async function openFiles(pid: number): Promise<string[]> {
-  if (process.platform === 'linux') {
-    const fds = await readdir(`/proc/${pid}/fd`)
-    const targets = await Promise.all(fds.map((fd) => readlink(`/proc/${pid}/fd/${fd}`).catch(() => '')))
-    return targets.filter(Boolean)
-  }
-  const { stdout } = await run('lsof', ['-n', '-P', '-Fn', '-p', String(pid)], { maxBuffer: 16 * 1024 * 1024 })
-  return stdout
-    .split('\n')
-    .filter((line) => line.startsWith('n'))
-    .map((line) => line.slice(1))
-}
-
-const productionFiles = (files: string[]) =>
-  files.filter((file) => PRODUCTION_PREFIXES.some((prefix) => file.startsWith(prefix)))
 
 async function diagnostics(base: string): Promise<DiagnosticsData> {
   const response = await fetch(`${base}/api/diagnostics`, { signal: AbortSignal.timeout(5_000) })

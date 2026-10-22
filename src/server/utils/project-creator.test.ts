@@ -1,18 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { execSync } from 'node:child_process'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { runFile } from './bounded-exec.js'
 import { validateProjectName, createProjectDirectory } from './project-creator.js'
 
-const mockRealExecSync = vi.hoisted(() => ({
-  current: undefined as unknown as typeof execSync,
+const mockRealRunFile = vi.hoisted(() => ({
+  current: undefined as unknown as typeof runFile,
 }))
 
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>()
-  mockRealExecSync.current = actual.execSync
-  return { ...actual, execSync: vi.fn(actual.execSync) }
+vi.mock('./bounded-exec.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./bounded-exec.js')>()
+  mockRealRunFile.current = actual.runFile
+  return { ...actual, runFile: vi.fn(actual.runFile) }
 })
 
 describe('project-creator', () => {
@@ -24,12 +25,18 @@ describe('project-creator', () => {
   })
 
   afterEach(async () => {
-    vi.mocked(execSync).mockImplementation(mockRealExecSync.current as never)
+    vi.mocked(runFile).mockImplementation(mockRealRunFile.current as never)
     try {
       await rm(testDir, { recursive: true, force: true })
     } catch {
       // ignore cleanup errors
     }
+  })
+
+  it('does not use execSync or spawnSync', async () => {
+    const src = await readFile(fileURLToPath(new URL('./project-creator.ts', import.meta.url)), 'utf8')
+    expect(src).not.toMatch(/\bexecSync\b/)
+    expect(src).not.toMatch(/\bspawnSync\b/)
   })
 
   describe('validateProjectName', () => {
@@ -92,11 +99,11 @@ describe('project-creator', () => {
       const fullPath = join(testDir, 'no-git-project')
       const missing = new Error('Command failed: git init\n/bin/sh: 1: git: not found') as Error & {
         status?: number
+        code?: string | number
       }
       missing.status = 127
-      vi.mocked(execSync).mockImplementation(() => {
-        throw missing
-      })
+      missing.code = 127
+      vi.mocked(runFile).mockRejectedValue(missing)
 
       const project = await createProjectDirectory('no-git-project', fullPath)
 
@@ -108,9 +115,7 @@ describe('project-creator', () => {
 
     it('creates the project without git when autoGitInit is disabled', async () => {
       const fullPath = join(testDir, 'no-auto-git-project')
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error('git must not be called when autoGitInit is disabled')
-      })
+      vi.mocked(runFile).mockRejectedValue(new Error('git must not be called when autoGitInit is disabled'))
 
       const project = await createProjectDirectory('no-auto-git-project', fullPath, false)
 
@@ -122,9 +127,7 @@ describe('project-creator', () => {
 
     it('fails and cleans up when git init fails for a non-missing reason', async () => {
       const fullPath = join(testDir, 'git-fail-project')
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error('fatal: unable to write new index file')
-      })
+      vi.mocked(runFile).mockRejectedValue(new Error('fatal: unable to write new index file'))
 
       let caught: unknown
       try {
@@ -139,9 +142,7 @@ describe('project-creator', () => {
 
     it('fails and cleans up when a genuine git error mentions "not found"', async () => {
       const fullPath = join(testDir, 'git-fail-notfound')
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error('fatal: unable to resolve reference not found')
-      })
+      vi.mocked(runFile).mockRejectedValue(new Error('fatal: unable to resolve reference not found'))
 
       let caught: unknown
       try {
@@ -158,12 +159,9 @@ describe('project-creator', () => {
       const fullPath = join(testDir, 'win-project')
       const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
 
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error("fatal: could not create work tree dir '...': Permission denied")
-      })
+      vi.mocked(runFile).mockRejectedValue(new Error("fatal: could not create work tree dir '...': Permission denied"))
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-      // Clear calls recorded by the beforeEach DB setup — only the git init under test should count
-      vi.mocked(execSync).mockClear()
+      vi.mocked(runFile).mockClear()
 
       try {
         let caught: unknown
@@ -176,8 +174,9 @@ describe('project-creator', () => {
         expect((caught as Error & { code?: string }).code).toBe('EACCES')
         expect(String((caught as Error).message)).toContain('Permission denied')
         // Only git init ran — no id/sudo fallback on Windows
-        expect(execSync).toHaveBeenCalledTimes(1)
-        expect(execSync).not.toHaveBeenCalledWith(expect.stringContaining('sudo -u'), expect.anything())
+        expect(runFile).toHaveBeenCalledTimes(1)
+        expect(runFile).toHaveBeenCalledWith('git', ['init'], expect.any(Object))
+        expect(runFile).not.toHaveBeenCalledWith('sudo', expect.anything(), expect.anything())
         // Self-created directory is cleaned up after failure
         expect(await checkExists(fullPath)).toBe(false)
       } finally {

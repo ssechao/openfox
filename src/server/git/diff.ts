@@ -2,6 +2,9 @@ import { spawn } from 'node:child_process'
 import type { GitDiffFile } from '../../shared/protocol.js'
 import type { PluginVcsContext } from '../../plugin/index.js'
 import { gitSpawnEnv } from './env.js'
+import { GIT_QUERY_TIMEOUT_MS } from '../utils/bounded-exec.js'
+import { logger } from '../utils/logger.js'
+import { terminateProcessTree } from '../utils/process-tree.js'
 import { resolveVcsBranch, resolveVcsDiffFiles, resolveVcsModifiedFiles } from '../plugins/vcs-providers.js'
 
 function toVcsContext(cwd: string, context?: { sessionId?: string; projectId?: string }): PluginVcsContext {
@@ -12,85 +15,32 @@ function toVcsContext(cwd: string, context?: { sessionId?: string; projectId?: s
   }
 }
 
-function nativeGetGitDiffFiles(cwd: string): Promise<GitDiffFile[]> {
-  return new Promise((resolve) => {
-    const env = gitSpawnEnv()
-    const diffProc = spawn('git', ['diff', '--ignore-submodules=none', '--name-status', 'HEAD'], {
-      cwd,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    const statusProc = spawn('git', ['status', '--porcelain', '--ignore-submodules=none'], {
-      cwd,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
+async function nativeGetGitDiffFiles(cwd: string): Promise<GitDiffFile[]> {
+  const diff = await runGitText(cwd, ['diff', '--ignore-submodules=none', '--name-status', 'HEAD'])
+  const status = await runGitText(cwd, ['status', '--porcelain', '--ignore-submodules=none'])
+  const files: GitDiffFile[] = []
 
-    let diffStdout = ''
-    let statusStdout = ''
-    let diffExited = false
-    let statusExited = false
-    let diffCode: number | null = null
-    let statusCode: number | null = null
-
-    const collect = () => {
-      if (!diffExited || !statusExited) return
-
-      const files: GitDiffFile[] = []
-
-      if (diffCode === 0) {
-        for (const line of diffStdout.split('\n')) {
-          if (!line.trim()) continue
-          const [statusChar, ...pathParts] = line.split('\t')
-          const path = pathParts.join('\t') || statusChar || ''
-          if (!path) continue
-          const status = statusChar === 'A' ? 'added' : statusChar === 'D' ? 'deleted' : 'modified'
-          files.push({ path, status, additions: 0, deletions: 0 })
-        }
-      }
-
-      if (statusCode === 0) {
-        for (const line of statusStdout.split('\n')) {
-          if (!line.startsWith('?? ')) continue
-          const path = line.slice(3).trim()
-          if (!path) continue
-          files.push({ path, status: 'added', additions: 0, deletions: 0 })
-        }
-      }
-
-      resolve(files)
+  if (diff.code === 0) {
+    for (const line of diff.stdout.split('\n')) {
+      if (!line.trim()) continue
+      const [statusChar, ...pathParts] = line.split('\t')
+      const path = pathParts.join('\t') || statusChar || ''
+      if (!path) continue
+      const fileStatus = statusChar === 'A' ? 'added' : statusChar === 'D' ? 'deleted' : 'modified'
+      files.push({ path, status: fileStatus, additions: 0, deletions: 0 })
     }
+  }
 
-    diffProc.stdout.on('data', (data: Buffer) => {
-      diffStdout += data.toString()
-    })
-    statusProc.stdout.on('data', (data: Buffer) => {
-      statusStdout += data.toString()
-    })
+  if (status.code === 0) {
+    for (const line of status.stdout.split('\n')) {
+      if (!line.startsWith('?? ')) continue
+      const path = line.slice(3).trim()
+      if (!path) continue
+      files.push({ path, status: 'added', additions: 0, deletions: 0 })
+    }
+  }
 
-    diffProc.on('close', (code) => {
-      diffExited = true
-      diffCode = code
-      collect()
-    })
-    statusProc.on('close', (code) => {
-      statusExited = true
-      statusCode = code
-      collect()
-    })
-    diffProc.on('error', () => {
-      diffExited = true
-      diffCode = 1
-      collect()
-    })
-    statusProc.on('error', () => {
-      statusExited = true
-      statusCode = 1
-      collect()
-    })
-  })
+  return files
 }
 
 export async function getGitDiffFiles(
@@ -133,13 +83,33 @@ function runGitText(cwd: string, args: string[]): Promise<{ code: number | null;
       env: gitSpawnEnv(),
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
+      ...(process.platform !== 'win32' ? { detached: true } : {}),
     })
     let stdout = ''
-    proc.stdout.on('data', (data: Buffer) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      logger.warn('git command timed out, killing its process tree', {
+        cwd,
+        args,
+        timeoutMs: GIT_QUERY_TIMEOUT_MS,
+      })
+      void terminateProcessTree(proc)
+        .catch(() => undefined)
+        .then(() => resolve({ code: null, stdout: '' }))
+    }, GIT_QUERY_TIMEOUT_MS)
+    const finish = (code: number | null, output: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code, stdout: output })
+    }
+    proc.stdout?.on('data', (data: Buffer) => {
       stdout += data.toString()
     })
-    proc.on('close', (code) => resolve({ code, stdout }))
-    proc.on('error', () => resolve({ code: null, stdout: '' }))
+    proc.on('close', (code) => finish(code, stdout))
+    proc.on('error', () => finish(null, ''))
   })
 }
 

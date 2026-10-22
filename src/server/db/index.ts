@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import type { Config } from '../config.js'
 import { logger } from '../utils/logger.js'
 import { assertTestDatabasePath } from '../utils/test-environment.js'
+import { acquireInstanceLock, releaseInstanceLock } from './instance-lock.js'
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
@@ -15,30 +16,50 @@ export function initDatabase(config: Config): Database.Database {
   assertTestDatabasePath(config.database.path)
   logger.info('Initializing database', { path: config.database.path })
 
-  db = new Database(config.database.path)
-  db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
-  db.pragma('journal_mode = WAL')
-  db.pragma('foreign_keys = ON')
+  // Acquire the instance-wide lock BEFORE opening the main database. This
+  // prevents two OpenFox instances from sharing one SQLite file, which caused
+  // SQLITE_BUSY crashes and provider reconciliation wiping sessions in the
+  // 2026-10-20 incident. The lock is released automatically when the process
+  // exits; closeDatabase() also releases it cleanly.
+  acquireInstanceLock(config.database.path)
 
-  runMigrations(db)
+  try {
+    db = new Database(config.database.path)
+    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
+    db.pragma('journal_mode = WAL')
+    db.pragma('foreign_keys = ON')
 
-  // Reset any stale running states from previous server runs
-  // Sessions cannot actually be running when server starts
-  const result = db.prepare(`UPDATE sessions SET is_running = 0 WHERE is_running = 1`).run()
-  if (result.changes > 0) {
-    logger.info('Reset stale running states', { count: result.changes })
+    runMigrations(db)
+
+    // Reset any stale running states from previous server runs
+    // Sessions cannot actually be running when server starts
+    const result = db.prepare(`UPDATE sessions SET is_running = 0 WHERE is_running = 1`).run()
+    if (result.changes > 0) {
+      logger.info('Reset stale running states', { count: result.changes })
+    }
+
+    // Vacuum database if freelist has accumulated (deleted rows leave free pages)
+    // Only vacuum if > 10k free pages to avoid unnecessary I/O
+    const freelistCount = db.pragma('freelist_count', { simple: true }) as number
+    if (freelistCount > 10000) {
+      logger.info('Vacuuming database', { freelistCount })
+      db.exec('VACUUM')
+      logger.info('Database vacuumed')
+    }
+
+    return db
+  } catch (error) {
+    if (db) {
+      try {
+        db.close()
+      } catch {
+        // Ignore close errors on the failed connection.
+      }
+      db = null
+    }
+    releaseInstanceLock()
+    throw error
   }
-
-  // Vacuum database if freelist has accumulated (deleted rows leave free pages)
-  // Only vacuum if > 10k free pages to avoid unnecessary I/O
-  const freelistCount = db.pragma('freelist_count', { simple: true }) as number
-  if (freelistCount > 10000) {
-    logger.info('Vacuuming database', { freelistCount })
-    db.exec('VACUUM')
-    logger.info('Database vacuumed')
-  }
-
-  return db
 }
 
 export function getDatabase(): Database.Database {
@@ -53,6 +74,9 @@ export function closeDatabase(): void {
     db.close()
     db = null
   }
+  // Release the kernel-backed instance lock last, after the main database is
+  // closed, so another process can take over immediately.
+  releaseInstanceLock()
 }
 
 function backfillRecentUserPrompts(database: Database.Database, refreshAll = false): number {

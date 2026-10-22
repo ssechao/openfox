@@ -1,8 +1,10 @@
-import { execSync } from 'node:child_process'
 import { join } from 'node:path'
 import { createProject as createProjectDb } from '../db/projects.js'
 import { logger } from './logger.js'
 import type { Project } from '../../shared/types.js'
+import { GIT_INIT_TIMEOUT_MS, isCommandMissing, runFile } from './bounded-exec.js'
+
+export type CreateProjectOptions = { signal?: AbortSignal }
 
 export function validateProjectName(name: string): { valid: true } | { valid: false; error: string } {
   if (!name || name.trim() === '') {
@@ -32,17 +34,23 @@ async function directoryExists(path: string): Promise<boolean> {
 }
 
 function isGitMissing(err: unknown): boolean {
-  if (!(err instanceof Error)) return false
-  const e = err as Error & { code?: string; status?: number }
-  if (e.code === 'ENOENT') return true
-  if (e.status === 127 || e.status === 9009) return true
-  return /is not recognized as an internal or external command/i.test(e.message)
+  return isCommandMissing(err)
+}
+
+function cleanExecEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  delete env['GIT_DIR']
+  delete env['GIT_INDEX_FILE']
+  delete env['GIT_WORK_TREE']
+  delete env['GIT_PREFIX']
+  return env
 }
 
 export async function createProjectDirectory(
   projectName: string,
   workdir: string,
   autoGitInit = true,
+  options?: CreateProjectOptions,
 ): Promise<Project> {
   const validation = validateProjectName(projectName)
   if (!validation.valid) {
@@ -51,6 +59,7 @@ export async function createProjectDirectory(
 
   const fullPath = workdir.replace(/\/+$/, '')
   const { stat, mkdir, rm, access, constants } = await import('node:fs/promises')
+  const signal = options?.signal
 
   const dirAlreadyExisted = await access(fullPath, constants.F_OK)
     .then(() => true)
@@ -89,16 +98,13 @@ export async function createProjectDirectory(
   }
 
   if (autoGitInit && !(await directoryExists(join(fullPath, '.git')))) {
-    const cleanExecEnv = (): Record<string, string | undefined> => {
-      const env = { ...process.env }
-      delete env['GIT_DIR']
-      delete env['GIT_INDEX_FILE']
-      delete env['GIT_WORK_TREE']
-      delete env['GIT_PREFIX']
-      return env
-    }
     try {
-      execSync('git init', { cwd: fullPath, stdio: 'pipe', windowsHide: true, env: cleanExecEnv() })
+      await runFile('git', ['init'], {
+        cwd: fullPath,
+        env: cleanExecEnv(),
+        timeoutMs: GIT_INIT_TIMEOUT_MS,
+        ...(signal ? { signal } : {}),
+      })
     } catch (gitErr) {
       if (isGitMissing(gitErr)) {
         logger.warn(`git is not installed, skipping git init for project "${projectName}"`)
@@ -107,17 +113,20 @@ export async function createProjectDirectory(
         const exitCode = (gitErr as { status?: number }).status ?? (gitErr as { exitCode?: number }).exitCode
         const isPermission = errMsg.includes('Permission denied') || exitCode === 128
 
-        // Try via sudo -u $USER if permission denied (process may not have correct groups).
-        // No sudo/id on Windows — skip straight to the error.
         let sudoSuccess = false
         if (isPermission && process.platform !== 'win32') {
           try {
-            const currentUser = execSync('id -un', { encoding: 'utf-8', windowsHide: true }).trim()
-            execSync(`sudo -u ${currentUser} git init`, {
+            const currentUser = (
+              await runFile('id', ['-un'], {
+                timeoutMs: GIT_INIT_TIMEOUT_MS,
+                ...(signal ? { signal } : {}),
+              })
+            ).stdout.trim()
+            await runFile('sudo', ['-u', currentUser, 'git', 'init'], {
               cwd: fullPath,
-              stdio: 'pipe',
-              windowsHide: true,
               env: cleanExecEnv(),
+              timeoutMs: GIT_INIT_TIMEOUT_MS,
+              ...(signal ? { signal } : {}),
             })
             sudoSuccess = true
           } catch {
@@ -130,7 +139,6 @@ export async function createProjectDirectory(
           if (isPermission) {
             permError.code = 'EACCES'
           }
-          // Only clean up if we created this directory ourselves
           if (!dirAlreadyExisted) {
             try {
               await rm(fullPath, { recursive: true, force: true })
