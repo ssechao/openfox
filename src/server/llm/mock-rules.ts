@@ -461,6 +461,11 @@ export const RULES: MockRule[] = [
     response: 'Listed directory contents.',
   },
   {
+    match: /RUNTIME-STOP-DEMO-TREE/i,
+    tools: [{ name: 'run_command', arguments: { command: 'bash /tmp/openfox-runtime-stop-demo/tree.sh' } }],
+    response: 'Started the process tree for the stop demo.',
+  },
+  {
     match: /run.*command|execute/i,
     tools: [{ name: 'run_command', arguments: { command: 'echo "test"' } }],
     response: 'Executed the command.',
