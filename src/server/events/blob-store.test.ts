@@ -197,7 +197,7 @@ describe('event persistence keeps only blob refs', () => {
     const payload = db.prepare(`SELECT payload FROM events WHERE event_type='turn.snapshot'`).get() as {
       payload: string
     }
-    expect(payload.payload).not.toContain('base64Data')
+    expect(payload.payload).not.toMatch(/"base64Data":/)
     expect(payload.payload).not.toContain('data:image')
     expect(payload.payload).toContain(hashBytes(PNG))
   })
@@ -319,7 +319,7 @@ describe('C1 SIGKILL after durable blob write', () => {
       expect(after[0]).toContain(CRASH_HASH)
       const att = (stored.data as { attachments: Array<{ blob?: { hash: string; mime: string; size: number } }> })
         .attachments[0]
-      expect(att?.blob).toEqual({ hash: CRASH_HASH, mime: 'image/png', size: CRASH_PNG.length })
+      expect(att?.blob).toMatchObject({ hash: CRASH_HASH, mime: 'image/png', size: CRASH_PNG.length })
       assertResolvablePng(blobs)
     } finally {
       db.close()

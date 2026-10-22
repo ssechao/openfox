@@ -16,7 +16,13 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventStore } from './store.js'
 import { FileBlobStore, blobDirForDatabase, setBlobStore } from './blob-store.js'
-import { BlobBackupError, backupDatabaseAndBlobs, restoreDatabaseAndBlobs, restoreJournalPath } from './blob-backup.js'
+import {
+  BLOB_BACKUP_MANIFEST,
+  BlobBackupError,
+  backupDatabaseAndBlobs,
+  restoreDatabaseAndBlobs,
+  restoreJournalPath,
+} from './blob-backup.js'
 import { collectBlobRefs } from './blob-codec.js'
 import { hydrateAttachmentData } from './blob-codec.js'
 import { CRASH_HASH, CRASH_PNG, CRASH_PNG_URL, killAtBarrier } from './blob-crash-harness.js'
@@ -291,6 +297,59 @@ describe('blob backup / restore', () => {
       restored.close()
     }
   }, 30_000)
+
+  it('fails backup when a blob body is corrupt and publishes nothing', async () => {
+    const { dbPath, db, events, blobs } = openStore(dir, 'sessions.db')
+    appendPng(events)
+    blobs.corruptForTest(CRASH_HASH)
+    db.close()
+    const dest = join(dir, 'backup')
+    await expect(backupDatabaseAndBlobs(dbPath, dest)).rejects.toThrow(/corrupt|integrity|mime/i)
+    expect(existsSync(dest)).toBe(false)
+  })
+
+  it('fails backup when blob mime is missing and publishes nothing', async () => {
+    const { dbPath, db, events } = openStore(dir, 'sessions.db')
+    appendPng(events)
+    db.close()
+    unlinkSync(join(blobDirForDatabase(dbPath), CRASH_HASH.slice(0, 2), `${CRASH_HASH}.mime`))
+    const dest = join(dir, 'backup')
+    await expect(backupDatabaseAndBlobs(dbPath, dest)).rejects.toThrow(/mime/i)
+    expect(existsSync(dest)).toBe(false)
+  })
+
+  it('restore refuses a manifest that omits a database blob ref', async () => {
+    const { dbPath, db, events } = openStore(dir, 'sessions.db')
+    appendPng(events)
+    db.close()
+    const backupDir = join(dir, 'backup')
+    await backupDatabaseAndBlobs(dbPath, backupDir)
+    const manifestPath = join(backupDir, BLOB_BACKUP_MANIFEST)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { blobs: unknown[] }
+    manifest.blobs = []
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const restoredPath = join(dir, 'restored.db')
+    expect(() => restoreDatabaseAndBlobs(backupDir, restoredPath)).toThrow(/manifest/)
+    expect(existsSync(restoredPath)).toBe(false)
+  })
+
+  it('restore refuses a manifest with the wrong mime or size', async () => {
+    const { dbPath, db, events } = openStore(dir, 'sessions.db')
+    appendPng(events)
+    db.close()
+    const backupDir = join(dir, 'backup')
+    await backupDatabaseAndBlobs(dbPath, backupDir)
+    const manifestPath = join(backupDir, BLOB_BACKUP_MANIFEST)
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      blobs: Array<{ hash: string; mime: string; size: number }>
+    }
+    const first = manifest.blobs[0]
+    if (first) first.mime = 'image/jpeg'
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const restoredPath = join(dir, 'restored.db')
+    expect(() => restoreDatabaseAndBlobs(backupDir, restoredPath)).toThrow()
+    expect(existsSync(restoredPath)).toBe(false)
+  })
 
   it('fails closed when a referenced blob is missing and publishes nothing', async () => {
     const { dbPath, db, events, blobs } = openStore(dir, 'sessions.db')

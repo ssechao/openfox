@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventStore } from './store.js'
 import { FileBlobStore, setBlobStore } from './blob-store.js'
-import { collectBlobRefs } from './blob-codec.js'
+import { BlobRollbackError, collectBlobRefs } from './blob-codec.js'
 import {
   CRASH_HASH,
   CRASH_PNG,
@@ -143,6 +143,72 @@ describe('blob rollback', () => {
       expect(eventPayloads(db, 's1')[0]).toContain(CRASH_HASH)
       events.rollbackSessionBlobs('s1')
       expect(eventPayloads(db, 's1')[0]).toContain('data:image/png')
+      expect(blobs.has(CRASH_HASH)).toBe(true)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('restores image_url.url and nested dataUrl for the pre-4a-1 reader', () => {
+    const { db, events } = openStore(dir)
+    try {
+      db.prepare(
+        `INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, 1, ?, 'message.start', ?)`,
+      ).run(
+        's1',
+        Date.now(),
+        JSON.stringify({
+          messageId: 'm1',
+          role: 'user',
+          content: [
+            { type: 'text', text: 'see' },
+            { type: 'image_url', image_url: { url: CRASH_PNG_URL, detail: 'auto' } },
+            { type: 'nested', wrapped: { dataUrl: CRASH_PNG_URL } },
+          ],
+        }),
+      )
+      events.migrateSessionBlobs('s1')
+      expect(eventPayloads(db, 's1')[0]).toContain(CRASH_HASH)
+      const report = events.rollbackSessionBlobs('s1')
+      expect(report.status).toBe('switched')
+      const payload = JSON.parse(eventPayloads(db, 's1')[0]!) as {
+        content: Array<{
+          type?: string
+          image_url?: { url?: string; dataUrl?: string; detail?: string; blob?: unknown }
+          wrapped?: { dataUrl?: string; url?: string; blob?: unknown }
+        }>
+      }
+      const image = payload.content.find((part) => part.type === 'image_url')
+      expect(image?.image_url?.url).toBe(CRASH_PNG_URL)
+      expect(image?.image_url?.dataUrl).toBeUndefined()
+      expect(image?.image_url?.blob).toBeUndefined()
+      expect(image?.image_url?.detail).toBe('auto')
+      const nested = payload.content.find((part) => part.type === 'nested')
+      expect(nested?.wrapped?.dataUrl).toBe(CRASH_PNG_URL)
+      expect(nested?.wrapped?.url).toBeUndefined()
+      expect(nested?.wrapped?.blob).toBeUndefined()
+    } finally {
+      db.close()
+    }
+  })
+
+  it('refuses an ambiguous blob form before marking switched', () => {
+    const { db, events, blobs } = openStore(dir)
+    try {
+      blobs.put(CRASH_PNG, 'image/png')
+      blobs.clearPending?.(CRASH_HASH)
+      db.prepare(
+        `INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, 1, ?, 'message.start', ?)`,
+      ).run(
+        's1',
+        Date.now(),
+        JSON.stringify({
+          mystery: { blob: { hash: CRASH_HASH, mime: 'image/png', size: CRASH_PNG.length } },
+        }),
+      )
+      expect(() => events.rollbackSessionBlobs('s1')).toThrow(BlobRollbackError)
+      expect(getBlobRollbackStatus(db, 's1')).not.toBe('switched')
+      expect(eventPayloads(db, 's1')[0]).toContain(CRASH_HASH)
       expect(blobs.has(CRASH_HASH)).toBe(true)
     } finally {
       db.close()

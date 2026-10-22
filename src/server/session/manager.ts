@@ -77,6 +77,7 @@ import { resolveLLMClientForAgent, getAgentModelOverride } from '../agents/model
 import { parseDefaultModelSelection } from '../provider-manager.js'
 import { getEventStore } from '../events/store.js'
 import { hashBytes } from '../events/blob-store.js'
+import { collectBlobRefs } from '../events/blob-codec.js'
 import {
   getSessionState,
   emitSessionInitialized,
@@ -628,13 +629,32 @@ export class SessionManager {
       }
     }
 
+    const required = new Map<string, { hash: string; mime: string; size: number }>()
+    for (const event of payload.events) {
+      for (const ref of collectBlobRefs(event.data)) {
+        required.set(ref.hash, { hash: ref.hash, mime: ref.mime, size: ref.size })
+      }
+    }
     const importedBlobs = (payload.blobs ?? []).map((blob) => {
       const bytes = Buffer.from(blob.data, 'base64')
       if (hashBytes(bytes) !== blob.hash) {
         throw new Error(`Imported blob hash mismatch: declared ${blob.hash}`)
       }
-      return { bytes, mime: blob.mime, hash: blob.hash }
+      return { bytes, mime: blob.mime, hash: blob.hash, size: blob.size }
     })
+    const provided = new Map(importedBlobs.map((blob) => [blob.hash, blob]))
+    for (const [hash, ref] of required) {
+      const blob = provided.get(hash)
+      if (!blob) {
+        throw new Error(`Imported blob missing: ${hash}`)
+      }
+      if (blob.mime !== ref.mime) {
+        throw new Error(`Imported blob mime mismatch: declared ${hash}`)
+      }
+      if (blob.size !== ref.size || blob.bytes.length !== ref.size) {
+        throw new Error(`Imported blob size mismatch: declared ${hash}`)
+      }
+    }
 
     const session = dbCreateSession(
       projectId,

@@ -20,6 +20,7 @@ Rollback : `npx tsx scripts/rollback-blobs.ts --yes --db <path>` (verrou).
 Aucune de ces commandes n’est lancée au démarrage.
 
 Le dossier de blobs est `<dbPath>.blobs` avec marqueur `.openfox-db`.
+Le chemin historique `dirname(db)/blobs` de 150b0c8f n'est pas repris : 4a-1 n'a jamais été déployé, 4a-1 et 4a-2 partent ensemble.
 
 ## Résultats
 

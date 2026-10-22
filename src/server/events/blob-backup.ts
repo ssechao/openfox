@@ -28,6 +28,21 @@ export interface BlobBackupReport {
   blobs: number
 }
 
+function assertManifestMatchesRefs(
+  listed: Array<{ hash: string; mime: string; size: number }>,
+  fromDb: Map<string, { hash: string; mime: string; size: number }>,
+): void {
+  if (listed.length !== fromDb.size) {
+    throw new BlobBackupError('Backup manifest does not match database blob refs')
+  }
+  for (const item of listed) {
+    const ref = fromDb.get(item.hash)
+    if (!ref || ref.mime !== item.mime || ref.size !== item.size) {
+      throw new BlobBackupError(`Backup manifest missing or mismatched ref: ${item.hash}`)
+    }
+  }
+}
+
 function readManifest(dir: string): BlobBackupManifest {
   const path = join(dir, BLOB_BACKUP_MANIFEST)
   if (!existsSync(path)) throw new BlobBackupError(`Backup manifest missing: ${path}`)
@@ -214,14 +229,17 @@ export async function backupDatabaseAndBlobs(
   parkAtBlobBarrier('before-blob-copy')
   try {
     for (const ref of refs) {
-      if (!liveBlobs.has(ref.hash)) {
-        throw new BlobBackupError(`Referenced blob missing during backup: ${ref.hash}`)
-      }
-      backupBlobs.copyBlobFrom(liveBlobs, ref.hash)
+      backupBlobs.copyBlobFrom(liveBlobs, ref)
+    }
+    const again = new Database(join(tmp, 'sessions.db'), { readonly: true, fileMustExist: true })
+    try {
+      assertManifestMatchesRefs(refs, collectBlobRefsFromEvents(again))
+    } finally {
+      again.close()
     }
   } catch (error) {
     rmSync(tmp, { recursive: true, force: true })
-    throw error
+    throw error instanceof BlobBackupError ? error : new BlobBackupError(String(error))
   }
 
   const manifest: BlobBackupManifest = {
@@ -247,10 +265,19 @@ export function restoreDatabaseAndBlobs(backupDir: string, destDbPath: string): 
   const manifest = readManifest(backupDir)
   const dbFile = join(backupDir, manifest.dbFile)
   if (!existsSync(dbFile)) throw new BlobBackupError(`Backup database missing: ${dbFile}`)
+  const backupSqlite = new Database(dbFile, { readonly: true, fileMustExist: true })
+  let dbRefs: Map<string, { hash: string; mime: string; size: number }>
+  try {
+    dbRefs = collectBlobRefsFromEvents(backupSqlite)
+  } finally {
+    backupSqlite.close()
+  }
+  assertManifestMatchesRefs(manifest.blobs, dbRefs)
   const backupBlobs = new FileBlobStore(join(backupDir, 'blobs'))
   for (const ref of manifest.blobs) {
-    if (!backupBlobs.has(ref.hash)) {
-      throw new BlobBackupError(`Backup blob missing: ${ref.hash}`)
+    const record = backupBlobs.get(ref.hash)
+    if (record.mime !== ref.mime || record.size !== ref.size || record.hash !== ref.hash) {
+      throw new BlobBackupError(`Backup blob mismatch: ${ref.hash}`)
     }
   }
 
@@ -270,7 +297,7 @@ export function restoreDatabaseAndBlobs(backupDir: string, destDbPath: string): 
     copyFileSync(dbFile, join(staging, 'sessions.db'))
     const stagedBlobs = new FileBlobStore(join(staging, 'blobs'))
     for (const ref of manifest.blobs) {
-      stagedBlobs.copyBlobFrom(backupBlobs, ref.hash)
+      stagedBlobs.copyBlobFrom(backupBlobs, ref)
     }
     writeRestoreJournal(journal)
     parkAtBlobBarrier('before-restore-publish')

@@ -1,4 +1,4 @@
-import type { Attachment, BlobRef } from '../../shared/types.js'
+import type { Attachment, BlobRef, BlobRefOrigin } from '../../shared/types.js'
 import { isBlobRef } from '../../shared/blob.js'
 import { decodeDataUrl } from '../utils/data-url.js'
 import { BlobMissingError, getBlobStore, type BlobStore } from './blob-store.js'
@@ -59,7 +59,7 @@ function extractAttachment(att: Record<string, unknown>, store: BlobStore): Reco
   const blob = store.put(decoded.bytes, decoded.mime)
   const next = { ...att }
   delete next['data']
-  next['blob'] = blob
+  next['blob'] = { ...blob, origin: 'data' satisfies BlobRefOrigin }
   return next
 }
 
@@ -84,16 +84,18 @@ function extractNode(value: unknown, store: BlobStore): unknown {
           ? obj['mimeType']
           : 'application/octet-stream'
       const bytes = Buffer.from(child, 'base64')
-      next['blob'] = store.put(bytes, mime)
+      next['blob'] = { ...store.put(bytes, mime), origin: 'base64Data' satisfies BlobRefOrigin }
       continue
     }
     if ((key === 'dataUrl' || key === 'url') && typeof child === 'string' && isBinaryDataUrl(child)) {
+      if (isBlobRef(next['blob'])) continue
       const decoded = decodeBinaryString(
         child,
         typeof obj['mimeType'] === 'string' ? obj['mimeType'] : 'application/octet-stream',
       )
       if (decoded) {
-        next['blob'] = store.put(decoded.bytes, decoded.mime)
+        const origin: BlobRefOrigin = key === 'url' ? 'url' : 'dataUrl'
+        next['blob'] = { ...store.put(decoded.bytes, decoded.mime), origin }
         continue
       }
     }
@@ -130,8 +132,42 @@ export function payloadHasBlobRef(payload: string): boolean {
   }
 }
 
+export class BlobRollbackError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BlobRollbackError'
+  }
+}
+
 function dataUrlFromRecord(mime: string, bytes: Buffer): string {
   return `data:${mime};base64,${bytes.toString('base64')}`
+}
+
+function resolveBlobOrigin(obj: Record<string, unknown>, blob: BlobRef): BlobRefOrigin {
+  if (blob.origin === 'url' || blob.origin === 'data') return blob.origin
+  if (typeof obj['filename'] === 'string' || typeof obj['id'] === 'string') return 'data'
+  if (typeof obj['mimeType'] === 'string') return 'base64Data'
+  if (blob.origin === 'dataUrl' || blob.origin === 'base64Data') return blob.origin
+  if (obj['type'] === 'image_url') return 'url'
+  throw new BlobRollbackError('Ambiguous blob origin; refusing rollback before switch')
+}
+
+function applyBlobOrigin(next: Record<string, unknown>, origin: BlobRefOrigin, mime: string, bytes: Buffer): void {
+  const dataUrl = dataUrlFromRecord(mime, bytes)
+  if (origin === 'data') {
+    next['data'] = dataUrl
+    return
+  }
+  if (origin === 'url') {
+    next['url'] = dataUrl
+    return
+  }
+  if (origin === 'dataUrl') {
+    next['dataUrl'] = dataUrl
+    return
+  }
+  next['base64Data'] = bytes.toString('base64')
+  next['dataUrl'] = dataUrl
 }
 
 function reinlineNode(value: unknown, store: BlobStore): unknown {
@@ -143,26 +179,14 @@ function reinlineNode(value: unknown, store: BlobStore): unknown {
   if (!value || typeof value !== 'object') return value
   const obj = value as Record<string, unknown>
   const blob = obj['blob']
+  const base: Record<string, unknown> = { ...obj }
   if (isBlobRef(blob)) {
     const record = store.get(blob.hash)
-    const dataUrl = dataUrlFromRecord(record.mime, record.bytes)
-    const next: Record<string, unknown> = { ...obj }
-    delete next['blob']
-    const hasFilename = typeof next['filename'] === 'string'
-    if (hasFilename || typeof next['id'] === 'string') {
-      next['data'] = dataUrl
-    }
-    if (typeof next['mimeType'] === 'string' && !hasFilename) {
-      next['base64Data'] = record.bytes.toString('base64')
-      next['dataUrl'] = dataUrl
-    }
-    if (!hasFilename && typeof next['data'] !== 'string' && typeof next['mimeType'] !== 'string') {
-      next['dataUrl'] = dataUrl
-    }
-    return next
+    delete base['blob']
+    applyBlobOrigin(base, resolveBlobOrigin(obj, blob), record.mime, record.bytes)
   }
   const next: Record<string, unknown> = {}
-  for (const [key, child] of Object.entries(obj)) {
+  for (const [key, child] of Object.entries(base)) {
     next[key] = reinlineNode(child, store)
   }
   return next
@@ -227,11 +251,13 @@ export function attachmentFromToolImageMetadata(metadata: Record<string, unknown
 export function collectBlobRefsFromJsonStrings(payloads: Iterable<string>): BlobRef[] {
   const out: BlobRef[] = []
   for (const payload of payloads) {
+    let parsed: unknown
     try {
-      collectBlobRefs(JSON.parse(payload), out)
+      parsed = JSON.parse(payload)
     } catch {
-      continue
+      throw new Error('Unreadable event payload; refusing blob scan')
     }
+    collectBlobRefs(parsed, out)
   }
   return out
 }

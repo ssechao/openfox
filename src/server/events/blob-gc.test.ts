@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { EventStore, initEventStore } from './store.js'
 import { FileBlobStore, blobDirForDatabase, hashBytes, setBlobStore } from './blob-store.js'
 import { BlobStoreOwnerError, gcBlobs } from './blob-gc.js'
+import { BlobScanError } from './blob-scan.js'
 import {
   CRASH_HASH,
   CRASH_PNG,
@@ -175,6 +176,23 @@ describe('blob GC', () => {
       expect(report.deleted).toBe(1)
       expect(blobs.has(CRASH_HASH)).toBe(true)
       expect(blobs.has(orphan.hash)).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('refuses GC when an event payload is unreadable and does not delete', () => {
+    const { db, events, blobs } = openPair(dir, 'sessions.db')
+    try {
+      pngMessage('s1', events)
+      const orphan = blobs.put(JPEG, 'image/jpeg')
+      blobs.clearPending?.(orphan.hash)
+      db.prepare(
+        `INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, 2, ?, 'message.start', ?)`,
+      ).run('s1', Date.now(), '{not-json')
+      expect(() => events.gcBlobs()).toThrow(BlobScanError)
+      expect(blobs.has(CRASH_HASH)).toBe(true)
+      expect(blobs.has(orphan.hash)).toBe(true)
     } finally {
       db.close()
     }

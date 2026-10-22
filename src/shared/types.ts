@@ -471,10 +471,13 @@ export interface PreparingToolCall {
   editContext?: EditContextRegion[] // Live edit context for streaming edit_file
 }
 
+export type BlobRefOrigin = 'url' | 'dataUrl' | 'base64Data' | 'data'
+
 export interface BlobRef {
   hash: string
   mime: string
   size: number
+  origin?: BlobRefOrigin
 }
 
 export interface Attachment {

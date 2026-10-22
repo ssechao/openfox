@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   closeSync,
-  copyFileSync,
   existsSync,
   fsyncSync,
   mkdirSync,
@@ -48,6 +47,24 @@ export class BlobStoreOwnerError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'BlobStoreOwnerError'
+  }
+}
+
+export class BlobMimeError extends Error {
+  readonly hash: string
+  constructor(hash: string) {
+    super(`Blob mime missing: ${hash}`)
+    this.name = 'BlobMimeError'
+    this.hash = hash
+  }
+}
+
+export class BlobIntegrityError extends Error {
+  readonly hash: string
+  constructor(hash: string, reason: string) {
+    super(`Blob integrity: ${hash}: ${reason}`)
+    this.name = 'BlobIntegrityError'
+    this.hash = hash
   }
 }
 
@@ -252,12 +269,21 @@ export class FileBlobStore implements BlobStore {
     return removed
   }
 
-  copyBlobFrom(source: FileBlobStore, hash: string): void {
-    assertHash(hash)
-    mkdirSync(this.dirFor(hash), { recursive: true })
-    copyFileSync(source.bodyPath(hash), this.bodyPath(hash))
-    const mimeSrc = source.mimePath(hash)
-    if (existsSync(mimeSrc)) copyFileSync(mimeSrc, this.mimePath(hash))
+  copyBlobFrom(source: FileBlobStore, ref: BlobRef): void {
+    assertHash(ref.hash)
+    const record = source.get(ref.hash)
+    if (record.mime !== ref.mime) {
+      throw new BlobIntegrityError(ref.hash, `mime ${record.mime} != ${ref.mime}`)
+    }
+    if (record.size !== ref.size) {
+      throw new BlobIntegrityError(ref.hash, `size ${record.size} != ${ref.size}`)
+    }
+    this.put(record.bytes, record.mime, { overwrite: true })
+    this.clearPending(ref.hash)
+    const dest = this.get(ref.hash)
+    if (dest.hash !== ref.hash || dest.mime !== ref.mime || dest.size !== ref.size) {
+      throw new BlobIntegrityError(ref.hash, 'destination mismatch after copy')
+    }
   }
 
   put(bytes: Buffer, mime: string, options: { overwrite?: boolean } = {}): BlobRef {
@@ -285,11 +311,10 @@ export class FileBlobStore implements BlobStore {
     if (!existsSync(body)) throw new BlobMissingError(hash)
     const bytes = readFileSync(body)
     if (hashBytes(bytes) !== hash) throw new BlobCorruptError(hash)
-    let mime = 'application/octet-stream'
     const mimeFile = this.mimePath(hash)
-    if (existsSync(mimeFile)) {
-      mime = readFileSync(mimeFile, 'utf8')
-    }
+    if (!existsSync(mimeFile)) throw new BlobMimeError(hash)
+    const mime = readFileSync(mimeFile, 'utf8')
+    if (mime.length === 0) throw new BlobMimeError(hash)
     return { bytes, mime, size: bytes.length, hash }
   }
 
