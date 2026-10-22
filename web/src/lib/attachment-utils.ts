@@ -1,4 +1,6 @@
-import { blobUrl, isBlobRef, attachmentDisplaySrc } from '@shared/blob.js'
+import { blobUrl as blobUrlRaw, isBlobRef, attachmentDisplaySrc as attachmentDisplaySrcRaw } from '@shared/blob.js'
+import type { Attachment } from '@shared/types.js'
+import { getSessionToken } from './api.js'
 
 import { TEXT_MIME_PREFIXES, TEXT_MIME_EXACT } from '@shared/constants.js'
 
@@ -66,7 +68,21 @@ export function isSupportedMimeType(mimeType: string): boolean {
   return isImageMime(mimeType) || isTextMime(mimeType) || mimeType === 'application/pdf'
 }
 
-export { attachmentDisplaySrc }
+function sessionToken(): string | undefined {
+  try {
+    return getSessionToken() ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function blobUrl(hash: string): string {
+  return blobUrlRaw(hash, sessionToken())
+}
+
+export function attachmentDisplaySrc(attachment: Attachment): string {
+  return attachmentDisplaySrcRaw(attachment, sessionToken())
+}
 
 export function metadataMediaSrc(metadata: Record<string, unknown> | undefined): string | undefined {
   if (!metadata) return undefined

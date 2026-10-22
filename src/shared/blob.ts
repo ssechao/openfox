@@ -8,8 +8,9 @@ export function isBlobHash(value: string): boolean {
   return BLOB_HASH_RE.test(value)
 }
 
-export function blobUrl(hash: string): string {
-  return `/api/blobs/${hash}`
+export function blobUrl(hash: string, token?: string): string {
+  const path = `/api/blobs/${hash}`
+  return token ? `${path}?token=${encodeURIComponent(token)}` : path
 }
 
 export function isBlobRef(value: unknown): value is BlobRef {
@@ -26,7 +27,7 @@ export function isBlobRef(value: unknown): value is BlobRef {
   )
 }
 
-export function attachmentDisplaySrc(attachment: Attachment): string {
-  if (attachment.blob) return blobUrl(attachment.blob.hash)
+export function attachmentDisplaySrc(attachment: Attachment, token?: string): string {
+  if (attachment.blob) return blobUrl(attachment.blob.hash, token)
   return attachment.data ?? ''
 }

@@ -5,7 +5,6 @@
 import { execFileSync, fork, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -132,8 +131,9 @@ describe('4a-1 blob open demo', () => {
     sessionId = info.sessionId
     roundTripHash = info.roundTripHash
     roundTripBytes = info.roundTripBytes
-    report['corpus'] = { snapshotBytes: info.snapshotBytes, sessionId, dbPath }
-  }, 60_000)
+    expect(info.snapshotBytes).toBeGreaterThan(80_000_000)
+    report['corpus'] = { snapshotBytes: info.snapshotBytes, sessionId, dbPath, freelist: info.freelist }
+  }, 180_000)
 
   afterAll(async () => {
     await rm(corpusDir, { recursive: true, force: true })
@@ -199,8 +199,18 @@ describe('4a-1 blob open demo', () => {
       expect(createHash('sha256').update(blob.body).digest('hex')).toBe(roundTripHash)
       expect(blob.body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(true)
 
+      const asImg = await timedGet(`${instance.url}/api/blobs/${roundTripHash}?token=${encodeURIComponent(TOKEN)}`)
+      expect(asImg.status).toBe(200)
+      expect(asImg.body.length).toBe(roundTripBytes)
+      expect(createHash('sha256').update(asImg.body).digest('hex')).toBe(roundTripHash)
+
       const noAuth = await timedGet(`${instance.url}/api/blobs/${roundTripHash}`)
       expect(noAuth.status).toBe(401)
+
+      const queryOnSession = await timedGet(
+        `${instance.url}/api/sessions/${sessionId}?token=${encodeURIComponent(TOKEN)}`,
+      )
+      expect(queryOnSession.status).toBe(401)
 
       const unknown = await timedGet(`${instance.url}/api/blobs/${'b'.repeat(64)}`, authed)
       expect(unknown.status).toBe(404)
@@ -214,19 +224,21 @@ describe('4a-1 blob open demo', () => {
       await stopInstance(instance, true)
     }
 
-    const { attachmentDisplaySrc, blobUrl } = await import('../src/shared/blob.js')
-    const uiSrc = attachmentDisplaySrc({
-      id: 'att-b',
-      filename: 'shot-b.png',
-      mimeType: 'image/png',
-      size: roundTripBytes,
-      blob: { hash: roundTripHash, mime: 'image/png', size: roundTripBytes },
-    })
-    expect(uiSrc).toBe(blobUrl(roundTripHash))
-    const component = readFileSync(join(REPO_ROOT, 'web/src/components/shared/MessageAttachments.tsx'), 'utf8')
-    expect(component).toContain('attachmentDisplaySrc')
-    expect(component).toContain('src={attachmentDisplaySrc(attachment)}')
-    report['ui'] = { src: uiSrc }
-    console.log(JSON.stringify({ beforeMedian, afterMedian, ratio, minus50: ratio <= 0.5 }, null, 2))
+    report['ui'] = { src: `/api/blobs/${roundTripHash}?token=…`, via: 'img-query-token' }
+    console.log(
+      JSON.stringify(
+        {
+          beforeMedian,
+          afterMedian,
+          ratio,
+          minus50: ratio <= 0.5,
+          corpus: report['corpus'],
+          before: report['before'],
+          after: report['after'],
+        },
+        null,
+        2,
+      ),
+    )
   }, 600_000)
 })

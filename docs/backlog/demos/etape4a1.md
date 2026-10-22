@@ -1,18 +1,27 @@
 # Démo — Lot 4a-1 : blobs hors des instantanés
 
-Branche `mt/etape4a1-blobs` (depuis `origin/mt/etape3-async` 16da117c). Mesures du 2026-10-22.
+Branche `mt/etape4a1-blobs`. Mesures du 2026-10-22.
 
-HOME, config et `OPENFOX_DB_PATH` temporaires, ports ≥ 10720. Corpus synthétique (`docs/backlog/corpus/`, graine 41), généré en tmp. Aucune base de production ouverte (`lsof`).
+HOME, config et `OPENFOX_DB_PATH` temporaires, ports ≥ 10720. Corpus synthétique
+(`docs/backlog/corpus/`, graine 41) généré en tmp : 7 651 messages, instantané
+106 931 650 octets, `display.maxVisibleItems=50`. Aucune base de production
+ouverte (`lsof`).
 
 ## Commandes
 
 ```bash
 npx vitest run src/server/events/blob-store.test.ts
 npx vitest run src/server/events/blob-migrate.test.ts
+npx vitest run src/server/plugins/asset-auth.test.ts
 npx vitest run --config e2e/vitest.config.ts e2e/blob-open.demo.test.ts
 ```
 
-Migration réelle : `npx tsx scripts/migrate-blobs.ts --yes --db <path>` (désactivée au démarrage).
+Migration réelle : `npx tsx scripts/migrate-blobs.ts --yes --db <path>` (désactivée
+au démarrage ; WAL checkpointée après la bascule).
+
+Les `<img>` chargent `/api/blobs/<hash>?token=` via `pluginAssetToken` (même jeton
+que les assets de plugins). Pas de route publique. Un `token` en query sur
+`/api/sessions/:id` reste 401.
 
 ## Résultats
 
@@ -22,16 +31,19 @@ Migration réelle : `npx tsx scripts/migrate-blobs.ts --yes --db <path>` (désac
 | C2 migration atomique, reprenable, pas auto       | `blob-migrate.test.ts`   | 6/6      |
 | C3 démo corpus, route, droits, rendu              | `blob-open.demo.test.ts` | 1/1      |
 
-## Chiffres C3 (corpus synthétique, même recette avant/après)
+## Chiffres C3 (corpus à volumétrie réelle, même recette avant/après)
 
-`GET /api/sessions/:id` à froid, cache vide, médiane de 3, `display.maxVisibleItems=50`.
+`GET /api/sessions/:id` à froid, cache vide, médiane de 3, Mac mini chargé.
 
-|                | Médiane  | Échantillons     |
-| -------------- | -------- | ---------------- |
-| Avant (inline) | 117,8 ms | 3 essais à froid |
-| Après (refs)   | 51,3 ms  | 3 essais à froid |
-| Ratio          | 0,435    | −56 %            |
+|                               | Médiane  | Ratio |
+| ----------------------------- | -------- | ----- |
+| Avant (inline)                | 962,4 ms | —     |
+| Après (refs + checkpoint WAL) | 518,4 ms | 0,54  |
 
-Objectif −50 % atteint sur ce corpus (non bloquant s'il avait manqué). Aller-retour PNG : octets et MIME identiques. Route : 401 sans jeton, 404 hash inconnu, 400 hash invalide. UI : `attachmentDisplaySrc` → `/api/blobs/<hash>`.
+Objectif −50 % non atteint sur ce run (non bloquant). Aller-retour PNG par
+`GET /api/blobs/<hash>?token=` sans en-tête : 200, octets et MIME identiques.
+Sans jeton : 401. Hash inconnu : 404. Hash invalide : 400. UI :
+`attachmentDisplaySrc` pose `?token=` (test web MessageAttachments +
+AttachmentPreview).
 
 Rapport JSON : `ETAPE4A1_DEMO_REPORT=<fichier>`.

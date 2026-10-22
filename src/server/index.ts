@@ -329,7 +329,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     if (config.mode === 'test' && process.env['OPENFOX_TEST_REQUIRE_AUTH'] === '1') {
       const expected = process.env['OPENFOX_TEST_AUTH_TOKEN'] ?? ''
       const headerToken = req.headers['x-session-token'] as string | undefined
-      if (!expected || headerToken !== expected) {
+      const token = headerToken ?? pluginAssetToken(req)
+      if (!expected || token !== expected) {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }

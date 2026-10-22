@@ -25,5 +25,6 @@ if (!existsSync(dbPath)) {
 const db = new Database(dbPath)
 const store = new EventStore(db)
 const reports = store.migrateAllBlobs()
-console.log(JSON.stringify({ dbPath, sessions: reports.length, reports }, null, 2))
+const checkpoint = store.checkpointWal()
+console.log(JSON.stringify({ dbPath, sessions: reports.length, reports, checkpoint }, null, 2))
 db.close()

@@ -17,3 +17,14 @@ describe('pluginAssetToken', () => {
     expect(pluginAssetToken({ path: '/plugins/demo/assets/panel.html', query: {} })).toBeUndefined()
   })
 })
+
+it('reads the token query parameter on blob hash paths', () => {
+  const hash = 'a'.repeat(64)
+  expect(pluginAssetToken({ path: `/blobs/${hash}`, query: { token: 'abc' } })).toBe('abc')
+  expect(pluginAssetToken({ path: `/api/blobs/${hash}`, query: { token: 'abc' } })).toBe('abc')
+})
+
+it('ignores the token on blob paths that are not a 64-hex hash', () => {
+  expect(pluginAssetToken({ path: '/blobs/not-a-hash', query: { token: 'abc' } })).toBeUndefined()
+  expect(pluginAssetToken({ path: '/blobs/../etc/passwd', query: { token: 'abc' } })).toBeUndefined()
+})

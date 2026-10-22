@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { blobUrl } from '@shared/blob.js'
 
 vi.mock('../../stores/session', () => ({
@@ -13,26 +13,35 @@ vi.mock('../../hooks/useT', () => ({
 vi.mock('./ImageModal', () => ({ ImageModal: () => null }))
 
 import { MessageAttachments } from './MessageAttachments'
+import { AttachmentPreview } from './AttachmentPreview'
 
 const HASH = 'a'.repeat(64)
+const TOKEN = 'network-session-token'
+
+const attachment = {
+  id: 'att-b',
+  filename: 'shot-b.png',
+  mimeType: 'image/png',
+  size: 70,
+  blob: { hash: HASH, mime: 'image/png', size: 70 },
+}
 
 describe('MessageAttachments blob refs', () => {
-  it('renders the image from the blob reference URL', () => {
-    render(
-      <MessageAttachments
-        messageId="m1"
-        attachments={[
-          {
-            id: 'att-b',
-            filename: 'shot-b.png',
-            mimeType: 'image/png',
-            size: 70,
-            blob: { hash: HASH, mime: 'image/png', size: 70 },
-          },
-        ]}
-      />,
-    )
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  it('renders the image from the blob URL with the session token query', () => {
+    localStorage.setItem('openfox_token', TOKEN)
+    render(<MessageAttachments messageId="m1" attachments={[attachment]} />)
     const img = screen.getByRole('img') as HTMLImageElement
-    expect(img.getAttribute('src')).toBe(blobUrl(HASH))
+    expect(img.getAttribute('src')).toBe(blobUrl(HASH, TOKEN))
+  })
+
+  it('renders AttachmentPreview from the same authenticated blob URL', () => {
+    localStorage.setItem('openfox_token', TOKEN)
+    render(<AttachmentPreview attachment={attachment} onRemove={() => undefined} />)
+    const img = screen.getByRole('img') as HTMLImageElement
+    expect(img.getAttribute('src')).toBe(blobUrl(HASH, TOKEN))
   })
 })
