@@ -383,6 +383,24 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     })
   }
 
+  if (config.mode !== 'production' && process.env['OPENFOX_DEMO_LOOP_PROBE'] === '1') {
+    let demoLoopMax = 0
+    let demoLoopLast = performance.now()
+    const sampleDemoLoop = () => {
+      const now = performance.now()
+      const delay = now - demoLoopLast - 20
+      if (delay > demoLoopMax) demoLoopMax = delay
+      demoLoopLast = now
+      setTimeout(sampleDemoLoop, 20).unref()
+    }
+    setTimeout(sampleDemoLoop, 20).unref()
+    app.get('/api/health/loop-delay', (_req, res) => {
+      const value = demoLoopMax
+      demoLoopMax = 0
+      res.json({ maxMs: value })
+    })
+  }
+
   // Changelog (public)
   app.get('/api/changelog', async (req, res) => {
     try {

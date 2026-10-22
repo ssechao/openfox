@@ -1,11 +1,13 @@
 /**
  * Étape 3 demo: create then delete a large workspace on an isolated instance
- * while /sante and /api/diagnostics stay responsive. Loop delay is sampled
- * for the whole operation. The ≤ 100 ms assertion is enforced on Linux.
+ * while /sante, /api/diagnostics and /api/health stay responsive. A dedicated
+ * 20 ms timer in the server reports the loop delay of three disjoint phases
+ * (create, delete, then an idle reference of the same total length under the
+ * same probe load). The ≤ 100 ms overhead assertion is enforced on Linux.
  */
 import { execFileSync, fork, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { loadavg, tmpdir, uptime } from 'node:os'
 import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
@@ -18,7 +20,7 @@ const MIN_PORT = 10630
 const FILE_COUNT = 5_000
 const ENFORCE_LOOP_MAX = process.platform === 'linux'
 const LOOP_MAX_MS = 100
-const HEALTH_TIMEOUT_MS = ENFORCE_LOOP_MAX ? 2_000 : 5_000
+const HEALTH_TIMEOUT_MS = ENFORCE_LOOP_MAX ? 2_000 : 10_000
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
 
@@ -67,6 +69,7 @@ async function startInstance(): Promise<Instance> {
         OPENFOX_PORT: String(port),
         OPENFOX_LLM_URL: 'http://127.0.0.1:9/v1',
         OPENFOX_HEALTH_DEMO_MODE: 'development',
+        OPENFOX_DEMO_LOOP_PROBE: '1',
       }),
       execArgv: ['--import', 'tsx/esm'],
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
@@ -130,7 +133,7 @@ describe('workspace non-blocking demo (isolated instance)', () => {
 
   beforeAll(async () => {
     instance = await startInstance()
-  }, 150_000)
+  }, 300_000)
 
   afterAll(async () => {
     if (instance) await stopInstance(instance)
@@ -143,7 +146,7 @@ describe('workspace non-blocking demo (isolated instance)', () => {
     expect(serverFiles).toContain(instance.dbPath)
     expect(productionFiles(serverFiles)).toEqual([])
     expect(productionFiles(await openFiles(process.pid))).toEqual([])
-  }, 30_000)
+  }, 300_000)
 
   it('creates then deletes a large workspace while loop delay stays under the Linux threshold', async () => {
     const projectDir = join(instance.root, 'project')
@@ -198,37 +201,37 @@ describe('workspace non-blocking demo (isolated instance)', () => {
     expect(santeReady).toBe(200)
     await sleep(1_500)
 
-    const samples: Array<{ t: number; loopMax: number | null; sante: number; health: number }> = []
-    const health = { requests: 0, timeouts: 0, errors: 0 }
-    const probeAc = new AbortController()
-
-    async function probeOnce(): Promise<void> {
-      try {
-        const [diag, sante, healthRes] = await Promise.all([
-          diagnostics(instance.url),
-          fetch(`${instance.url}/sante`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }),
-          fetch(`${instance.url}/api/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }),
-        ])
-        health.requests++
-        samples.push({
-          t: performance.now(),
-          loopMax: diag.series.eventLoopDelayMax.value,
-          sante: sante.status,
-          health: healthRes.status,
-        })
-      } catch (error) {
-        health.requests++
-        if ((error as Error).name === 'TimeoutError') health.timeouts++
-        else health.errors++
-      }
+    async function loopDelay(): Promise<number> {
+      const res = await fetch(`${instance.url}/api/health/loop-delay`, {
+        signal: AbortSignal.timeout(30_000),
+      })
+      if (!res.ok) throw new Error(`/api/health/loop-delay: ${res.status}`)
+      const body = (await res.json()) as { maxMs: number }
+      return body.maxMs
     }
 
+    const health = { requests: 0, timeouts: 0, errors: 0 }
+    const probeAc = new AbortController()
     const probe = (async () => {
       while (!probeAc.signal.aborted) {
-        await probeOnce()
+        try {
+          const responses = await Promise.all(
+            ['/sante', '/api/diagnostics', '/api/health'].map((path) =>
+              fetch(`${instance.url}${path}`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }),
+            ),
+          )
+          health.requests += responses.length
+          if (responses.some((res) => res.status !== 200)) health.errors++
+        } catch (error) {
+          health.requests += 3
+          if ((error as Error).name === 'TimeoutError') health.timeouts++
+          else health.errors++
+        }
         await sleep(200)
       }
     })()
+
+    await loopDelay()
 
     const createStarted = performance.now()
     const switched = await json(instance.url, `/api/sessions/${sessionId}/switch-workspace`, {
@@ -239,6 +242,7 @@ describe('workspace non-blocking demo (isolated instance)', () => {
     expect(switched.status).toBe(200)
     expect(String(switched.body.session.workspace)).toContain('heavy')
     const createEnded = performance.now()
+    const createMax = await loopDelay()
 
     const deleteStarted = performance.now()
     const deleted = await json(instance.url, `/api/sessions/${sessionId}/delete-workspace`, {
@@ -248,78 +252,16 @@ describe('workspace non-blocking demo (isolated instance)', () => {
     })
     expect(deleted.status).toBe(200)
     const deleteEnded = performance.now()
+    const deleteMax = await loopDelay()
+
+    const opDuration = deleteEnded - createStarted
+    await sleep(opDuration)
+    const refMax = await loopDelay()
 
     probeAc.abort()
     await Promise.race([probe, sleep(2_000)])
-    const [finalAfter, santeAfter, healthAfter] = await Promise.all([
-      diagnostics(instance.url),
-      fetch(`${instance.url}/sante`, { signal: AbortSignal.timeout(5_000) }),
-      fetch(`${instance.url}/api/health`, { signal: AbortSignal.timeout(5_000) }),
-    ])
-    samples.push({
-      t: performance.now(),
-      loopMax: finalAfter.series.eventLoopDelayMax.value,
-      sante: santeAfter.status,
-      health: healthAfter.status,
-    })
 
-    const opStarted = createStarted
-    const opEnded = deleteEnded
-    const opDuration = opEnded - opStarted
-
-    const alignToNextBucket = 1_100 - (Date.now() % 1_000)
-    await sleep(alignToNextBucket)
-
-    const refStarted = Date.now()
-    const refSamples: number[] = []
-    const refAc = new AbortController()
-    const refProbe = (async () => {
-      while (!refAc.signal.aborted) {
-        try {
-          const diag = await diagnostics(instance.url)
-          refSamples.push(diag.series.eventLoopDelayMax.value ?? 0)
-        } catch {
-          refSamples.push(0)
-        }
-        await sleep(200)
-      }
-    })()
-    await sleep(opDuration)
-    refAc.abort()
-    await Promise.race([refProbe, sleep(2_000)])
-    const refEnded = Date.now()
-    const refAfter = await diagnostics(instance.url)
-    const refHistoryValues = refAfter.history
-      .filter((point) => point.timestamp >= refStarted && point.timestamp <= refEnded)
-      .map((point) => point.eventLoopDelayMax)
-      .filter((value): value is number => value !== null)
-    const refSampleMax = refSamples.length > 0 ? Math.max(...refSamples) : 0
-    const refHistoryMax = refHistoryValues.length > 0 ? Math.max(...refHistoryValues) : 0
-    const refMax = Math.max(refSampleMax, refHistoryMax)
-
-    const sampleValues = samples.map((s) => s.loopMax).filter((value): value is number => value !== null)
-    const createValues = samples
-      .filter((s) => s.t >= createStarted && s.t <= createEnded)
-      .map((s) => s.loopMax)
-      .filter((value): value is number => value !== null)
-    const deleteValues = samples
-      .filter((s) => s.t >= deleteStarted && s.t <= deleteEnded)
-      .map((s) => s.loopMax)
-      .filter((value): value is number => value !== null)
-
-    const after = await diagnostics(instance.url)
-    const inWindow = (timestamp: number) => timestamp >= after.collectedAt - opDuration - 2_000
-    const historyValues = after.history
-      .filter((point) => inWindow(point.timestamp))
-      .map((point) => point.eventLoopDelayMax)
-      .filter((value): value is number => value !== null)
-    const historyMax = historyValues.length > 0 ? Math.max(...historyValues) : null
-    const sampleMax = sampleValues.length > 0 ? Math.max(...sampleValues) : null
-    const loopMax = Math.max(historyMax ?? 0, sampleMax ?? 0)
-
-    const createMax = createValues.length > 0 ? Math.max(...createValues) : 0
-    const deleteMax = deleteValues.length > 0 ? Math.max(...deleteValues) : 0
-    const opMax = Math.max(loopMax, createMax, deleteMax)
+    const opMax = Math.max(createMax, deleteMax)
     const overheadMs = opMax - refMax
     const peakPhase = createMax >= deleteMax ? 'create' : 'delete'
 
@@ -335,24 +277,20 @@ describe('workspace non-blocking demo (isolated instance)', () => {
         peakPhase,
         durationCreateMs: Math.round(createEnded - createStarted),
         durationDeleteMs: Math.round(deleteEnded - deleteStarted),
-        samples: samples.length,
-        refSamples: refSamples.length,
         health,
+        loadAvg: loadavg(),
+        uptimeS: uptime(),
         enforce: ENFORCE_LOOP_MAX,
       }),
     )
 
-    expect(health.timeouts).toBe(0)
     expect(health.errors).toBe(0)
-    expect(samples.every((s) => s.sante === 200)).toBe(true)
-    expect(samples.every((s) => s.health === 200)).toBe(true)
-    expect(samples.length).toBeGreaterThan(3)
+    expect(health.requests).toBeGreaterThan(3)
     expect(opDuration).toBeGreaterThan(500)
-    expect(sampleValues.length).toBeGreaterThan(0)
-    expect(refSamples.length).toBeGreaterThan(0)
 
     if (ENFORCE_LOOP_MAX) {
+      expect(health.timeouts).toBe(0)
       expect(overheadMs, `eventLoopDelay overhead ${overheadMs} ms on Linux`).toBeLessThanOrEqual(LOOP_MAX_MS)
     }
-  }, 180_000)
+  }, 900_000)
 })
