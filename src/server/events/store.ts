@@ -661,13 +661,15 @@ export class EventStore {
     for (let attempt = 0; attempt < 100; attempt++) {
       try {
         this.timed('write', () =>
-          this.db.transaction(() => {
-            insert.run(sessionId, seq, timestamp, event.type, payload)
-            this.searchIndex.apply(sessionId, toStore, timestamp, {
-              ...(options.indexSnapshot ? { allowSnapshot: true } : {}),
-              ...(options.searchRemoveIds ? { removeMessageIds: options.searchRemoveIds } : {}),
-            })
-          })(),
+          this.searchIndex.withPendingRollback(() =>
+            this.db.transaction(() => {
+              insert.run(sessionId, seq, timestamp, event.type, payload)
+              this.searchIndex.apply(sessionId, toStore, timestamp, {
+                ...(options.indexSnapshot ? { allowSnapshot: true } : {}),
+                ...(options.searchRemoveIds ? { removeMessageIds: options.searchRemoveIds } : {}),
+              })
+            })(),
+          ),
         )
         break
       } catch (error) {
@@ -750,7 +752,7 @@ export class EventStore {
             seq++
           }
         })
-        this.timed('write', transaction)
+        this.timed('write', () => this.searchIndex.withPendingRollback(transaction))
 
         for (const stored of results) this.releaseBlobPending(stored.data)
 
@@ -801,7 +803,7 @@ export class EventStore {
         })
       }
     })
-    transaction()
+    this.searchIndex.withPendingRollback(() => transaction())
 
     this.projections.delete(sessionId)
     this.replayPrefixes.delete(sessionId)
@@ -1357,10 +1359,12 @@ export class EventStore {
    */
   deleteSession(sessionId: string): void {
     this.dropStreaming(sessionId)
-    this.db.transaction(() => {
-      this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
-      this.searchIndex.removeSession(sessionId)
-    })()
+    this.searchIndex.withPendingRollback(() =>
+      this.db.transaction(() => {
+        this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(sessionId)
+        this.searchIndex.removeSession(sessionId)
+      })(),
+    )
     this.invalidateSessionCache(sessionId)
     this.runningSessionIds.delete(sessionId)
 

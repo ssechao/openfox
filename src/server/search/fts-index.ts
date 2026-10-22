@@ -243,11 +243,24 @@ function attachSearchHits(db: Database.Database, match: string, sessionIds: stri
   })
 }
 
+type PendingEntry = { content: string; indexable: boolean }
+
 export class SearchIndexer {
-  private readonly pending = new Map<string, Map<string, { content: string; indexable: boolean }>>()
+  private pending = new Map<string, Map<string, PendingEntry>>()
 
   constructor(private readonly db: Database.Database) {
     ensureSearchSchema(db)
+  }
+
+  /** Snapshot in-memory pending buffers and restore them if `fn` throws. */
+  withPendingRollback<T>(fn: () => T): T {
+    const snapshot = this.clonePending()
+    try {
+      return fn()
+    } catch (error) {
+      this.pending = snapshot
+      throw error
+    }
   }
 
   apply(
@@ -321,7 +334,19 @@ export class SearchIndexer {
     }
   }
 
-  private sessionPending(sessionId: string): Map<string, { content: string; indexable: boolean }> {
+  private clonePending(): Map<string, Map<string, PendingEntry>> {
+    const clone = new Map<string, Map<string, PendingEntry>>()
+    for (const [sessionId, messages] of this.pending) {
+      const inner = new Map<string, PendingEntry>()
+      for (const [messageId, entry] of messages) {
+        inner.set(messageId, { content: entry.content, indexable: entry.indexable })
+      }
+      clone.set(sessionId, inner)
+    }
+    return clone
+  }
+
+  private sessionPending(sessionId: string): Map<string, PendingEntry> {
     let map = this.pending.get(sessionId)
     if (!map) {
       map = new Map()

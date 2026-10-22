@@ -232,6 +232,63 @@ describe('C1 FTS index write path', () => {
     expect(ids('keep-prefix')).toEqual(['s1'])
   })
 
+  function failOnSecondApply(): ReturnType<typeof vi.spyOn> {
+    const originalApply = store.searchIndex.apply.bind(store.searchIndex)
+    let calls = 0
+    return vi.spyOn(store.searchIndex, 'apply').mockImplementation((sessionId, event, timestamp, options) => {
+      calls++
+      if (calls === 2) throw new Error('fts-write-failed')
+      return originalApply(sessionId, event, timestamp, options)
+    })
+  }
+
+  it('restores pending when a later FTS write fails inside appendBatch', () => {
+    store.append('s1', userStart('m1', 'keep-prefix-'))
+    const spy = failOnSecondApply()
+    expect(() =>
+      store.appendBatch('s1', [
+        { type: 'message.delta', data: { messageId: 'm1', content: 'rolled-back-zzz' } },
+        userStart('m2', 'never-committed'),
+      ]),
+    ).toThrow(/fts-write-failed/)
+    spy.mockRestore()
+    store.append('s1', { type: 'message.delta', data: { messageId: 'm1', content: 'committed-yyy' } })
+    expect(ids('rolled-back-zzz')).toEqual([])
+    expect(ids('committed-yyy')).toEqual(['s1'])
+    expect(ids('keep-prefix')).toEqual(['s1'])
+    expect(ids('never-committed')).toEqual([])
+  })
+
+  it('restores pending when a later FTS write fails inside importEvents', () => {
+    store.append('s1', userStart('m1', 'keep-prefix-'))
+    const spy = failOnSecondApply()
+    const now = Date.now()
+    expect(() =>
+      store.importEvents('s1', [
+        {
+          seq: 2,
+          timestamp: now,
+          sessionId: 's1',
+          type: 'message.delta',
+          data: { messageId: 'm1', content: 'rolled-back-zzz' },
+        },
+        {
+          seq: 3,
+          timestamp: now,
+          sessionId: 's1',
+          type: 'message.start',
+          data: { messageId: 'm2', role: 'user', content: 'never-committed' },
+        },
+      ]),
+    ).toThrow(/fts-write-failed/)
+    spy.mockRestore()
+    store.append('s1', { type: 'message.delta', data: { messageId: 'm1', content: 'committed-yyy' } })
+    expect(ids('rolled-back-zzz')).toEqual([])
+    expect(ids('committed-yyy')).toEqual(['s1'])
+    expect(ids('keep-prefix')).toEqual(['s1'])
+    expect(ids('never-committed')).toEqual([])
+  })
+
   it('uses the sessions table title after a rename through a different indexer', () => {
     store.append('s1', userStart('m1', 'before-rename'))
     db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run('BravoUnique', 's1')
