@@ -1,16 +1,16 @@
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { ServerResponse } from 'node:http'
 
 /**
- * AbortSignal tied to the HTTP request. Aborts when the client disconnects
- * before the response has been sent. Close after a finished response is ignored.
+ * AbortSignal tied to an HTTP response: aborts when the connection closes before
+ * the response has been fully sent. The request's own 'close' is not used: since
+ * Node 16 it fires once the body has been read, not when the client leaves.
  */
-export function requestAbortSignal(req: IncomingMessage, res?: ServerResponse): AbortSignal {
+export function requestAbortSignal(res: ServerResponse): AbortSignal {
   const ac = new AbortController()
   const abort = () => {
-    if (res?.writableEnded) return
-    if (!ac.signal.aborted) ac.abort()
+    if (!res.writableFinished) ac.abort()
   }
-  req.once('aborted', abort)
-  req.once('close', abort)
+  if (res.closed) abort()
+  else res.once('close', abort)
   return ac.signal
 }

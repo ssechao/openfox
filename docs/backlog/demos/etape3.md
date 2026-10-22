@@ -19,6 +19,8 @@ Mesure contrôlée sur `origin/mt/etape2-verrou`, même capteur `setTimeout(20)`
 npx vitest run src/server/git/workspace.test.ts
 npx vitest run src/server/utils/permissions.test.ts src/server/utils/project-creator.test.ts src/server/dev-server/inspect-proxy.test.ts
 npx vitest run src/server/ws/server.test.ts src/server/git/diff.test.ts
+npx vitest run src/server/utils/request-abort.test.ts
+npx vitest run --config e2e/vitest.config.ts e2e/project-rest.test.ts -t check-permissions
 npx vitest run --config e2e/vitest.config.ts e2e/git-status-watcher.test.ts
 npx vitest run --config e2e/vitest.config.ts e2e/workspace-nonblocking.demo.test.ts
 # Attribution des retards : un dossier par exécution, puis analyse
@@ -30,19 +32,26 @@ Linux : Docker `node:24-bookworm` sur `ssechao@192.168.71.122`.
 
 ## Résultats
 
-| Critère                                                                  | macOS (worktree)                                                                                           | Linux (.122 Docker)                                          |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| C1 `workspace.test.ts`                                                   | 41/41                                                                                                      | 41/41                                                        |
-| C2 permissions / project-creator / inspect-proxy                         | 36/36                                                                                                      | 36/36                                                        |
-| Scrutation git `ws/server.test.ts` + `git/diff.test.ts`                  | 47 réussis, 1 ignoré                                                                                       | `ws/` + `git/` + `utils/` : 281 réussis, 1 ignoré            |
-| e2e git (`git-status-watcher`, `workspace-branch-isolation`, `git-tool`) | —                                                                                                          | 35/35                                                        |
-| C3 `workspace-nonblocking.demo.test.ts` (client WebSocket abonné)        | 4/5 au seuil de 100 ms, écart témoin médian 73,8 ms ; depuis, écart affiché sans seuil (« Écart accepté ») | 3/3, écart témoin médian 3,1 ms, retard absolu médian 4,3 ms |
+| Critère                                                                              | macOS (worktree)                                                                                           | Linux (.122 Docker)                                          |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| C1 `workspace.test.ts`                                                               | 41/41                                                                                                      | 41/41                                                        |
+| C2 permissions / project-creator / inspect-proxy                                     | 36/36                                                                                                      | 36/36                                                        |
+| Scrutation git `ws/server.test.ts` + `git/diff.test.ts`                              | 47 réussis, 1 ignoré                                                                                       | `ws/` + `git/` + `utils/` : 281 réussis, 1 ignoré            |
+| e2e git (`git-status-watcher`, `workspace-branch-isolation`, `git-tool`)             | —                                                                                                          | 35/35                                                        |
+| Annulation des requêtes `request-abort.test.ts` + `project-rest` (check-permissions) | 6/6 ; e2e non exécuté (démarrage du serveur de test > 10 s sur le Mac chargé)                              | 143/143 (`utils/`) ; 1/1                                     |
+| C3 `workspace-nonblocking.demo.test.ts` (client WebSocket abonné)                    | 4/5 au seuil de 100 ms, écart témoin médian 73,8 ms ; depuis, écart affiché sans seuil (« Écart accepté ») | 3/3, écart témoin médian 3,1 ms, retard absolu médian 4,3 ms |
 
 ## Écart accepté
 
 - macOS : l’écart au témoin dépasse 100 ms dans 1 exécution sur 5 (série sans profil, 4/5) et dans 2 sur 5 (série profilée, 3/5) ; la démo le mesure et l’affiche (JSON en console) sans l’affirmer. Sous Linux, les trois seuils restent affirmés : écart au témoin, retard absolu et surcoût, chacun ≤ 100 ms.
 - Cause : le coût de `posix_spawn` (`child_process.spawn`) sur la boucle d’un Mac chargé, pour les `git` de la scrutation, ici 10 fois plus fréquente qu’en production. Le retard unique de 301 ms `(program)` en `delete` reste non attribué.
 - Traitement prévu aux étapes 6 et 7 (exécution hors du processus principal). Écart accepté par le pilote le 2026-10-22, sur le commit fc4cec0b.
+
+## Annulation des requêtes HTTP
+
+`requestAbortSignal` (`src/server/utils/request-abort.ts`) écoutait `close` et `aborted` sur la requête. Depuis Node 16, `req` émet `close` dès que le corps est lu, pas quand le client part. Un signal demandé dès le premier tick du gestionnaire était donc annulé tout de suite, même si le client attendait la réponse. Les 5 routes raccordées (création de projet, vérification et correction des permissions, `switch-workspace`, `delete-workspace`) demandent le signal après un `await` : `close` avait déjà eu lieu, et le signal ne s’annulait jamais, même quand le client se déconnectait. Le signal écoute désormais `close` sur la réponse, et ne s’annule que si la réponse n’est pas terminée (`!res.writableFinished`). Il est annulé d’emblée si la connexion est déjà fermée. Il ne prend plus que la réponse : `requestAbortSignal(res)`.
+
+Tests réels, avec un vrai serveur express et `express.json()`, sans simulation de `req`/`res`. Chaque cas est joué avec le signal demandé au premier tick et après un `await`. (a) POST JSON, gestionnaire de 300 ms, client qui attend : signal non annulé, réponse 200. (b) Même POST, client détruit à 100 ms : signal annulé avant la fin du gestionnaire. Plus : client parti avant la demande du signal, qui est alors déjà annulé. Sur l’ancien code, 3 de ces 5 tests échouaient : (a) au premier tick, (b) après un `await`, et le client parti avant. (c) Route réelle `POST /api/projects/check-permissions` : réponse 200 avec `success: true`, donc les commandes `id`/`getent` n’ont pas été annulées. Ce test passe aussi sur l’ancien code, car la route demande le signal après un `await`.
 
 ## Correctif de la scrutation git
 

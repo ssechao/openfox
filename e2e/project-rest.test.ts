@@ -6,6 +6,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createTestServer, type TestServerHandle } from './utils/index.js'
 
 describe('Project REST API', () => {
@@ -313,5 +316,28 @@ describe('Project REST API', () => {
 
       expect(response.status).toBe(404)
     })
+  })
+
+  describe('POST /api/projects/check-permissions', () => {
+    it.skipIf(process.platform === 'win32')(
+      'runs its permission commands to completion for a JSON body whose client waits',
+      async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'openfox-check-permissions-'))
+        try {
+          const response = await fetch(`${server.url}/api/projects/check-permissions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: dir }),
+          })
+          const data: any = await response.json()
+
+          expect({ status: response.status, data }).toMatchObject({ status: 200, data: { success: true } })
+          expect(typeof data.sudoAvailable).toBe('boolean')
+          expect(typeof data.groupHasWrite).toBe('boolean')
+        } finally {
+          await rm(dir, { recursive: true, force: true })
+        }
+      },
+    )
   })
 })

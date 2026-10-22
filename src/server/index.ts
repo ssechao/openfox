@@ -486,7 +486,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const globalConfig = await loadGlobalConfig(config.mode ?? 'production', config.globalConfigPath)
     try {
       const project = await createProjectDirectory(name, workdir, globalConfig.workspace?.autoGitInit ?? true, {
-        signal: requestAbortSignal(req, res),
+        signal: requestAbortSignal(res),
       })
       res.status(201).json({ project })
     } catch (err) {
@@ -506,7 +506,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { checkPermissions } = await import('./utils/permissions.js')
-    const result = await checkPermissions(targetPath, { signal: requestAbortSignal(req, res) })
+    const result = await checkPermissions(targetPath, { signal: requestAbortSignal(res) })
 
     if (result.success) {
       res.json(result)
@@ -528,7 +528,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const { fixPermissions } = await import('./utils/permissions.js')
-    const result = await fixPermissions(targetPath, action, { signal: requestAbortSignal(req, res) })
+    const result = await fixPermissions(targetPath, action, { signal: requestAbortSignal(res) })
 
     if (result.success) {
       res.json(result)
@@ -949,7 +949,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     try {
       const updated = await sessionManager.switchWorkspace(req.params.id, target, branch, sourceBranch, {
-        signal: requestAbortSignal(req, res),
+        signal: requestAbortSignal(res),
       })
       res.json({ session: toClientSession(updated) })
     } catch (err) {
@@ -974,7 +974,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     try {
       const updated = await sessionManager.deleteWorkspace(req.params.id, target, force === true, {
-        signal: requestAbortSignal(req, res),
+        signal: requestAbortSignal(res),
       })
       res.json({ session: toClientSession(updated) })
     } catch (err) {
