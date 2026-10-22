@@ -41,7 +41,11 @@ try {
 const db = new Database(dbPath)
 try {
   const store = new EventStore(db)
-  const report = store.gcBlobs()
+  const report = store.gcBlobs({
+    onProgress: (scanned, refs) => {
+      process.stderr.write(`gc: scanned ${scanned} events, ${refs} blob refs\n`)
+    },
+  })
   console.log(JSON.stringify({ dbPath, report }, null, 2))
 } finally {
   db.close()

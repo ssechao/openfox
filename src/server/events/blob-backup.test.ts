@@ -1,7 +1,7 @@
 import { execFileSync, fork, type ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -112,6 +112,90 @@ describe('blob backup / restore', () => {
     }
     expect(liveOpenfoxHits()).toBe(0)
   })
+
+  it('refuses an existing dest before opening the source database', async () => {
+    const dest = join(dir, 'backup')
+    mkdirSync(dest)
+    writeFileSync(join(dest, 'sentinel'), 'keep')
+    await expect(backupDatabaseAndBlobs(join(dir, 'missing.db'), dest)).rejects.toBeInstanceOf(BlobBackupError)
+    await expect(backupDatabaseAndBlobs(join(dir, 'missing.db'), dest)).rejects.toThrow(/already exists/)
+    expect(readFileSync(join(dest, 'sentinel'), 'utf8')).toBe('keep')
+    expect(existsSync(join(dest, 'sessions.db'))).toBe(false)
+    expect(readdirSync(dir).filter((name) => name.includes('.tmp-'))).toEqual([])
+  })
+
+  it('restore replaces dest atomically and drops sqlite WAL sidecars', async () => {
+    const src = openStore(dir, 'src.db')
+    appendPng(src.events)
+    src.db.close()
+    const backupDir = join(dir, 'backup')
+    await backupDatabaseAndBlobs(src.dbPath, backupDir)
+
+    const destPath = join(dir, 'dest.db')
+    const dest = new Database(destPath)
+    dest.pragma('journal_mode = WAL')
+    dest.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY)`)
+    dest.prepare('INSERT INTO sessions (id) VALUES (?)').run('old')
+    dest.close()
+    writeFileSync(`${destPath}-wal`, Buffer.from('garbage-wal'))
+    writeFileSync(`${destPath}-shm`, Buffer.from('garbage-shm'))
+    writeFileSync(`${destPath}-journal`, Buffer.from('garbage-journal'))
+
+    restoreDatabaseAndBlobs(backupDir, destPath)
+
+    expect(existsSync(`${destPath}-wal`)).toBe(false)
+    expect(existsSync(`${destPath}-shm`)).toBe(false)
+    expect(existsSync(`${destPath}-journal`)).toBe(false)
+    const restored = new Database(destPath, { readonly: true, fileMustExist: true })
+    try {
+      const ids = restored.prepare('SELECT id FROM sessions ORDER BY id').all()
+      expect(ids).toEqual([{ id: 's1' }])
+      const payload = restored.prepare('SELECT payload FROM events').get() as { payload: string }
+      expect(payload.payload).toContain(CRASH_HASH)
+    } finally {
+      restored.close()
+    }
+    const blobs = new FileBlobStore(blobDirForDatabase(destPath), { ownerDbPath: destPath })
+    expect(blobs.get(CRASH_HASH).bytes.equals(CRASH_PNG)).toBe(true)
+  })
+
+  it('SIGKILL mid-restore publishes nothing', async () => {
+    const src = openStore(dir, 'src.db')
+    appendPng(src.events)
+    src.db.close()
+    const backupDir = join(dir, 'backup')
+    await backupDatabaseAndBlobs(src.dbPath, backupDir)
+
+    const dest = openStore(dir, 'dest.db')
+    dest.db.prepare('INSERT INTO sessions (id) VALUES (?)').run('keep-me')
+    dest.db.close()
+
+    await killAtBarrier(
+      {
+        OPENFOX_DB_PATH: dest.dbPath,
+        OPENFOX_BLOB_CRASH_MODE: 'restore',
+        OPENFOX_BLOB_BACKUP_FROM: backupDir,
+      },
+      'before-restore-publish',
+      join(dir, 'barrier-restore'),
+    )
+
+    expect(existsSync(dest.dbPath)).toBe(true)
+    expect(existsSync(`${dest.dbPath}.pre-restore`)).toBe(false)
+    const still = new Database(dest.dbPath, { readonly: true, fileMustExist: true })
+    try {
+      const ids = still.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>
+      expect(ids.map((row) => row.id)).toEqual(['keep-me', 's1'])
+      expect(still.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 0 })
+    } finally {
+      still.close()
+    }
+    const destBlobs = blobDirForDatabase(dest.dbPath)
+    if (existsSync(destBlobs)) {
+      const store = new FileBlobStore(destBlobs, { ownerDbPath: dest.dbPath })
+      expect(store.has(CRASH_HASH)).toBe(false)
+    }
+  }, 30_000)
 
   it('fails closed when a referenced blob is missing and publishes nothing', async () => {
     const { dbPath, db, events, blobs } = openStore(dir, 'sessions.db')

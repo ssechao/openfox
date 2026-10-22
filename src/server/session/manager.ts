@@ -76,6 +76,7 @@ import { devServerManager } from '../dev-server/manager.js'
 import { resolveLLMClientForAgent, getAgentModelOverride } from '../agents/model-overrides.js'
 import { parseDefaultModelSelection } from '../provider-manager.js'
 import { getEventStore } from '../events/store.js'
+import { hashBytes } from '../events/blob-store.js'
 import {
   getSessionState,
   emitSessionInitialized,
@@ -627,6 +628,14 @@ export class SessionManager {
       }
     }
 
+    const importedBlobs = (payload.blobs ?? []).map((blob) => {
+      const bytes = Buffer.from(blob.data, 'base64')
+      if (hashBytes(bytes) !== blob.hash) {
+        throw new Error(`Imported blob hash mismatch: declared ${blob.hash}`)
+      }
+      return { bytes, mime: blob.mime, hash: blob.hash }
+    })
+
     const session = dbCreateSession(
       projectId,
       project.workdir,
@@ -636,11 +645,9 @@ export class SessionManager {
     )
 
     const eventStore = getEventStore()
-    if (payload.blobs) {
-      for (const blob of payload.blobs) {
-        eventStore.blobStore.put(Buffer.from(blob.data, 'base64'), blob.mime)
-        eventStore.blobStore.clearPending?.(blob.hash)
-      }
+    for (const blob of importedBlobs) {
+      eventStore.blobStore.put(blob.bytes, blob.mime)
+      eventStore.blobStore.clearPending?.(blob.hash)
     }
     eventStore.importEvents(session.id, payload.events as unknown as import('../events/types.js').StoredEvent[])
 

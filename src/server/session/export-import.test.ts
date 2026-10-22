@@ -446,5 +446,21 @@ describe('Session export / import', () => {
       const payload = buildSessionExport(manager, createSourceSession())
       await expect(manager.importSession('missing-project', payload)).rejects.toThrow('Project not found')
     })
+
+    it('rejects import blobs whose decoded hash does not match the declared hash', async () => {
+      const payload = buildSessionExport(manager, createSourceSession())
+      const mutated = {
+        ...payload,
+        blobs: [
+          {
+            hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            mime: 'image/png',
+            size: 4,
+            data: Buffer.from('nope').toString('base64'),
+          },
+        ],
+      }
+      await expect(manager.importSession(targetProjectId, mutated)).rejects.toThrow(/hash mismatch/)
+    })
   })
 })

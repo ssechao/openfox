@@ -1,10 +1,10 @@
 import Database from 'better-sqlite3'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { parkAtBlobBarrier } from './blob-barrier.js'
-import { collectBlobRefsFromJsonStrings } from './blob-codec.js'
-import { FileBlobStore, blobDirForDatabase, durableWriteFile, ownerIdForDatabase } from './blob-store.js'
+import { collectBlobRefsFromEvents, type BlobScanProgress } from './blob-scan.js'
+import { FileBlobStore, blobDirForDatabase, durableWriteFile, unlinkQuiet } from './blob-store.js'
 
 export const BLOB_BACKUP_MANIFEST = 'manifest.json'
 
@@ -28,15 +28,6 @@ export interface BlobBackupReport {
   blobs: number
 }
 
-function collectRefsFromDb(db: Database.Database): Array<{ hash: string; mime: string; size: number }> {
-  const rows = db.prepare('SELECT payload FROM events').all() as Array<{ payload: string }>
-  const byHash = new Map<string, { hash: string; mime: string; size: number }>()
-  for (const ref of collectBlobRefsFromJsonStrings(rows.map((row) => row.payload))) {
-    byHash.set(ref.hash, { hash: ref.hash, mime: ref.mime, size: ref.size })
-  }
-  return [...byHash.values()]
-}
-
 function readManifest(dir: string): BlobBackupManifest {
   const path = join(dir, BLOB_BACKUP_MANIFEST)
   if (!existsSync(path)) throw new BlobBackupError(`Backup manifest missing: ${path}`)
@@ -47,7 +38,21 @@ function readManifest(dir: string): BlobBackupManifest {
   return parsed
 }
 
-export async function backupDatabaseAndBlobs(dbPath: string, destDir: string): Promise<BlobBackupReport> {
+function unlinkSqliteSidecars(dbPath: string): void {
+  unlinkQuiet(`${dbPath}-wal`)
+  unlinkQuiet(`${dbPath}-shm`)
+  unlinkQuiet(`${dbPath}-journal`)
+}
+
+export async function backupDatabaseAndBlobs(
+  dbPath: string,
+  destDir: string,
+  options: { onProgress?: BlobScanProgress } = {},
+): Promise<BlobBackupReport> {
+  if (existsSync(destDir)) {
+    throw new BlobBackupError(`Backup destination already exists: ${destDir}`)
+  }
+  mkdirSync(dirname(destDir), { recursive: true })
   const tmp = `${destDir}.tmp-${randomUUID()}`
   mkdirSync(tmp, { recursive: true })
   const source = new Database(dbPath, { timeout: 5000 })
@@ -62,7 +67,11 @@ export async function backupDatabaseAndBlobs(dbPath: string, destDir: string): P
   const snapshot = new Database(join(tmp, 'sessions.db'), { readonly: true, fileMustExist: true })
   let refs: Array<{ hash: string; mime: string; size: number }>
   try {
-    refs = collectRefsFromDb(snapshot)
+    refs = [...collectBlobRefsFromEvents(snapshot, options.onProgress).values()].map((ref) => ({
+      hash: ref.hash,
+      mime: ref.mime,
+      size: ref.size,
+    }))
   } finally {
     snapshot.close()
   }
@@ -75,9 +84,7 @@ export async function backupDatabaseAndBlobs(dbPath: string, destDir: string): P
       if (!liveBlobs.has(ref.hash)) {
         throw new BlobBackupError(`Referenced blob missing during backup: ${ref.hash}`)
       }
-      const record = liveBlobs.get(ref.hash)
-      backupBlobs.put(record.bytes, record.mime)
-      backupBlobs.clearPending(record.hash)
+      backupBlobs.copyBlobFrom(liveBlobs, ref.hash)
     }
   } catch (error) {
     rmSync(tmp, { recursive: true, force: true })
@@ -94,7 +101,6 @@ export async function backupDatabaseAndBlobs(dbPath: string, destDir: string): P
   parkAtBlobBarrier('before-manifest')
   durableWriteFile(join(tmp, BLOB_BACKUP_MANIFEST), Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'))
   parkAtBlobBarrier('before-publish')
-  mkdirSync(dirname(destDir), { recursive: true })
   if (existsSync(destDir)) {
     rmSync(tmp, { recursive: true, force: true })
     throw new BlobBackupError(`Backup destination already exists: ${destDir}`)
@@ -112,16 +118,39 @@ export function restoreDatabaseAndBlobs(backupDir: string, destDbPath: string): 
     if (!backupBlobs.has(ref.hash)) {
       throw new BlobBackupError(`Backup blob missing: ${ref.hash}`)
     }
-    const record = backupBlobs.get(ref.hash)
-    if (record.size !== ref.size) throw new BlobBackupError(`Backup blob size mismatch: ${ref.hash}`)
   }
-  mkdirSync(dirname(destDbPath), { recursive: true })
-  durableWriteFile(destDbPath, readFileSync(dbFile))
-  const destBlobs = new FileBlobStore(blobDirForDatabase(destDbPath), { ownerDbPath: destDbPath })
-  for (const ref of manifest.blobs) {
-    const record = backupBlobs.get(ref.hash)
-    destBlobs.put(record.bytes, record.mime)
-    destBlobs.clearPending(record.hash)
+
+  const staging = `${destDbPath}.restoring-${randomUUID()}`
+  mkdirSync(staging, { recursive: true })
+  try {
+    copyFileSync(dbFile, join(staging, 'sessions.db'))
+    const stagedBlobs = new FileBlobStore(join(staging, 'blobs'))
+    for (const ref of manifest.blobs) {
+      stagedBlobs.copyBlobFrom(backupBlobs, ref.hash)
+    }
+    parkAtBlobBarrier('before-restore-publish')
+
+    const destBlobsDir = blobDirForDatabase(destDbPath)
+    unlinkSqliteSidecars(destDbPath)
+    const bakDb = `${destDbPath}.pre-restore`
+    const bakBlobs = `${destBlobsDir}.pre-restore`
+    rmSync(bakDb, { force: true })
+    rmSync(bakBlobs, { recursive: true, force: true })
+    if (existsSync(destDbPath)) renameSync(destDbPath, bakDb)
+    if (existsSync(destBlobsDir)) renameSync(destBlobsDir, bakBlobs)
+    try {
+      mkdirSync(dirname(destDbPath), { recursive: true })
+      renameSync(join(staging, 'sessions.db'), destDbPath)
+      renameSync(join(staging, 'blobs'), destBlobsDir)
+    } catch (error) {
+      if (!existsSync(destDbPath) && existsSync(bakDb)) renameSync(bakDb, destDbPath)
+      if (!existsSync(destBlobsDir) && existsSync(bakBlobs)) renameSync(bakBlobs, destBlobsDir)
+      throw error
+    }
+    rmSync(bakDb, { force: true })
+    rmSync(bakBlobs, { recursive: true, force: true })
+    new FileBlobStore(destBlobsDir, { ownerDbPath: destDbPath })
+  } finally {
+    rmSync(staging, { recursive: true, force: true })
   }
-  destBlobs.registerOwner(ownerIdForDatabase(destDbPath))
 }

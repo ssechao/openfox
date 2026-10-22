@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
   mkdirSync,
@@ -122,7 +123,7 @@ export function durableWriteFile(finalPath: string, bytes: Buffer): void {
 }
 
 interface BlobDirMarker {
-  owners: string[]
+  owner: string
 }
 
 export class FileBlobStore implements BlobStore {
@@ -159,11 +160,11 @@ export class FileBlobStore implements BlobStore {
     if (!existsSync(path)) return null
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8')) as { owner?: string; owners?: string[] }
-      if (Array.isArray(parsed.owners) && parsed.owners.every((item) => typeof item === 'string')) {
-        return { owners: parsed.owners }
-      }
       if (typeof parsed.owner === 'string' && parsed.owner.length > 0) {
-        return { owners: [parsed.owner] }
+        return { owner: parsed.owner }
+      }
+      if (Array.isArray(parsed.owners) && parsed.owners.length === 1 && typeof parsed.owners[0] === 'string') {
+        return { owner: parsed.owners[0] }
       }
     } catch {
       return null
@@ -174,9 +175,12 @@ export class FileBlobStore implements BlobStore {
   registerOwner(dbPath: string): void {
     const owner = ownerIdForDatabase(dbPath)
     const current = this.readMarker()
-    const owners = new Set(current?.owners ?? [])
-    owners.add(owner)
-    durableWriteFile(this.markerPath(), Buffer.from(JSON.stringify({ owners: [...owners] }, null, 2), 'utf8'))
+    if (current && current.owner !== owner && current.owner !== resolve(dbPath)) {
+      throw new BlobStoreOwnerError(`Blob store ${this.root} is owned by ${current.owner}, not ${owner}`)
+    }
+    if (!current) {
+      durableWriteFile(this.markerPath(), Buffer.from(JSON.stringify({ owner }, null, 2), 'utf8'))
+    }
   }
 
   assertOwner(dbPath: string): void {
@@ -185,13 +189,9 @@ export class FileBlobStore implements BlobStore {
       throw new BlobStoreOwnerError(`Blob store marker missing in ${this.root}`)
     }
     const owner = ownerIdForDatabase(dbPath)
-    if (!marker.owners.includes(owner) && !marker.owners.includes(resolve(dbPath))) {
-      throw new BlobStoreOwnerError(`Blob store marker does not list ${owner} (owners: ${marker.owners.join(', ')})`)
+    if (marker.owner !== owner && marker.owner !== resolve(dbPath)) {
+      throw new BlobStoreOwnerError(`Blob store marker does not match ${owner} (owner: ${marker.owner})`)
     }
-  }
-
-  ownerDatabases(): string[] {
-    return this.readMarker()?.owners ?? []
   }
 
   private writePending(hash: string): void {
@@ -252,15 +252,23 @@ export class FileBlobStore implements BlobStore {
     return removed
   }
 
-  put(bytes: Buffer, mime: string): BlobRef {
+  copyBlobFrom(source: FileBlobStore, hash: string): void {
+    assertHash(hash)
+    mkdirSync(this.dirFor(hash), { recursive: true })
+    copyFileSync(source.bodyPath(hash), this.bodyPath(hash))
+    const mimeSrc = source.mimePath(hash)
+    if (existsSync(mimeSrc)) copyFileSync(mimeSrc, this.mimePath(hash))
+  }
+
+  put(bytes: Buffer, mime: string, options: { overwrite?: boolean } = {}): BlobRef {
     const hash = hashBytes(bytes)
     this.writePending(hash)
     const body = this.bodyPath(hash)
-    if (!existsSync(body)) {
+    if (options.overwrite || !existsSync(body)) {
       durableWriteFile(body, bytes)
     }
     const mimeFile = this.mimePath(hash)
-    if (!existsSync(mimeFile)) {
+    if (options.overwrite || !existsSync(mimeFile)) {
       durableWriteFile(mimeFile, Buffer.from(mime, 'utf8'))
     }
     return { hash, mime, size: bytes.length }

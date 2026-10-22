@@ -1,6 +1,21 @@
 import type Database from 'better-sqlite3'
 import { parkAtBlobBarrier } from './blob-barrier.js'
 
+export function sessionPayloadsNeedRewrite(
+  db: Database.Database,
+  sessionId: string,
+  shouldRewrite: (payload: string) => boolean,
+): { scanned: number; needed: boolean } {
+  let scanned = 0
+  let needed = false
+  const stmt = db.prepare('SELECT payload FROM events WHERE session_id = ?')
+  for (const row of stmt.iterate(sessionId) as IterableIterator<{ payload: string }>) {
+    scanned++
+    if (!needed && shouldRewrite(row.payload)) needed = true
+  }
+  return { scanned, needed }
+}
+
 export function rewriteSessionPayloads(
   db: Database.Database,
   sessionId: string,
@@ -14,12 +29,11 @@ export function rewriteSessionPayloads(
     markSwitched: () => void
   },
 ): { scanned: number; rewritten: number } {
-  const rows = db.prepare('SELECT id, payload FROM events WHERE session_id = ?').all(sessionId) as Array<{
-    id: number
-    payload: string
-  }>
   const updates: Array<{ id: number; payload: string }> = []
-  for (const row of rows) {
+  let scanned = 0
+  const stmt = db.prepare('SELECT id, payload FROM events WHERE session_id = ?')
+  for (const row of stmt.iterate(sessionId) as IterableIterator<{ id: number; payload: string }>) {
+    scanned++
     if (!options.shouldRewrite(row.payload)) continue
     let parsed: unknown
     try {
@@ -43,5 +57,5 @@ export function rewriteSessionPayloads(
   switchTx()
   parkAtBlobBarrier(options.afterSwitchBarrier)
 
-  return { scanned: rows.length, rewritten: updates.length }
+  return { scanned, rewritten: updates.length }
 }

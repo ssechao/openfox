@@ -42,6 +42,7 @@ import { collectBlobRefs, extractBinaries } from './blob-codec.js'
 import { parkAtBlobBarrier } from './blob-barrier.js'
 import { migrateAllBlobs, migrateSessionBlobs, type BlobMigrationReport } from './blob-migrate.js'
 import { gcBlobs, type BlobGcReport } from './blob-gc.js'
+import type { BlobScanProgress } from './blob-scan.js'
 import { rollbackAllBlobs, rollbackSessionBlobs, type BlobRollbackReport } from './blob-rollback.js'
 
 // Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
@@ -1921,8 +1922,8 @@ export class EventStore {
     return reports
   }
 
-  gcBlobs(): BlobGcReport {
-    return gcBlobs(this.db, this.blobStore)
+  gcBlobs(options: { onProgress?: BlobScanProgress } = {}): BlobGcReport {
+    return gcBlobs(this.db, this.blobStore, options)
   }
 
   rollbackSessionBlobs(sessionId: string): BlobRollbackReport {

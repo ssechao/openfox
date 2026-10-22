@@ -87,14 +87,19 @@ export interface SessionExportDocument {
   session?: { title?: string }
 }
 
+export type SessionExportDownload = { ok: true } | { ok: false; error: string }
+
 /**
  * Fetch a session export and trigger a browser download of the JSON document.
- * Returns false when the export failed.
  */
-export async function downloadSessionExport(sessionId: string, fallbackTitle?: string): Promise<boolean> {
+export async function downloadSessionExport(sessionId: string, fallbackTitle?: string): Promise<SessionExportDownload> {
   try {
     const res = await authFetch(`/api/sessions/${sessionId}/export`)
-    if (!res.ok) return false
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      const error = typeof body.error === 'string' && body.error.trim() ? body.error : `Export failed (${res.status})`
+      return { ok: false, error }
+    }
     const payload = (await res.json()) as SessionExportDocument
     const title = payload.session?.title ?? fallbackTitle ?? 'session'
     const filename = `${title.replace(/[^a-zA-Z0-9-_]+/g, '_')}.openfox-session.json`
@@ -107,9 +112,9 @@ export async function downloadSessionExport(sessionId: string, fallbackTitle?: s
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    return true
-  } catch {
-    return false
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Export failed' }
   }
 }
 

@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { BlobStore } from './blob-store.js'
 import { extractBinaries, payloadHasInlineBinary } from './blob-codec.js'
-import { rewriteSessionPayloads } from './blob-rewrite.js'
+import { rewriteSessionPayloads, sessionPayloadsNeedRewrite } from './blob-rewrite.js'
 
 export type BlobMigrationStatus = 'copied' | 'switched'
 
@@ -41,11 +41,9 @@ function setStatus(db: Database.Database, sessionId: string, status: BlobMigrati
 export function migrateSessionBlobs(db: Database.Database, sessionId: string, store: BlobStore): BlobMigrationReport {
   ensureBlobMigrationSchema(db)
   const existing = getBlobMigrationStatus(db, sessionId)
-  const rows = db.prepare('SELECT payload FROM events WHERE session_id = ?').all(sessionId) as Array<{
-    payload: string
-  }>
-  if (existing === 'switched' && !rows.some((row) => payloadHasInlineBinary(row.payload))) {
-    return { sessionId, scanned: rows.length, rewritten: 0, status: 'switched' }
+  const check = sessionPayloadsNeedRewrite(db, sessionId, payloadHasInlineBinary)
+  if (existing === 'switched' && !check.needed) {
+    return { sessionId, scanned: check.scanned, rewritten: 0, status: 'switched' }
   }
 
   const { scanned, rewritten } = rewriteSessionPayloads(db, sessionId, {

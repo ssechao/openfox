@@ -1,8 +1,6 @@
 import type Database from 'better-sqlite3'
-import DatabaseCtor from 'better-sqlite3'
-import { existsSync } from 'node:fs'
 import { parkAtBlobBarrier } from './blob-barrier.js'
-import { collectBlobRefsFromJsonStrings } from './blob-codec.js'
+import { collectBlobRefsFromEvents, type BlobScanProgress } from './blob-scan.js'
 import { BlobStoreOwnerError, FileBlobStore, type BlobStore } from './blob-store.js'
 
 export interface BlobGcReport {
@@ -13,32 +11,25 @@ export interface BlobGcReport {
   staleTemps: number
 }
 
-function collectRefsFromDatabase(db: Database.Database): Set<string> {
-  const rows = db.prepare('SELECT payload FROM events').all() as Array<{ payload: string }>
-  return new Set(collectBlobRefsFromJsonStrings(rows.map((row) => row.payload)).map((ref) => ref.hash))
+export function referencedBlobHashes(
+  db: Database.Database,
+  store: FileBlobStore,
+  onProgress?: BlobScanProgress,
+): Set<string> {
+  store.assertOwner(db.name)
+  return new Set(collectBlobRefsFromEvents(db, onProgress).keys())
 }
 
-export function referencedBlobHashes(db: Database.Database, store: FileBlobStore): Set<string> {
-  const hashes = collectRefsFromDatabase(db)
-  const self = db.name
-  for (const owner of store.ownerDatabases()) {
-    if (!owner || owner === self || !existsSync(owner)) continue
-    const extra = new DatabaseCtor(owner, { readonly: true, fileMustExist: true, timeout: 5000 })
-    try {
-      for (const hash of collectRefsFromDatabase(extra)) hashes.add(hash)
-    } finally {
-      extra.close()
-    }
-  }
-  return hashes
-}
-
-export function gcBlobs(db: Database.Database, store: BlobStore): BlobGcReport {
+export function gcBlobs(
+  db: Database.Database,
+  store: BlobStore,
+  options: { onProgress?: BlobScanProgress } = {},
+): BlobGcReport {
   if (!(store instanceof FileBlobStore)) {
     return { scanned: 0, referenced: 0, deleted: 0, keptPending: 0, staleTemps: 0 }
   }
   store.assertOwner(db.name)
-  const referenced = referencedBlobHashes(db, store)
+  const referenced = referencedBlobHashes(db, store, options.onProgress)
   const livePending = store.livePendingHashes()
   const onDisk = store.listStoredHashes()
   parkAtBlobBarrier('after-gc-scan')

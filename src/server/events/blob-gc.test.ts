@@ -191,43 +191,41 @@ describe('blob GC', () => {
     db1.prepare('INSERT INTO sessions (id) VALUES (?)').run('s1')
     db2.prepare('INSERT INTO sessions (id) VALUES (?)').run('s1')
     const store = new FileBlobStore(shared, { ownerDbPath: db1Path })
-    store.registerOwner(db2Path)
+    expect(() => store.registerOwner(db2Path)).toThrow(BlobStoreOwnerError)
+    expect(() => new FileBlobStore(shared, { ownerDbPath: db2Path })).toThrow(BlobStoreOwnerError)
     const e1 = new EventStore(db1, { blobStore: store })
-    const e2 = new EventStore(db2, { blobStore: store })
     try {
       pngMessage('s1', e1)
-      e2.append('s1', {
-        type: 'message.start',
-        data: {
-          messageId: 'm1',
-          role: 'user',
-          content: 'jpeg',
-          attachments: [
-            {
-              id: 'j',
-              filename: 'dot.jpg',
-              mimeType: 'image/jpeg',
-              size: JPEG.length,
-              data: `data:image/jpeg;base64,${JPEG.toString('base64')}`,
-            },
-          ],
-        },
-      })
       const jpegHash = hashBytes(JPEG)
-      expect(e1.gcBlobs().deleted).toBe(0)
+      store.put(JPEG, 'image/jpeg')
+      store.clearPending?.(jpegHash)
+      db2
+        .prepare(
+          `INSERT INTO events (session_id, seq, timestamp, event_type, payload) VALUES (?, 1, ?, 'message.start', ?)`,
+        )
+        .run(
+          's1',
+          Date.now(),
+          JSON.stringify({
+            messageId: 'm1',
+            role: 'user',
+            content: 'jpeg',
+            attachments: [
+              {
+                id: 'j',
+                filename: 'dot.jpg',
+                mimeType: 'image/jpeg',
+                size: JPEG.length,
+                blob: { hash: jpegHash, mime: 'image/jpeg', size: JPEG.length },
+              },
+            ],
+          }),
+        )
+      expect(() => gcBlobs(db2, store)).toThrow(BlobStoreOwnerError)
+      // Exclusive owner: the non-owner cannot GC, so db1's png stays. We do not
+      // GC db1 here — that would treat db2's planted jpeg as an orphan.
       expect(store.has(CRASH_HASH)).toBe(true)
       expect(store.has(jpegHash)).toBe(true)
-      expect(e2.gcBlobs().deleted).toBe(0)
-      expect(store.has(CRASH_HASH)).toBe(true)
-      expect(store.has(jpegHash)).toBe(true)
-
-      const db3Path = join(dir, 'c.db')
-      const db3 = new Database(db3Path)
-      schema(db3)
-      expect(() => gcBlobs(db3, store)).toThrow(BlobStoreOwnerError)
-      expect(store.has(CRASH_HASH)).toBe(true)
-      expect(store.has(jpegHash)).toBe(true)
-      db3.close()
     } finally {
       db1.close()
       db2.close()
