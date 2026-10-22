@@ -383,21 +383,24 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     })
   }
 
-  if (config.mode !== 'production' && process.env['OPENFOX_DEMO_LOOP_PROBE'] === '1') {
-    let demoLoopMax = 0
+  const demoLoopProbe = config.mode !== 'production' && process.env['OPENFOX_DEMO_LOOP_PROBE'] === '1'
+  if (demoLoopProbe) {
+    const demoLoopSamples: Array<[number, number]> = []
     let demoLoopLast = performance.now()
     const sampleDemoLoop = () => {
       const now = performance.now()
-      const delay = now - demoLoopLast - 20
-      if (delay > demoLoopMax) demoLoopMax = delay
+      demoLoopSamples.push([Date.now(), now - demoLoopLast - 20])
+      if (demoLoopSamples.length > 60_000) demoLoopSamples.splice(0, 10_000)
       demoLoopLast = now
       setTimeout(sampleDemoLoop, 20).unref()
     }
     setTimeout(sampleDemoLoop, 20).unref()
-    app.get('/api/health/loop-delay', (_req, res) => {
-      const value = demoLoopMax
-      demoLoopMax = 0
-      res.json({ maxMs: value })
+    app.get('/api/health/loop-delay', (req, res) => {
+      const since = Number(req.query['since'] ?? 0)
+      res.json({
+        samples: demoLoopSamples.filter(([firedAt]) => firedAt >= since),
+        clock: { wallMs: Date.now(), hrtimeUs: Number(process.hrtime.bigint() / 1000n) },
+      })
     })
   }
 
@@ -3516,7 +3519,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     viteServer = await createViteServer({
       root: webDir,
       configFile: resolve(__dirname, '../../web/vite.config.ts'),
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, ...(demoLoopProbe ? { preTransformRequests: false } : {}) },
       appType: 'spa',
       logLevel: 'warn',
     })

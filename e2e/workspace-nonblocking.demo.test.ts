@@ -1,15 +1,17 @@
 /**
  * Étape 3 demo: create then delete a large workspace on an isolated instance
  * while /sante, /api/diagnostics and /api/health stay responsive. A dedicated
- * 20 ms timer in the server reports the loop delay of three disjoint phases
- * (create, delete, then an idle reference of the same total length under the
- * same probe load). The ≤ 100 ms overhead assertion is enforced on Linux.
+ * 20 ms timer in the server and the same timer in an idle witness process
+ * record timestamped loop delays over three disjoint phases (create, delete,
+ * then an idle reference of the same total length under the same probe load).
+ * CPU contention delays both processes; a blocked event loop only delays the
+ * server. The per-phase gap to the witness, over aligned windows, must stay
+ * ≤ 100 ms on every platform; the gap to the reference is enforced on Linux.
  */
-import { execFileSync, fork, type ChildProcess } from 'node:child_process'
+import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { loadavg, tmpdir, uptime } from 'node:os'
 import { join, resolve } from 'node:path'
-import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { DiagnosticsData } from '../src/shared/diagnostics.js'
@@ -20,9 +22,114 @@ const MIN_PORT = 10630
 const FILE_COUNT = 5_000
 const ENFORCE_LOOP_MAX = process.platform === 'linux'
 const LOOP_MAX_MS = 100
+const WINDOW_MS = 1_000
 const HEALTH_TIMEOUT_MS = ENFORCE_LOOP_MAX ? 2_000 : 10_000
 
+const WITNESS_SOURCE = `
+const samples = []
+let last = performance.now()
+const tick = () => {
+  const now = performance.now()
+  samples.push([Date.now(), now - last - 20])
+  last = now
+  setTimeout(tick, 20)
+}
+setTimeout(tick, 20)
+process.on('message', () => process.send(samples))
+process.on('disconnect', () => process.exit(0))
+process.send('ready')
+`
+
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+
+type LoopSample = [firedAt: number, delayMs: number]
+
+interface PhaseStats {
+  openfoxMaxMs: number
+  witnessMaxMs: number
+  witnessGapMs: number
+  worstWindow: { atMs: number; openfoxMs: number; witnessMs: number }
+}
+
+function stallMax(samples: LoopSample[], from: number, to: number): number {
+  let max = 0
+  for (const [firedAt, delay] of samples) {
+    if (firedAt >= from && firedAt - delay < to && delay > max) max = delay
+  }
+  return max
+}
+
+function phaseStats(openfox: LoopSample[], witness: LoopSample[], from: number, to: number): PhaseStats {
+  let worstWindow = { atMs: 0, openfoxMs: 0, witnessMs: 0 }
+  let witnessGapMs = Number.NEGATIVE_INFINITY
+  for (let start = from; start < to; start += WINDOW_MS) {
+    const end = Math.min(start + WINDOW_MS, to)
+    const openfoxMs = stallMax(openfox, start, end)
+    const witnessMs = stallMax(witness, start, end)
+    if (openfoxMs - witnessMs > witnessGapMs) {
+      witnessGapMs = openfoxMs - witnessMs
+      worstWindow = { atMs: start - from, openfoxMs, witnessMs }
+    }
+  }
+  return {
+    openfoxMaxMs: stallMax(openfox, from, to),
+    witnessMaxMs: stallMax(witness, from, to),
+    witnessGapMs,
+    worstWindow,
+  }
+}
+
+const round = (value: number) => Math.round(value * 10) / 10
+
+function roundStats(stats: PhaseStats) {
+  return {
+    openfoxMaxMs: round(stats.openfoxMaxMs),
+    witnessMaxMs: round(stats.witnessMaxMs),
+    witnessGapMs: round(stats.witnessGapMs),
+    worstWindow: {
+      atMs: Math.round(stats.worstWindow.atMs),
+      openfoxMs: round(stats.worstWindow.openfoxMs),
+      witnessMs: round(stats.worstWindow.witnessMs),
+    },
+  }
+}
+
+async function startWitness(logs: string[]): Promise<ChildProcess> {
+  const env = { ...process.env }
+  delete env['NODE_OPTIONS']
+  const child = track(
+    spawn(process.execPath, ['-e', WITNESS_SOURCE], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      detached: true,
+    }),
+    'witness',
+    logs,
+  )
+  await new Promise<void>((done, fail) => {
+    const timer = setTimeout(() => fail(new Error(`Witness did not start:\n${logs.join('')}`)), 30_000)
+    child.once('message', () => {
+      clearTimeout(timer)
+      done()
+    })
+    child.once('exit', (code) => {
+      clearTimeout(timer)
+      fail(new Error(`Witness exited (${code}):\n${logs.join('')}`))
+    })
+  })
+  return child
+}
+
+function witnessSamples(child: ChildProcess): Promise<LoopSample[]> {
+  return new Promise((done, fail) => {
+    const timer = setTimeout(() => fail(new Error('Witness did not return its samples')), 30_000)
+    child.once('message', (message) => {
+      clearTimeout(timer)
+      done(message as LoopSample[])
+    })
+    child.send('samples')
+  })
+}
 
 interface Instance {
   url: string
@@ -70,8 +177,17 @@ async function startInstance(): Promise<Instance> {
         OPENFOX_LLM_URL: 'http://127.0.0.1:9/v1',
         OPENFOX_HEALTH_DEMO_MODE: 'development',
         OPENFOX_DEMO_LOOP_PROBE: '1',
+        ...(process.env['ETAPE3_GIT_POLL_INTERVAL']
+          ? { OPENFOX_GIT_POLL_INTERVAL: process.env['ETAPE3_GIT_POLL_INTERVAL'] }
+          : {}),
       }),
-      execArgv: ['--import', 'tsx/esm'],
+      execArgv: [
+        '--import',
+        'tsx/esm',
+        ...(process.env['ETAPE3_CPU_PROF_DIR']
+          ? ['--cpu-prof', `--cpu-prof-dir=${process.env['ETAPE3_CPU_PROF_DIR']}`]
+          : []),
+      ],
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
       detached: true,
     }),
@@ -148,7 +264,7 @@ describe('workspace non-blocking demo (isolated instance)', () => {
     expect(productionFiles(await openFiles(process.pid))).toEqual([])
   }, 300_000)
 
-  it('creates then deletes a large workspace while loop delay stays under the Linux threshold', async () => {
+  it('creates then deletes a large workspace without blocking the event loop beyond the witness', async () => {
     const projectDir = join(instance.root, 'project')
     await mkdir(projectDir, { recursive: true })
     await writeFile(join(projectDir, 'README.md'), 'etape3\n')
@@ -201,96 +317,132 @@ describe('workspace non-blocking demo (isolated instance)', () => {
     expect(santeReady).toBe(200)
     await sleep(1_500)
 
-    async function loopDelay(): Promise<number> {
-      const res = await fetch(`${instance.url}/api/health/loop-delay`, {
+    async function serverSamples(
+      since: number,
+    ): Promise<{ samples: LoopSample[]; clock: { wallMs: number; hrtimeUs: number } }> {
+      const res = await fetch(`${instance.url}/api/health/loop-delay?since=${since}`, {
         signal: AbortSignal.timeout(30_000),
       })
       if (!res.ok) throw new Error(`/api/health/loop-delay: ${res.status}`)
-      const body = (await res.json()) as { maxMs: number }
-      return body.maxMs
+      return (await res.json()) as { samples: LoopSample[]; clock: { wallMs: number; hrtimeUs: number } }
     }
 
-    const health = { requests: 0, timeouts: 0, errors: 0 }
-    const probeAc = new AbortController()
-    const probe = (async () => {
-      while (!probeAc.signal.aborted) {
-        try {
-          const responses = await Promise.all(
-            ['/sante', '/api/diagnostics', '/api/health'].map((path) =>
-              fetch(`${instance.url}${path}`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }),
-            ),
-          )
-          health.requests += responses.length
-          if (responses.some((res) => res.status !== 200)) health.errors++
-        } catch (error) {
-          health.requests += 3
-          if ((error as Error).name === 'TimeoutError') health.timeouts++
-          else health.errors++
+    const witness = await startWitness(instance.logs)
+    try {
+      const health = { requests: 0, timeouts: 0, errors: 0 }
+      const probeAc = new AbortController()
+      const probe = (async () => {
+        while (!probeAc.signal.aborted) {
+          try {
+            const responses = await Promise.all(
+              ['/sante', '/api/diagnostics', '/api/health'].map((path) =>
+                fetch(`${instance.url}${path}`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }),
+              ),
+            )
+            health.requests += responses.length
+            if (responses.some((res) => res.status !== 200)) health.errors++
+          } catch (error) {
+            health.requests += 3
+            if ((error as Error).name === 'TimeoutError') health.timeouts++
+            else health.errors++
+          }
+          await sleep(200)
         }
-        await sleep(200)
+      })()
+      await sleep(1_000)
+
+      const createStarted = Date.now()
+      const switched = await json(instance.url, `/api/sessions/${sessionId}/switch-workspace`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ target: 'heavy' }),
+      })
+      expect(switched.status).toBe(200)
+      expect(String(switched.body.session.workspace)).toContain('heavy')
+      const createEnded = Date.now()
+
+      const deleted = await json(instance.url, `/api/sessions/${sessionId}/delete-workspace`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ target: 'heavy' }),
+      })
+      expect(deleted.status).toBe(200)
+      const deleteEnded = Date.now()
+
+      const opDuration = deleteEnded - createStarted
+      await sleep(opDuration)
+      const referenceEnded = Date.now()
+
+      probeAc.abort()
+      await Promise.race([probe, sleep(2_000)])
+
+      const [server, witnessed] = await Promise.all([serverSamples(createStarted - 60_000), witnessSamples(witness)])
+      const openfox = server.samples
+      const profDir = process.env['ETAPE3_CPU_PROF_DIR']
+      if (profDir) {
+        const stalls = (samples: LoopSample[]) => samples.filter(([, delay]) => delay > LOOP_MAX_MS)
+        await writeFile(
+          join(profDir, `stalls-${server.clock.wallMs}.json`),
+          JSON.stringify({
+            clock: server.clock,
+            phases: { createStarted, createEnded, deleteEnded, referenceEnded },
+            openfox: stalls(openfox),
+            witness: stalls(witnessed),
+          }),
+        )
       }
-    })()
+      const create = phaseStats(openfox, witnessed, createStarted, createEnded)
+      const remove = phaseStats(openfox, witnessed, createEnded, deleteEnded)
+      const reference = phaseStats(openfox, witnessed, deleteEnded, referenceEnded)
 
-    await loopDelay()
+      const opMax = Math.max(create.openfoxMaxMs, remove.openfoxMaxMs)
+      const overheadMs = opMax - reference.openfoxMaxMs
 
-    const createStarted = performance.now()
-    const switched = await json(instance.url, `/api/sessions/${sessionId}/switch-workspace`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ target: 'heavy' }),
-    })
-    expect(switched.status).toBe(200)
-    expect(String(switched.body.session.workspace)).toContain('heavy')
-    const createEnded = performance.now()
-    const createMax = await loopDelay()
+      // eslint-disable-next-line no-console
+      console.log(
+        JSON.stringify({
+          platform: process.platform,
+          create: roundStats(create),
+          delete: roundStats(remove),
+          reference: roundStats(reference),
+          overheadMs: round(overheadMs),
+          durationCreateMs: createEnded - createStarted,
+          durationDeleteMs: deleteEnded - createEnded,
+          samples: { openfox: openfox.length, witness: witnessed.length },
+          health,
+          loadAvg: loadavg(),
+          uptimeS: uptime(),
+          enforceReference: ENFORCE_LOOP_MAX,
+        }),
+      )
 
-    const deleteStarted = performance.now()
-    const deleted = await json(instance.url, `/api/sessions/${sessionId}/delete-workspace`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ target: 'heavy' }),
-    })
-    expect(deleted.status).toBe(200)
-    const deleteEnded = performance.now()
-    const deleteMax = await loopDelay()
+      expect(health.errors).toBe(0)
+      expect(health.requests).toBeGreaterThan(3)
+      expect(opDuration).toBeGreaterThan(500)
+      expect(
+        openfox.filter(([firedAt]) => firedAt >= createStarted && firedAt <= referenceEnded).length,
+      ).toBeGreaterThan(0)
+      expect(
+        witnessed.filter(([firedAt]) => firedAt >= createStarted && firedAt <= referenceEnded).length,
+      ).toBeGreaterThan(0)
 
-    const opDuration = deleteEnded - createStarted
-    await sleep(opDuration)
-    const refMax = await loopDelay()
+      for (const [phase, stats] of [
+        ['create', create],
+        ['delete', remove],
+        ['reference', reference],
+      ] as const) {
+        expect(
+          stats.witnessGapMs,
+          `${phase}: server loop delay exceeds the witness by ${stats.witnessGapMs} ms`,
+        ).toBeLessThanOrEqual(LOOP_MAX_MS)
+      }
 
-    probeAc.abort()
-    await Promise.race([probe, sleep(2_000)])
-
-    const opMax = Math.max(createMax, deleteMax)
-    const overheadMs = opMax - refMax
-    const peakPhase = createMax >= deleteMax ? 'create' : 'delete'
-
-    // eslint-disable-next-line no-console
-    console.log(
-      JSON.stringify({
-        platform: process.platform,
-        referenceMaxMs: Math.round(refMax * 10) / 10,
-        opMaxMs: Math.round(opMax * 10) / 10,
-        createMaxMs: Math.round(createMax * 10) / 10,
-        deleteMaxMs: Math.round(deleteMax * 10) / 10,
-        overheadMs: Math.round(overheadMs * 10) / 10,
-        peakPhase,
-        durationCreateMs: Math.round(createEnded - createStarted),
-        durationDeleteMs: Math.round(deleteEnded - deleteStarted),
-        health,
-        loadAvg: loadavg(),
-        uptimeS: uptime(),
-        enforce: ENFORCE_LOOP_MAX,
-      }),
-    )
-
-    expect(health.errors).toBe(0)
-    expect(health.requests).toBeGreaterThan(3)
-    expect(opDuration).toBeGreaterThan(500)
-
-    if (ENFORCE_LOOP_MAX) {
-      expect(health.timeouts).toBe(0)
-      expect(overheadMs, `eventLoopDelay overhead ${overheadMs} ms on Linux`).toBeLessThanOrEqual(LOOP_MAX_MS)
+      if (ENFORCE_LOOP_MAX) {
+        expect(health.timeouts).toBe(0)
+        expect(overheadMs, `eventLoopDelay overhead ${overheadMs} ms on Linux`).toBeLessThanOrEqual(LOOP_MAX_MS)
+      }
+    } finally {
+      killProcessTree(witness)
     }
   }, 900_000)
 })
