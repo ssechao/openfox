@@ -132,9 +132,10 @@ function buildAssistantMessage(
   sendReasoningInMessages?: boolean,
   inlineThinking?: boolean,
 ): Record<string, unknown> {
+  const hasToolCalls = Boolean(msg.toolCalls?.length)
   const result: Record<string, unknown> = {
     role: 'assistant',
-    content: msg.content || ' ',
+    content: hasToolCalls && !msg.content?.trim() ? null : msg.content || ' ',
   }
   if (msg.toolCalls?.length) {
     result['tool_calls'] = convertToolCalls(msg.toolCalls)

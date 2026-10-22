@@ -37,6 +37,7 @@ vi.mock('../events/index.js', () => ({
 vi.mock('./conversation-history.js', () => ({
   getConversationMessages: getConversationMessagesMock,
   processEventsForConversation: vi.fn(async (_sessionId: string, _llmClient: any, _onEvent: any) => []),
+  ensureRequestNotEndingWithAssistant: vi.fn((messages: unknown) => messages),
 }))
 
 vi.mock('../db/settings.js', () => ({

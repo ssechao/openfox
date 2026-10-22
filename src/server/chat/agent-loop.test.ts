@@ -46,6 +46,7 @@ vi.mock('../../cli/paths.js', () => ({
 // Mock conversation history
 vi.mock('./conversation-history.js', () => ({
   getConversationMessages: vi.fn().mockReturnValue([]),
+  ensureRequestNotEndingWithAssistant: vi.fn((messages: unknown) => messages),
 }))
 
 // Mock stream-pure to capture modelSettings for clamping tests

@@ -288,6 +288,25 @@ describe('parseResponsesResponse', () => {
     expect(response.choices[0]?.finish_reason).toBe('length')
   })
 
+  it('prefers incomplete over tool_calls so truncation stays visible', () => {
+    const response = parseResponsesResponse({
+      id: 'resp_inc_tools',
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [
+        {
+          type: 'function_call',
+          id: 'fc_1',
+          call_id: 'call-1',
+          name: 'glob',
+          arguments: '{"pattern":"*.ts"}',
+        },
+      ],
+    })
+    expect(response.choices[0]?.finish_reason).toBe('length')
+    expect(response.choices[0]?.message['tool_calls']).toHaveLength(1)
+  })
+
   it('maps failed status to the content_filter finish reason', () => {
     const response = parseResponsesResponse({ id: 'resp_4', status: 'failed', output: [] })
     expect(response.choices[0]?.finish_reason).toBe('content_filter')

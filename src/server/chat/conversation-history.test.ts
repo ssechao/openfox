@@ -719,10 +719,11 @@ describe('buildContextMessages', () => {
         subAgentType: 'verifier',
       }
       const result = getConversationMessages(scope)
-      expect(result.length).toBeGreaterThanOrEqual(2)
-      expect(result[result.length - 1]!.role).toBe('user')
-      expect(result[result.length - 1]!.source).toBe('history')
-      expect(result[result.length - 2]!.role).toBe('assistant')
+      expect(result.length).toBeGreaterThanOrEqual(1)
+      expect(result[result.length - 1]!.role).toBe('assistant')
+      const normalized = ensureRequestNotEndingWithAssistant(result)
+      expect(normalized[normalized.length - 1]!.role).toBe('user')
+      expect(normalized[normalized.length - 1]!.source).toBe('history')
     })
   })
 })

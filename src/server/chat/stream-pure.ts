@@ -642,16 +642,36 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
  * at `minIntervalMs`; retrying stops once `maxDurationMs` has elapsed since
  * the first failure or `maxAttempts` consecutive failures are reached.
  */
+export const MAX_LLM_RETRY_AFTER_MS = 120_000
+
+export function isRetryableLlmHttpStatus(status: number | undefined): boolean {
+  if (status === undefined) return true
+  return status === 408 || status === 409 || status === 429 || status >= 500
+}
+
+export function parseLlmHttpError(message: string | undefined): { status?: number; retryAfterMs?: number } {
+  if (!message) return {}
+  const match = message.match(/HTTP (\d{3})(?: \(retry-after-ms=(\d+)\))?:/)
+  if (!match) return {}
+  const status = Number(match[1])
+  const retryAfterMs = match[2] !== undefined ? Number(match[2]) : undefined
+  return retryAfterMs !== undefined ? { status, retryAfterMs } : { status }
+}
+
 export function evaluateLLMRetry(
   failures: number,
   firstFailureAt: number,
   now: number,
   policy: LLMRetryPolicy,
+  options?: { retryAfterMs?: number },
 ): { retry: true; delayMs: number; attempt: number } | { retry: false } {
   if (now - firstFailureAt >= policy.maxDurationMs) return { retry: false }
   if (failures >= policy.maxAttempts) return { retry: false }
-  const delayMs = failures <= policy.backoffMs.length ? policy.backoffMs[failures - 1]! : policy.minIntervalMs
-  return { retry: true, delayMs, attempt: failures + 1 }
+  const remaining = policy.maxDurationMs - (now - firstFailureAt)
+  if (remaining <= 0) return { retry: false }
+  const ladder = failures <= policy.backoffMs.length ? policy.backoffMs[failures - 1]! : policy.minIntervalMs
+  const delayMs = options?.retryAfterMs !== undefined ? Math.min(options.retryAfterMs, MAX_LLM_RETRY_AFTER_MS) : ladder
+  return { retry: true, delayMs: Math.min(delayMs, remaining), attempt: failures + 1 }
 }
 
 /** AbortControllers for in-flight backoff waits, keyed by session. */

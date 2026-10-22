@@ -52,6 +52,7 @@ vi.mock('../../cli/paths.js', () => ({
 
 vi.mock('./conversation-history.js', () => ({
   getConversationMessages: vi.fn().mockReturnValue([]),
+  ensureRequestNotEndingWithAssistant: vi.fn((messages: unknown) => messages),
 }))
 
 vi.mock('../context/compactor.js', () => ({
