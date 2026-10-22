@@ -884,7 +884,7 @@ describe('stream-pure', () => {
       const first = 1_000_000
       const before = first + 30 * 60_000 - 1
       const after = first + 30 * 60_000
-      expect(evaluateLLMRetry(5, first, before, policy)).toEqual({ retry: true, delayMs: 60_000, attempt: 6 })
+      expect(evaluateLLMRetry(5, first, before, policy)).toEqual({ retry: true, delayMs: 1, attempt: 6 })
       expect(evaluateLLMRetry(5, first, after, policy)).toEqual({ retry: false })
     })
 

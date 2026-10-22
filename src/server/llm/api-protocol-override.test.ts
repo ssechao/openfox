@@ -105,13 +105,13 @@ describe('apiProtocol override wiring (real HTTP endpoint selection)', () => {
               { type: 'input_image', image_url: 'data:image/png;base64,QUJD', detail: 'auto' },
             ],
           },
-          ...(content ? [{ role: 'assistant', content }] : [{ role: 'assistant', content: ' ' }]),
+          ...(content.trim() ? [{ role: 'assistant', content }] : []),
           { type: 'function_call', call_id: 'call-1', name: 'read_file', arguments: '{"path":"source.ts"}' },
           { type: 'function_call_output', call_id: 'call-1', output: 'result\n' },
         ])
       } else {
         const messages = sent.body['messages'] as Array<Record<string, unknown>>
-        expect(messages[1]!['content']).toBe(content || ' ')
+        expect(messages[1]!['content']).toBe(content.trim() ? content : null)
         expect(sent.body['previous_response_id']).toBeUndefined()
       }
     }

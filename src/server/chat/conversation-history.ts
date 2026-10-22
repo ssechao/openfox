@@ -205,9 +205,7 @@ export function getConversationMessages(
   if (events.length === 0) return []
 
   const contextMessages = buildContextMessages(events, scope)
-  const requestMessages = minimalMessagesToRequestContextMessages(contextMessages, 'history')
-
-  return ensureRequestNotEndingWithAssistant(requestMessages)
+  return minimalMessagesToRequestContextMessages(contextMessages, 'history')
 }
 
 /**

@@ -21,6 +21,13 @@ vi.mock('./stream-pure.js', () => ({
     data: { messageId, reason },
   })),
   evaluateLLMRetry: vi.fn(() => ({ retry: true, delayMs: 0, attempt: 2 })),
+  isRetryableLlmHttpStatus: vi.fn(
+    (status?: number) => status === undefined || status === 408 || status === 409 || status === 429 || status >= 500,
+  ),
+  parseLlmHttpError: vi.fn((message?: string) => {
+    const match = String(message ?? '').match(/HTTP (\d{3})/)
+    return match ? { status: Number(match[1]) } : {}
+  }),
   sleepThroughRetryBackoff: vi.fn(async () => 'waited' as const),
   recordLLMFailure: vi.fn(),
   clearLLMFailure: vi.fn(),
@@ -50,6 +57,7 @@ vi.mock('../context/compactor.js', () => ({
 
 vi.mock('./conversation-history.js', () => ({
   getConversationMessages: vi.fn().mockReturnValue([]),
+  ensureRequestNotEndingWithAssistant: vi.fn((messages: unknown) => messages),
 }))
 
 vi.mock('../db/settings.js', () => ({

@@ -224,6 +224,7 @@ vi.mock('../chat/stream-pure.js', async (importOriginal) => {
 vi.mock('../chat/conversation-history.js', () => ({
   getConversationMessages: vi.fn().mockReturnValue([]),
   processEventsForConversation: vi.fn().mockResolvedValue([]),
+  ensureRequestNotEndingWithAssistant: vi.fn((messages: unknown) => messages),
 }))
 
 vi.mock('../chat/orchestrator.js', async (importOriginal) => {

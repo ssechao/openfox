@@ -96,7 +96,8 @@ function messageToInputItem(message: ChatCompletionMessageParam): ResponsesInput
     // Assistant messages carrying tool calls become function_call items; the
     // textual part (usually empty in agent loops) is emitted before them.
     const items: ResponsesInputItem[] = []
-    if (message.content) {
+    const text = typeof message.content === 'string' ? message.content.trim() : message.content
+    if (text) {
       items.push({ role: 'assistant', content: convertMessageContent(message.content, 'assistant') })
     }
     for (const toolCall of message.tool_calls) {
@@ -192,11 +193,11 @@ interface ResponsesApiResponse {
 
 function mapResponseStatus(
   status?: string,
-  incompleteReason?: string,
+  _incompleteReason?: string,
 ): ChatCompletionResponse['choices'][0]['finish_reason'] {
   switch (status) {
     case 'incomplete':
-      return incompleteReason === 'max_output_tokens' ? 'length' : 'stop'
+      return 'length'
     case 'failed':
     case 'cancelled':
       return 'content_filter'
@@ -310,7 +311,8 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
     case 'response.content_part.done':
       return null
 
-    case 'response.completed': {
+    case 'response.completed':
+    case 'response.incomplete': {
       const response = event['response'] as ResponsesApiResponse | undefined
       return finalChunk(responseId, response)
     }

@@ -26,6 +26,8 @@ import {
   createMessageDoneEvent,
   createChatDoneEvent,
   evaluateLLMRetry,
+  isRetryableLlmHttpStatus,
+  parseLlmHttpError,
   sleepThroughRetryBackoff,
   recordLLMFailure,
   clearLLMFailure,
@@ -51,6 +53,7 @@ import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
 import { COMPACTION_PROMPT, CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT } from './prompts.js'
+import { ensureRequestNotEndingWithAssistant } from './conversation-history.js'
 import { logger } from '../utils/logger.js'
 import { emitPluginHook } from '../plugins/hook-emitter.js'
 import { applyPluginMessageTransforms } from '../plugins/message-transforms.js'
@@ -339,7 +342,21 @@ export async function runTopLevelAgentLoop(
       const attemptClient = resolveClient()
       const profileDefaultMaxTokens = getModelProfile(attemptClient.getModel()).defaultMaxTokens
 
-      const requestMessages = await config.getConversationMessages()
+      let requestMessages = await config.getConversationMessages()
+      const normalized = ensureRequestNotEndingWithAssistant(requestMessages)
+      if (normalized !== requestMessages) {
+        const extra = normalized[normalized.length - 1]!
+        const continueMsgId = crypto.randomUUID()
+        append(
+          createMessageStartEvent(continueMsgId, 'user', extra.content, {
+            ...(currentWindowMessageOptions ?? {}),
+            isSystemGenerated: true,
+            messageKind: 'correction',
+          }),
+        )
+        append({ type: 'message.done', data: { messageId: continueMsgId } })
+        requestMessages = normalized
+      }
 
       // The format-retry continuation is appended once per round (not on
       // LLM-error retries) — its persisted copy feeds later context rebuilds.
@@ -553,7 +570,21 @@ export async function runTopLevelAgentLoop(
       if (requestFirstFailureAt === 0) {
         requestFirstFailureAt = Date.now()
       }
-      const decision = evaluateLLMRetry(requestFailures, requestFirstFailureAt, Date.now(), retryPolicy)
+      const { status, retryAfterMs } = parseLlmHttpError(attemptResult.error)
+      if (!isRetryableLlmHttpStatus(status)) {
+        if (!config.subAgentMetadata) {
+          recordLLMFailure(sessionId)
+          config.onMessage?.(createChatLLMRetryFailedMessage(attemptResult.error, requestFailures))
+        }
+        return { failed: { error: attemptResult.error } }
+      }
+      const decision = evaluateLLMRetry(
+        requestFailures,
+        requestFirstFailureAt,
+        Date.now(),
+        retryPolicy,
+        retryAfterMs !== undefined ? { retryAfterMs } : undefined,
+      )
       if (!decision.retry) {
         if (!config.subAgentMetadata) {
           recordLLMFailure(sessionId)
@@ -695,6 +726,13 @@ export async function runTopLevelAgentLoop(
     }
 
     if (!compacting && result.finishReason === 'length' && result.toolCalls.length === 0) {
+      const truncatedNotice = serverT({
+        en: 'The model response was truncated before it finished.',
+        fr: 'La réponse du modèle a été tronquée avant d’être terminée.',
+      })
+      if (!config.subAgentMetadata) {
+        onMessage?.(createChatLLMRetryMessage(truncationRetryCount + 1, 0, truncatedNotice))
+      }
       if (truncationRetryCount < MAX_TRUNCATION_RETRIES) {
         truncationRetryCount += 1
         const currentMaxTokens =
@@ -706,34 +744,26 @@ export async function runTopLevelAgentLoop(
           Math.max(256, contextWindow - promptTokens - OUTPUT_RESERVE_TOKENS),
         )
         currentMaxTokensOverride = newMaxTokens
-        // Finalize the truncated assistant message so the frontend properly closes it
         const interimStats = turnMetrics.buildStats(statsIdentity, mode)
         append(
           createMessageDoneEvent(assistantMsgId, {
             segments: result.segments,
             stats: interimStats,
+            partial: true,
           }),
         )
-        // Tell the frontend to fold the streaming message back into messages
-        onMessage?.(createChatMessageUpdatedMessage(assistantMsgId, { isStreaming: false }))
-        // Emit continue message to event store so getConversationMessages picks it up next iteration
-        // We don't broadcast it via WebSocket, so the frontend won't see it
+        onMessage?.(createChatMessageUpdatedMessage(assistantMsgId, { isStreaming: false, partial: true }))
         const continueMsgId = crypto.randomUUID()
         append(
-          createMessageStartEvent(
-            continueMsgId,
-            'user',
-            'Continue your previous response exactly where you left off.',
-            {
-              ...(currentWindowMessageOptions ?? {}),
-              isSystemGenerated: true,
-            },
-          ),
+          createMessageStartEvent(continueMsgId, 'user', truncatedNotice, {
+            ...(currentWindowMessageOptions ?? {}),
+            isSystemGenerated: true,
+            messageKind: 'correction',
+          }),
         )
         append({ type: 'message.done', data: { messageId: continueMsgId } })
         continue
       } else {
-        // Exhausted retries, emit truncated
         const stats = turnMetrics.buildStats(statsIdentity, mode)
         append(
           createMessageDoneEvent(assistantMsgId, {
@@ -743,6 +773,14 @@ export async function runTopLevelAgentLoop(
           }),
         )
         append(createChatDoneEvent(assistantMsgId, 'truncated', stats, agentType))
+        onMessage?.(
+          createChatMessageUpdatedMessage(assistantMsgId, {
+            isStreaming: false,
+            partial: true,
+            stats,
+          }),
+        )
+        onMessage?.(createChatDoneMessage(assistantMsgId, 'truncated', stats, agentType))
         break
       }
     }

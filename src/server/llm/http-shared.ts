@@ -7,6 +7,21 @@ import type {
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
 
+/** Parse Retry-After as milliseconds. Accepts delta-seconds and HTTP-date. */
+export function parseRetryAfterMs(header: string | null | undefined, now = Date.now()): number | undefined {
+  if (!header) return undefined
+  const trimmed = header.trim()
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000
+  const date = Date.parse(trimmed)
+  if (Number.isNaN(date)) return undefined
+  return Math.max(0, date - now)
+}
+
+export function formatLlmHttpError(status: number, body: string, retryAfterMs?: number): string {
+  const suffix = retryAfterMs !== undefined ? ` (retry-after-ms=${Math.round(retryAfterMs)})` : ''
+  return `HTTP ${status}${suffix}: ${body}`
+}
+
 export interface RequestOptions {
   signal?: AbortSignal | null | undefined
   /** Extra headers merged over the client's default headers (e.g. opencode session affinity). */
@@ -98,7 +113,11 @@ export async function postJson(
 
   if (!response.ok) {
     const errorText = await response.text()
-    throw new LLMError(`HTTP ${response.status}: ${errorText}`)
+    const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'))
+    throw new LLMError(formatLlmHttpError(response.status, errorText, retryAfterMs), {
+      status: response.status,
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    })
   }
 
   return response
