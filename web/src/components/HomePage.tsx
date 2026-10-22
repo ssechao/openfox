@@ -1,7 +1,9 @@
 import { ScrollArea } from './shared/ScrollArea'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { Link, useLocation } from 'wouter'
+import { useShallow } from 'zustand/react/shallow'
 import { useSessionStore } from '../stores/session'
+import { selectSessionSearch } from '../stores/session/selectors'
 import { useProjectStore } from '../stores/project'
 import { useProjects } from '../hooks/useProjects'
 import { useResource } from '../hooks/useResource'
@@ -26,7 +28,7 @@ import {
 } from './shared/icons'
 import { DropdownMenu, type DropdownMenuItem } from './shared/DropdownMenu'
 import { Spinner } from './shared/Spinner'
-import { highlightMatches } from '../lib/modal-utils'
+import { highlightExact } from '../lib/modal-utils'
 import { shouldAutofocus } from '../lib/device'
 import { TasksModal } from './tasks/TasksModal'
 import type { Translation } from '@shared/i18n/index.js'
@@ -150,18 +152,14 @@ export function HomePage() {
   const [tasksProjectId, setTasksProjectId] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
-  // The home page shows only the 20 most recent sessions; the full corpus
-  // (with prompts) is loaded on demand when the user searches.
+  // The home page shows the 20 most recent sessions. Search uses the server FTS index.
   const sessions = useSessionStore((state) => state.sessions)
-  const searchResults = useSessionStore((state) => state.searchResults)
-  const searchIndexReady = useSessionStore((state) => state.searchIndexReady)
-  const searchIndexMessage = useSessionStore((state) => state.searchIndexMessage)
+  const searchState = useSessionStore(useShallow(selectSessionSearch))
   const sessionsWithPendingConfirmations = useSessionStore((state) => state.sessionsWithPendingConfirmations)
   const showProjectsAboveSessions =
     useSetting(SETTINGS_KEYS.DISPLAY_SHOW_PROJECTS_ABOVE_SESSIONS, 'false').value === 'true'
   const { projects, loading } = useProjects()
   const listHomeSessions = useSessionStore((state) => state.listHomeSessions)
-  const searchFromServer = useSessionStore((state) => state.searchFromServer)
   const deleteProject = useProjectStore((state) => state.deleteProject)
 
   const connectionStatus = useSessionStore((state) => state.connectionStatus)
@@ -178,8 +176,8 @@ export function HomePage() {
   }, [searchQuery])
 
   useEffect(() => {
-    void searchFromServer(debouncedQuery)
-  }, [debouncedQuery, searchFromServer])
+    void searchState.searchFromServer(debouncedQuery)
+  }, [debouncedQuery, searchState.searchFromServer])
 
   const projectById = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects])
 
@@ -193,8 +191,8 @@ export function HomePage() {
 
   const visibleSessions = useMemo(() => {
     if (!debouncedQuery) return recentSessions
-    return searchResults ?? []
-  }, [debouncedQuery, searchResults, recentSessions])
+    return searchState.searchResults ?? []
+  }, [debouncedQuery, searchState.searchResults, recentSessions])
 
   // Mirror the project dropdown ordering: starred first, then the rest,
   // alphabetical within each group.
@@ -218,9 +216,15 @@ export function HomePage() {
   }
 
   const isSearching = debouncedQuery.length > 0
-  const indexUnavailable = isSearching && searchIndexReady === false
-  const matchCount = visibleSessions.length
-  const hasNoResults = isSearching && !indexUnavailable && searchResults !== null && matchCount === 0
+  const indexUnavailable = isSearching && searchState.searchIndexReady === false
+  const matchCount = searchState.searchTotal ?? visibleSessions.length
+  const hasNoResults =
+    isSearching &&
+    !indexUnavailable &&
+    !searchState.searchPending &&
+    !searchState.searchError &&
+    searchState.searchResults !== null &&
+    visibleSessions.length === 0
 
   const recentSessionsSection = (
     <div aria-label={t({ en: 'Recent sessions', fr: 'Sessions récentes' })} className="mb-6 md:mb-8">
@@ -232,12 +236,20 @@ export function HomePage() {
           <SearchIcon className="w-10 h-10 mx-auto mb-4 opacity-40" />
           <p className="text-lg">
             {t(
-              searchIndexMessage ?? {
+              searchState.searchIndexMessage ?? {
                 en: 'Search index is unavailable. Run scripts/rebuild-search-index.ts to enable search.',
                 fr: "L'index de recherche est indisponible. Exécutez scripts/rebuild-search-index.ts pour activer la recherche.",
               },
             )}
           </p>
+        </div>
+      ) : searchState.searchError ? (
+        <div className="text-center py-16 text-text-muted bg-bg-secondary border border-border rounded-lg">
+          <p className="text-lg">{t(searchState.searchError)}</p>
+        </div>
+      ) : isSearching && searchState.searchPending && searchState.searchResults === null ? (
+        <div className="bg-bg-secondary border border-border rounded-lg p-3 md:p-4 text-text-muted text-sm">
+          {t({ en: 'Searching…', fr: 'Recherche…' })}
         </div>
       ) : hasNoResults ? (
         <div className="text-center py-16 text-text-muted bg-bg-secondary border border-border rounded-lg">
@@ -254,57 +266,89 @@ export function HomePage() {
           </p>
         </div>
       ) : visibleSessions.length > 0 ? (
-        <div className="bg-bg-secondary border border-border rounded-lg overflow-hidden divide-y divide-border">
-          {visibleSessions.map((session) => {
-            const project = projectById.get(session.projectId)
-            const displayTitle = session.title ?? session.id.slice(0, 8)
-            const waiting = sessionsWithPendingConfirmations.includes(session.id)
-            const rowClass =
-              'flex items-center gap-3 px-3 md:px-4 py-2.5 transition-colors' +
-              (project ? ' hover:bg-bg-tertiary/50 cursor-pointer' : ' cursor-default')
-            const rowBody = (
-              <>
-                <span className="text-sm text-text-primary truncate flex-1 min-w-0">
-                  {isSearching ? highlightMatches(displayTitle, debouncedQuery) : displayTitle}
-                </span>
-                <span className="text-xs text-text-muted shrink-0">{formatRelativeDate(session.updatedAt)}</span>
-                <span className="text-xs text-text-muted shrink-0">
-                  {t({ en: '{{count}} msgs', fr: '{{count}} msg' }, { count: session.messageCount })}
-                </span>
-              </>
-            )
-            const statusDot = <SessionStatusDot session={session} waiting={waiting} />
-            return project ? (
-              <div
-                key={session.id}
-                className={rowClass}
-                onClick={(e) => {
-                  if (e.button !== 0 || e.defaultPrevented) return
-                  if ((e.target as HTMLElement).closest('[data-testid="session-dropdown-menu"]')) return
-                  navigate(`/p/${project.id}/s/${session.id}`)
-                }}
-              >
-                {statusDot}
-                <SessionProjectMenu
-                  projectId={project.id}
-                  projectName={project.name}
-                  onTasks={() => setTasksProjectId(project.id)}
-                />
-                <Link href={`/p/${project.id}/s/${session.id}`} className="flex items-center gap-3 flex-1 min-w-0">
-                  {rowBody}
-                </Link>
-              </div>
-            ) : (
-              <div key={session.id} className={rowClass}>
-                {statusDot}
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-accent-primary shrink-0 max-w-[90px] truncate">
-                  {session.projectId.slice(0, 10)}
-                </span>
-                <div className="flex items-center gap-3 flex-1 min-w-0">{rowBody}</div>
-              </div>
-            )
-          })}
-        </div>
+        <>
+          <div className="bg-bg-secondary border border-border rounded-lg overflow-hidden divide-y divide-border">
+            {visibleSessions.map((session) => {
+              const project = projectById.get(session.projectId)
+              const displayTitle = session.title ?? session.id.slice(0, 8)
+              const waiting = sessionsWithPendingConfirmations.includes(session.id)
+              const rowClass =
+                'flex items-center gap-3 px-3 md:px-4 py-2.5 transition-colors' +
+                (project ? ' hover:bg-bg-tertiary/50 cursor-pointer' : ' cursor-default')
+              const bodySnippet =
+                isSearching && session.searchMatch?.field === 'body' ? session.searchMatch.snippet : undefined
+              const rowBody = (
+                <>
+                  <span className="text-sm text-text-primary truncate flex-1 min-w-0">
+                    {isSearching ? highlightExact(displayTitle, debouncedQuery) : displayTitle}
+                  </span>
+                  {bodySnippet ? (
+                    <span className="flex flex-wrap items-center gap-1.5 shrink-0 max-w-[50%]">
+                      <span className="text-[10px] font-medium text-accent-primary border border-accent-primary/30 bg-accent-primary/8 rounded px-1 py-0.5 leading-none">
+                        {t({ en: 'prompts', fr: 'invites' })}
+                      </span>
+                      <span className="text-[11px] text-text-muted truncate">
+                        {highlightExact(bodySnippet, debouncedQuery)}
+                      </span>
+                    </span>
+                  ) : null}
+                  <span className="text-xs text-text-muted shrink-0">{formatRelativeDate(session.updatedAt)}</span>
+                  <span className="text-xs text-text-muted shrink-0">
+                    {t({ en: '{{count}} msgs', fr: '{{count}} msg' }, { count: session.messageCount })}
+                  </span>
+                </>
+              )
+              const statusDot = <SessionStatusDot session={session} waiting={waiting} />
+              return project ? (
+                <div
+                  key={session.id}
+                  className={rowClass}
+                  onClick={(e) => {
+                    if (e.button !== 0 || e.defaultPrevented) return
+                    if ((e.target as HTMLElement).closest('[data-testid="session-dropdown-menu"]')) return
+                    navigate(`/p/${project.id}/s/${session.id}`)
+                  }}
+                >
+                  {statusDot}
+                  <SessionProjectMenu
+                    projectId={project.id}
+                    projectName={project.name}
+                    onTasks={() => setTasksProjectId(project.id)}
+                  />
+                  <Link href={`/p/${project.id}/s/${session.id}`} className="flex items-center gap-3 flex-1 min-w-0">
+                    {rowBody}
+                  </Link>
+                </div>
+              ) : (
+                <div key={session.id} className={rowClass}>
+                  {statusDot}
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-accent-primary shrink-0 max-w-[90px] truncate">
+                    {session.projectId.slice(0, 10)}
+                  </span>
+                  <div className="flex items-center gap-3 flex-1 min-w-0">{rowBody}</div>
+                </div>
+              )
+            })}
+          </div>
+          {isSearching && searchState.searchHasMore ? (
+            <button
+              type="button"
+              className="w-full mt-2 py-2 text-sm text-text-muted hover:text-text-primary"
+              disabled={searchState.searchPending}
+              onClick={() =>
+                void searchState.searchFromServer(debouncedQuery, {
+                  offset: searchState.searchResults?.length ?? 0,
+                  append: true,
+                  limit: 20,
+                })
+              }
+            >
+              {searchState.searchPending
+                ? t({ en: 'Loading more…', fr: 'Chargement…' })
+                : t({ en: 'Load more', fr: 'Charger la suite' })}
+            </button>
+          ) : null}
+        </>
       ) : (
         <div className="bg-bg-secondary border border-border rounded-lg p-3 md:p-4 text-text-muted text-sm">
           {t({

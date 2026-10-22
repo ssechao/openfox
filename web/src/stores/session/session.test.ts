@@ -684,51 +684,6 @@ describe('useSessionStore session isolation', () => {
     expect(state.currentSession?.messageCount).toBe(3)
   })
 
-  it('applies the flat-summary refresh to the search corpus (searchSessions) as well', async () => {
-    const useSessionStore = await loadSessionStore()
-
-    useSessionStore.setState((state) => ({
-      ...state,
-      sessions: [],
-      searchSessions: [
-        {
-          id: 'session-1',
-          projectId: 'project-1',
-          workdir: '/tmp/project-1',
-          mode: 'planner',
-          phase: 'plan',
-          isRunning: false,
-          isFavorite: false,
-          createdAt: 'a',
-          updatedAt: '2024-01-01T00:00:00.000Z',
-          criteriaCount: 0,
-          criteriaCompleted: 0,
-          messageCount: 2,
-        },
-      ],
-      currentSession: null,
-    }))
-
-    useSessionStore.getState().handleServerMessage({
-      type: 'chat.message',
-      sessionId: 'session-1',
-      payload: {
-        message: {
-          id: 'msg-3',
-          role: 'assistant',
-          content: '',
-          timestamp: '2024-01-02T00:00:00.000Z',
-          tokenCount: 0,
-          isStreaming: true,
-        },
-      },
-    })
-
-    const summary = useSessionStore.getState().searchSessions?.[0]
-    expect(summary?.messageCount).toBe(3)
-    expect(summary?.updatedAt).toBe('2024-01-02T00:00:00.000Z')
-  })
-
   it('does not double-count a re-delivered chat.message on the flat summary', async () => {
     const useSessionStore = await loadSessionStore()
 
@@ -2797,7 +2752,6 @@ describe('homepage session loading', () => {
 
     await useSessionStore.getState().listHomeSessions()
 
-    expect(useSessionStore.getState().searchSessions).toBeNull()
     const urls = fetchMock.mock.calls.map((c) => (c as unknown[])[0])
     expect(urls).not.toContain('/api/sessions')
   })
@@ -2887,7 +2841,7 @@ describe('homepage session loading', () => {
     expect(state.sessions.find((s: any) => s.id === 'old-b1')).toBeUndefined()
   })
 
-  it('ensureFullSessionList loads the full corpus once and caches it for later calls', async () => {
+  it('searchFromServer records indexReady, total, and keeps previous results until the response', async () => {
     const useSessionStore = await loadSessionStore()
     fetchMock.mockResolvedValue({
       ok: true,
@@ -2904,33 +2858,61 @@ describe('homepage session loading', () => {
               messageCount: 1,
               createdAt: '2024-01-01T00:00:00.000Z',
               updatedAt: '2024-01-01T00:00:00.000Z',
-              recentUserPrompts: [{ id: 'm1', content: 'hello', timestamp: '2024-01-01T00:00:00.000Z' }],
-            },
-            {
-              id: 's2',
-              projectId: 'p2',
-              mode: 'planner',
-              phase: 'plan',
-              isRunning: false,
-              messageCount: 2,
-              createdAt: '2024-01-01T00:00:00.000Z',
-              updatedAt: '2024-01-01T00:00:00.000Z',
+              searchMatch: { field: 'body', snippet: 'hello world' },
             },
           ],
+          hasMore: true,
+          total: 21,
+          indexReady: true,
         }),
     } as never)
 
+    await useSessionStore.getState().searchFromServer('hello')
     const state = useSessionStore.getState()
-    await state.ensureFullSessionList()
-    await state.ensureFullSessionList()
-
-    expect(useSessionStore.getState().searchSessions).toHaveLength(2)
-    const fullListCalls = fetchMock.mock.calls.map((c) => (c as unknown[])[0]).filter((url) => url === '/api/sessions')
-    expect(fullListCalls).toHaveLength(1)
+    expect(state.searchResults).toHaveLength(1)
+    expect(state.searchHasMore).toBe(true)
+    expect(state.searchTotal).toBe(21)
+    expect(state.searchIndexReady).toBe(true)
+    expect(state.searchPending).toBe(false)
+    expect(state.searchError).toBeNull()
   })
 
-  it('invalidates the search corpus when a session is deleted so stale entries disappear', async () => {
+  it('searchFromServer treats a missing indexReady as not ready and surfaces HTTP errors', async () => {
     const useSessionStore = await loadSessionStore()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          sessions: [],
+          hasMore: false,
+          indexReady: false,
+          message: { en: 'unavailable', fr: 'indisponible' },
+        }),
+    } as never)
+    await useSessionStore.getState().searchFromServer('hello')
+    expect(useSessionStore.getState().searchIndexReady).toBe(false)
+    expect(useSessionStore.getState().searchIndexMessage?.en).toBe('unavailable')
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({ error: 'boom' }),
+    } as never)
+    await useSessionStore.getState().searchFromServer('hello')
+    expect(useSessionStore.getState().searchError?.en).toBe('boom')
+    expect(useSessionStore.getState().searchPending).toBe(false)
+  })
+
+  it('ignores a stale search response when a newer query is in flight', async () => {
+    const useSessionStore = await loadSessionStore()
+    let resolveFirst!: (value: any) => void
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve
+        }) as Promise<Response>,
+    )
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -2938,30 +2920,49 @@ describe('homepage session loading', () => {
         Promise.resolve({
           sessions: [
             {
-              id: 's1',
+              id: 's-new',
               projectId: 'p1',
               mode: 'planner',
               phase: 'plan',
               isRunning: false,
               messageCount: 1,
-              createdAt: '2024-01-01T00:00:00.000Z',
-              updatedAt: '2024-01-01T00:00:00.000Z',
+              createdAt: 't',
+              updatedAt: 't',
             },
           ],
+          hasMore: false,
+          total: 1,
+          indexReady: true,
         }),
     } as never)
-    await useSessionStore.getState().ensureFullSessionList()
-    expect(useSessionStore.getState().searchSessions).not.toBeNull()
 
-    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({}) } as never)
-    fetchMock.mockResolvedValueOnce({
+    const first = useSessionStore.getState().searchFromServer('alpha')
+    const second = useSessionStore.getState().searchFromServer('beta')
+    await second
+    resolveFirst({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ sessions: [], pendingConfirmationsBySession: {} }),
-    } as never)
-    await useSessionStore.getState().deleteSession('s1')
-
-    expect(useSessionStore.getState().searchSessions).toBeNull()
+      json: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              id: 's-old',
+              projectId: 'p1',
+              mode: 'planner',
+              phase: 'plan',
+              isRunning: false,
+              messageCount: 1,
+              createdAt: 't',
+              updatedAt: 't',
+            },
+          ],
+          hasMore: false,
+          total: 1,
+          indexReady: true,
+        }),
+    })
+    await first
+    expect(useSessionStore.getState().searchResults?.[0]?.id).toBe('s-new')
   })
 })
 

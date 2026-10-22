@@ -84,6 +84,10 @@ vi.mock('../../stores/session', async () => {
         searchResults: resultsRef.current,
         searchIndexReady: resultsRef.ready,
         searchIndexMessage: null,
+        searchHasMore: false,
+        searchTotal: resultsRef.current?.length ?? null,
+        searchPending: false,
+        searchError: null,
       }
       return selector ? selector(state) : state
     },
@@ -650,15 +654,15 @@ describe('Sidebar session search', () => {
 
     await vi.waitFor(() => {
       expect(screen.getByText('Alpha')).toBeTruthy()
+      expect(screen.queryByText('Beta')).toBeNull()
     })
-    expect(screen.queryByText('Beta')).toBeNull()
 
     await userEvent.clear(input)
 
     await vi.waitFor(() => {
       expect(screen.getByText('Alpha')).toBeTruthy()
+      expect(screen.getByText('Beta')).toBeTruthy()
     })
-    expect(screen.getByText('Beta')).toBeTruthy()
   })
 
   describe('Ctrl+S shortcut behavior', () => {

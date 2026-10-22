@@ -38,10 +38,21 @@ export interface SearchIndexReadyState {
   ready: boolean
 }
 
+export interface SearchHit {
+  sessionId: string
+  messageId: string
+  matchField: 'title' | 'body'
+  snippet: string
+}
+
 export interface SearchPage {
   sessionIds: string[]
+  hits: SearchHit[]
   hasMore: boolean
+  total: number
 }
+
+const EMPTY_PAGE: SearchPage = { sessionIds: [], hits: [], hasMore: false, total: 0 }
 
 interface IndexableMessage {
   id: string
@@ -171,49 +182,80 @@ export function searchSessionIds(
 ): SearchPage {
   ensureSearchSchema(db)
   const match = buildMatchQuery(query)
-  if (!match) return { sessionIds: [], hasMore: false }
+  if (!match) return EMPTY_PAGE
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100)
   const offset = Math.max(options.offset ?? 0, 0)
   const projectId = options.projectId
-  const needed = offset + limit + 1
+  const grouped = `SELECT session_id, MIN(rank) AS best
+     FROM search_index WHERE search_index MATCH ? GROUP BY session_id`
+  const fromHits =
+    projectId && tableExists(db, 'sessions')
+      ? `SELECT h.session_id AS session_id, h.best AS best
+         FROM (${grouped}) h
+         JOIN sessions s ON s.id = h.session_id
+         WHERE s.project_id = ?`
+      : grouped
   try {
-    const rows = db
-      .prepare(
-        `SELECT session_id, rank AS best FROM search_index WHERE search_index MATCH ? ORDER BY rank ASC, session_id ASC`,
-      )
-      .all(match) as Array<{ session_id: string }>
-    const allowed =
+    const countRow =
       projectId && tableExists(db, 'sessions')
-        ? new Set(
-            (db.prepare('SELECT id FROM sessions WHERE project_id = ?').all(projectId) as Array<{ id: string }>).map(
-              (row) => row.id,
-            ),
-          )
-        : null
-    const ordered: string[] = []
-    const seen = new Set<string>()
-    for (const row of rows) {
-      if (allowed && !allowed.has(row.session_id)) continue
-      if (seen.has(row.session_id)) continue
-      seen.add(row.session_id)
-      ordered.push(row.session_id)
-      if (ordered.length >= needed) break
-    }
-    return { sessionIds: ordered.slice(offset, offset + limit), hasMore: ordered.length > offset + limit }
+        ? (db.prepare(`SELECT COUNT(*) AS n FROM (${fromHits})`).get(match, projectId) as { n: number })
+        : (db.prepare(`SELECT COUNT(*) AS n FROM (${fromHits})`).get(match) as { n: number })
+    const total = countRow?.n ?? 0
+    const pageSql = `SELECT session_id, best FROM (${fromHits}) ORDER BY best ASC, session_id ASC LIMIT ? OFFSET ?`
+    const rows =
+      projectId && tableExists(db, 'sessions')
+        ? (db.prepare(pageSql).all(match, projectId, limit + 1, offset) as Array<{ session_id: string }>)
+        : (db.prepare(pageSql).all(match, limit + 1, offset) as Array<{ session_id: string }>)
+    const hasMore = rows.length > limit
+    const page = rows.slice(0, limit)
+    const sessionIds = page.map((row) => row.session_id)
+    const hits = attachSearchHits(db, match, sessionIds)
+    return { sessionIds, hits, hasMore, total }
   } catch {
-    return { sessionIds: [], hasMore: false }
+    return EMPTY_PAGE
   }
+}
+
+function attachSearchHits(db: Database.Database, match: string, sessionIds: string[]): SearchHit[] {
+  if (sessionIds.length === 0) return []
+  const placeholders = sessionIds.map(() => '?').join(',')
+  const rows = db
+    .prepare(
+      `SELECT session_id, message_id, snippet(search_index, 3, '', '', '…', 24) AS body_snip, rank AS best
+       FROM search_index
+       WHERE search_index MATCH ? AND session_id IN (${placeholders})
+       ORDER BY rank ASC, session_id ASC`,
+    )
+    .all(match, ...sessionIds) as Array<{ session_id: string; message_id: string; body_snip: string }>
+  const first = new Map<string, SearchHit>()
+  for (const row of rows) {
+    if (first.has(row.session_id)) continue
+    first.set(row.session_id, {
+      sessionId: row.session_id,
+      messageId: row.message_id,
+      matchField: row.message_id === TITLE_ROW_ID ? 'title' : 'body',
+      snippet: row.body_snip ?? '',
+    })
+  }
+  return sessionIds.flatMap((id) => {
+    const hit = first.get(id)
+    return hit ? [hit] : []
+  })
 }
 
 export class SearchIndexer {
   private readonly pending = new Map<string, Map<string, { content: string; indexable: boolean }>>()
-  private readonly titles = new Map<string, string>()
 
   constructor(private readonly db: Database.Database) {
     ensureSearchSchema(db)
   }
 
-  apply(sessionId: string, event: TurnEvent, _timestamp: number, options: { allowSnapshot?: boolean } = {}): void {
+  apply(
+    sessionId: string,
+    event: TurnEvent,
+    _timestamp: number,
+    options: { allowSnapshot?: boolean; removeMessageIds?: string[] } = {},
+  ): void {
     if (event.type === 'session.initialized' && event.data.title) {
       this.updateTitle(sessionId, event.data.title)
       return
@@ -223,24 +265,23 @@ export class SearchIndexer {
       return
     }
     if (event.type === 'turn.snapshot') {
-      if (!options.allowSnapshot) return
-      this.indexSnapshotMessages(sessionId, event.data.messages ?? [])
+      if (options.allowSnapshot) this.indexSnapshotMessages(sessionId, event.data.messages ?? [])
+      if (options.removeMessageIds) this.removeMessages(sessionId, options.removeMessageIds)
       return
     }
     if (event.type === 'message.start') {
       const indexable = isIndexableUserMessage(event.data)
-      this.sessionPending(sessionId).set(event.data.messageId, {
-        content: event.data.content ?? '',
-        indexable,
-      })
-      if (indexable) this.upsertMessage(sessionId, event.data.messageId, event.data.content ?? '')
+      const content = event.data.content ?? ''
+      if (indexable) this.upsertMessage(sessionId, event.data.messageId, content)
+      this.sessionPending(sessionId).set(event.data.messageId, { content, indexable })
       return
     }
     if (event.type === 'message.delta') {
       const pending = this.sessionPending(sessionId).get(event.data.messageId)
       if (!pending) return
-      pending.content += event.data.content
-      if (pending.indexable) this.upsertMessage(sessionId, event.data.messageId, pending.content)
+      const next = pending.content + event.data.content
+      if (pending.indexable) this.upsertMessage(sessionId, event.data.messageId, next)
+      pending.content = next
       return
     }
     if (event.type === 'message.done') {
@@ -248,10 +289,10 @@ export class SearchIndexer {
       if (pending?.indexable) this.upsertMessage(sessionId, event.data.messageId, pending.content)
       this.sessionPending(sessionId).delete(event.data.messageId)
     }
+    if (options.removeMessageIds) this.removeMessages(sessionId, options.removeMessageIds)
   }
 
   updateTitle(sessionId: string, title: string): void {
-    this.titles.set(sessionId, title)
     const current = this.db
       .prepare('SELECT message_id, body FROM search_index WHERE session_id = ?')
       .all(sessionId) as Array<{ message_id: string; body: string }>
@@ -270,7 +311,6 @@ export class SearchIndexer {
   removeSession(sessionId: string): void {
     deleteSessionRows(this.db, 'search_index', sessionId)
     this.pending.delete(sessionId)
-    this.titles.delete(sessionId)
   }
 
   removeMessages(sessionId: string, messageIds: string[]): void {
@@ -291,7 +331,21 @@ export class SearchIndexer {
   }
 
   private titleOf(sessionId: string): string {
-    return this.titles.get(sessionId) ?? readTitle(this.db, sessionId, '')
+    return readTitle(this.db, sessionId, '')
+  }
+
+  indexUserMessages(
+    sessionId: string,
+    messages: Array<{
+      id?: string
+      role?: string
+      content?: string
+      isSystemGenerated?: boolean
+      messageKind?: string
+      subAgentType?: string
+    }>,
+  ): void {
+    this.indexSnapshotMessages(sessionId, messages)
   }
 
   private upsertMessage(sessionId: string, messageId: string, body: string): void {

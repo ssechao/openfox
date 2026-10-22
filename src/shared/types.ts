@@ -173,6 +173,7 @@ export interface SessionSummary {
   criteriaCompleted: number
   messageCount: number
   recentUserPrompts?: RecentUserPrompt[]
+  searchMatch?: { field: 'title' | 'body'; snippet?: string }
 }
 
 // ============================================================================

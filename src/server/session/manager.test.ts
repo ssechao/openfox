@@ -831,6 +831,21 @@ describe('SessionManager', () => {
       expect(forked.messages[1]?.content).toBe('Second message')
     })
 
+    it('indexes copied prompts on fork and omits messages after the fork point', async () => {
+      const { searchSessionIds } = await import('../search/fts-index.js')
+      const original = manager.createSession(projectId)
+      const keep = manager.addMessage(original.id, {
+        role: 'user',
+        content: 'fork-keep-alpha-term',
+        tokenCount: 10,
+      })
+      manager.addMessage(original.id, { role: 'user', content: 'fork-drop-omega-term', tokenCount: 10 })
+      const forked = manager.forkSession(original.id, keep.id)
+      const db = getDatabase()
+      expect(searchSessionIds(db, 'fork-keep-alpha-term').sessionIds.sort()).toEqual([forked.id, original.id].sort())
+      expect(searchSessionIds(db, 'fork-drop-omega-term').sessionIds).toEqual([original.id])
+    })
+
     it('copies cached system prompt to the forked session', async () => {
       const { updateSessionCachedPrompt, getSessionCachedPrompt } = await import('../db/sessions.js')
       const original = manager.createSession(projectId)
@@ -1114,6 +1129,20 @@ describe('SessionManager', () => {
       expect(forkedCtx.length).toBeLessThan(originalCtx.length)
       expect(JSON.stringify(originalCtx.slice(0, forkedCtx.length))).toBe(JSON.stringify(forkedCtx))
     })
+  })
+
+  it('removes truncated prompts from the search index', async () => {
+    const { searchSessionIds } = await import('../search/fts-index.js')
+    const { getSessionState, emitTurnSnapshot, truncateSessionMessages } = await import('../events/session.js')
+    const { buildSnapshot } = await import('../events/folding.js')
+    const session = manager.createSession(projectId)
+    manager.addMessage(session.id, { role: 'user', content: 'truncate-keep-term', tokenCount: 1 })
+    manager.addMessage(session.id, { role: 'user', content: 'truncate-drop-term', tokenCount: 1 })
+    const state = getSessionState(session.id)
+    emitTurnSnapshot(session.id, buildSnapshot(state!, 1))
+    truncateSessionMessages(session.id, 0)
+    expect(searchSessionIds(getDatabase(), 'truncate-keep-term').sessionIds).toEqual([session.id])
+    expect(searchSessionIds(getDatabase(), 'truncate-drop-term').sessionIds).toEqual([])
   })
 
   describe('createClientForAgent', () => {

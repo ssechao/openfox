@@ -36,6 +36,10 @@ const sessionStoreState = {
   searchResults: null as SessionSummary[] | null,
   searchIndexReady: null as boolean | null,
   searchIndexMessage: null as { en: string; fr: string } | null,
+  searchHasMore: false,
+  searchTotal: null as number | null,
+  searchPending: false,
+  searchError: null as { en: string; fr: string } | null,
 }
 
 vi.mock('../../stores/session', () => ({

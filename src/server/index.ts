@@ -881,6 +881,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.json({
         sessions: sessionsWithPrompts,
         hasMore: result.hasMore,
+        total: result.total,
         indexReady: result.indexReady,
         ...(result.message ? { message: result.message } : {}),
         pendingConfirmationsBySession: {},

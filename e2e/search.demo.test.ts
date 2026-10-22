@@ -172,7 +172,11 @@ describe('search FTS5 demo (isolated instance)', () => {
       fixtures: Record<string, string>
     }
     fixtures = generated.fixtures
-    report['corpus'] = { sessions: generated.sessionCount, events: generated.eventCount, commit: 'ff2b1018' }
+    report['corpus'] = {
+      sessions: generated.sessionCount,
+      events: generated.eventCount,
+      before: 'GET /api/sessions full list, current code',
+    }
   }, 60_000)
 
   afterAll(async () => {

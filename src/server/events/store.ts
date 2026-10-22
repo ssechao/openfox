@@ -519,10 +519,14 @@ export class EventStore {
   /**
    * Append a single event to a session
    */
-  append(sessionId: string, event: TurnEvent): StoredEvent {
+  append(
+    sessionId: string,
+    event: TurnEvent,
+    options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
+  ): StoredEvent {
     return event?.type === 'turn.snapshot'
-      ? this.measureSnapshotOperation('snapshotAppend', () => this.appendEvent(sessionId, event))
-      : this.appendEvent(sessionId, event)
+      ? this.measureSnapshotOperation('snapshotAppend', () => this.appendEvent(sessionId, event, true, options))
+      : this.appendEvent(sessionId, event, true, options)
   }
 
   appendStreaming(sessionId: string, event: TurnEvent): void {
@@ -628,7 +632,12 @@ export class EventStore {
     for (const ref of collectBlobRefs(data)) clear.call(this.blobStore, ref.hash)
   }
 
-  private appendEvent(sessionId: string, event: TurnEvent, notify = true): StoredEvent {
+  private appendEvent(
+    sessionId: string,
+    event: TurnEvent,
+    notify = true,
+    options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
+  ): StoredEvent {
     this.assertValidEvent(sessionId, event)
     this.flushStreaming(sessionId)
 
@@ -654,7 +663,10 @@ export class EventStore {
         this.timed('write', () =>
           this.db.transaction(() => {
             insert.run(sessionId, seq, timestamp, event.type, payload)
-            this.searchIndex.apply(sessionId, toStore, timestamp)
+            this.searchIndex.apply(sessionId, toStore, timestamp, {
+              ...(options.indexSnapshot ? { allowSnapshot: true } : {}),
+              ...(options.searchRemoveIds ? { removeMessageIds: options.searchRemoveIds } : {}),
+            })
           })(),
         )
         break

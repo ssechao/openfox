@@ -1,6 +1,6 @@
 # Démo — Lot 4b : recherche FTS5
 
-Branche `mt/etape4b-fts`. Mesures du 2026-10-22. Référence AVANT figée sur `ff2b1018`.
+Branche `mt/etape4b-fts`. Mesures du 2026-10-22. Référence AVANT : liste complète (`GET /api/sessions`), code courant (pas un checkout `ff2b1018`).
 
 HOME, config et `OPENFOX_DB_PATH` temporaires. Aucune base de production
 ouverte (`lsof`). Reconstruction de l’index : commande explicite, jamais au
@@ -22,10 +22,10 @@ Générateur `docs/backlog/corpus/generate.mjs` (mode `search`) : 100 sessions, 
 
 ## Mesure HTTP bout-en-bout (N = 100)
 
-| Chemin                                             | p50    | p99     | froid   |
-| -------------------------------------------------- | ------ | ------- | ------- |
-| AVANT `GET /api/sessions` (liste complète)         | 9.1 ms | 20.1 ms | 33.2 ms |
-| APRÈS `GET /api/sessions?q=xylophone-alpha` (FTS5) | 3.3 ms | 13.0 ms | 9.4 ms  |
+| Chemin                                                   | p50    | p99     | froid   |
+| -------------------------------------------------------- | ------ | ------- | ------- |
+| AVANT `GET /api/sessions` (liste complète, code courant) | 9.1 ms | 20.1 ms | 33.2 ms |
+| APRÈS `GET /api/sessions?q=xylophone-alpha` (FTS5)       | 3.3 ms | 13.0 ms | 9.4 ms  |
 
 Seuil : p99 APRÈS ≤ 100 ms. Ratio p99 après/avant ≈ 0.65.
 

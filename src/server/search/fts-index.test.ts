@@ -8,6 +8,8 @@ import {
   isSearchIndexReady,
   getSearchIndexReadyState,
   SEARCH_INDEX_SCHEMA_VERSION,
+  ensureSearchSchema,
+  SearchIndexer,
 } from './fts-index.js'
 
 function snapshot(messages: SessionSnapshot['messages']): SessionSnapshot {
@@ -215,5 +217,27 @@ describe('C1 FTS index write path', () => {
     expect(buildMatchQuery('  foo bar  ')).toBe('"foo"* AND "bar"*')
     expect(buildMatchQuery('unique-term')).toBe('"unique"* AND "term"*')
     expect(buildMatchQuery('')).toBeNull()
+  })
+
+  it('does not keep a rolled-back delta in the in-memory pending buffer', () => {
+    store.append('s1', userStart('m1', 'keep-prefix-'))
+    db.exec('DROP TABLE search_index')
+    expect(() =>
+      store.append('s1', { type: 'message.delta', data: { messageId: 'm1', content: 'rolled-back-zzz' } }),
+    ).toThrow()
+    ensureSearchSchema(db)
+    store.append('s1', { type: 'message.delta', data: { messageId: 'm1', content: 'committed-yyy' } })
+    expect(ids('rolled-back-zzz')).toEqual([])
+    expect(ids('committed-yyy')).toEqual(['s1'])
+    expect(ids('keep-prefix')).toEqual(['s1'])
+  })
+
+  it('uses the sessions table title after a rename through a different indexer', () => {
+    store.append('s1', userStart('m1', 'before-rename'))
+    db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run('BravoUnique', 's1')
+    new SearchIndexer(db).updateTitle('s1', 'BravoUnique')
+    store.append('s1', userStart('m2', 'after-rename'))
+    expect(ids('BravoUnique')).toEqual(['s1'])
+    expect(ids('Alpha')).toEqual([])
   })
 })

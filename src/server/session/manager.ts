@@ -548,7 +548,7 @@ export class SessionManager {
     }
 
     const eventStore = getEventStore()
-    eventStore.append(newSession.id, { type: 'turn.snapshot', data: snapshot })
+    eventStore.append(newSession.id, { type: 'turn.snapshot', data: snapshot }, { indexSnapshot: true })
     updateSessionMessageCount(newSession.id, messages.length)
 
     const cached = getSessionCachedPrompt(originalSessionId)
@@ -809,21 +809,35 @@ export class SessionManager {
   ): {
     sessions: SessionSummary[]
     hasMore: boolean
+    total: number
     indexReady: boolean
     message?: { en: string; fr: string }
   } {
     const db = getDatabase()
     if (!isSearchIndexReady(db)) {
-      return { sessions: [], hasMore: false, indexReady: false, message: SEARCH_INDEX_UNAVAILABLE }
+      return { sessions: [], hasMore: false, total: 0, indexReady: false, message: SEARCH_INDEX_UNAVAILABLE }
     }
     const page = searchSessionIds(db, query, {
       limit,
       offset,
       ...(projectId ? { projectId } : {}),
     })
+    const hitById = new Map(page.hits.map((hit) => [hit.sessionId, hit]))
+    const sessions = dbGetSessionSummariesByIds(page.sessionIds).map((session) => {
+      const hit = hitById.get(session.id)
+      if (!hit) return session
+      return {
+        ...session,
+        searchMatch: {
+          field: hit.matchField,
+          ...(hit.matchField === 'body' && hit.snippet ? { snippet: hit.snippet } : {}),
+        },
+      }
+    })
     return {
-      sessions: this.projectRunningState(dbGetSessionSummariesByIds(page.sessionIds)),
+      sessions: this.projectRunningState(sessions),
       hasMore: page.hasMore,
+      total: page.total,
       indexReady: true,
     }
   }

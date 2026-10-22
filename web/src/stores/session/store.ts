@@ -44,7 +44,6 @@ let wsUnsubscribe: (() => void) | null = null
 const loadingSessionIds = new Set<string>()
 const loadedSessionIds = new Set<string>()
 const listingSessionsForProject = new Map<string, Promise<void>>()
-let fullSessionListPromise: Promise<void> | null = null
 let searchRequestGen = 0
 
 interface SessionLoadData {
@@ -383,11 +382,13 @@ export const useSessionStore = create<SessionState>((set, get) => {
     showPasswordModal: false,
     passwordModalRetry: false,
     sessions: [],
-    searchSessions: null,
     searchResults: null,
     searchIndexReady: null,
     searchIndexMessage: null,
     searchHasMore: false,
+    searchTotal: null,
+    searchPending: false,
+    searchError: null,
     currentSession: null,
     unreadSessionIds: [],
     messages: [],
@@ -586,7 +587,6 @@ export const useSessionStore = create<SessionState>((set, get) => {
           return null
         }
         const data = await res.json()
-        set({ searchSessions: null })
         try {
           wsClient.send('session.load', { sessionId: data.session.id })
         } catch {
@@ -749,35 +749,23 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }
     },
 
-    ensureFullSessionList: async () => {
-      // The full list (with prompts) powers search across all sessions. It is
-      // deliberately loaded on demand only — a fresh home page load must never
-      // pay for parsing every session snapshot.
-      if (get().searchSessions) return
-      if (fullSessionListPromise) return fullSessionListPromise
-      fullSessionListPromise = (async () => {
-        try {
-          const res = await authFetch('/api/sessions')
-          const data = await res.json()
-          const incoming = (data.sessions ?? []) as SessionSummary[]
-          set({ searchSessions: incoming })
-        } catch {
-          // Allow a retry on the next search; the visible list still works.
-        } finally {
-          fullSessionListPromise = null
-        }
-      })()
-      return fullSessionListPromise
-    },
-
     searchFromServer: async (query, opts = {}) => {
       const trimmed = query.trim()
       if (!trimmed) {
         searchRequestGen++
-        set({ searchResults: null, searchIndexReady: null, searchIndexMessage: null, searchHasMore: false })
+        set({
+          searchResults: null,
+          searchIndexReady: null,
+          searchIndexMessage: null,
+          searchHasMore: false,
+          searchTotal: null,
+          searchPending: false,
+          searchError: null,
+        })
         return
       }
       const gen = ++searchRequestGen
+      set({ searchPending: true, searchError: null })
       const params = new URLSearchParams()
       params.set('q', trimmed)
       params.set('limit', String(opts.limit ?? 20))
@@ -785,22 +773,42 @@ export const useSessionStore = create<SessionState>((set, get) => {
       if (opts.projectId) params.set('projectId', opts.projectId)
       try {
         const res = await authFetch(`/api/sessions?${params.toString()}`)
-        const data = (await res.json()) as {
+        const data = (await res.json().catch(() => ({}))) as {
           sessions?: SessionSummary[]
           hasMore?: boolean
+          total?: number
           indexReady?: boolean
           message?: { en: string; fr: string }
+          error?: string
         }
         if (gen !== searchRequestGen) return
+        if (!res.ok) {
+          set({
+            searchPending: false,
+            searchError: {
+              en: data.error || 'Search failed.',
+              fr: data.error || 'La recherche a échoué.',
+            },
+          })
+          return
+        }
         const incoming = data.sessions ?? []
+        const ready = data.indexReady === true
         set({
           searchResults: opts.append ? [...(get().searchResults ?? []), ...incoming] : incoming,
           searchHasMore: Boolean(data.hasMore),
-          searchIndexReady: data.indexReady !== false,
+          searchTotal: typeof data.total === 'number' ? data.total : incoming.length,
+          searchIndexReady: data.indexReady === false ? false : ready,
           searchIndexMessage: data.message ?? null,
+          searchPending: false,
+          searchError: null,
         })
       } catch {
         if (gen !== searchRequestGen) return
+        set({
+          searchPending: false,
+          searchError: { en: 'Search failed.', fr: 'La recherche a échoué.' },
+        })
       }
     },
 
@@ -846,7 +854,6 @@ export const useSessionStore = create<SessionState>((set, get) => {
       try {
         const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
         if (!res.ok) return false
-        set({ searchSessions: null })
         await get().listSessions(projectId)
         if (get().focusedSessionId === sessionId || get().currentSession?.id === sessionId) {
           get().clearSession()
@@ -866,7 +873,6 @@ export const useSessionStore = create<SessionState>((set, get) => {
           body: JSON.stringify({ title }),
         })
         if (!res.ok) return false
-        set({ searchSessions: null })
         await get().listSessions(projectId)
         set((state) => {
           const pane = state.panes[sessionId]
@@ -918,7 +924,6 @@ export const useSessionStore = create<SessionState>((set, get) => {
       try {
         const res = await authFetch(`/api/projects/${projectId}/sessions`, { method: 'DELETE' })
         if (!res.ok) return false
-        set({ searchSessions: null })
         await get().listSessions(projectId)
         return true
       } catch {
