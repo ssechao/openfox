@@ -4,9 +4,9 @@
  * Single code path for starting a workflow-orchestrator run in a session,
  * used by the WebSocket `runner.launch` handler and by the project-tasks
  * service when a slash-workflow task is seeded. Owns the running-state
- * lifecycle, error surfacing, and a small registry so `abortRunnerRun` can
- * cancel task-launched runs (the WS layer additionally tracks its own
- * controllers for client-initiated runs).
+ * lifecycle and error surfacing. The caller must acquire a `workflow`
+ * ExecutionHandle from `SessionRuntimeRegistry` and pass it in; abort/stop
+ * is handled by the shared runtime, not by a local controller registry.
  */
 
 import type { Attachment, StatsIdentity, WorkflowLaunchScope } from '../../shared/types.js'
@@ -14,6 +14,7 @@ import type { ServerMessage } from '../../shared/protocol.js'
 import { createServerMessage } from '../../shared/protocol.js'
 import type { LLMClientWithModel } from '../llm/client.js'
 import type { SessionManager } from '../session/index.js'
+import { getSessionRuntimeRegistry, type ExecutionHandle } from '../session/index.js'
 import { runOrchestrator } from './index.js'
 import { normalizeWorkflowScope } from '../workflows/registry.js'
 import { logger } from '../utils/logger.js'
@@ -37,7 +38,7 @@ export interface WorkflowLaunchPayload {
 export interface LaunchWorkflowRunDeps {
   sessionManager: SessionManager
   sessionId: string
-  controller: AbortController
+  runtimeHandle: ExecutionHandle
   llmClient: LLMClientWithModel
   /** Re-resolve the session's LLM client per retry attempt (provider switch mid-run). */
   getSessionLLMClient?: () => LLMClientWithModel
@@ -47,30 +48,18 @@ export interface LaunchWorkflowRunDeps {
   onFinished?: () => void
 }
 
-const activeRuns = new Map<string, AbortController>()
-
-/** Abort a task-launched workflow run for a session. Returns whether one was found. */
-export function abortRunnerRun(sessionId: string): boolean {
-  const controller = activeRuns.get(sessionId)
-  if (!controller) return false
-  controller.abort()
-  return true
-}
-
 export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: WorkflowLaunchPayload): void {
   const {
     sessionManager,
     sessionId,
-    controller,
+    runtimeHandle,
     llmClient,
     getSessionLLMClient,
     statsIdentity,
     broadcastForSession,
     onFinished,
   } = deps
-  const signal = controller.signal
-
-  activeRuns.set(sessionId, controller)
+  const signal = runtimeHandle.signal
 
   // Mark session as running (emits running.changed event)
   sessionManager.setRunning(sessionId, true)
@@ -153,9 +142,8 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
       broadcastForSession(sessionId, createServerMessage('chat.error', { error: errorMessage, recoverable: false }))
     })
     .finally(() => {
-      if (activeRuns.get(sessionId) === controller) {
-        activeRuns.delete(sessionId)
-      }
+      const registry = getSessionRuntimeRegistry()
+      registry.get(sessionId).release(runtimeHandle)
       try {
         // The orchestrator bypasses runChatTurn, so isRunning must be cleared here
         sessionManager.setRunning(sessionId, false)

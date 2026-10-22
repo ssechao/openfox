@@ -9,6 +9,7 @@ import { handleTerminalMessage, unsubscribeAllFromTerminal } from './terminal.js
 import type { Config } from '../config.js'
 import type { LLMClientWithModel } from '../llm/client.js'
 import type { SessionManager } from '../session/index.js'
+import { getSessionRuntimeRegistry, type ExecutionHandle } from '../session/index.js'
 import { getEventStore, combineEventsWithSnapshot } from '../events/index.js'
 import { getMaxVisibleItems } from '../db/settings.js'
 
@@ -218,8 +219,7 @@ function processQueueAndRestartTurn(
   ) => Array<{ content: string; attachments?: Attachment[]; messageKind?: string; queueId?: string }>,
   queueMode: 'asap' | 'completion',
   broadcastFn: (sessionId: string, msg: ServerMessage) => void,
-  activeAgents: Map<string, AbortController>,
-  startTurnFn: (sessionId: string, controller: AbortController) => void,
+  startTurnFn: (sessionId: string, handle: ExecutionHandle) => void,
   queueMessageFn?: (
     sessionId: string,
     mode: 'asap' | 'completion',
@@ -258,15 +258,10 @@ function processQueueAndRestartTurn(
     broadcastFn,
   )
 
-  const newController = new AbortController()
-  activeAgents.set(sessionId, newController)
-  startTurnFn(sessionId, newController)
+  const handle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
+  startTurnFn(sessionId, handle)
   return true
 }
-
-// Track active agent AbortControllers by sessionId
-const activeAgents = new Map<string, AbortController>()
-const abortedSessions = new Set<string>()
 
 interface ClientConnection {
   ws: WebSocket
@@ -462,17 +457,17 @@ export function createWebSocketServer(
 
   function cleanupAfterTurn(
     sessionId: string,
-    controller: AbortController,
+    handle: ExecutionHandle,
     sendFn: (sessionId: string, msg: ServerMessage) => void,
     setRunningOnEarlyReturn: boolean,
   ) {
-    if (activeAgents.get(sessionId) !== controller) {
+    const runtime = getSessionRuntimeRegistry().peek(sessionId)
+    const stopped = runtime?.wasStopped(handle) ?? false
+    if (!runtime?.release(handle)) {
       return
     }
-    activeAgents.delete(sessionId)
 
-    if (abortedSessions.has(sessionId)) {
-      abortedSessions.delete(sessionId)
+    if (stopped) {
       sessionManager.clearMessageQueue(sessionId)
       const contextState = sessionManager.getContextState(sessionId)
       sendFn(sessionId, createContextStateMessage(contextState))
@@ -485,7 +480,6 @@ export function createWebSocketServer(
       (sid) => sessionManager.drainAsapMessages(sid),
       'asap',
       sendFn,
-      activeAgents,
       startTurnWithCompletionChain,
       (sid, mode, content, attachments, messageKind) =>
         sessionManager.queueMessage(sid, mode, content, attachments, messageKind as 'command' | undefined),
@@ -501,7 +495,6 @@ export function createWebSocketServer(
       (sid) => sessionManager.drainCompletionMessages(sid),
       'completion',
       sendFn,
-      activeAgents,
       startTurnWithCompletionChain,
     )
     if (processedCompletion) {
@@ -517,14 +510,14 @@ export function createWebSocketServer(
     sendFn(sessionId, createContextStateMessage(contextState))
   }
 
-  function startTurnWithCompletionChain(sessionId: string, controller: AbortController) {
+  function startTurnWithCompletionChain(sessionId: string, handle: ExecutionHandle) {
     runChatTurn({
       sessionManager,
       sessionId,
       llmClient: llmForSession(sessionId),
       getSessionLLMClient: () => llmForSession(sessionId),
       statsIdentity: statsForSession(sessionId),
-      signal: controller.signal,
+      signal: handle.signal,
       onMessage: (msg) => broadcastForSession(sessionId, msg),
     })
       .catch((error) => {
@@ -535,7 +528,7 @@ export function createWebSocketServer(
       })
       .finally(() => {
         try {
-          cleanupAfterTurn(sessionId, controller, broadcastForSession, false)
+          cleanupAfterTurn(sessionId, handle, broadcastForSession, false)
         } catch {
           // Session may have been deleted during execution
         }
@@ -823,15 +816,8 @@ export function createWebSocketServer(
   return {
     wss,
     abortSession: (sessionId: string) => {
-      abortedSessions.add(sessionId)
       sessionManager.clearPauseState(sessionId)
-      const controller = activeAgents.get(sessionId)
-      if (controller) {
-        activeAgents.delete(sessionId)
-        controller.abort()
-        return true
-      }
-      return false
+      return getSessionRuntimeRegistry().get(sessionId).stop()
     },
     close: (cb?: () => void) => wss.close(cb as (err?: Error) => void),
     broadcastForSession,
@@ -862,10 +848,10 @@ async function handleClientMessage(
   _getSessionStatsIdentity: ((sessionId: string) => StatsIdentity) | undefined,
   llmForSession: (sessionId: string) => LLMClientWithModel,
   statsForSession: (sessionId: string) => StatsIdentity,
-  _startTurnWithCompletionChain: (sessionId: string, controller: AbortController) => void,
+  _startTurnWithCompletionChain: (sessionId: string, handle: ExecutionHandle) => void,
   cleanupAfterTurn: (
     sessionId: string,
-    controller: AbortController,
+    handle: ExecutionHandle,
     sendFn: (sessionId: string, msg: ServerMessage) => void,
     setRunningOnEarlyReturn: boolean,
   ) => void,
@@ -1037,14 +1023,8 @@ async function handleClientMessage(
       // Acknowledge immediately
       send({ type: 'ack', payload: {}, id: message.id })
 
-      // Create AbortController so manual compaction is abortable via abortSession()
-      const controller = new AbortController()
-      const existingController = activeAgents.get(sessionId)
-      if (existingController) {
-        logger.warn('Aborting existing agent before compaction', { sessionId })
-        existingController.abort()
-      }
-      activeAgents.set(sessionId, controller)
+      // Acquire a runtime handle so compaction is abortable via the shared stop path.
+      const compactHandle = getSessionRuntimeRegistry().get(sessionId).acquire('compact')
 
       // Append compaction prompt to event store (shared helper, same as agent-loop.ts auto-compaction trigger)
       appendCompactionPrompt(sessionId, (event) => getEventStore().append(sessionId, event))
@@ -1056,7 +1036,7 @@ async function handleClientMessage(
         llmClient: llmForSession(sessionId),
         getSessionLLMClient: () => llmForSession(sessionId),
         statsIdentity: statsForSession(sessionId),
-        signal: controller.signal,
+        signal: compactHandle.signal,
         onMessage: (msg) => _broadcastForSession(sessionId, msg),
         initialCompacting: true,
       })
@@ -1078,13 +1058,11 @@ async function handleClientMessage(
         })
         .finally(() => {
           try {
-            // Clean up activeAgents
-            if (activeAgents.get(sessionId) === controller) {
-              activeAgents.delete(sessionId)
-            }
+            const runtime = getSessionRuntimeRegistry().peek(sessionId)
+            const stopped = runtime?.wasStopped(compactHandle) ?? false
+            runtime?.release(compactHandle)
 
-            if (abortedSessions.has(sessionId)) {
-              abortedSessions.delete(sessionId)
+            if (stopped) {
               sessionManager.clearMessageQueue(sessionId)
             }
 
@@ -1358,16 +1336,9 @@ async function handleClientMessage(
       const hasUserMessage = hasUserContent || hasUserAttachments
       const isResume = !!launchPayload?.resumeFrom
 
-      // Create AbortController for this run (abort existing if any - defense in depth)
-      // The running-state lifecycle (setRunning + session.running messages) is
-      // owned by the shared launcher below.
-      const controller = new AbortController()
-      const existingController = activeAgents.get(sessionId)
-      if (existingController) {
-        logger.warn('Aborting existing agent before starting new one', { sessionId })
-        existingController.abort()
-      }
-      activeAgents.set(sessionId, controller)
+      // Acquire a runtime handle for this run. The running-state lifecycle
+      // (setRunning + session.running messages) is owned by the shared launcher.
+      const workflowHandle = getSessionRuntimeRegistry().get(sessionId).acquire('workflow')
 
       // Acknowledge immediately
       send({ type: 'ack', payload: {}, id: message.id })
@@ -1400,7 +1371,7 @@ async function handleClientMessage(
               broadcastForSession: _broadcastForSession,
               eventStore: getEventStore(),
             },
-            controller.signal,
+            workflowHandle.signal,
           )
         }
       }
@@ -1409,12 +1380,12 @@ async function handleClientMessage(
         {
           sessionManager,
           sessionId,
-          controller,
+          runtimeHandle: workflowHandle,
           llmClient: llmForSession(sessionId),
           getSessionLLMClient: () => llmForSession(sessionId),
           statsIdentity: statsForSession(sessionId),
           broadcastForSession: (sid, msg) => _broadcastForSession(sid, msg),
-          onFinished: () => cleanupAfterTurn(sessionId, controller, sendForSession, true),
+          onFinished: () => cleanupAfterTurn(sessionId, workflowHandle, sendForSession, true),
         },
         {
           ...(launchPayload?.workflowId ? { workflowId: launchPayload.workflowId } : {}),
@@ -1533,11 +1504,7 @@ async function handleClientMessage(
       }
 
       // Abort any running agent turn
-      const controller = activeAgents.get(exitSessionId)
-      if (controller) {
-        activeAgents.delete(exitSessionId)
-        controller.abort()
-      }
+      getSessionRuntimeRegistry().get(exitSessionId).stop()
 
       // Ensure running state is cleared
       if (exitSession.isRunning) {
@@ -1618,16 +1585,10 @@ async function handleClientMessage(
 
       // Re-run the last turn WITHOUT re-adding the user message — the context is
       // already in history, untouched by the failed attempt.
-      const controller = new AbortController()
-      const existingController = activeAgents.get(retrySessionId)
-      if (existingController) {
-        logger.warn('Aborting existing agent before retrying turn', { sessionId: retrySessionId })
-        existingController.abort()
-      }
-      activeAgents.set(retrySessionId, controller)
+      const retryHandle = getSessionRuntimeRegistry().get(retrySessionId).acquire('chat')
 
       send({ type: 'ack', payload: {}, id: message.id })
-      _startTurnWithCompletionChain(retrySessionId, controller)
+      _startTurnWithCompletionChain(retrySessionId, retryHandle)
       break
     }
 

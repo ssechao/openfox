@@ -7,7 +7,8 @@ vi.mock('./index.js', () => ({
   runOrchestrator: (...args: unknown[]) => runOrchestratorMock(...args),
 }))
 
-import { launchWorkflowRun, abortRunnerRun } from './launch.js'
+import { launchWorkflowRun } from './launch.js'
+import { getSessionRuntimeRegistry, resetSessionRuntimeRegistry } from '../session/index.js'
 
 const flush = async () => {
   for (let i = 0; i < 5; i++) await Promise.resolve()
@@ -22,10 +23,10 @@ describe('launchWorkflowRun', () => {
   }
   let broadcast: ReturnType<typeof vi.fn>
   let onFinished: ReturnType<typeof vi.fn>
-  let controller: AbortController
 
   beforeEach(() => {
     runOrchestratorMock.mockReset()
+    resetSessionRuntimeRegistry()
     sessionManager = {
       setRunning: vi.fn(),
       getActiveWorkflowExecution: vi.fn(() => null),
@@ -34,11 +35,11 @@ describe('launchWorkflowRun', () => {
     }
     broadcast = vi.fn()
     onFinished = vi.fn()
-    controller = new AbortController()
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
+    resetSessionRuntimeRegistry()
   })
 
   const run = (payload: Record<string, unknown> = {}) =>
@@ -46,7 +47,7 @@ describe('launchWorkflowRun', () => {
       {
         sessionManager: sessionManager as never,
         sessionId: 'sess-1',
-        controller,
+        runtimeHandle: getSessionRuntimeRegistry().get('sess-1').acquire('workflow'),
         llmClient: { getModel: () => 'm', getBackend: () => 'openai' } as never,
         statsIdentity: { providerId: 'p', providerName: 'pn', backend: 'openai', model: 'm' },
         broadcastForSession: broadcast as never,
@@ -192,38 +193,5 @@ describe('launchWorkflowRun', () => {
     expect(options.params).toBeUndefined()
     expect(options.initialStepOutput).toBeUndefined()
     expect(sessionManager.resumeWorkflow).not.toHaveBeenCalled()
-  })
-})
-
-describe('abortRunnerRun', () => {
-  it('aborts a registered run and reports success', async () => {
-    runOrchestratorMock.mockImplementation(() => new Promise(() => {}))
-    const controller = new AbortController()
-    const abortSpy = vi.spyOn(controller, 'abort')
-
-    launchWorkflowRun(
-      {
-        sessionManager: {
-          setRunning: vi.fn(),
-          getActiveWorkflowExecution: vi.fn(() => null),
-          resumeWorkflow: vi.fn(),
-        } as never,
-        sessionId: 'sess-abort',
-        controller,
-        llmClient: {} as never,
-        statsIdentity: { providerId: 'p', providerName: 'pn', backend: 'openai', model: 'm' },
-        broadcastForSession: vi.fn() as never,
-      },
-      { workflowId: 'wf' } as never,
-    )
-    expect(abortRunnerRun('sess-abort')).toBe(true)
-    expect(abortSpy).toHaveBeenCalled()
-
-    // A second abort reports false (nothing running).
-    expect(abortRunnerRun('sess-abort')).toBe(true)
-  })
-
-  it('returns false when nothing is running for the session', () => {
-    expect(abortRunnerRun('sess-none')).toBe(false)
   })
 })

@@ -3,6 +3,7 @@ import type { StatsIdentity, Attachment } from '../../shared/types.js'
 import type { ServerMessage } from '../../shared/protocol.js'
 import type { SessionManager } from './index.js'
 import type { ProviderManager } from '../provider-manager.js'
+import { getSessionRuntimeRegistry, type ExecutionHandle } from './index.js'
 import { getEventStore } from '../events/index.js'
 import { runChatTurn } from '../chat/orchestrator.js'
 import { buildRunChatTurnParams } from '../utils/session-utils.js'
@@ -10,9 +11,6 @@ import { generateSessionNameForSession } from './name-generator.js'
 
 import { createChatMessageMessage, createSessionRunningMessage, createPhaseChangedMessage } from '../ws/protocol.js'
 import { finalizeTurnCompletion } from '../utils/session-utils.js'
-
-const activeAgents = new Map<string, AbortController>()
-const abortedSessions = new Set<string>()
 
 export interface ChatHandlerDeps {
   sessionManager: SessionManager
@@ -52,13 +50,9 @@ export async function startChatSession(
     broadcastForSession(sessionId, createPhaseChangedMessage('build'))
   }
 
-  // Create AbortController
-  const controller = new AbortController()
-  const existingController = activeAgents.get(sessionId)
-  if (existingController) {
-    existingController.abort()
-  }
-  activeAgents.set(sessionId, controller)
+  // Acquire a runtime handle for this chat turn.
+  const runtime = getSessionRuntimeRegistry().get(sessionId)
+  const handle = runtime.acquire('chat')
 
   // Mark session as running
   sessionManager.setRunning(sessionId, true)
@@ -86,15 +80,13 @@ export async function startChatSession(
         broadcastForSession,
         eventStore,
       },
-      controller.signal,
+      handle.signal,
     )
 
     // Start the chat turn
-    startTurnWithCompletionChain(sessionId, controller, deps)
+    startTurnWithCompletionChain(sessionId, handle, deps)
   } catch (error) {
-    if (activeAgents.get(sessionId) === controller) {
-      activeAgents.delete(sessionId)
-    }
+    runtime.release(handle)
     try {
       sessionManager.setRunning(sessionId, false)
       broadcastForSession(sessionId, createSessionRunningMessage(false))
@@ -106,8 +98,9 @@ export async function startChatSession(
   }
 }
 
-function startTurnWithCompletionChain(sessionId: string, controller: AbortController, deps: ChatHandlerDeps): void {
+function startTurnWithCompletionChain(sessionId: string, handle: ExecutionHandle, deps: ChatHandlerDeps): void {
   const { sessionManager, llmClient, statsIdentity, broadcastForSession } = deps
+  const runtime = getSessionRuntimeRegistry().peek(sessionId)
 
   runChatTurn(
     buildRunChatTurnParams({
@@ -115,7 +108,7 @@ function startTurnWithCompletionChain(sessionId: string, controller: AbortContro
       sessionId,
       llmClient,
       statsIdentity,
-      signal: controller.signal,
+      signal: handle.signal,
       onMessage: (msg) => broadcastForSession(sessionId, msg),
     }),
   )
@@ -125,13 +118,12 @@ function startTurnWithCompletionChain(sessionId: string, controller: AbortContro
       }
     })
     .finally(() => {
-      if (activeAgents.get(sessionId) !== controller) {
+      const stopped = runtime?.wasStopped(handle) ?? false
+      if (!runtime?.release(handle)) {
         return
       }
-      activeAgents.delete(sessionId)
 
-      if (abortedSessions.has(sessionId)) {
-        abortedSessions.delete(sessionId)
+      if (stopped) {
         sessionManager.clearMessageQueue(sessionId)
         finalizeTurnCompletion(sessionId, sessionManager, broadcastForSession)
         return
@@ -151,9 +143,8 @@ function startTurnWithCompletionChain(sessionId: string, controller: AbortContro
         })
         broadcastForSession(sessionId, createChatMessageMessage(userMessage))
 
-        const newController = new AbortController()
-        activeAgents.set(sessionId, newController)
-        startTurnWithCompletionChain(sessionId, newController, deps)
+        const nextHandle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
+        startTurnWithCompletionChain(sessionId, nextHandle, deps)
         return
       }
 
@@ -163,12 +154,7 @@ function startTurnWithCompletionChain(sessionId: string, controller: AbortContro
 }
 
 export function stopSessionExecution(sessionId: string, sessionManager: SessionManager): void {
-  abortedSessions.add(sessionId)
-  const controller = activeAgents.get(sessionId)
-  if (controller) {
-    activeAgents.delete(sessionId)
-    controller.abort()
-  }
+  getSessionRuntimeRegistry().get(sessionId).stop()
 
   // Release a paused gate immediately (setRunning(false) also clears it, but
   // this gives the UI instant feedback on Stop).

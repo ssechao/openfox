@@ -1,6 +1,7 @@
 import type { LLMClientWithModel } from '../llm/client.js'
 import type { ProviderManager } from '../provider-manager.js'
 import type { SessionManager } from '../session/manager.js'
+import type { SessionRuntimeRegistry } from '../session/index.js'
 import { logger } from '../utils/logger.js'
 import type { ServerMessage } from '../../shared/protocol.js'
 import { createSessionRunningMessage, createChatMessageMessage } from '../ws/protocol.js'
@@ -11,6 +12,7 @@ import { getEventStore } from '../events/index.js'
 interface QueueProcessorDeps {
   sessionManager: SessionManager
   providerManager: ProviderManager
+  runtimeRegistry: SessionRuntimeRegistry
   getLLMClient: () => LLMClientWithModel
   getLLMClientForProvider?: (
     providerId: string,
@@ -24,8 +26,6 @@ interface QueueProcessorDeps {
 export class QueueProcessor {
   private deps: QueueProcessorDeps
   private unsubscribe: (() => void) | null = null
-  private activeAgents = new Map<string, AbortController>()
-  private abortedSessions = new Set<string>()
 
   constructor(deps: QueueProcessorDeps) {
     this.deps = deps
@@ -54,24 +54,14 @@ export class QueueProcessor {
       this.unsubscribe = null
     }
 
-    for (const controller of this.activeAgents.values()) {
-      controller.abort()
-    }
-    this.activeAgents.clear()
+    this.deps.runtimeRegistry.abortAll()
 
     logger.debug('QueueProcessor stopped')
   }
 
   abortSession(sessionId: string): boolean {
-    this.abortedSessions.add(sessionId)
     this.deps.sessionManager.clearPauseState(sessionId)
-    const controller = this.activeAgents.get(sessionId)
-    if (controller) {
-      controller.abort()
-      this.activeAgents.delete(sessionId)
-      return true
-    }
-    return false
+    return this.deps.runtimeRegistry.get(sessionId).stop()
   }
 
   private handleQueueAdded(sessionId: string): void {
@@ -142,8 +132,8 @@ export class QueueProcessor {
       )
     }
 
-    const controller = new AbortController()
-    this.activeAgents.set(sessionId, controller)
+    const runtime = this.deps.runtimeRegistry.get(sessionId)
+    const handle = runtime.acquire('chat')
 
     sessionManager.setRunning(sessionId, true)
     broadcastForSession(sessionId, createSessionRunningMessage(true))
@@ -174,14 +164,14 @@ export class QueueProcessor {
           getLLMClient: this.deps.getLLMClient,
           ...(this.deps.getLLMClientForProvider ? { getLLMClientForProvider: this.deps.getLLMClientForProvider } : {}),
         },
-        controller.signal,
+        handle.signal,
       )
     }
 
-    this.runTurn(sessionId, controller)
+    this.runTurn(sessionId, handle)
   }
 
-  private async runTurn(sessionId: string, controller: AbortController): Promise<void> {
+  private async runTurn(sessionId: string, handle: import('../session/index.js').ExecutionHandle): Promise<void> {
     const { sessionManager, getLLMClient, getActiveProvider, broadcastForSession, providerManager } = this.deps
 
     // Activate the session's EFFECTIVE provider/model (agent override > session
@@ -247,7 +237,7 @@ export class QueueProcessor {
       llmClient: sessionClient,
       getSessionLLMClient,
       statsIdentity,
-      signal: controller.signal,
+      signal: handle.signal,
       onMessage: (msg) => broadcastForSession(sessionId, msg),
     })
 
@@ -259,7 +249,9 @@ export class QueueProcessor {
         logger.error('QueueProcessor turn error', { sessionId, error })
       })
       .finally(() => {
-        this.activeAgents.delete(sessionId)
+        const runtime = this.deps.runtimeRegistry.peek(sessionId)
+        const stopped = runtime?.wasStopped(handle) ?? false
+        const released = runtime?.release(handle) ?? false
 
         try {
           const session = sessionManager.getSession(sessionId)
@@ -268,8 +260,7 @@ export class QueueProcessor {
             return
           }
 
-          if (this.abortedSessions.has(sessionId)) {
-            this.abortedSessions.delete(sessionId)
+          if (stopped || !released) {
             finalizeTurnCompletion(sessionId, sessionManager, broadcastForSession)
             return
           }

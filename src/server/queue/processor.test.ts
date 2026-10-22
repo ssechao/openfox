@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { QueueProcessor } from './processor.js'
+import { SessionRuntimeRegistry } from '../session/index.js'
 import { initDatabase, closeDatabase } from '../db/index.js'
 import type { Config } from '../config.js'
 
@@ -39,6 +40,7 @@ describe('QueueProcessor', () => {
   let mockGetLLMClient: any
   let mockGetActiveProvider: any
   let mockBroadcastForSession: any
+  let runtimeRegistry: SessionRuntimeRegistry
   let queueProcessor: QueueProcessor
 
   // Stateful session mock: mutations via setRunning are reflected in getSession
@@ -116,10 +118,12 @@ describe('QueueProcessor', () => {
     }))
     mockGetActiveProvider = vi.fn()
     mockBroadcastForSession = vi.fn()
+    runtimeRegistry = new SessionRuntimeRegistry()
 
     queueProcessor = new QueueProcessor({
       sessionManager: mockSessionManager as any,
       providerManager: mockProviderManager as any,
+      runtimeRegistry,
       getLLMClient: mockGetLLMClient,
       getActiveProvider: mockGetActiveProvider,
       broadcastForSession: mockBroadcastForSession,
@@ -254,6 +258,7 @@ describe('QueueProcessor', () => {
       const qp = new QueueProcessor({
         sessionManager: mockSessionManager as any,
         providerManager: mockProviderManager as any,
+        runtimeRegistry,
         getLLMClient: mockGetLLMClient,
         getLLMClientForProvider: getLLMClientForProviderMock,
         getActiveProvider: mockGetActiveProvider,
@@ -305,6 +310,7 @@ describe('QueueProcessor', () => {
       const qp = new QueueProcessor({
         sessionManager: mockSessionManager as any,
         providerManager: mockProviderManager as any,
+        runtimeRegistry,
         getLLMClient: mockGetLLMClient,
         getLLMClientForProvider: getLLMClientForProviderMock,
         getActiveProvider: mockGetActiveProvider,
