@@ -4068,8 +4068,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         httpServer.on('error', reject)
       }),
 
-    close: () =>
-      new Promise<void>((resolve, reject) => {
+    close: () => {
+      workerManager.closeAdmissions()
+      return new Promise<void>((resolve, reject) => {
         logger.info('Shutting down...')
         void (async () => {
           diagnosticsCollector.stop()
@@ -4104,7 +4105,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           wss.close()
           httpServer.close(() => resolve())
         })().catch(reject)
-      }),
+      })
+    },
   }
 }
 

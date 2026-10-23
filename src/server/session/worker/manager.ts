@@ -93,6 +93,7 @@ function resolveWorkerEntry(): { path: string; execArgv: string[] } {
 export class SessionWorkerManager {
   private active: ActiveWorker | null = null
   private lastCrash: WorkerCrashReport | null = null
+  private admissionsClosed = false
 
   constructor(private readonly deps: SessionWorkerManagerDeps) {}
 
@@ -103,7 +104,7 @@ export class SessionWorkerManager {
    * gateway).
    */
   shouldUseWorker(sessionId: string): boolean {
-    if (!this.deps.isEnabled()) return false
+    if (this.admissionsClosed || !this.deps.isEnabled()) return false
     if (this.active) return this.active.sessionId === sessionId
     return true
   }
@@ -117,6 +118,10 @@ export class SessionWorkerManager {
     return this.lastCrash
   }
 
+  closeAdmissions(): void {
+    this.admissionsClosed = true
+  }
+
   /** Cooperative stop: ask the worker to abort its turn (Stop button path). */
   requestStop(sessionId: string): boolean {
     if (this.active?.sessionId !== sessionId) return false
@@ -125,6 +130,7 @@ export class SessionWorkerManager {
   }
 
   launch(sessionId: string, onSettled: (outcome: WorkerSettledOutcome) => void): void {
+    if (this.admissionsClosed) throw new Error('Session worker admissions are closed during shutdown')
     if (this.active) throw new Error('A session worker is already running')
 
     const db = this.deps.db()
@@ -222,6 +228,7 @@ export class SessionWorkerManager {
 
   /** Kill the active worker (gateway shutdown). */
   async shutdown(): Promise<void> {
+    this.closeAdmissions()
     const worker = this.active
     if (!worker) return
     this.active = null
@@ -250,7 +257,18 @@ export class SessionWorkerManager {
         // Already gone
       }
       await Promise.all([(this.deps.cleanupChildren ?? killTrackedChildren)(worker.childrenPath), exitedBeforeTimeout])
-      worker.onSettled({ crashed: false })
+      const interruptedAt = new Date().toISOString()
+      markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
+      try {
+        this.deps.sessionManager.setRunning(worker.sessionId, false)
+        emitRunningChanged(worker.sessionId, false)
+      } catch (error) {
+        logger.debug('Session disappeared during worker shutdown', {
+          sessionId: worker.sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+      worker.onSettled({ crashed: true, error: 'Gateway shutdown interrupted the worker turn' })
     } finally {
       if (timeout) clearTimeout(timeout)
       clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)

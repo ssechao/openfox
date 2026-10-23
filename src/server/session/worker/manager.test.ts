@@ -13,7 +13,10 @@ function createDb(name: string): { db: Database.Database; namedDb: Database.Data
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
       worker_id TEXT,
-      worker_generation INTEGER NOT NULL DEFAULT 0
+      worker_generation INTEGER NOT NULL DEFAULT 0,
+      is_running INTEGER NOT NULL DEFAULT 0,
+      interrupted_at TEXT,
+      updated_at TEXT
     );
     INSERT INTO sessions (id) VALUES ('sess-1');
   `)
@@ -48,6 +51,7 @@ describe('SessionWorkerManager', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-shutdown.db')
     openDbs.push(db)
     const order: string[] = []
+    let settledOutcome: { crashed: boolean; error?: string } | undefined
     const token = assignWorkerToken(namedDb, 'sess-1')
     const child = Object.assign(new EventEmitter(), {
       pid: 42,
@@ -61,7 +65,7 @@ describe('SessionWorkerManager', () => {
     const manager = new SessionWorkerManager({
       db: () => namedDb,
       config,
-      sessionManager: {} as SessionManager,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
       isEnabled: () => true,
       broadcastForSession: () => {},
       cleanupChildren: async () => {
@@ -78,7 +82,10 @@ describe('SessionWorkerManager', () => {
       doneReceived: false,
       doneOk: false,
       stderrTail: [],
-      onSettled: () => order.push('settled'),
+      onSettled: (outcome: { crashed: boolean; error?: string }) => {
+        settledOutcome = outcome
+        order.push('settled')
+      },
     })
 
     let completed = false
@@ -91,6 +98,13 @@ describe('SessionWorkerManager', () => {
     child.emit('exit', 0, null)
     await shutdown
     expect(order).toEqual(['worker', 'children', 'settled'])
+    expect(settledOutcome).toMatchObject({ crashed: true, error: expect.stringMatching(/shutdown/i) })
+    expect(manager.shouldUseWorker('sess-1')).toBe(false)
+    expect(() => manager.launch('sess-1', () => {})).toThrow(/admissions.*closed|shutdown/i)
+    const interrupted = namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get() as {
+      interrupted_at: string | null
+    }
+    expect(interrupted.interrupted_at).toBeTruthy()
 
     const timeoutToken = assignWorkerToken(namedDb, 'sess-1')
     const stuckChild = Object.assign(new EventEmitter(), {
@@ -119,7 +133,7 @@ describe('SessionWorkerManager', () => {
     const manager = new SessionWorkerManager({
       db: () => namedDb,
       config,
-      sessionManager: {} as SessionManager,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
       isEnabled: () => true,
       broadcastForSession: () => {},
     })
