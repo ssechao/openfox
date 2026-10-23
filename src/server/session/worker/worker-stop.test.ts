@@ -24,6 +24,7 @@ describe('session worker stop relay', () => {
 
   beforeAll(async () => {
     process.env['OPENFOX_MOCK_LLM'] = 'true'
+    process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR'] = 'true'
     workdir = join(tmpdir(), `openfox-worker-stop-${randomUUID()}`)
     dbDir = join(tmpdir(), `openfox-worker-stop-db-${randomUUID()}`)
     await mkdir(workdir, { recursive: true })
@@ -51,6 +52,7 @@ describe('session worker stop relay', () => {
     await server?.close()
     requestStopSpy?.mockRestore()
     delete process.env['OPENFOX_MOCK_LLM']
+    delete process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR']
     await rm(workdir, { recursive: true, force: true }).catch(() => {})
     await rm(dbDir, { recursive: true, force: true }).catch(() => {})
   }, 20_000)

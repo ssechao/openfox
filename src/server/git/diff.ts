@@ -1,11 +1,18 @@
-import { spawn } from 'node:child_process'
 import type { GitDiffFile } from '../../shared/protocol.js'
 import type { PluginVcsContext } from '../../plugin/index.js'
-import { gitSpawnEnv } from './env.js'
+import { spawnGitProcess } from './spawn.js'
 import { GIT_QUERY_TIMEOUT_MS } from '../utils/bounded-exec.js'
 import { logger } from '../utils/logger.js'
 import { terminateProcessTree } from '../utils/process-tree.js'
 import { resolveVcsBranch, resolveVcsDiffFiles, resolveVcsModifiedFiles } from '../plugins/vcs-providers.js'
+
+type NativeGitRunner = (cwd: string, args: string[]) => Promise<{ code: number | null; stdout: string }>
+
+let externalGitRunner: NativeGitRunner | null = null
+
+export function setExternalGitRunner(runner: NativeGitRunner | null): void {
+  externalGitRunner = runner
+}
 
 function toVcsContext(cwd: string, context?: { sessionId?: string; projectId?: string }): PluginVcsContext {
   return {
@@ -77,14 +84,9 @@ export async function formatGitDiffFiles(
 }
 
 function runGitText(cwd: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
+  if (externalGitRunner) return externalGitRunner(cwd, args)
   return new Promise((resolve) => {
-    const proc = spawn('git', args, {
-      cwd,
-      env: gitSpawnEnv(),
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-      ...(process.platform !== 'win32' ? { detached: true } : {}),
-    })
+    const proc = spawnGitProcess(cwd, args)
     let stdout = ''
     let settled = false
     const timer = setTimeout(() => {

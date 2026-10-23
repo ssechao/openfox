@@ -18,6 +18,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process'
+import type { SessionProcessSupervisor, SupervisorWorkerHandle } from '../process-supervisor/client.js'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,7 +51,7 @@ export interface WorkerSettledOutcome {
 interface ActiveWorker {
   sessionId: string
   token: WorkerToken
-  child: ChildProcess
+  child: ChildProcess | SupervisorWorkerHandle
   childrenPath: string
   doneReceived: boolean
   doneOk: boolean
@@ -81,6 +82,7 @@ export interface SessionWorkerManagerDeps {
   cleanupChildren?: (path: string) => Promise<number[]>
   shutdownTimeoutMs?: number
   maxProcesses?: number
+  processSupervisor?: SessionProcessSupervisor
   healthAggregator?: HealthAggregator
   eventStore?: () => ReturnType<typeof getEventStore>
 }
@@ -132,16 +134,18 @@ export class SessionWorkerManager {
 
   activeWorker(sessionId?: string): { sessionId: string; token: WorkerToken; pid: number | undefined } | null {
     const worker = sessionId ? this.active.get(sessionId) : this.active.values().next().value
-    if (!worker) return null
+    if (!worker || worker.child.pid === undefined) return null
     return { sessionId: worker.sessionId, token: worker.token, pid: worker.child.pid }
   }
 
   activeWorkers(): Array<{ sessionId: string; token: WorkerToken; pid: number | undefined }> {
-    return [...this.active.values()].map((worker) => ({
-      sessionId: worker.sessionId,
-      token: worker.token,
-      pid: worker.child.pid,
-    }))
+    return [...this.active.values()]
+      .filter((worker) => worker.child.pid !== undefined)
+      .map((worker) => ({
+        sessionId: worker.sessionId,
+        token: worker.token,
+        pid: worker.child.pid,
+      }))
   }
 
   lastCrashReport(): WorkerCrashReport | null {
@@ -182,22 +186,28 @@ export class SessionWorkerManager {
       })
     }
 
-    let child: ChildProcess
+    const env = {
+      ...process.env,
+      OPENFOX_WORKER_ID: token.workerId,
+      OPENFOX_WORKER_GENERATION: String(token.generation),
+      OPENFOX_WORKER_DB_PATH: db.name,
+      OPENFOX_WORKER_CHILDREN: childrenPath,
+    }
+    let child: ChildProcess | SupervisorWorkerHandle
     try {
-      child = fork(entry.path, [], {
-        execArgv: entry.execArgv,
-        env: {
-          ...process.env,
-          OPENFOX_WORKER_ID: token.workerId,
-          OPENFOX_WORKER_GENERATION: String(token.generation),
-          OPENFOX_WORKER_DB_PATH: db.name,
-          OPENFOX_WORKER_CHILDREN: childrenPath,
-        },
-        // stdin stays a pipe held open by the gateway: the worker's
-        // parent-exit guard uses its closure as the orphan-kill signal.
-        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-        detached: false,
-      })
+      child = this.deps.processSupervisor
+        ? this.deps.processSupervisor.spawnWorker({
+            workerKey: token.workerId,
+            path: entry.path,
+            execArgv: entry.execArgv,
+            env,
+          })
+        : fork(entry.path, [], {
+            execArgv: entry.execArgv,
+            env,
+            stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+            detached: false,
+          })
     } catch (error) {
       removeChildrenFile(childrenPath)
       clearWorkerToken(db, sessionId, token)

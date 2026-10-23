@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { getGitDiffFiles, formatGitDiffFiles, formatGitReviewDiff, getGitBranch } from './diff.js'
+import { getGitDiffFiles, formatGitDiffFiles, formatGitReviewDiff, getGitBranch, setExternalGitRunner } from './diff.js'
 import { setPluginVcsProviders, clearPluginVcsProviders } from '../plugins/vcs-providers.js'
 import type { PluginVcsProvider } from '../../plugin/index.js'
 import { GIT_QUERY_TIMEOUT_MS } from '../utils/bounded-exec.js'
@@ -49,6 +49,7 @@ function makeMockProc(stdout: string, exitCode = 0): MockProc {
 beforeEach(() => {
   vi.resetAllMocks()
   clearPluginVcsProviders()
+  setExternalGitRunner(null)
 })
 
 describe('formatGitReviewDiff', () => {
@@ -123,6 +124,20 @@ describe('formatGitReviewDiff', () => {
 })
 
 describe('getGitDiffFiles', () => {
+  it('uses the external runner without spawning git in the gateway', async () => {
+    const runner = vi
+      .fn()
+      .mockResolvedValueOnce({ code: 0, stdout: 'M\tsrc/file.ts\n' })
+      .mockResolvedValueOnce({ code: 0, stdout: '' })
+    setExternalGitRunner(runner)
+
+    await expect(getGitDiffFiles('/tmp/project')).resolves.toEqual([
+      { path: 'src/file.ts', status: 'modified', additions: 0, deletions: 0 },
+    ])
+    expect(runner).toHaveBeenCalledTimes(2)
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
   it('passes --ignore-submodules=none to both git invocations', async () => {
     vi.mocked(spawn).mockReturnValue(makeMockProc('') as unknown as ReturnType<typeof spawn>)
     await getGitDiffFiles('/tmp/project')

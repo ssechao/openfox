@@ -49,6 +49,7 @@ describe('session worker crash', () => {
 
   beforeAll(async () => {
     process.env['OPENFOX_MOCK_LLM'] = 'true'
+    process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR'] = 'true'
     workdir = join(tmpdir(), `openfox-worker-crash-${randomUUID()}`)
     dbDir = join(tmpdir(), `openfox-worker-crash-db-${randomUUID()}`)
     await mkdir(workdir, { recursive: true })
@@ -73,6 +74,7 @@ describe('session worker crash', () => {
   afterAll(async () => {
     await server?.close()
     delete process.env['OPENFOX_MOCK_LLM']
+    delete process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR']
     await rm(workdir, { recursive: true, force: true }).catch(() => {})
     await rm(dbDir, { recursive: true, force: true }).catch(() => {})
   }, 20_000)

@@ -3921,7 +3921,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // opt-out. The supervisor owns bounded admission, crash handling, cleanup,
   // and the explicit resume gate.
   const { SessionWorkerManager, resolveSessionWorkerEnabled } = await import('./session/worker/index.js')
+  const { SessionProcessSupervisor } = await import('./session/process-supervisor/client.js')
+  const { setExternalGitRunner } = await import('./git/diff.js')
   const { getSetting: getWorkerSetting, SETTINGS_KEYS: WORKER_SETTINGS_KEYS } = await import('./db/settings.js')
+  const externalSupervisorEnabled =
+    config.mode !== 'test' || process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR'] === 'true'
+  const processSupervisor = externalSupervisorEnabled ? new SessionProcessSupervisor() : null
   const workerManager = new SessionWorkerManager({
     db: () => getDatabase(),
     config,
@@ -3933,6 +3938,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         config.mode !== 'test',
       ),
     broadcastForSession: wssExports.broadcastForSession,
+    ...(processSupervisor ? { processSupervisor } : {}),
     healthAggregator,
   })
   sessionManager.setQueueAdmissionGuard(
@@ -4068,38 +4074,50 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     httpServer,
     ctx: { config, sessionManager, llmClient: getLLMClient(), toolRegistry, providerManager, diagnosticsCollector },
 
-    start: (port?: number) =>
-      new Promise((resolve, reject) => {
-        const listenPort = port ?? config.server.port
-        const host = config.server.host
-
-        httpServer.listen(listenPort, host, () => {
-          const addr = httpServer.address()
-          const actualPort = typeof addr === 'object' && addr ? addr.port : listenPort
-          setMcpOAuthServerPort(actualPort)
-          mcpActualPort = actualPort
-          // The /mcp endpoint is only reachable once we're listening, so start
-          // MCP client connections now — a self-referencing server (OpenFox as
-          // its own MCP client) would otherwise race the listen and fail.
-          // The very first requests may arrive before MCP tools register;
-          // connectMcpServers settles shortly after, then signals MCP readiness.
-          connectMcpServers().catch((err) => {
-            logger.error('MCP server startup connection failed', {
-              error: err instanceof Error ? err.message : String(err),
-            })
+    start: async (port?: number) => {
+      const listenPort = port ?? config.server.port
+      const host = config.server.host
+      try {
+        if (processSupervisor) {
+          await processSupervisor.start()
+          setExternalGitRunner((cwd, args) => processSupervisor.runGit(cwd, args))
+        }
+        const actualPort = await new Promise<number>((resolve, reject) => {
+          const onError = (error: Error) => {
+            httpServer.off('error', onError)
+            reject(error)
+          }
+          httpServer.once('error', onError)
+          httpServer.listen(listenPort, host, () => {
+            httpServer.off('error', onError)
+            const addr = httpServer.address()
+            resolve(typeof addr === 'object' && addr ? addr.port : listenPort)
           })
-          const client = getLLMClient()
-          logger.info(`OpenFox server running at http://${host}:${actualPort}`)
-          logger.info(`WebSocket available at ws://${host}:${actualPort}/ws`)
-          logger.info(
-            `MCP endpoint available at http://${host}:${actualPort}/mcp — run 'openfox mcp' for a paste-ready client config`,
-          )
-          logger.info(`LLM backend: ${client.getBackend()}, model: ${client.getModel()}, url: ${config.llm.baseUrl}`)
-          resolve({ port: actualPort })
         })
-
-        httpServer.on('error', reject)
-      }),
+        setMcpOAuthServerPort(actualPort)
+        mcpActualPort = actualPort
+        connectMcpServers().catch((err) => {
+          logger.error('MCP server startup connection failed', {
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+        const client = getLLMClient()
+        logger.info(`OpenFox server running at http://${host}:${actualPort}`)
+        logger.info(`WebSocket available at ws://${host}:${actualPort}/ws`)
+        logger.info(
+          `MCP endpoint available at http://${host}:${actualPort}/mcp — run 'openfox mcp' for a paste-ready client config`,
+        )
+        logger.info(`LLM backend: ${client.getBackend()}, model: ${client.getModel()}, url: ${config.llm.baseUrl}`)
+        return { port: actualPort }
+      } catch (error) {
+        setExternalGitRunner(null)
+        await processSupervisor?.shutdown()
+        queueProcessor.stop()
+        taskScheduler.stop()
+        diagnosticsCollector.stop()
+        throw error
+      }
+    },
 
     close: () => {
       workerManager.closeAdmissions()
@@ -4131,6 +4149,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           // Database should only be closed when the application exits.
           runtimeRegistry.abortAll()
           await workerManager.shutdown()
+          setExternalGitRunner(null)
+          await processSupervisor?.shutdown()
           // Terminate all WebSocket connections to allow clean shutdown
           for (const client of wss.clients) {
             client.terminate()
