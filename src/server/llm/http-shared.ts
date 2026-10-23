@@ -26,6 +26,12 @@ export interface RequestOptions {
   signal?: AbortSignal | null | undefined
   /** Extra headers merged over the client's default headers (e.g. opencode session affinity). */
   headers?: Record<string, string>
+  /**
+   * Called for every chunk of bytes received on the stream, including SSE
+   * comments (e.g. ": ping" heartbeats). Lets the caller's idle-timeout track
+   * any sign of life, not just parsed data chunks.
+   */
+  onActivity?: () => void
 }
 
 export interface ChatRequest {
@@ -82,7 +88,7 @@ export abstract class ChatHttpClient {
 
     async function* generate(): AsyncGenerator<ChatCompletionChunk> {
       const response = await responsePromise
-      for await (const trimmed of readResponseLines(response)) {
+      for await (const trimmed of readResponseLines(response, options?.onActivity)) {
         const chunk = parseStreamLine(trimmed)
         if (chunk === null) continue
         if (chunk === DONE) return
@@ -148,7 +154,7 @@ export async function parseCompletionResponse<T>(
  * Yield trimmed, non-empty lines from a streaming response body. Both the
  * SSE stream (OpenAI) and NDJSON stream (native Ollama) are line-delimited.
  */
-export async function* readResponseLines(response: Response): AsyncGenerator<string> {
+export async function* readResponseLines(response: Response, onData?: () => void): AsyncGenerator<string> {
   if (!response.body) {
     throw new LLMError('No response body for streaming')
   }
@@ -161,6 +167,7 @@ export async function* readResponseLines(response: Response): AsyncGenerator<str
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      onData?.()
 
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')

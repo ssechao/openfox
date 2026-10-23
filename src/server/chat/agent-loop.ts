@@ -48,7 +48,12 @@ import {
   createChatStatsMessage,
 } from '../ws/protocol.js'
 import { executeTools, type ToolBatchContext } from './execute-tools.js'
-import { estimateToolResultTokens, isContextLengthError } from './token-budget.js'
+import {
+  estimateConversationTokens,
+  estimateToolResultTokens,
+  isContextLengthError,
+  isInputOverflowError,
+} from './token-budget.js'
 import { loadAllAgentsDefault, getSubAgents } from '../agents/registry.js'
 import { createRetryLimiter, type RetryLimiter } from './retry-limiter.js'
 import { drainQueue } from './drain-queue.js'
@@ -244,6 +249,7 @@ export async function runTopLevelAgentLoop(
   const retryLimiter: RetryLimiter = createRetryLimiter(config.maxRetriesPerTurn ?? 10)
   let truncationRetryCount = 0
   let contextRetryCount = 0
+  let inputOverflowCompactionTried = false
   let pendingToolResultTokens = 0
   let returnValueContent: string | undefined
   let returnValueResult: string | undefined
@@ -333,6 +339,7 @@ export async function runTopLevelAgentLoop(
     let result!: import('./stream-pure.js').PureStreamResult
     let assistantMsgId: string
     let assistantMessageStarted = false
+    let lastRequestMessages: Awaited<ReturnType<typeof config.getConversationMessages>> | undefined
 
     for (;;) {
       // Resolve fresh per attempt: resolveClient() supports provider switches
@@ -358,6 +365,7 @@ export async function runTopLevelAgentLoop(
         append({ type: 'message.done', data: { messageId: continueMsgId } })
         requestMessages = normalized
       }
+      lastRequestMessages = requestMessages
 
       // The format-retry continuation is appended once per round (not on
       // LLM-error retries) — its persisted copy feeds later context rebuilds.
@@ -558,6 +566,39 @@ export async function runTopLevelAgentLoop(
 
       if (signal?.aborted) throw new Error('Aborted')
 
+      // Input overflow: the prompt ALONE exceeds the model window (e.g. the
+      // wrapper's cold_replay_context_exceeded). Halving maxTokens cannot
+      // shrink the prompt, so instead of the context-length retry loop we
+      // compact once — and if even the summary request overflows, fail
+      // visibly instead of retrying a deterministic error.
+      if (isInputOverflowError(attemptResult.error)) {
+        if (!inputOverflowCompactionTried && !compacting && !config.subAgentMetadata) {
+          inputOverflowCompactionTried = true
+          const { appendCompactionPrompt } = await import('../context/compactor.js')
+          appendCompactionPrompt(sessionId, append, config.subAgentMetadata)
+          compacting = true
+          continue
+        }
+        append({
+          type: 'chat.error',
+          data: {
+            error: serverT(
+              {
+                en: 'The conversation exceeds the model context window and could not be compacted: {{error}}',
+                fr: 'La conversation dépasse la fenêtre de contexte du modèle et n’a pas pu être compactée : {{error}}',
+              },
+              { error: attemptResult.error },
+            ),
+            recoverable: false,
+          },
+        })
+        if (!config.subAgentMetadata) {
+          recordLLMFailure(sessionId)
+          config.onMessage?.(createChatLLMRetryFailedMessage(attemptResult.error, requestFailures + 1))
+        }
+        return { failed: { error: attemptResult.error } }
+      }
+
       // Context overflow: the prompt (including tool results) plus the requested
       // maxTokens exceeds the model's window. The error is deterministic, so
       // retry immediately with a reduced maxTokens instead of waiting out backoff.
@@ -693,9 +734,16 @@ export async function runTopLevelAgentLoop(
     if (!config.subAgentMetadata) {
       emitLiveTurnStats(turnMetrics, statsIdentity, mode, config.onMessage)
     }
+    // Providers that strip the usage payload (e.g. some wrappers) report
+    // promptTokens = 0 for every call: the recorded context size would stay
+    // at 0 and auto-compaction would never fire, so the full history keeps
+    // being sent even after manual compactions. Fall back to a local
+    // estimate of the request that was just sent.
+    const recordedPromptTokens =
+      result.usage.promptTokens > 0 ? result.usage.promptTokens : estimateConversationTokens(lastRequestMessages ?? [])
     sessionManager.setCurrentContextSize(
       sessionId,
-      result.usage.promptTokens,
+      recordedPromptTokens,
       result.usage.completionTokens,
       config.subAgentMetadata?.subAgentId,
     )

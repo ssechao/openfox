@@ -13,9 +13,32 @@ export function estimateToolResultTokens(toolMessages: Array<Pick<RequestContext
   )
 }
 
+/**
+ * Local estimate of the conversation size, used only when the provider does
+ * not report prompt usage (e.g. a wrapper that strips `usage`). Without it
+ * the recorded context size stays at 0 and auto-compaction never fires, so
+ * the full history keeps being sent after compactions.
+ */
+export function estimateConversationTokens(messages: Array<Pick<RequestContextMessage, 'content'>>): number {
+  return estimateToolResultTokens(messages)
+}
+
 const CONTEXT_LENGTH_ERROR_PATTERN = /context\s*length|context_length|context window|prompt (?:is )?too long/i
 
 export function isContextLengthError(message: string | undefined): boolean {
   if (!message) return false
   return CONTEXT_LENGTH_ERROR_PATTERN.test(message)
+}
+
+const INPUT_OVERFLOW_ERROR_PATTERN =
+  /cold_replay_context_exceeded|input_tokens=\d+|your messages resulted in|prompt (?:is )?too long/i
+
+/**
+ * The prompt ALONE exceeds the model window: reducing maxTokens cannot help,
+ * so the maxTokens/2 retry loop must not run. The caller compacts or fails
+ * visibly instead.
+ */
+export function isInputOverflowError(message: string | undefined): boolean {
+  if (!message) return false
+  return INPUT_OVERFLOW_ERROR_PATTERN.test(message)
 }
