@@ -384,8 +384,9 @@ describe('llm client', () => {
         chat_template_kwargs: { enable_thinking: false },
       }),
       // The stream always carries a signal now, even with no caller abort: it is what the idle
-      // timeout pulls to tear a silent stream down.
-      { signal: expect.any(AbortSignal) },
+      // timeout pulls to tear a silent stream down. onActivity feeds the same idle timer on any
+      // received byte (including SSE comment heartbeats).
+      { signal: expect.any(AbortSignal), onActivity: expect.any(Function) },
     )
     // Should NOT have reasoning_effort in the params
     const callArgs = httpClientCreateStreamMock.mock.calls[0]?.[0] as Record<string, unknown> | undefined

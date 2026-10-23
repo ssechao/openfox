@@ -316,6 +316,11 @@ export function createLLMClient(
 
         const stream = httpFor(backend).createChatCompletionStream(streamingParams, {
           signal: streamSignal,
+          // Any byte received on the wire — including SSE comment heartbeats
+          // (": ping") that parseStreamLine skips — counts as a sign of life.
+          onActivity: () => {
+            lastChunkTime = Date.now()
+          },
           ...(request.sessionId && isOpencode && { headers: openCodeSessionHeaders(request.sessionId) }),
         })
 
