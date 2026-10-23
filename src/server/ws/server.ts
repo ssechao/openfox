@@ -23,7 +23,7 @@ import type { ProviderManager } from '../provider-manager.js'
 import { runChatTurn } from '../chat/orchestrator.js'
 import { interruptLLMRetryWait, hasRecentLLMFailure } from '../chat/stream-pure.js'
 
-import { launchWorkflowRun } from '../runner/launch.js'
+import { launchWorkflowRun, type TurnCleanupOutcome } from '../runner/launch.js'
 import { appendCompactionPrompt } from '../context/compactor.js'
 import { computeSessionHash, applyDynamicContext, computeUnifiedDiff } from '../chat/dynamic-context.js'
 import { provideAnswer } from '../tools/index.js'
@@ -491,19 +491,18 @@ export function createWebSocketServer(
     sessionId: string,
     handle: ExecutionHandle,
     sendFn: (sessionId: string, msg: ServerMessage) => void,
-    setRunningOnEarlyReturn: boolean,
-  ) {
+  ): TurnCleanupOutcome {
     const runtime = getSessionRuntimeRegistry().peek(sessionId)
     const stopped = runtime?.wasStopped(handle) ?? false
     if (!runtime?.release(handle)) {
-      return
+      return 'stale'
     }
 
     if (stopped) {
       sessionManager.clearMessageQueue(sessionId)
       const contextState = sessionManager.getContextState(sessionId)
       sendFn(sessionId, createContextStateMessage(contextState))
-      return
+      return 'settled'
     }
 
     const processed = processQueueAndRestartTurn(
@@ -517,8 +516,7 @@ export function createWebSocketServer(
         sessionManager.queueMessage(sid, mode, content, attachments, messageKind as 'command' | undefined),
     )
     if (processed) {
-      if (setRunningOnEarlyReturn) sessionManager.setRunning(sessionId, false)
-      return
+      return 'restarted'
     }
 
     const processedCompletion = processQueueAndRestartTurn(
@@ -530,8 +528,7 @@ export function createWebSocketServer(
       startTurnWithCompletionChain,
     )
     if (processedCompletion) {
-      if (setRunningOnEarlyReturn) sessionManager.setRunning(sessionId, false)
-      return
+      return 'restarted'
     }
 
     sessionManager.clearMessageQueue(sessionId)
@@ -540,6 +537,7 @@ export function createWebSocketServer(
     // .finally() block handles setRunning(false) explicitly.
     const contextState = sessionManager.getContextState(sessionId)
     sendFn(sessionId, createContextStateMessage(contextState))
+    return 'settled'
   }
 
   function startTurnWithCompletionChain(sessionId: string, handle: ExecutionHandle) {
@@ -560,7 +558,7 @@ export function createWebSocketServer(
       })
       .finally(() => {
         try {
-          cleanupAfterTurn(sessionId, handle, broadcastForSession, false)
+          cleanupAfterTurn(sessionId, handle, broadcastForSession)
         } catch {
           // Session may have been deleted during execution
         }
@@ -885,8 +883,7 @@ async function handleClientMessage(
     sessionId: string,
     handle: ExecutionHandle,
     sendFn: (sessionId: string, msg: ServerMessage) => void,
-    setRunningOnEarlyReturn: boolean,
-  ) => void,
+  ) => TurnCleanupOutcome,
   enqueueSendFn: (client: ClientConnection, data: string, seq: number) => void,
   getMcpServers?: () => import('../mcp/types.js').McpServerState[],
 ): Promise<void> {
@@ -1416,7 +1413,7 @@ async function handleClientMessage(
           getSessionLLMClient: () => llmForSession(sessionId),
           statsIdentity: statsForSession(sessionId),
           broadcastForSession: (sid, msg) => _broadcastForSession(sid, msg),
-          onFinished: () => cleanupAfterTurn(sessionId, workflowHandle, sendForSession, true),
+          onFinished: () => cleanupAfterTurn(sessionId, workflowHandle, sendForSession),
         },
         {
           ...(launchPayload?.workflowId ? { workflowId: launchPayload.workflowId } : {}),

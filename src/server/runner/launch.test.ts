@@ -34,7 +34,7 @@ describe('launchWorkflowRun', () => {
       resumeWorkflow: vi.fn(),
     }
     broadcast = vi.fn()
-    onFinished = vi.fn()
+    onFinished = vi.fn(() => 'settled')
   })
 
   afterEach(() => {
@@ -144,12 +144,50 @@ describe('launchWorkflowRun', () => {
     const runtime = getSessionRuntimeRegistry().get('sess-1')
     onFinished.mockImplementation(() => {
       expect(runtime.currentHandle()).not.toBeNull()
+      return 'settled'
     })
     run({ workflowId: 'wf' })
     await flush()
     expect(onFinished).toHaveBeenCalledTimes(1)
     expect(runtime.currentHandle()).toBeNull()
     expect(runtime.snapshot().state).toBe('idle')
+  })
+
+  it('leaves the running state to the successor when onFinished restarts a turn', async () => {
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    onFinished.mockImplementation(() => {
+      // cleanupAfterTurn released the workflow handle and acquired the
+      // successor's chat handle before returning.
+      const runtime = getSessionRuntimeRegistry().get('sess-1')
+      runtime.release(runtime.currentHandle()!)
+      runtime.acquire('chat')
+      return 'restarted'
+    })
+    run({ workflowId: 'wf' })
+    await flush()
+
+    expect(onFinished).toHaveBeenCalledTimes(1)
+    // No isRunning=false write, no running=false broadcast: the successor owns it
+    expect(sessionManager.setRunning).toHaveBeenCalledTimes(1)
+    expect(sessionManager.setRunning).toHaveBeenNthCalledWith(1, 'sess-1', true)
+    expect(
+      broadcast.mock.calls.some(([, msg]) => msg.type === 'session.running' && msg.payload.isRunning === false),
+    ).toBe(false)
+    // The old finally must not release the successor's handle either
+    const handle = getSessionRuntimeRegistry().get('sess-1').currentHandle()
+    expect(handle?.kind).toBe('chat')
+  })
+
+  it('does not write the running state when onFinished reports a stale handle', async () => {
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    onFinished.mockReturnValue('stale')
+    run({ workflowId: 'wf' })
+    await flush()
+
+    expect(sessionManager.setRunning).toHaveBeenCalledTimes(1)
+    expect(
+      broadcast.mock.calls.some(([, msg]) => msg.type === 'session.running' && msg.payload.isRunning === false),
+    ).toBe(false)
   })
 
   it('does not recreate a runtime after the session is deleted mid-run', async () => {

@@ -35,6 +35,15 @@ export interface WorkflowLaunchPayload {
   attachments?: Attachment[]
 }
 
+/**
+ * Outcome of the post-run turn cleanup:
+ * - `restarted`: a queued message started a successor turn — the successor
+ *   owns the session's running state from now on.
+ * - `settled`: no successor — the caller finalizes (isRunning=false).
+ * - `stale`: the handle was no longer current — nothing may be touched.
+ */
+export type TurnCleanupOutcome = 'restarted' | 'settled' | 'stale'
+
 export interface LaunchWorkflowRunDeps {
   sessionManager: SessionManager
   sessionId: string
@@ -45,7 +54,7 @@ export interface LaunchWorkflowRunDeps {
   statsIdentity: StatsIdentity
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
   /** Turn-bookkeeping cleanup after the run settles (queue drain, restart, …). */
-  onFinished?: () => void
+  onFinished?: () => TurnCleanupOutcome
 }
 
 export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: WorkflowLaunchPayload): void {
@@ -145,15 +154,24 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
       const runtime = getSessionRuntimeRegistry().peek(sessionId)
       if (!runtime) return
       if (onFinished) {
+        let outcome: TurnCleanupOutcome
         try {
-          onFinished()
+          outcome = onFinished()
+        } catch {
+          // Session may have been deleted during execution. If our handle is
+          // still current, no successor was started: we still own finalization.
+          outcome = runtime.isCurrent(runtimeHandle) ? 'settled' : 'stale'
+        }
+        runtime.release(runtimeHandle)
+        // A successor turn started during cleanup owns the running state now —
+        // never write isRunning=false after it, and never touch a stale handle.
+        if (outcome !== 'settled') return
+        try {
           // The orchestrator bypasses runChatTurn, so isRunning must be cleared here
           sessionManager.setRunning(sessionId, false)
           broadcastForSession(sessionId, createSessionRunningMessage(false))
         } catch {
           // Session may have been deleted during execution
-        } finally {
-          runtime.release(runtimeHandle)
         }
         return
       }

@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { EventEmitter, once } from 'node:events'
 import WebSocket from 'ws'
 import { recordLLMFailure, clearLLMFailure, sleepThroughRetryBackoff } from '../chat/stream-pure.js'
+import { getSessionRuntimeRegistry, resetSessionRuntimeRegistry } from '../session/index.js'
 
 const {
   createProjectMock,
@@ -1504,6 +1505,92 @@ describe('createWebSocketServer', () => {
     const reply = await harness.nextMessage((message) => message.id === 'launch-while-running')
     expect(reply).toMatchObject({ type: 'error', payload: { code: 'SESSION_RUNNING' } })
     expect(reply.sessionId).toBe('session-b')
+
+    await harness.close()
+  })
+
+  it('hands a queued message to a successor turn without the old finally writing isRunning=false', async () => {
+    const sessionState: any = {
+      id: 'session-1',
+      projectId: 'project-1',
+      workdir: '/tmp/project',
+      mode: 'builder',
+      phase: 'build',
+      isRunning: false,
+      criteria: [],
+      metadata: { totalTokensUsed: 0, totalToolCalls: 0, iterationCount: 0 },
+    }
+    const lifecycle: string[] = []
+    const sessionManager = createSessionManager({
+      createSession: vi.fn(() => sessionState),
+      getSession: vi.fn(() => sessionState),
+      requireSession: vi.fn(() => sessionState),
+      setRunning: vi.fn((_id: string, isRunning: boolean) => {
+        lifecycle.push(`setRunning:${isRunning}`)
+        sessionState.isRunning = isRunning
+        return { ...sessionState, isRunning }
+      }),
+      // The workflow finishes with one message in the queue, then drains empty
+      drainAsapMessages: vi
+        .fn()
+        .mockImplementationOnce(() => [{ content: 'queued follow-up' }])
+        .mockImplementation(() => []),
+    })
+
+    resetSessionRuntimeRegistry()
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+
+    let finishSuccessor!: () => void
+    runChatTurnMock.mockImplementation(() => {
+      lifecycle.push('successor-start')
+      // The real runChatTurn marks the session running at turn start
+      sessionManager.setRunning('session-1', true)
+      return new Promise<void>((resolve) => {
+        finishSuccessor = resolve
+      })
+    })
+
+    const harness = await createHarness({ sessionManager })
+    const runningBroadcasts: boolean[] = []
+    harness.client.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as { type: string; payload?: { isRunning?: boolean } }
+      if (message.type === 'session.running' && message.payload?.isRunning !== undefined) {
+        runningBroadcasts.push(message.payload.isRunning)
+      }
+    })
+
+    harness.send({ id: 'sl-1', type: 'session.load', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'sl-1')
+
+    harness.send({ id: 'launch-1', type: 'runner.launch', payload: { workflowId: 'wf-1' } })
+    expect(await harness.nextMessage((message) => message.id === 'launch-1')).toMatchObject({ type: 'ack' })
+
+    // The workflow settles and the queued message starts its successor turn
+    const startDeadline = Date.now() + 5000
+    while (!finishSuccessor && Date.now() < startDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(finishSuccessor).toBeTruthy()
+
+    // Let the old workflow finally run to completion
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+
+    const runtime = getSessionRuntimeRegistry().peek('session-1')
+    expect(runtime?.currentHandle()?.kind).toBe('chat')
+    expect(sessionState.isRunning).toBe(true)
+
+    // The old finally modified nothing: no isRunning=false, no false broadcast
+    expect(lifecycle).toContain('successor-start')
+    expect(lifecycle.filter((entry) => entry === 'setRunning:false')).toEqual([])
+    expect(runningBroadcasts).not.toContain(false)
+
+    // The successor settles cleanly and releases the runtime
+    finishSuccessor()
+    const releaseDeadline = Date.now() + 5000
+    while (getSessionRuntimeRegistry().peek('session-1')?.currentHandle() && Date.now() < releaseDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(getSessionRuntimeRegistry().peek('session-1')?.currentHandle()).toBeNull()
 
     await harness.close()
   })
