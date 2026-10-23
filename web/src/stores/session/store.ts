@@ -12,6 +12,7 @@ import type {
   SessionStatsSummary,
 } from '@shared/types.js'
 import type { QueuedMessage, PendingQuestionPayload } from '@shared/protocol.js'
+import { t } from '@shared/i18n/index.js'
 import { wsClient } from '../../lib/ws'
 import { useConfigStore } from '../config'
 import { projectsResource } from '../../lib/resources'
@@ -1048,21 +1049,33 @@ export const useSessionStore = create<SessionState>((set, get) => {
     resumeInterruption: async (sessionId) => {
       const pane = paneFor(get(), sessionId)
       if (!pane?.session?.interruptedAt) return
-      set((s) => updatePane(s, sessionId, (p) => ({ ...p, abortInProgress: true })))
+      set((s) => updatePane(s, sessionId, (p) => ({ ...p, abortInProgress: true, error: null })))
       try {
         const res = await authFetch(`/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
         if (!res.ok) {
-          const body = await res.json().catch(() => ({ error: 'Unknown error' }))
+          const body = await res.json().catch(() => ({}))
+          const detail = typeof body.error === 'string' && body.error ? body.error : `HTTP ${res.status}`
           set((s) =>
             updatePane(s, sessionId, (p) => ({
               ...p,
-              error: { code: 'resume_failed', message: body.error ?? 'Resume failed' },
+              error: {
+                code: 'resume_failed',
+                message: t({ en: 'Resume failed ({{detail}})', fr: 'Échec de la reprise ({{detail}})' }, { detail }),
+              },
             })),
           )
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: { code: 'resume_failed', message } })))
+        const detail = error instanceof Error ? error.message : String(error)
+        set((s) =>
+          updatePane(s, sessionId, (p) => ({
+            ...p,
+            error: {
+              code: 'resume_failed',
+              message: t({ en: 'Resume failed ({{detail}})', fr: 'Échec de la reprise ({{detail}})' }, { detail }),
+            },
+          })),
+        )
       } finally {
         set((s) => updatePane(s, sessionId, (p) => ({ ...p, abortInProgress: false })))
       }

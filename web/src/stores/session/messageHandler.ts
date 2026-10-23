@@ -5,6 +5,7 @@ import type {
   GitDiffFile,
   SessionListPayload,
   SessionRunningPayload,
+  SessionInterruptedPayload,
   SessionPausePayload,
   ChatAskUserPayload,
   ChatDeltaPayload,
@@ -437,6 +438,23 @@ export function handleServerMessage(
         sessions: projectId !== undefined ? state.sessions.filter((s) => s.projectId !== projectId) : state.sessions,
       }))
       get().listSessions(projectId)
+      break
+    }
+
+    case 'session.interrupted': {
+      const payload = message.payload as SessionInterruptedPayload
+      updateSessionField(message, set, get, (s) => ({ ...s, interruptedAt: payload.interruptedAt }))
+      const eventSessionId = message.sessionId
+      if (!eventSessionId || !isLivePane(get(), eventSessionId)) {
+        break
+      }
+      // Sync the live pane's session object (the resume button reads it).
+      set((state) => updatePaneSession(state, eventSessionId, (s) => ({ ...s, interruptedAt: payload.interruptedAt })))
+      // On resume (null), clear any stale resume error so the affordance and
+      // its error state both reset cleanly.
+      if (payload.interruptedAt === null) {
+        set((state) => updatePane(state, eventSessionId, (p) => ({ ...p, error: null })))
+      }
       break
     }
 

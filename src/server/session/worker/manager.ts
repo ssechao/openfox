@@ -25,7 +25,11 @@ import type Database from 'better-sqlite3'
 import type { Config } from '../../../shared/types.js'
 import type { ServerMessage } from '../../../shared/protocol.js'
 import { logger } from '../../utils/logger.js'
-import { createSessionRunningMessage, createChatMessageMessage } from '../../ws/protocol.js'
+import {
+  createSessionRunningMessage,
+  createSessionInterruptedMessage,
+  createChatMessageMessage,
+} from '../../ws/protocol.js'
 import { createMessageDoneEvent } from '../../chat/stream-pure.js'
 import { serverT } from '../../i18n.js'
 import { getEventStore } from '../../events/index.js'
@@ -275,6 +279,9 @@ export class SessionWorkerManager {
     } catch {
       // Session may have been deleted while the worker ran
     }
+    // Sync the UI: the session is now « interrompue — reprendre ». The client
+    // shows the resume affordance as soon as it receives this, without a reload.
+    this.deps.broadcastForSession(sessionId, createSessionInterruptedMessage(interruptedAt))
     // Keep the event-sourced running state consistent: the worker died before
     // appending its own running.changed(false). Without this the next gateway
     // boot would treat the session as stale-running and the opt-in boot

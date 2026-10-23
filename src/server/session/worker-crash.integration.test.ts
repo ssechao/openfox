@@ -11,6 +11,7 @@
  * sessions must keep working.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { WebSocket } from 'ws'
 import { mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -214,5 +215,82 @@ describe('session worker crash', () => {
     )
     expect(recovered.session.interruptedAt).toBeNull()
     expect(recovered.messages.some((m) => m.role === 'assistant')).toBe(true)
+  }, 120_000)
+
+  it('syncs interruptedAt over the real WebSocket on crash and clears it on resume', async () => {
+    await setWorkerMode(true)
+    await waitFor(
+      async () => ((await getWorkerIntrospection()).active === null ? true : null),
+      40_000,
+      'previous worker to settle',
+    )
+    const sessionId = await createSession('ws-interrupt')
+
+    const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    const interruptedMessages: Array<{ interruptedAt: string | null }> = []
+    ws.on('message', (raw) => {
+      const msg = JSON.parse(String(raw)) as {
+        type?: string
+        sessionId?: string
+        payload?: { interruptedAt?: string | null }
+      }
+      if (msg.type === 'session.interrupted' && msg.sessionId === sessionId) {
+        interruptedMessages.push({ interruptedAt: msg.payload?.interruptedAt ?? null })
+      }
+    })
+    ws.send(JSON.stringify({ id: 'load', type: 'session.load', payload: { sessionId } }))
+    // The ack proves the server set this client's active session, so the
+    // crash broadcast below is routed to it.
+    const loadAcked = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timed out waiting for session.load ack')), 5_000)
+      const onMessage = (raw: WebSocket.RawData) => {
+        const msg = JSON.parse(String(raw)) as { id?: string; type?: string }
+        if (msg.id === 'load' && msg.type === 'ack') {
+          clearTimeout(timer)
+          ws.off('message', onMessage)
+          resolve()
+        }
+      }
+      ws.on('message', onMessage)
+    })
+
+    await sendMessage(sessionId, 'Run the exact command: sleep 30')
+    await loadAcked
+    const active = await waitFor(async () => (await getWorkerIntrospection()).active, 40_000, 'worker to be launched')
+    expect(active?.sessionId).toBe(sessionId)
+    process.kill(active!.pid!, 'SIGKILL')
+
+    const crashed = await waitFor(
+      async () => {
+        const view = await getSessionView(sessionId)
+        return view.session.interruptedAt && !view.session.isRunning ? view : null
+      },
+      10_000,
+      'session to be marked interrupted',
+    )
+    const interruptedAt = crashed!.session.interruptedAt!
+
+    const crashSync = await waitFor(
+      async () => interruptedMessages.find((m) => m.interruptedAt !== null) ?? null,
+      5_000,
+      'session.interrupted over WS',
+    )
+    expect(crashSync.interruptedAt).toBe(interruptedAt)
+
+    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+    expect(resumed.status).toBe(200)
+
+    const clearSync = await waitFor(
+      async () => interruptedMessages.find((m) => m.interruptedAt === null) ?? null,
+      5_000,
+      'session.interrupted (null) over WS',
+    )
+    expect(clearSync.interruptedAt).toBeNull()
+
+    ws.close()
   }, 120_000)
 })

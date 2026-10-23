@@ -9,6 +9,7 @@ import type {
   SessionListPayload,
   SessionCreatedPayload,
   SessionRunningPayload,
+  SessionInterruptedPayload,
   SessionPausePayload,
   SessionNameGeneratedPayload,
   PendingPathConfirmationPayload,
@@ -186,6 +187,13 @@ export function createSessionRunningMessage(
   sessionId?: string,
 ): ServerMessage<SessionRunningPayload> {
   return createServerMessage('session.running', { isRunning }, sessionId)
+}
+
+export function createSessionInterruptedMessage(
+  interruptedAt: string | null,
+  sessionId?: string,
+): ServerMessage<SessionInterruptedPayload> {
+  return createServerMessage('session.interrupted', { interruptedAt }, sessionId)
 }
 
 export function createSessionPauseMessage(pauseState: PauseState): ServerMessage<SessionPausePayload> {
