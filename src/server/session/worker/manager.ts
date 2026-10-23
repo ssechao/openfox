@@ -32,7 +32,7 @@ import { getEventStore } from '../../events/index.js'
 import { emitRunningChanged } from '../../events/session.js'
 import type { SessionManager } from '../manager.js'
 import { assignWorkerToken, clearWorkerToken, isWorkerMessageCurrent, type WorkerToken } from './token.js'
-import { childrenFilePath, killTrackedChildren, removeChildrenFile } from './children.js'
+import { childrenFilePath, initChildrenTracking, killTrackedChildren, removeChildrenFile } from './children.js'
 import { markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
 import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
 
@@ -130,20 +130,36 @@ export class SessionWorkerManager {
     const childrenPath = childrenFilePath(db.name, token.workerId)
     const entry = resolveWorkerEntry()
 
-    const child = fork(entry.path, [], {
-      execArgv: entry.execArgv,
-      env: {
-        ...process.env,
-        OPENFOX_WORKER_ID: token.workerId,
-        OPENFOX_WORKER_GENERATION: String(token.generation),
-        OPENFOX_WORKER_DB_PATH: db.name,
-        OPENFOX_WORKER_CHILDREN: childrenPath,
-      },
-      // stdin stays a pipe held open by the gateway: the worker's
-      // parent-exit guard uses its closure as the orphan-kill signal.
-      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-      detached: false,
-    })
+    try {
+      initChildrenTracking(childrenPath)
+    } catch (error) {
+      clearWorkerToken(db, sessionId, token)
+      throw new Error(`Cannot launch session worker: child sidecar initialization failed at ${childrenPath}`, {
+        cause: error,
+      })
+    }
+
+    let child: ChildProcess
+    try {
+      child = fork(entry.path, [], {
+        execArgv: entry.execArgv,
+        env: {
+          ...process.env,
+          OPENFOX_WORKER_ID: token.workerId,
+          OPENFOX_WORKER_GENERATION: String(token.generation),
+          OPENFOX_WORKER_DB_PATH: db.name,
+          OPENFOX_WORKER_CHILDREN: childrenPath,
+        },
+        // stdin stays a pipe held open by the gateway: the worker's
+        // parent-exit guard uses its closure as the orphan-kill signal.
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+        detached: false,
+      })
+    } catch (error) {
+      removeChildrenFile(childrenPath)
+      clearWorkerToken(db, sessionId, token)
+      throw new Error('Cannot launch session worker: process spawn failed', { cause: error })
+    }
 
     const worker: ActiveWorker = {
       sessionId,

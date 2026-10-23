@@ -25,7 +25,6 @@ import { attachWorkerEventStore } from '../../events/store.js'
 import { createProviderManager } from '../../provider-manager.js'
 import { SessionManager } from '../manager.js'
 import { createMockLLMClient } from '../../llm/mock.js'
-import { initChildrenTracking } from './children.js'
 import type { WorkerToken } from './token.js'
 import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
 import type { LLMClientWithModel } from '../../llm/client.js'
@@ -45,7 +44,6 @@ const workerEnv = (() => {
 })()
 
 const token: WorkerToken = { workerId: workerEnv.workerId, generation: workerEnv.generation }
-initChildrenTracking(workerEnv.childrenPath)
 
 const send = (msg: WorkerToGatewayMessage, onFlush?: () => void): void => {
   try {
