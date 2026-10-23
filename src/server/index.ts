@@ -4038,7 +4038,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }),
 
     close: () =>
-      new Promise<void>((resolve) => {
+      new Promise<void>((resolve, reject) => {
         logger.info('Shutting down...')
         void (async () => {
           diagnosticsCollector.stop()
@@ -4065,14 +4065,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           // Note: Not closing database here - it's a singleton shared across servers.
           // Database should only be closed when the application exits.
           runtimeRegistry.abortAll()
-          workerManager.shutdown()
+          await workerManager.shutdown()
           // Terminate all WebSocket connections to allow clean shutdown
           for (const client of wss.clients) {
             client.terminate()
           }
           wss.close()
           httpServer.close(() => resolve())
-        })()
+        })().catch(reject)
       }),
   }
 }

@@ -71,6 +71,8 @@ export interface SessionWorkerManagerDeps {
   sessionManager: SessionManager
   isEnabled: () => boolean
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
+  cleanupChildren?: (path: string) => Promise<number[]>
+  shutdownTimeoutMs?: number
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
@@ -219,18 +221,40 @@ export class SessionWorkerManager {
   }
 
   /** Kill the active worker (gateway shutdown). */
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     const worker = this.active
     if (!worker) return
     this.active = null
+
+    let timeout: NodeJS.Timeout | undefined
     try {
-      worker.child.kill('SIGTERM')
-    } catch {
-      // Already gone
+      const exited = new Promise<void>((resolve) => {
+        if (worker.child.exitCode !== null || worker.child.signalCode !== null) resolve()
+        else worker.child.once('exit', () => resolve())
+      })
+      const timeoutMs = this.deps.shutdownTimeoutMs ?? 2000
+      const exitedBeforeTimeout = Promise.race([
+        exited,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(
+              new Error(`Session worker ${worker.token.workerId} did not exit within ${timeoutMs}ms during shutdown`),
+            )
+          }, timeoutMs)
+        }),
+      ])
+
+      try {
+        worker.child.kill('SIGTERM')
+      } catch {
+        // Already gone
+      }
+      await Promise.all([(this.deps.cleanupChildren ?? killTrackedChildren)(worker.childrenPath), exitedBeforeTimeout])
+      worker.onSettled({ crashed: false })
+    } finally {
+      if (timeout) clearTimeout(timeout)
+      clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
     }
-    removeChildrenFile(worker.childrenPath)
-    clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
-    worker.onSettled({ crashed: false })
   }
 
   private sendTo(worker: ActiveWorker, msg: GatewayToWorkerMessage): void {

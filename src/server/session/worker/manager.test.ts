@@ -1,8 +1,11 @@
+import { EventEmitter } from 'node:events'
+import type { ChildProcess } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import type { Config } from '../../../shared/types.js'
 import type { SessionManager } from '../manager.js'
 import { SessionWorkerManager } from './manager.js'
+import { assignWorkerToken } from './token.js'
 
 function createDb(name: string): { db: Database.Database; namedDb: Database.Database } {
   const db = new Database(':memory:')
@@ -41,6 +44,75 @@ afterEach(() => {
 })
 
 describe('SessionWorkerManager', () => {
+  it('signals the worker, kills its children, waits for exit, and reports a shutdown timeout', async () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-shutdown.db')
+    openDbs.push(db)
+    const order: string[] = []
+    const token = assignWorkerToken(namedDb, 'sess-1')
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      kill: () => {
+        order.push('worker')
+        return true
+      },
+    }) as unknown as ChildProcess
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {} as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      cleanupChildren: async () => {
+        order.push('children')
+        return [99]
+      },
+      shutdownTimeoutMs: 25,
+    })
+    Reflect.set(manager, 'active', {
+      sessionId: 'sess-1',
+      token,
+      child,
+      childrenPath: '/tmp/test.children',
+      doneReceived: false,
+      doneOk: false,
+      stderrTail: [],
+      onSettled: () => order.push('settled'),
+    })
+
+    let completed = false
+    const shutdown = manager.shutdown().then(() => {
+      completed = true
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(order).toEqual(['worker', 'children'])
+    expect(completed).toBe(false)
+    child.emit('exit', 0, null)
+    await shutdown
+    expect(order).toEqual(['worker', 'children', 'settled'])
+
+    const timeoutToken = assignWorkerToken(namedDb, 'sess-1')
+    const stuckChild = Object.assign(new EventEmitter(), {
+      pid: 43,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    }) as unknown as ChildProcess
+    Reflect.set(manager, 'active', {
+      sessionId: 'sess-1',
+      token: timeoutToken,
+      child: stuckChild,
+      childrenPath: '/tmp/test-timeout.children',
+      doneReceived: false,
+      doneOk: false,
+      stderrTail: [],
+      onSettled: () => {},
+    })
+
+    await expect(manager.shutdown()).rejects.toThrow(/worker.*did not exit within 25ms.*shutdown/i)
+  })
+
   it('fails before spawning when the child sidecar cannot be initialized', () => {
     const { db, namedDb } = createDb('/missing/openfox/sessions.db')
     openDbs.push(db)
