@@ -1479,6 +1479,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       const { autoApprovePendingConfirmationsForSession } = await import('./tools/index.js')
       const approvedCallIds = autoApprovePendingConfirmationsForSession(sessionId)
       for (const callId of approvedCallIds) {
+        workerManager.relayResolvedPath(callId, true, false)
         wssExports.broadcastForSession(sessionId, {
           type: 'session.confirmation_resolved',
           sessionId,
@@ -1589,8 +1590,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(403).json({ error: 'Confirmation does not belong to this session' })
     }
 
-    const result = providePathConfirmation(callId, approved, alwaysAllow)
-    if (!result.found) {
+    const found =
+      workerManager.answerPath(callId, approved, alwaysAllow ?? false) ||
+      providePathConfirmation(callId, approved, alwaysAllow).found
+    if (!found) {
       return res.status(404).json({ error: 'No pending path confirmation with that ID' })
     }
 
@@ -1654,7 +1657,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(404).json({ error: 'No pending question with that ID' })
     }
 
-    const found = provideAnswer(callId, answer ?? '', skip ?? false)
+    const found =
+      workerManager.answerQuestion(callId, answer ?? '', skip ?? false) ||
+      provideAnswer(callId, answer ?? '', skip ?? false)
 
     if (!found) {
       return res.status(404).json({ error: 'No pending question with that ID' })
@@ -4062,9 +4067,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }
       return null
     },
-    answerQuestion: (callId, answer, skip) => provideAnswer(callId, answer, skip),
+    answerQuestion: (callId, answer, skip) =>
+      workerManager.answerQuestion(callId, answer, skip ?? false) || provideAnswer(callId, answer, skip),
     pendingQuestions: (sessionId) => getPendingQuestionsForSession(sessionId),
-    confirmPath: (callId, approved, alwaysAllow) => providePathConfirmation(callId, approved, alwaysAllow).found,
+    confirmPath: (callId, approved, alwaysAllow) =>
+      workerManager.answerPath(callId, approved, alwaysAllow ?? false) ||
+      providePathConfirmation(callId, approved, alwaysAllow).found,
     pendingConfirmations: (sessionId) => getPendingConfirmationsBySession()[sessionId] ?? [],
     setMetadataEntries: (sessionId, key, entries) => sessionManager.setMetadataEntries(sessionId, key, entries),
     recentMessages: (sessionId, limit) => {

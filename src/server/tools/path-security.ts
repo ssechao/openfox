@@ -6,6 +6,7 @@ import { createChatPathConfirmationMessage } from '../ws/protocol.js'
 import { getEventStore } from '../events/index.js'
 import { getPlatformShell } from '../utils/platform.js'
 import { evaluatePluginPathAccess } from '../plugins/danger-levels.js'
+import { relayWorkerPath } from '../session/worker/interactive-relay.js'
 
 // ===========================================================================
 // Constants
@@ -1601,6 +1602,7 @@ export function registerPathConfirmation(
 ): Promise<boolean> {
   return new Promise((resolve, reject) => {
     pendingConfirmations.set(callId, { resolve, reject, paths, sessionId, tool, workdir, reason })
+    relayWorkerPath({ callId, paths, sessionId, tool, workdir, reason })
   })
 }
 
@@ -1619,6 +1621,7 @@ export function providePathConfirmation(
   callId: string,
   approved: boolean,
   alwaysAllow?: boolean,
+  emitEvent = true,
 ): {
   found: boolean
   sessionId?: string
@@ -1629,15 +1632,16 @@ export function providePathConfirmation(
     return { found: false }
   }
 
-  // Emit path.confirmation_responded event for persistence
-  try {
-    const eventStore = getEventStore()
-    eventStore.append(pending.sessionId, {
-      type: 'path.confirmation_responded',
-      data: { callId, approved, alwaysAllow: alwaysAllow ?? false },
-    })
-  } catch {
-    // Event store might not be initialized in tests, continue without event
+  if (emitEvent) {
+    try {
+      const eventStore = getEventStore()
+      eventStore.append(pending.sessionId, {
+        type: 'path.confirmation_responded',
+        data: { callId, approved, alwaysAllow: alwaysAllow ?? false },
+      })
+    } catch {
+      void 0
+    }
   }
 
   if (approved && alwaysAllow) {

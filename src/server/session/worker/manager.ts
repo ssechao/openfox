@@ -47,6 +47,9 @@ import type {
   WorkerToGatewayMessage,
 } from './protocol.js'
 import { WorkerMcpBroker } from './mcp-broker.js'
+import { WorkerInteractiveBroker } from './interactive-broker.js'
+import { cancelQuestion, registerPendingQuestion, provideAnswer } from '../../tools/ask.js'
+import { cancelPathConfirmation, providePathConfirmation, registerPathConfirmation } from '../../tools/path-security.js'
 import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
 
@@ -115,6 +118,7 @@ export class SessionWorkerManager {
   private readonly active = new Map<string, ActiveWorker>()
   private readonly scheduler: SessionTurnScheduler
   private readonly mcpBroker: WorkerMcpBroker | null
+  private readonly interactiveBroker: WorkerInteractiveBroker
   private lastCrash: WorkerCrashReport | null = null
   private admissionsClosed = false
 
@@ -134,6 +138,19 @@ export class SessionWorkerManager {
           reconcile: (request) => this.appendMcpReconciliation(request),
         })
       : null
+    this.interactiveBroker = new WorkerInteractiveBroker({
+      isCurrent: (identity) => this.isCurrentIdentity(identity),
+      send: (message) => {
+        const worker = this.active.get(message.sessionId)
+        if (worker) this.sendTo(worker, message)
+      },
+      registerQuestion: registerPendingQuestion,
+      registerPath: registerPathConfirmation,
+      answerQuestion: provideAnswer,
+      answerPath: (callId, approved, alwaysAllow) => providePathConfirmation(callId, approved, alwaysAllow).found,
+      cancelQuestion,
+      cancelPath: cancelPathConfirmation,
+    })
   }
 
   isEnabled(): boolean {
@@ -182,8 +199,21 @@ export class SessionWorkerManager {
     const worker = this.active.get(sessionId)
     if (!worker) return this.scheduler.cancel(sessionId) === 'waiting'
     this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
+    this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session stopped by user')
     this.sendTo(worker, { ...worker.token, type: 'abort' })
     return true
+  }
+
+  answerQuestion(callId: string, answer: string, skip: boolean): boolean {
+    return this.interactiveBroker.answerQuestion(callId, answer, skip)
+  }
+
+  answerPath(callId: string, approved: boolean, alwaysAllow: boolean): boolean {
+    return this.interactiveBroker.answerPath(callId, approved, alwaysAllow)
+  }
+
+  relayResolvedPath(callId: string, approved: boolean, alwaysAllow: boolean): boolean {
+    return this.interactiveBroker.relayResolvedPath(callId, approved, alwaysAllow)
   }
 
   releaseTurn(sessionId: string): boolean {
@@ -285,6 +315,8 @@ export class SessionWorkerManager {
         this.mcpBroker?.handleRequest(msg)
       } else if (msg.type === 'mcp.cancel') {
         this.mcpBroker?.handleCancel(msg)
+      } else if (msg.type === 'interactive.question.open' || msg.type === 'interactive.path.open') {
+        this.interactiveBroker.handleOpen(msg)
       } else if (msg.type === 'done') {
         worker.doneReceived = true
         worker.doneOk = msg.ok
@@ -299,6 +331,7 @@ export class SessionWorkerManager {
     child.on('exit', (code, signal) => {
       if (this.active.get(sessionId) !== worker) return
       this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
+      this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session worker exited')
       this.active.delete(sessionId)
       void this.settle(worker, code, signal)
     })
@@ -311,6 +344,10 @@ export class SessionWorkerManager {
     const workers = [...this.active.values()]
     for (const worker of workers) {
       this.mcpBroker?.cancelWorker({ sessionId: worker.sessionId, ...worker.token })
+      this.interactiveBroker.cancelWorker(
+        { sessionId: worker.sessionId, ...worker.token },
+        'Gateway shutdown interrupted the worker turn',
+      )
     }
     this.active.clear()
     await Promise.all(workers.map((worker) => this.shutdownWorker(worker)))

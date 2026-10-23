@@ -1,5 +1,5 @@
 import type { Config } from '../../../shared/types.js'
-import type { ServerMessage } from '../../../shared/protocol.js'
+import type { ChoiceOption, ServerMessage } from '../../../shared/protocol.js'
 import type { DiagnosticsData } from '../../../shared/diagnostics.js'
 import type { LLMToolDefinition } from '../../llm/types.js'
 import type { WorkerToken } from './token.js'
@@ -49,10 +49,59 @@ export type McpResponseEndMessage = WorkerIpcIdentity & {
 
 export type WorkerMcpResponseMessage = McpResponseChunkMessage | McpResponseEndMessage
 
+export type InteractiveQuestionOpenMessage = WorkerIpcIdentity & {
+  type: 'interactive.question.open'
+  requestId: string
+  callId: string
+  question: string
+  questionType: 'text' | 'confirm' | 'choice'
+  options?: ChoiceOption[]
+}
+
+export type InteractivePathOpenMessage = WorkerIpcIdentity & {
+  type: 'interactive.path.open'
+  requestId: string
+  callId: string
+  paths: string[]
+  tool: string
+  workdir: string
+  reason: 'outside_workdir' | 'sensitive_file' | 'both' | 'dangerous_command' | 'git_no_verify'
+}
+
+export type InteractiveOpenMessage = InteractiveQuestionOpenMessage | InteractivePathOpenMessage
+
+export type InteractiveQuestionResponseMessage = WorkerIpcIdentity & {
+  type: 'interactive.question.response'
+  requestId: string
+  callId: string
+  answer: string
+  skip: boolean
+}
+
+export type InteractivePathResponseMessage = WorkerIpcIdentity & {
+  type: 'interactive.path.response'
+  requestId: string
+  callId: string
+  approved: boolean
+  alwaysAllow: boolean
+}
+
+export type InteractiveCancelledMessage = WorkerIpcIdentity & {
+  type: 'interactive.cancelled'
+  requestId: string
+  callId: string
+  kind: 'question' | 'path'
+  reason: string
+}
+
+export type WorkerInteractiveResponseMessage =
+  InteractiveQuestionResponseMessage | InteractivePathResponseMessage | InteractiveCancelledMessage
+
 export type GatewayToWorkerMessage =
   | (WorkerToken & { type: 'start'; sessionId: string; config: Config; mcpTools: WorkerMcpTool[] })
   | (WorkerToken & { type: 'abort' })
   | WorkerMcpResponseMessage
+  | WorkerInteractiveResponseMessage
 
 export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'ready'; pid: number })
@@ -61,3 +110,4 @@ export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'done'; ok: boolean; error?: string })
   | McpRequestMessage
   | McpCancelMessage
+  | InteractiveOpenMessage

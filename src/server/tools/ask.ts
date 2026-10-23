@@ -3,6 +3,7 @@ import type { Tool, ToolContext } from './types.js'
 import type { PendingQuestionPayload, ChoiceOption } from '../../shared/protocol.js'
 import { normalizeAskOptions } from '../../shared/ask-options.js'
 import { createDeferred } from '../utils/async.js'
+import { relayWorkerQuestion } from '../session/worker/interactive-relay.js'
 
 // Store pending questions by call ID
 const pendingQuestions = new Map<
@@ -77,21 +78,33 @@ export const askUserTool: Tool = {
 
     const callId = context.toolCallId ?? crypto.randomUUID()
 
-    const deferred = createDeferred<string>()
-    void deferred.promise.catch(() => {})
-
-    pendingQuestions.set(callId, {
-      promise: deferred.promise,
-      resolve: deferred.resolve,
-      reject: deferred.reject,
-      sessionId: context.sessionId,
-      question,
-      type,
-      options,
-    })
+    registerPendingQuestion(callId, context.sessionId, question, type, options)
 
     throw new AskUserInterrupt(callId, question, type, options)
   },
+}
+
+export function registerPendingQuestion(
+  callId: string,
+  sessionId: string,
+  question: string,
+  type: 'text' | 'confirm' | 'choice',
+  options?: ChoiceOption[],
+): Promise<string> | null {
+  if (pendingQuestions.has(callId)) return null
+  const deferred = createDeferred<string>()
+  void deferred.promise.catch(() => {})
+  pendingQuestions.set(callId, {
+    promise: deferred.promise,
+    resolve: deferred.resolve,
+    reject: deferred.reject,
+    sessionId,
+    question,
+    type,
+    options,
+  })
+  relayWorkerQuestion({ callId, sessionId, question, type, ...(options ? { options } : {}) })
+  return deferred.promise
 }
 
 export class AskUserInterrupt extends Error {

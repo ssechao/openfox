@@ -8,11 +8,6 @@
  * with its parent (parent-exit guard) and records its exclusive shell
  * children in a sidecar file so the gateway can reap them after a crash.
  *
- * 6a scope: plain chat turns with the built-in tools. MCP tools are not
- * registered in the worker (the gateway owns the shared MCP connections) and
- * interactive prompts (ask_user / path confirmations) are not wired across
- * IPC — sessions that need them are not supported in the worker and must run
- * in-process.
  */
 
 import { installParentExitGuard } from '../../utils/parent-exit-guard.js'
@@ -34,6 +29,7 @@ import { shutdownLspManager } from '../../lsp/index.js'
 import { createWorkerDiagnosticsCollector } from '../../diagnostics/worker-collector.js'
 import { setMcpTools } from '../../tools/index.js'
 import { WorkerMcpClient } from './mcp-client.js'
+import { WorkerInteractiveClient } from './interactive-client.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -61,20 +57,25 @@ const send = (msg: WorkerToGatewayMessage, onFlush?: () => void): void => {
 
 const controller = new AbortController()
 let mcpClient: WorkerMcpClient | null = null
+let interactiveClient: WorkerInteractiveClient | null = null
 
 process.on('message', (raw) => {
   const msg = raw as GatewayToWorkerMessage
   if (!msg || typeof msg !== 'object') return
   if (msg.workerId !== token.workerId || msg.generation !== token.generation) return
   if (msg.type === 'start') {
-    mcpClient = new WorkerMcpClient({ ...token, sessionId: msg.sessionId }, send)
+    const identity = { ...token, sessionId: msg.sessionId }
+    mcpClient = new WorkerMcpClient(identity, send)
+    interactiveClient = new WorkerInteractiveClient(identity, send)
     setMcpTools(mcpClient.createTools(msg.mcpTools ?? []))
     void runTurn(msg.sessionId, msg.config)
   } else if (msg.type === 'abort') {
     mcpClient?.cancelAll()
+    interactiveClient?.close('Session stopped by user')
     controller.abort()
   } else {
     mcpClient?.handleMessage(msg)
+    interactiveClient?.handleMessage(msg)
   }
 })
 
@@ -84,6 +85,7 @@ async function runTurn(sessionId: string, config: import('../../../shared/types.
   healthCollector.start((data) => send({ ...token, type: 'health', data }))
   const finish = (ok: boolean, error?: string): void => {
     healthCollector.stop()
+    interactiveClient?.close('Worker turn finished')
     send({ ...token, type: 'done', ok, ...(error ? { error } : {}) }, () => process.exit(ok ? 0 : 1))
     // Safety net if the IPC channel is already gone.
     setTimeout(() => process.exit(ok ? 0 : 1), 2000).unref()
