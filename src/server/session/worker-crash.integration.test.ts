@@ -11,7 +11,7 @@
  * sessions must keep working.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -135,12 +135,17 @@ describe('session worker crash', () => {
     const sessionA = await createSession('crash-victim')
     const sessionB = await createSession('witness')
 
-    // The turn runs in a worker, busy inside a long shell command.
-    await sendMessage(sessionA, 'Run the exact command: sleep 30')
+    const effectPath = join(workdir, 'crash-effect.txt')
+    await sendMessage(sessionA, `Run the exact command: printf x >> ${JSON.stringify(effectPath)}; sleep 30`)
     const active = await waitFor(async () => (await getWorkerIntrospection()).active, 20_000, 'worker to be launched')
     expect(active?.sessionId).toBe(sessionA)
     expect(active?.token.generation).toBe(1)
     expect(active?.pid).toBeGreaterThan(0)
+    await waitFor(
+      async () => ((await readFile(effectPath, 'utf-8').catch(() => '')) === 'x' ? true : null),
+      20_000,
+      'tool side effect',
+    )
 
     // Crash the worker. Detection must come from the exit handler, fast.
     const killedAt = Date.now()
@@ -214,5 +219,6 @@ describe('session worker crash', () => {
     )
     expect(recovered.session.interruptedAt).toBeNull()
     expect(recovered.messages.some((m) => m.role === 'assistant')).toBe(true)
+    expect(await readFile(effectPath, 'utf-8')).toBe('x')
   }, 120_000)
 })

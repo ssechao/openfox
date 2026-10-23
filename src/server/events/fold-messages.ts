@@ -315,7 +315,7 @@ export function buildContextMessagesFromStoredEvents(
     }
   }
 
-  stripOrphanedToolCalls(messages, fulfilledToolCallIds)
+  materializeUnknownToolResults(messages, fulfilledToolCallIds)
   reorderToolMessages(messages)
   return messages.map(({ id: _id, ...message }) => message)
 }
@@ -396,16 +396,29 @@ export function handleToolResult(
   }
 }
 
-export function stripOrphanedToolCalls(messages: MessageWithId[], fulfilledToolCallIds: Set<string>): void {
-  for (const msg of messages) {
-    if (msg.role === 'assistant' && msg.toolCalls) {
-      const fulfilled = msg.toolCalls.filter((tc) => fulfilledToolCallIds.has(tc.id))
-      if (fulfilled.length === 0) {
-        delete msg.toolCalls
-      } else {
-        msg.toolCalls = fulfilled
-      }
-    }
+const UNKNOWN_TOOL_RESULT =
+  'Tool result is unknown because execution was interrupted after the tool may have produced external effects. Do not retry automatically.'
+
+export function materializeUnknownToolResults(messages: MessageWithId[], fulfilledToolCallIds: Set<string>): void {
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+    const message = messages[messageIndex]!
+    if (message.role !== 'assistant' || !message.toolCalls) continue
+
+    const unknownCalls = message.toolCalls.filter((toolCall) => !fulfilledToolCallIds.has(toolCall.id))
+    if (unknownCalls.length === 0) continue
+
+    let insertIndex = messageIndex + 1
+    while (insertIndex < messages.length && messages[insertIndex]!.role === 'tool') insertIndex++
+    messages.splice(
+      insertIndex,
+      0,
+      ...unknownCalls.map((toolCall) => ({
+        id: `tool-${toolCall.id}`,
+        role: 'tool' as const,
+        content: UNKNOWN_TOOL_RESULT,
+        toolCallId: toolCall.id,
+      })),
+    )
   }
 }
 

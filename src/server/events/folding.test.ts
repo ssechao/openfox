@@ -1813,8 +1813,8 @@ describe('event folding', () => {
     })
   })
 
-  describe('orphaned tool call filtering (abort scenario)', () => {
-    it('strips orphaned toolCalls from assistant message in buildContextMessagesFromStoredEvents when tool.result is missing', () => {
+  describe('unknown tool results after interruption', () => {
+    it('materializes a durable unknown result when tool.result is missing', () => {
       const events: StoredEvent[] = [
         { ...baseEvent, type: 'message.start', data: { messageId: 'm1', role: 'user', content: 'do it' } },
         { ...baseEvent, type: 'message.done', data: { messageId: 'm1' } },
@@ -1834,15 +1834,17 @@ describe('event folding', () => {
 
       const messages = buildContextMessagesFromStoredEvents(events)
 
-      // Assistant message should NOT have the orphaned tool call
       const assistant = messages.find((m) => m.role === 'assistant')
       expect(assistant).toBeDefined()
-      expect(assistant!.toolCalls).toBeUndefined()
+      expect(assistant!.toolCalls).toHaveLength(1)
+      expect(assistant!.toolCalls![0]!.id).toBe('call-1')
 
-      // Only user message and assistant (no tool message since result is missing)
-      expect(messages).toHaveLength(2)
+      expect(messages).toHaveLength(3)
       expect(messages[0]).toMatchObject({ role: 'user', content: 'do it' })
       expect(messages[1]).toMatchObject({ role: 'assistant' })
+      expect(messages[2]).toMatchObject({ role: 'tool', toolCallId: 'call-1' })
+      expect(messages[2]!.content).toMatch(/result is unknown/i)
+      expect(messages[2]!.content).toMatch(/do not retry automatically/i)
     })
 
     it('keeps toolCalls when all have matching tool.result events', () => {
@@ -1876,7 +1878,7 @@ describe('event folding', () => {
       expect(messages.some((m) => m.role === 'tool' && m.toolCallId === 'call-1')).toBe(true)
     })
 
-    it('strips orphaned toolCalls only (keeps fulfilled ones) when partial abort', () => {
+    it('keeps fulfilled results and materializes unknown results when partially interrupted', () => {
       const events: StoredEvent[] = [
         { ...baseEvent, type: 'message.start', data: { messageId: 'm1', role: 'assistant' } },
         {
@@ -1907,13 +1909,16 @@ describe('event folding', () => {
 
       const messages = buildContextMessagesFromStoredEvents(events)
 
-      // Assistant should only have call-1 (fulfilled), not call-2 (orphaned)
       const assistant = messages.find((m) => m.role === 'assistant')
-      expect(assistant!.toolCalls).toHaveLength(1)
-      expect(assistant!.toolCalls![0]!.id).toBe('call-1')
+      expect(assistant!.toolCalls).toHaveLength(2)
+      expect(assistant!.toolCalls!.map((toolCall) => toolCall.id)).toEqual(['call-1', 'call-2'])
 
-      // Tool message for call-1 should be present
-      expect(messages.some((m) => m.role === 'tool' && m.toolCallId === 'call-1')).toBe(true)
+      const toolMessages = messages.filter((m) => m.role === 'tool')
+      expect(toolMessages).toHaveLength(2)
+      expect(toolMessages[0]).toMatchObject({ toolCallId: 'call-1', content: 'a' })
+      expect(toolMessages[1]).toMatchObject({ toolCallId: 'call-2' })
+      expect(toolMessages[1]!.content).toMatch(/result is unknown/i)
+      expect(toolMessages[1]!.content).toMatch(/do not retry automatically/i)
     })
 
     describe('parallel tool call ordering', () => {
@@ -2154,7 +2159,7 @@ describe('event folding', () => {
       })
     })
 
-    it('strips orphaned toolCalls from snapshot messages via buildContextMessagesFromEventHistory', () => {
+    it('preserves unknown tool results from snapshots via buildContextMessagesFromEventHistory', () => {
       const events: StoredEvent[] = [
         {
           ...baseEvent,
@@ -2207,13 +2212,16 @@ describe('event folding', () => {
 
       const messages = buildContextMessagesFromEventHistory(events, 'window-1')
 
-      // Assistant should only have call-2 (with result), not call-1 (orphaned)
       const assistant = messages.find((m) => m.role === 'assistant')
-      expect(assistant!.toolCalls).toHaveLength(1)
-      expect(assistant!.toolCalls![0]!.id).toBe('call-2')
+      expect(assistant!.toolCalls).toHaveLength(2)
+      expect(assistant!.toolCalls!.map((toolCall) => toolCall.id)).toEqual(['call-1', 'call-2'])
 
-      // Tool message for call-2 should be present
-      expect(messages.some((m) => m.role === 'tool' && m.toolCallId === 'call-2')).toBe(true)
+      const toolMessages = messages.filter((m) => m.role === 'tool')
+      expect(toolMessages).toHaveLength(2)
+      expect(toolMessages[0]).toMatchObject({ toolCallId: 'call-1' })
+      expect(toolMessages[0]!.content).toMatch(/result is unknown/i)
+      expect(toolMessages[0]!.content).toMatch(/do not retry automatically/i)
+      expect(toolMessages[1]).toMatchObject({ toolCallId: 'call-2', content: 'content' })
     })
 
     it('produces stable message order with and without snapshots when tool result races with injected user message', () => {

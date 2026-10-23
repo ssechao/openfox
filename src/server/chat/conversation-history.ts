@@ -17,7 +17,7 @@ import {
   handleMessageDelta,
   handleToolCall,
   handleToolResult,
-  stripOrphanedToolCalls,
+  materializeUnknownToolResults,
   reorderToolMessages,
   type MessageWithId,
 } from '../events/folding.js'
@@ -166,7 +166,7 @@ function buildSubAgentContextMessages(events: StoredEvent[], scope: SubAgentScop
     }
   }
 
-  stripOrphanedToolCalls(messages, fulfilledToolCallIds)
+  materializeUnknownToolResults(messages, fulfilledToolCallIds)
   reorderToolMessages(messages)
 
   return messages.map(

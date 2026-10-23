@@ -26,7 +26,7 @@ export {
   handleMessageDelta,
   handleToolCall,
   handleToolResult,
-  stripOrphanedToolCalls,
+  materializeUnknownToolResults,
   reorderToolMessages,
   buildContextMessagesFromEventHistory,
   buildSessionStatsMessages,
