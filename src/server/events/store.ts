@@ -45,6 +45,7 @@ import { gcBlobs, type BlobGcReport } from './blob-gc.js'
 import { SearchIndexer } from '../search/fts-index.js'
 import type { BlobScanProgress } from './blob-scan.js'
 import { rollbackAllBlobs, rollbackSessionBlobs, type BlobRollbackReport } from './blob-rollback.js'
+import { createWorkerFence, type WorkerToken } from '../session/worker/token.js'
 
 // Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
 // auto-pruned on the next migration invocation (startup auto-run or manual
@@ -212,6 +213,7 @@ function createSubscriber(
 
 export class EventStore {
   private db: Database.Database
+  private readonly writeFence: ((sessionId: string) => void) | undefined
   readonly searchIndex: SearchIndexer
   private subscribers: Map<string, Set<Subscriber>> = new Map()
   private globalSubscribers: Map<number, GlobalSubscriber> = new Map()
@@ -399,6 +401,10 @@ export class EventStore {
       streamFlushIntervalMs?: number
       streamFlushMaxBytes?: number
       blobStore?: BlobStore
+      /** Worker fencing (étape 6a): invoked inside every append transaction;
+       *  must throw when this writer's token is stale. Gateway instances leave
+       *  it unset. */
+      writeFence?: (sessionId: string) => void
     } = {},
   ) {
     this.diagnostics =
@@ -407,6 +413,7 @@ export class EventStore {
     this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS
     this.streamFlushMaxBytes = options.streamFlushMaxBytes ?? STREAM_FLUSH_MAX_BYTES
     this.db = db
+    this.writeFence = options.writeFence
     this.blobStore = options.blobStore ?? blobStoreForDatabase(db.name)
     setBlobStore(this.blobStore)
     this.initSchema()
@@ -661,6 +668,7 @@ export class EventStore {
         this.timed('write', () =>
           this.searchIndex.withPendingRollback(() =>
             this.db.transaction(() => {
+              this.writeFence?.(sessionId)
               insert.run(sessionId, seq, timestamp, event.type, payload)
               this.searchIndex.apply(sessionId, toStore, timestamp, {
                 ...(options.indexSnapshot ? { allowSnapshot: true } : {}),
@@ -737,6 +745,7 @@ export class EventStore {
         const transaction = this.db.transaction(() => {
           let seq = baseSeq
           for (const event of toStore) {
+            this.writeFence?.(sessionId)
             insert.run(sessionId, seq, timestamp, event.type, payloads[seq - baseSeq])
             this.searchIndex.apply(sessionId, event, timestamp)
             const stored: StoredEvent = {
@@ -1044,6 +1053,15 @@ export class EventStore {
       const prompts = [...promptMap.values()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
       this.writeRecentUserPrompts(sessionId, prompts)
     }
+  }
+
+  /**
+   * Drop every cached projection for a session written by an external writer
+   * (a session worker process, étape 6a). Called by the gateway when the
+   * worker's turn settles.
+   */
+  invalidateExternalSession(sessionId: string): void {
+    this.invalidateSessionCache(sessionId)
   }
 
   private invalidateSessionCache(sessionId: string, event?: TurnEvent): void {
@@ -2157,6 +2175,19 @@ function rejectStaleConfirmations(eventStore: EventStore, db: Database.Database)
   if (rejectedCount > 0) {
     logger.info('Rejected stale path confirmations from previous server run', { count: rejectedCount })
   }
+}
+
+/**
+ * Worker-side attach (étape 6a): open the event store on an already-migrated
+ * database without any gateway-only maintenance — no is_running reset, no
+ * stale-session repair, no storage optimization, no consolidation, no WAL
+ * checkpoint (see the gateway/worker contract in db/instance-lock.ts). Every
+ * append is fenced on the (workerId, generation) token the gateway issued.
+ */
+export function attachWorkerEventStore(db: Database.Database, token: WorkerToken): EventStore {
+  eventStoreInstance = new EventStore(db, { writeFence: createWorkerFence(db, token) })
+  logger.info('Worker attached to event store', { workerId: token.workerId, generation: token.generation })
+  return eventStoreInstance
 }
 
 export function getEventStore(): EventStore {

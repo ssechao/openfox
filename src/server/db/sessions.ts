@@ -393,6 +393,7 @@ export function listSessions(): SessionSummary[] {
       s.mode,
       s.workflow_phase,
       s.is_running,
+      s.interrupted_at,
       s.is_favorite,
       s.created_at,
       s.updated_at,
@@ -419,6 +420,7 @@ const SESSION_SUMMARY_SELECT = `
       s.mode,
       s.workflow_phase,
       s.is_running,
+      s.interrupted_at,
       s.is_favorite,
       s.created_at,
       s.updated_at,
@@ -485,6 +487,7 @@ function listSessionsPaged(
       s.mode,
       s.workflow_phase,
       s.is_running,
+      s.interrupted_at,
       s.is_favorite,
       s.created_at,
       s.updated_at,
@@ -528,6 +531,7 @@ export function listHomeSessions(limit = 20): SessionSummary[] {
       s.mode,
       s.workflow_phase,
       s.is_running,
+      s.interrupted_at,
       s.is_favorite,
       s.created_at,
       s.updated_at,
@@ -595,6 +599,7 @@ function mapSessionBase(row: SessionRow | SessionSummaryRow): {
   mode: SessionMode
   phase: SessionPhase
   isRunning: boolean
+  interruptedAt?: string | null
   providerId: string | null
   providerModel: string | null
   providerReasoningEffort?: string | null
@@ -613,6 +618,7 @@ function mapSessionBase(row: SessionRow | SessionSummaryRow): {
     mode: (row.mode ?? 'planner') as SessionMode,
     phase: (row.workflow_phase ?? 'plan') as SessionPhase,
     isRunning: Boolean(row.is_running),
+    interruptedAt: row.interrupted_at ?? null,
     providerId: row.provider_id ?? null,
     providerModel: row.provider_model ?? null,
     ...('provider_reasoning_effort' in row
@@ -681,6 +687,7 @@ interface SessionRow {
   mode: string
   workflow_phase: string
   is_running: number
+  interrupted_at?: string | null
   summary: string | null
   provider_id: string | null
   provider_model: string | null
@@ -711,6 +718,7 @@ interface SessionSummaryRow {
   mode: string
   workflow_phase: string
   is_running: number
+  interrupted_at?: string | null
   is_favorite: number
   created_at: string
   updated_at: string

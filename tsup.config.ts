@@ -11,6 +11,7 @@ export default defineConfig({
     'cli/index': 'src/cli/index.ts',
     'cli/dev': 'src/cli/dev.ts',
     'server/index': 'src/server/index.ts',
+    'server/session/worker/child': 'src/server/session/worker/child.ts',
     'shared/index': 'src/shared/index.ts',
     'provider/index': 'src/provider/index.ts',
     'plugin/index': 'src/plugin/index.ts',

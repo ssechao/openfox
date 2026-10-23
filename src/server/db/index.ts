@@ -41,6 +41,13 @@ export function initDatabase(config: Config): Database.Database {
       logger.info('Reset stale running states', { count: result.changes })
     }
 
+    // Workers of the previous instance are all dead with it; release their
+    // tokens. worker_generation is intentionally kept (monotonic fencing).
+    const staleWorkers = db.prepare(`UPDATE sessions SET worker_id = NULL WHERE worker_id IS NOT NULL`).run()
+    if (staleWorkers.changes > 0) {
+      logger.info('Released stale worker tokens', { count: staleWorkers.changes })
+    }
+
     // Vacuum database if freelist has accumulated (deleted rows leave free pages)
     // Only vacuum if > 10k free pages to avoid unnecessary I/O
     const freelistCount = db.pragma('freelist_count', { simple: true }) as number
@@ -69,6 +76,26 @@ export function getDatabase(): Database.Database {
   if (!db) {
     throw new Error('Database not initialized. Call initDatabase first.')
   }
+  return db
+}
+
+/**
+ * Worker-side attach (étape 6a): open the gateway's database WITHOUT the
+ * instance lock, migrations, or any global maintenance (is_running reset,
+ * VACUUM) — the gateway owns all of that for the instance lifetime (see the
+ * contract in instance-lock.ts). The worker just reads and writes its own
+ * session's rows through the fenced EventStore.
+ */
+export function attachWorkerDatabase(dbPath: string): Database.Database {
+  if (db) {
+    return db
+  }
+  assertTestDatabasePath(dbPath)
+  logger.info('Worker attaching to database', { path: dbPath, pid: process.pid })
+  db = new Database(dbPath)
+  db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
+  db.pragma('journal_mode = WAL')
+  db.pragma('foreign_keys = ON')
   return db
 }
 
@@ -229,6 +256,22 @@ function runMigrations(db: Database.Database): void {
   if (!columnNames.includes('is_running')) {
     logger.info('Migrating sessions table: adding is_running column')
     db.exec(`ALTER TABLE sessions ADD COLUMN is_running INTEGER NOT NULL DEFAULT 0`)
+  }
+
+  // Worker mode (étape 6a): the (worker_id, worker_generation) pair fences
+  // every event written by a session worker process; interrupted_at marks a
+  // session whose worker crashed until the user explicitly resumes it.
+  if (!columnNames.includes('worker_id')) {
+    logger.info('Migrating sessions table: adding worker_id column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN worker_id TEXT`)
+  }
+  if (!columnNames.includes('worker_generation')) {
+    logger.info('Migrating sessions table: adding worker_generation column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN worker_generation INTEGER NOT NULL DEFAULT 0`)
+  }
+  if (!columnNames.includes('interrupted_at')) {
+    logger.info('Migrating sessions table: adding interrupted_at column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN interrupted_at TEXT`)
   }
 
   // Note: The old 'phase' column was for the state machine (idle/planning/executing/etc.)
