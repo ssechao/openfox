@@ -28,7 +28,7 @@ import { cascadeProviderDelete } from './providers/adapters/provider-deletion.js
 import { isReasoningEffortValidForModel, collapseModeFamilies } from '../shared/reasoning-effort.js'
 import { createToolRegistry, setMcpTools, getBuiltInToolNames } from './tools/index.js'
 import { ALWAYS_ALLOWED, ALWAYS_ALLOWED_FOR_SUBAGENTS, TOP_LEVEL_ONLY_TOOLS } from './tools/tool-policy.js'
-import { McpManager, createMcpTools } from './mcp/index.js'
+import { McpManager, createMcpTools, createWorkerMcpTools, normalizeMcpToolArgs } from './mcp/index.js'
 import {
   setMcpManagerForTools,
   setMcpConfigMode,
@@ -3940,6 +3940,24 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     broadcastForSession: wssExports.broadcastForSession,
     ...(processSupervisor ? { processSupervisor } : {}),
     healthAggregator,
+    getMcpTools: () => createWorkerMcpTools(mcpManager),
+    executeMcp: async (request, signal) => {
+      const startedAt = Date.now()
+      const result = await mcpManager.callTool(
+        request.serverName,
+        request.toolName,
+        normalizeMcpToolArgs(request.args),
+        request.sessionId,
+        { signal },
+      )
+      return {
+        success: result.success,
+        ...(result.output ? { output: result.output } : {}),
+        ...(result.error ? { error: result.error } : {}),
+        durationMs: Date.now() - startedAt,
+        truncated: false,
+      }
+    },
   })
   sessionManager.setQueueAdmissionGuard(
     (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId),

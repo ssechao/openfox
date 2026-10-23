@@ -320,6 +320,7 @@ export class McpManager {
     toolName: string,
     args: Record<string, unknown>,
     sessionId?: string,
+    options?: { signal?: AbortSignal },
   ): Promise<{ success: boolean; output?: string; error?: string }> {
     const entry = this.servers.get(serverName)
     if (!entry) return { success: false, error: `MCP server '${serverName}' not found` }
@@ -332,6 +333,17 @@ export class McpManager {
     const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, forwardedArgs)
     const timeoutMs = timeoutSeconds * 1000
     const controller = new AbortController()
+    let abortFromCaller = (): void => {}
+    const callerAbortPromise = new Promise<never>((_, reject) => {
+      abortFromCaller = (): void => {
+        const reason =
+          options?.signal?.reason instanceof Error ? options.signal.reason : new Error('MCP tool call cancelled')
+        controller.abort(reason)
+        reject(reason)
+      }
+      if (options?.signal?.aborted) abortFromCaller()
+      else options?.signal?.addEventListener('abort', abortFromCaller, { once: true })
+    })
     let timer: NodeJS.Timeout | undefined
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -351,6 +363,7 @@ export class McpManager {
             signal: controller.signal,
           }),
           timeoutPromise,
+          callerAbortPromise,
         ])
       } finally {
         if (timer) clearTimeout(timer)
@@ -364,6 +377,8 @@ export class McpManager {
       return { success: true, output: text }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      options?.signal?.removeEventListener('abort', abortFromCaller)
     }
   }
 

@@ -358,6 +358,25 @@ describe('McpManager', () => {
       }
     })
 
+    it('should cancel one in-flight call through its AbortSignal', async () => {
+      mockClientInstance.callTool.mockImplementation(() => new Promise(() => {}))
+      try {
+        await manager.addServer('cancel-server', { transport: 'stdio', command: 'node' })
+        const controller = new AbortController()
+        const result = manager.callTool('cancel-server', 'get_weather', {}, undefined, { signal: controller.signal })
+
+        controller.abort(new Error('cancelled by worker'))
+
+        await expect(result).resolves.toEqual({ success: false, error: 'cancelled by worker' })
+        expect(lastCallOptions()?.signal?.aborted).toBe(true)
+      } finally {
+        mockClientInstance.callTool.mockImplementation(async () => ({
+          content: [{ type: 'text', text: 'Sunny, 72°F' }],
+          isError: false,
+        }))
+      }
+    })
+
     it('should extend the SDK request timeout for the tool timeout arg (no config timeout)', async () => {
       await manager.addServer('test', { transport: 'stdio', command: 'node' })
 

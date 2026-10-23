@@ -19,8 +19,15 @@ import { randomUUID } from 'node:crypto'
 import type { Config } from '../../shared/types.js'
 import type { ServerHandle } from '../context.js'
 
+interface WorkerRecord {
+  sessionId: string
+  token: { workerId: string; generation: number }
+  pid: number | undefined
+}
+
 interface WorkerIntrospection {
-  active: { sessionId: string; token: { workerId: string; generation: number }; pid: number | undefined } | null
+  active: WorkerRecord | null
+  activeWorkers: WorkerRecord[]
   lastCrash: {
     sessionId: string
     generation: number
@@ -129,6 +136,11 @@ describe('session worker crash', () => {
     return (await res.json()) as WorkerIntrospection
   }
 
+  async function getActiveWorker(sessionId: string): Promise<WorkerRecord | null> {
+    const { activeWorkers } = await getWorkerIntrospection()
+    return activeWorkers.find((worker) => worker.sessionId === sessionId) ?? null
+  }
+
   async function waitFor<T>(probe: () => Promise<T | null>, timeoutMs: number, what: string): Promise<T> {
     const deadline = Date.now() + timeoutMs
     for (;;) {
@@ -146,7 +158,7 @@ describe('session worker crash', () => {
 
     const effectPath = join(workdir, 'crash-effect.txt')
     await sendMessage(sessionA, `Run the exact command: printf x >> ${JSON.stringify(effectPath)}; sleep 30`)
-    const active = await waitFor(async () => (await getWorkerIntrospection()).active, 20_000, 'worker to be launched')
+    const active = await waitFor(() => getActiveWorker(sessionA), 20_000, 'worker to be launched')
     expect(active?.sessionId).toBe(sessionA)
     expect(active?.token.generation).toBe(1)
     expect(active?.pid).toBeGreaterThan(0)
@@ -292,7 +304,7 @@ describe('session worker crash', () => {
 
     await sendMessage(sessionId, 'Run the exact command: sleep 30')
     await loadAcked
-    const active = await waitFor(async () => (await getWorkerIntrospection()).active, 40_000, 'worker to be launched')
+    const active = await waitFor(() => getActiveWorker(sessionId), 40_000, 'worker to be launched')
     expect(active?.sessionId).toBe(sessionId)
     process.kill(active!.pid!, 'SIGKILL')
 
@@ -336,7 +348,7 @@ describe('session worker crash', () => {
     const sessionId = await createSession('shutdown-reconciliation')
     const effectPath = join(workdir, 'shutdown-effect.txt')
     await sendMessage(sessionId, `Run the exact command: printf x >> ${JSON.stringify(effectPath)}; sleep 30`)
-    const active = await waitFor(async () => (await getWorkerIntrospection()).active, 20_000, 'worker to start')
+    const active = await waitFor(() => getActiveWorker(sessionId), 20_000, 'worker to start')
     expect(active?.sessionId).toBe(sessionId)
     await waitFor(
       async () => ((await readFile(effectPath, 'utf-8').catch(() => '')) === 'x' ? true : null),

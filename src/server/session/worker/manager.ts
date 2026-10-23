@@ -23,7 +23,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type Database from 'better-sqlite3'
-import type { Config } from '../../../shared/types.js'
+import type { Config, ToolResult } from '../../../shared/types.js'
 import type { ServerMessage } from '../../../shared/protocol.js'
 import { logger } from '../../utils/logger.js'
 import {
@@ -39,7 +39,14 @@ import type { SessionManager } from '../manager.js'
 import { assignWorkerToken, clearWorkerToken, isWorkerMessageCurrent, type WorkerToken } from './token.js'
 import { childrenFilePath, initChildrenTracking, killTrackedChildren, removeChildrenFile } from './children.js'
 import { findPendingToolReconciliations, markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
-import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
+import type {
+  GatewayToWorkerMessage,
+  McpRequestMessage,
+  WorkerIpcIdentity,
+  WorkerMcpTool,
+  WorkerToGatewayMessage,
+} from './protocol.js'
+import { WorkerMcpBroker } from './mcp-broker.js'
 import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
 
@@ -85,6 +92,8 @@ export interface SessionWorkerManagerDeps {
   processSupervisor?: SessionProcessSupervisor
   healthAggregator?: HealthAggregator
   eventStore?: () => ReturnType<typeof getEventStore>
+  getMcpTools?: () => WorkerMcpTool[]
+  executeMcp?: (request: McpRequestMessage, signal: AbortSignal) => Promise<ToolResult>
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
@@ -105,6 +114,7 @@ function resolveWorkerEntry(): { path: string; execArgv: string[] } {
 export class SessionWorkerManager {
   private readonly active = new Map<string, ActiveWorker>()
   private readonly scheduler: SessionTurnScheduler
+  private readonly mcpBroker: WorkerMcpBroker | null
   private lastCrash: WorkerCrashReport | null = null
   private admissionsClosed = false
 
@@ -113,6 +123,17 @@ export class SessionWorkerManager {
       maxConcurrent: deps.maxProcesses ?? resolveWorkerPoolSize(process.env['OPENFOX_SESSION_WORKER_MAX_PROCESSES']),
       maxWaitingSessions: MAX_WAITING_SESSIONS,
     })
+    this.mcpBroker = deps.executeMcp
+      ? new WorkerMcpBroker({
+          execute: deps.executeMcp,
+          isCurrent: (identity) => this.isCurrentIdentity(identity),
+          send: (message) => {
+            const worker = this.active.get(message.sessionId)
+            if (worker) this.sendTo(worker, message)
+          },
+          reconcile: (request) => this.appendMcpReconciliation(request),
+        })
+      : null
   }
 
   isEnabled(): boolean {
@@ -160,6 +181,7 @@ export class SessionWorkerManager {
   requestStop(sessionId: string): boolean {
     const worker = this.active.get(sessionId)
     if (!worker) return this.scheduler.cancel(sessionId) === 'waiting'
+    this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
     this.sendTo(worker, { ...worker.token, type: 'abort' })
     return true
   }
@@ -248,11 +270,21 @@ export class SessionWorkerManager {
           generation: token.generation,
           pid: msg.pid,
         })
-        this.sendTo(worker, { ...token, type: 'start', sessionId, config: this.deps.config })
+        this.sendTo(worker, {
+          ...token,
+          type: 'start',
+          sessionId,
+          config: this.deps.config,
+          mcpTools: this.deps.getMcpTools?.() ?? [],
+        })
       } else if (msg.type === 'ws') {
         this.deps.broadcastForSession(sessionId, msg.msg)
       } else if (msg.type === 'health') {
         this.deps.healthAggregator?.recordSnapshot(token, msg.data)
+      } else if (msg.type === 'mcp.request') {
+        this.mcpBroker?.handleRequest(msg)
+      } else if (msg.type === 'mcp.cancel') {
+        this.mcpBroker?.handleCancel(msg)
       } else if (msg.type === 'done') {
         worker.doneReceived = true
         worker.doneOk = msg.ok
@@ -266,6 +298,7 @@ export class SessionWorkerManager {
 
     child.on('exit', (code, signal) => {
       if (this.active.get(sessionId) !== worker) return
+      this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
       this.active.delete(sessionId)
       void this.settle(worker, code, signal)
     })
@@ -276,6 +309,9 @@ export class SessionWorkerManager {
   async shutdown(): Promise<void> {
     this.closeAdmissions()
     const workers = [...this.active.values()]
+    for (const worker of workers) {
+      this.mcpBroker?.cancelWorker({ sessionId: worker.sessionId, ...worker.token })
+    }
     this.active.clear()
     await Promise.all(workers.map((worker) => this.shutdownWorker(worker)))
   }
@@ -348,6 +384,28 @@ export class SessionWorkerManager {
       })
       return { killedChildren: [], cleanupError }
     }
+  }
+
+  private isCurrentIdentity(identity: WorkerIpcIdentity): boolean {
+    const worker = this.active.get(identity.sessionId)
+    return (
+      worker !== undefined &&
+      worker.token.workerId === identity.workerId &&
+      worker.token.generation === identity.generation
+    )
+  }
+
+  private appendMcpReconciliation(request: McpRequestMessage): void {
+    const eventStore = this.deps.eventStore?.() ?? getEventStore()
+    eventStore.append(request.sessionId, {
+      type: 'tool.reconciliation_required',
+      data: {
+        messageId: request.messageId,
+        toolCallId: request.toolCallId,
+        name: request.name,
+        arguments: request.args,
+      },
+    })
   }
 
   private sendTo(worker: ActiveWorker, msg: GatewayToWorkerMessage): void {

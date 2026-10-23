@@ -1,50 +1,59 @@
 import type { Tool, ToolContext } from '../tools/types.js'
 import type { LLMToolDefinition } from '../llm/types.js'
+import type { WorkerMcpTool } from '../session/worker/protocol.js'
 import type { McpManager } from './manager.js'
 import type { ToolResult } from '../../shared/types.js'
 import { sanitizeToolSchema } from '../llm/schema-sanitizer.js'
 
-export function createMcpTools(mcpManager: McpManager): Tool[] {
-  const tools: Tool[] = []
+export function normalizeMcpToolArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...args }
+  if ('props' in normalized && !('properties' in normalized)) {
+    normalized['properties'] = normalized['props']
+    delete normalized['props']
+  }
+  return normalized
+}
 
+export function createWorkerMcpTools(mcpManager: McpManager): WorkerMcpTool[] {
+  const tools: WorkerMcpTool[] = []
   for (const server of mcpManager.getAllServers()) {
     for (const mcpTool of server.tools) {
       if (!mcpTool.enabled) continue
-
-      const prefixedName = `${server.name}_${mcpTool.name}`
-
+      const name = `${server.name}_${mcpTool.name}`
       const definition: LLMToolDefinition = {
         type: 'function',
         function: {
-          name: prefixedName,
+          name,
           description: mcpTool.description ?? '',
           parameters: sanitizeToolSchema(mcpTool.inputSchema as Record<string, unknown>),
         },
       }
-
-      tools.push({
-        name: prefixedName,
-        definition,
-        mcpServer: server.name,
-        execute: async (args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> => {
-          const start = Date.now()
-          const normalizedArgs = { ...args }
-          if ('props' in normalizedArgs && !('properties' in normalizedArgs)) {
-            normalizedArgs['properties'] = normalizedArgs['props']
-            delete normalizedArgs['props']
-          }
-          const result = await mcpManager.callTool(server.name, mcpTool.name, normalizedArgs, context.sessionId)
-          return {
-            success: result.success,
-            ...(result.output ? { output: result.output } : {}),
-            ...(result.error ? { error: result.error } : {}),
-            durationMs: Date.now() - start,
-            truncated: false,
-          }
-        },
-      })
+      tools.push({ name, definition, serverName: server.name, toolName: mcpTool.name })
     }
   }
-
   return tools
+}
+
+export function createMcpTools(mcpManager: McpManager): Tool[] {
+  return createWorkerMcpTools(mcpManager).map((descriptor) => ({
+    name: descriptor.name,
+    definition: descriptor.definition,
+    mcpServer: descriptor.serverName,
+    execute: async (args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> => {
+      const start = Date.now()
+      const result = await mcpManager.callTool(
+        descriptor.serverName,
+        descriptor.toolName,
+        normalizeMcpToolArgs(args),
+        context.sessionId,
+      )
+      return {
+        success: result.success,
+        ...(result.output ? { output: result.output } : {}),
+        ...(result.error ? { error: result.error } : {}),
+        durationMs: Date.now() - start,
+        truncated: false,
+      }
+    },
+  }))
 }

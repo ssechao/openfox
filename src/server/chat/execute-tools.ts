@@ -252,6 +252,7 @@ export async function executeTools(
       onEvent: ctx.onMessage,
       onProgress,
       toolCallId: toolCall.id,
+      messageId: assistantMsgId,
     }
     if (ctx.dangerLevel) {
       toolContext.dangerLevel = ctx.dangerLevel
@@ -264,6 +265,9 @@ export async function executeTools(
     }
     if (ctx.providerManager) {
       toolContext.providerManager = ctx.providerManager
+    }
+    if (ctx.agentTimeout !== undefined) {
+      toolContext.agentTimeout = ctx.agentTimeout
     }
 
     const startTime = Date.now()

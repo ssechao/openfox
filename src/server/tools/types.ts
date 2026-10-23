@@ -24,6 +24,7 @@ export interface ToolContext {
   providerManager?: ProviderManager | undefined // For per-agent model override resolution
   permittedActions?: Record<string, string[]> | undefined // Map of tool name -> allowed actions (e.g., { criterion: ['pass', 'fail'] })
   toolCallId?: string // ID of the tool call being executed (for matching confirmations)
+  messageId?: string
   agentTimeout?: number // User-configured max tool timeout from config.agent.toolTimeout
 }
 

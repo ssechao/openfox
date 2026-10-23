@@ -32,6 +32,8 @@ import type { StatsIdentity } from '../../../shared/types.js'
 import { logger } from '../../utils/logger.js'
 import { shutdownLspManager } from '../../lsp/index.js'
 import { createWorkerDiagnosticsCollector } from '../../diagnostics/worker-collector.js'
+import { setMcpTools } from '../../tools/index.js'
+import { WorkerMcpClient } from './mcp-client.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -58,13 +60,22 @@ const send = (msg: WorkerToGatewayMessage, onFlush?: () => void): void => {
 }
 
 const controller = new AbortController()
+let mcpClient: WorkerMcpClient | null = null
 
 process.on('message', (raw) => {
   const msg = raw as GatewayToWorkerMessage
   if (!msg || typeof msg !== 'object') return
   if (msg.workerId !== token.workerId || msg.generation !== token.generation) return
-  if (msg.type === 'start') void runTurn(msg.sessionId, msg.config)
-  if (msg.type === 'abort') controller.abort()
+  if (msg.type === 'start') {
+    mcpClient = new WorkerMcpClient({ ...token, sessionId: msg.sessionId }, send)
+    setMcpTools(mcpClient.createTools(msg.mcpTools ?? []))
+    void runTurn(msg.sessionId, msg.config)
+  } else if (msg.type === 'abort') {
+    mcpClient?.cancelAll()
+    controller.abort()
+  } else {
+    mcpClient?.handleMessage(msg)
+  }
 })
 
 send({ ...token, type: 'ready', pid: process.pid })
