@@ -1,7 +1,7 @@
 import type { LLMClientWithModel } from '../llm/client.js'
 import type { ProviderManager } from '../provider-manager.js'
 import type { SessionManager } from '../session/manager.js'
-import type { SessionRuntimeRegistry } from '../session/index.js'
+import { isSessionAlreadyRunningError, type ExecutionHandle, type SessionRuntimeRegistry } from '../session/index.js'
 import { logger } from '../utils/logger.js'
 import type { ServerMessage } from '../../shared/protocol.js'
 import { createSessionRunningMessage, createChatMessageMessage } from '../ws/protocol.js'
@@ -116,6 +116,18 @@ export class QueueProcessor {
     // workflow: the step can no longer be retried, so clear it (execution +
     // phase) instead of leaving the stale "Retry step" affordance pinned while
     // the turn runs.
+    const runtime = this.deps.runtimeRegistry.get(sessionId)
+    let handle: ExecutionHandle
+    try {
+      handle = runtime.acquire('chat')
+    } catch (error) {
+      if (isSessionAlreadyRunningError(error)) {
+        logger.warn('Cannot start turn: session already owned', { sessionId, error: error.message })
+        return
+      }
+      throw error
+    }
+
     const latestExec = sessionManager.getLatestWorkflowExecution(sessionId)
     if (latestExec && latestExec.status === 'blocked') {
       logger.info('Cancelling blocked workflow execution before chat turn', {
@@ -131,9 +143,6 @@ export class QueueProcessor {
         latestExec.workflowColor,
       )
     }
-
-    const runtime = this.deps.runtimeRegistry.get(sessionId)
-    const handle = runtime.acquire('chat')
 
     sessionManager.setRunning(sessionId, true)
     broadcastForSession(sessionId, createSessionRunningMessage(true))
@@ -171,7 +180,7 @@ export class QueueProcessor {
     this.runTurn(sessionId, handle)
   }
 
-  private async runTurn(sessionId: string, handle: import('../session/index.js').ExecutionHandle): Promise<void> {
+  private async runTurn(sessionId: string, handle: ExecutionHandle): Promise<void> {
     const { sessionManager, getLLMClient, getActiveProvider, broadcastForSession, providerManager } = this.deps
 
     // Activate the session's EFFECTIVE provider/model (agent override > session
@@ -252,6 +261,7 @@ export class QueueProcessor {
         const runtime = this.deps.runtimeRegistry.peek(sessionId)
         const stopped = runtime?.wasStopped(handle) ?? false
         const released = runtime?.release(handle) ?? false
+        if (!released) return
 
         try {
           const session = sessionManager.getSession(sessionId)
@@ -260,7 +270,7 @@ export class QueueProcessor {
             return
           }
 
-          if (stopped || !released) {
+          if (stopped) {
             finalizeTurnCompletion(sessionId, sessionManager, broadcastForSession)
             return
           }

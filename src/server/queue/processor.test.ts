@@ -132,6 +132,7 @@ describe('QueueProcessor', () => {
 
   afterEach(() => {
     queueProcessor.stop()
+    runtimeRegistry.remove('sess-1')
     vi.clearAllMocks()
   })
 
@@ -168,6 +169,20 @@ describe('QueueProcessor', () => {
 
       expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
       expect(mockSessionManager.addMessage).toHaveBeenCalled()
+    })
+
+    it('does not start a turn while the runtime is stopping', () => {
+      const handle = runtimeRegistry.get('sess-1').acquire('chat')
+      runtimeRegistry.get('sess-1').stop()
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+
+      queueProcessor.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+
+      expect(mockSessionManager.setRunning).not.toHaveBeenCalled()
+      runtimeRegistry.get('sess-1').release(handle)
     })
 
     it('should NOT start turn when session is already running', () => {

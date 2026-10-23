@@ -9,7 +9,12 @@ import { handleTerminalMessage, unsubscribeAllFromTerminal } from './terminal.js
 import type { Config } from '../config.js'
 import type { LLMClientWithModel } from '../llm/client.js'
 import type { SessionManager } from '../session/index.js'
-import { getSessionRuntimeRegistry, type ExecutionHandle } from '../session/index.js'
+import {
+  getSessionRuntimeRegistry,
+  isSessionAlreadyRunningError,
+  type ExecutionHandle,
+  type RuntimeKind,
+} from '../session/index.js'
 import { getEventStore, combineEventsWithSnapshot } from '../events/index.js'
 import { getMaxVisibleItems } from '../db/settings.js'
 
@@ -195,6 +200,23 @@ function resolveStatsIdentity(
   }
 }
 
+function acquireRuntime(
+  sessionId: string,
+  kind: RuntimeKind,
+  messageId: string,
+  send: (msg: ServerMessage) => void,
+): ExecutionHandle | null {
+  try {
+    return getSessionRuntimeRegistry().get(sessionId).acquire(kind)
+  } catch (error) {
+    if (isSessionAlreadyRunningError(error)) {
+      send(createErrorMessage('SESSION_RUNNING', error.message, messageId))
+      return null
+    }
+    throw error
+  }
+}
+
 function addUserMessageAndBroadcast(
   sessionManager: SessionManager,
   sessionId: string,
@@ -228,9 +250,20 @@ function processQueueAndRestartTurn(
     messageKind?: string,
   ) => void,
 ): boolean {
+  let handle: ExecutionHandle
+  try {
+    handle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
+  } catch (error) {
+    if (isSessionAlreadyRunningError(error)) return false
+    throw error
+  }
+
   const messages = drainFn(sessionId)
   const next = messages[0]
-  if (!next) return false
+  if (!next) {
+    getSessionRuntimeRegistry().peek(sessionId)?.release(handle)
+    return false
+  }
 
   for (const remaining of messages.slice(1)) {
     if (queueMessageFn) {
@@ -258,7 +291,6 @@ function processQueueAndRestartTurn(
     broadcastFn,
   )
 
-  const handle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
   startTurnFn(sessionId, handle)
   return true
 }
@@ -1020,11 +1052,11 @@ async function handleClientMessage(
         return
       }
 
+      const compactHandle = acquireRuntime(sessionId, 'compact', message.id, send)
+      if (!compactHandle) return
+
       // Acknowledge immediately
       send({ type: 'ack', payload: {}, id: message.id })
-
-      // Acquire a runtime handle so compaction is abortable via the shared stop path.
-      const compactHandle = getSessionRuntimeRegistry().get(sessionId).acquire('compact')
 
       // Append compaction prompt to event store (shared helper, same as agent-loop.ts auto-compaction trigger)
       appendCompactionPrompt(sessionId, (event) => getEventStore().append(sessionId, event))
@@ -1060,7 +1092,7 @@ async function handleClientMessage(
           try {
             const runtime = getSessionRuntimeRegistry().peek(sessionId)
             const stopped = runtime?.wasStopped(compactHandle) ?? false
-            runtime?.release(compactHandle)
+            if (!runtime?.release(compactHandle)) return
 
             if (stopped) {
               sessionManager.clearMessageQueue(sessionId)
@@ -1308,6 +1340,10 @@ async function handleClientMessage(
         }
       }
 
+      // Acquire before any side effect so a concurrent chat/compact/stop cannot race.
+      const workflowHandle = acquireRuntime(sessionId, 'workflow', message.id, send)
+      if (!workflowHandle) return
+
       // Check if session is blocked - user intervention resets it
       if (session.phase === 'blocked') {
         logger.info('User launched runner - resetting blocked state', { sessionId })
@@ -1335,10 +1371,6 @@ async function handleClientMessage(
       const hasUserAttachments = launchAttachments && launchAttachments.length > 0
       const hasUserMessage = hasUserContent || hasUserAttachments
       const isResume = !!launchPayload?.resumeFrom
-
-      // Acquire a runtime handle for this run. The running-state lifecycle
-      // (setRunning + session.running messages) is owned by the shared launcher.
-      const workflowHandle = getSessionRuntimeRegistry().get(sessionId).acquire('workflow')
 
       // Acknowledge immediately
       send({ type: 'ack', payload: {}, id: message.id })
@@ -1459,6 +1491,8 @@ async function handleClientMessage(
         return
       }
 
+      getSessionRuntimeRegistry().get(client.activeSessionId).recordCommand('answer')
+
       logger.debug('Ask user answer received', {
         sessionId: client.activeSessionId,
         callId,
@@ -1578,6 +1612,9 @@ async function handleClientMessage(
         return
       }
 
+      const retryHandle = acquireRuntime(retrySessionId, 'chat', message.id, send)
+      if (!retryHandle) return
+
       // User intervention resets a blocked phase
       if (retrySession.phase === 'blocked') {
         sessionManager.setPhase(retrySessionId, 'build')
@@ -1585,8 +1622,6 @@ async function handleClientMessage(
 
       // Re-run the last turn WITHOUT re-adding the user message — the context is
       // already in history, untouched by the failed attempt.
-      const retryHandle = getSessionRuntimeRegistry().get(retrySessionId).acquire('chat')
-
       send({ type: 'ack', payload: {}, id: message.id })
       _startTurnWithCompletionChain(retrySessionId, retryHandle)
       break

@@ -43,7 +43,7 @@ import { createServerMessage } from '../shared/protocol.js'
 import { createContextStateMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
-import { SessionRuntimeRegistry, setSessionRuntimeRegistry } from './session/index.js'
+import { isSessionAlreadyRunningError, SessionRuntimeRegistry, setSessionRuntimeRegistry } from './session/index.js'
 import { clearSessionsForDeletedProvider, reconcileSessionProviders } from './session/provider-reconcile.js'
 import { toClientSession } from './session/client-session.js'
 import { setRuntimeConfig } from './runtime-config.js'
@@ -1622,6 +1622,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(404).json({ error: 'No pending question with that ID' })
     }
 
+    runtimeRegistry.get(req.params.id).recordCommand('answer')
     res.json({ success: true })
   })
 
@@ -1638,6 +1639,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const hasAttachments = Array.isArray(attachments) && attachments.length > 0
     if (!hasContent && !hasAttachments) {
       return res.status(400).json({ error: 'content or attachments is required' })
+    }
+
+    if (runtimeRegistry.peek(sessionId)?.state === 'stopping') {
+      return res.status(409).json({ error: 'Session is stopping', code: 'SESSION_ALREADY_RUNNING' })
     }
 
     // Always queue the message - QueueProcessor will handle it
@@ -1786,6 +1791,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(409).json({ error: 'A pause is already in progress' })
     }
 
+    runtimeRegistry.get(sessionId).recordCommand('pause')
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
   })
 
@@ -1802,6 +1808,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(409).json({ error: 'Nothing to resume' })
     }
 
+    runtimeRegistry.get(sessionId).recordCommand('resume')
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
   })
 
@@ -3754,7 +3761,16 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
     const provider = providerManager.getActiveProvider()
     const statsEffort = llmClient.getReasoningEffort?.()
-    const handle = runtimeRegistry.get(sessionId).acquire('workflow')
+    let handle
+    try {
+      handle = runtimeRegistry.get(sessionId).acquire('workflow')
+    } catch (error) {
+      if (isSessionAlreadyRunningError(error)) {
+        logger.warn('Cannot launch workflow: session already owned', { sessionId, error: error.message })
+        return
+      }
+      throw error
+    }
     launchWorkflowRun(
       {
         sessionManager,

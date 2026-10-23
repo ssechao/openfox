@@ -1,6 +1,7 @@
 export { SessionManager, type SessionEvent } from './manager.js'
 export {
   SessionAlreadyRunningError,
+  isSessionAlreadyRunningError,
   SessionRuntime,
   SessionRuntimeRegistry,
   getSessionRuntimeRegistry,

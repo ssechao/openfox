@@ -13,6 +13,10 @@ export class SessionAlreadyRunningError extends Error {
   }
 }
 
+export function isSessionAlreadyRunningError(error: unknown): error is SessionAlreadyRunningError {
+  return error instanceof SessionAlreadyRunningError
+}
+
 export interface ExecutionHandle {
   readonly sessionId: string
   readonly generation: number

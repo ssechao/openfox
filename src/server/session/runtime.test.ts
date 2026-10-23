@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PauseState } from '../../shared/types.js'
 import {
   SessionAlreadyRunningError,
+  isSessionAlreadyRunningError,
   SessionRuntime,
   SessionRuntimeRegistry,
   resetSessionRuntimeRegistry,
@@ -46,7 +47,8 @@ describe('SessionRuntime acquire', () => {
   it('refuses a second acquire from a different path with an explicit 409', () => {
     const runtime = new SessionRuntime('sess-1')
     const chat = runtime.acquire('chat')
-    expectRunningError(() => runtime.acquire('workflow'))
+    const workflowError = expectRunningError(() => runtime.acquire('workflow'))
+    expect(isSessionAlreadyRunningError(workflowError)).toBe(true)
     expectRunningError(() => runtime.acquire('compact'))
     expect(runtime.currentHandle()?.controller).toBe(chat.controller)
     expect(runtime.snapshot().state).toBe('running')

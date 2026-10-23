@@ -143,7 +143,7 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
     })
     .finally(() => {
       const registry = getSessionRuntimeRegistry()
-      registry.get(sessionId).release(runtimeHandle)
+      if (!registry.get(sessionId).release(runtimeHandle)) return
       try {
         // The orchestrator bypasses runChatTurn, so isRunning must be cleared here
         sessionManager.setRunning(sessionId, false)

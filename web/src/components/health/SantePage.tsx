@@ -1,4 +1,10 @@
-import type { DiagnosticsSeries, DiagnosticsSeriesName, RuntimeSnapshot, RuntimeState } from '@shared/diagnostics.js'
+import type {
+  DiagnosticsSeries,
+  DiagnosticsSeriesName,
+  RuntimeLastCommand,
+  RuntimeSnapshot,
+  RuntimeState,
+} from '@shared/diagnostics.js'
 import { DIAGNOSTICS_SERIES_NAMES } from '@shared/diagnostics.js'
 import type { Translation } from '@shared/i18n/index.js'
 import { useDiagnostics } from '../../hooks/useDiagnostics'
@@ -26,6 +32,16 @@ const RUNTIME_STATE_LABELS: Record<RuntimeState, Translation> = {
   stopping: { en: 'Stopping', fr: 'Arrêt en cours' },
   compacting: { en: 'Compacting', fr: 'Compactage' },
   workflow: { en: 'Workflow', fr: 'Workflow' },
+}
+
+const RUNTIME_COMMAND_LABELS: Record<RuntimeLastCommand, Translation> = {
+  launch: { en: 'Launch', fr: 'Lancement' },
+  stop: { en: 'Stop', fr: 'Arrêt' },
+  pause: { en: 'Pause', fr: 'Pause' },
+  resume: { en: 'Resume', fr: 'Reprise' },
+  answer: { en: 'Answer', fr: 'Réponse' },
+  workflow: { en: 'Workflow', fr: 'Workflow' },
+  compact: { en: 'Compact', fr: 'Compactage' },
 }
 
 function formatValue(series: DiagnosticsSeries): string {
@@ -147,7 +163,7 @@ export function SantePage() {
                       <span className="text-text-primary truncate">{runtime.sessionId}</span>
                       <span className="text-text-muted">
                         {t(RUNTIME_STATE_LABELS[runtime.state])}
-                        {runtime.lastCommand ? ` · ${runtime.lastCommand}` : ''}
+                        {runtime.lastCommand ? ` · ${t(RUNTIME_COMMAND_LABELS[runtime.lastCommand])}` : ''}
                       </span>
                     </li>
                   ))}

@@ -3,7 +3,7 @@ import type { StatsIdentity, Attachment } from '../../shared/types.js'
 import type { ServerMessage } from '../../shared/protocol.js'
 import type { SessionManager } from './index.js'
 import type { ProviderManager } from '../provider-manager.js'
-import { getSessionRuntimeRegistry, type ExecutionHandle } from './index.js'
+import { getSessionRuntimeRegistry, isSessionAlreadyRunningError, type ExecutionHandle } from './index.js'
 import { getEventStore } from '../events/index.js'
 import { runChatTurn } from '../chat/orchestrator.js'
 import { buildRunChatTurnParams } from '../utils/session-utils.js'
@@ -39,20 +39,14 @@ export async function startChatSession(
 
   const eventStore = getEventStore()
 
-  // Check if session is already running
-  if (session.isRunning) {
-    throw new Error('Session is already running')
-  }
+  const runtime = getSessionRuntimeRegistry().get(sessionId)
+  const handle = runtime.acquire('chat')
 
   // Check if session is blocked - user intervention resets it
   if (session.phase === 'blocked') {
     sessionManager.setPhase(sessionId, 'build')
     broadcastForSession(sessionId, createPhaseChangedMessage('build'))
   }
-
-  // Acquire a runtime handle for this chat turn.
-  const runtime = getSessionRuntimeRegistry().get(sessionId)
-  const handle = runtime.acquire('chat')
 
   // Mark session as running
   sessionManager.setRunning(sessionId, true)
@@ -143,8 +137,14 @@ function startTurnWithCompletionChain(sessionId: string, handle: ExecutionHandle
         })
         broadcastForSession(sessionId, createChatMessageMessage(userMessage))
 
-        const nextHandle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
-        startTurnWithCompletionChain(sessionId, nextHandle, deps)
+        try {
+          const nextHandle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
+          startTurnWithCompletionChain(sessionId, nextHandle, deps)
+        } catch (error) {
+          if (!isSessionAlreadyRunningError(error)) throw error
+          sessionManager.clearMessageQueue(sessionId)
+          finalizeTurnCompletion(sessionId, sessionManager, broadcastForSession)
+        }
         return
       }
 

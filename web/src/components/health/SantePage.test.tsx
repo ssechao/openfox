@@ -123,9 +123,8 @@ describe('SantePage', () => {
 
     expect(text(container, 'sante-runtimes')).toContain('Runtimes')
     expect(text(container, 'runtime-sess-a')).toContain('Running')
-    expect(text(container, 'runtime-sess-a')).toContain('launch')
+    expect(text(container, 'runtime-sess-a')).toContain('Launch')
     expect(text(container, 'runtime-sess-b')).toContain('Workflow')
-    expect(text(container, 'runtime-sess-b')).toContain('workflow')
   })
 
   it('refreshes every 2 seconds and stops polling once unmounted', async () => {
