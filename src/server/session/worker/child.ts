@@ -31,6 +31,7 @@ import type { LLMClientWithModel } from '../../llm/client.js'
 import type { StatsIdentity } from '../../../shared/types.js'
 import { logger } from '../../utils/logger.js'
 import { shutdownLspManager } from '../../lsp/index.js'
+import { createWorkerDiagnosticsCollector } from '../../diagnostics/worker-collector.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -45,6 +46,7 @@ const workerEnv = (() => {
 })()
 
 const token: WorkerToken = { workerId: workerEnv.workerId, generation: workerEnv.generation }
+const healthCollector = createWorkerDiagnosticsCollector()
 
 const send = (msg: WorkerToGatewayMessage, onFlush?: () => void): void => {
   try {
@@ -68,7 +70,9 @@ process.on('message', (raw) => {
 send({ ...token, type: 'ready', pid: process.pid })
 
 async function runTurn(sessionId: string, config: import('../../../shared/types.js').Config): Promise<void> {
+  healthCollector.start((data) => send({ ...token, type: 'health', data }))
   const finish = (ok: boolean, error?: string): void => {
+    healthCollector.stop()
     send({ ...token, type: 'done', ok, ...(error ? { error } : {}) }, () => process.exit(ok ? 0 : 1))
     // Safety net if the IPC channel is already gone.
     setTimeout(() => process.exit(ok ? 0 : 1), 2000).unref()
