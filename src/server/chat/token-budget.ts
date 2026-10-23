@@ -18,9 +18,29 @@ export function estimateToolResultTokens(toolMessages: Array<Pick<RequestContext
  * not report prompt usage (e.g. a wrapper that strips `usage`). Without it
  * the recorded context size stays at 0 and auto-compaction never fires, so
  * the full history keeps being sent after compactions.
+ *
+ * Counts everything that ends up on the wire — content, thinking, tool-call
+ * names and arguments — not just message content: on a real tool-heavy
+ * history, tool calls and thinking account for roughly half of the request
+ * body, and a content-only estimate lands just under the compaction
+ * threshold (measured on session 450/0fd8a855: 220k estimated vs ~291k
+ * reported by the provider for the same body). The estimate deliberately
+ * errs on the high side: underestimating reproduces the unbounded-growth
+ * incident, overestimating only compacts slightly early.
  */
-export function estimateConversationTokens(messages: Array<Pick<RequestContextMessage, 'content'>>): number {
-  return estimateToolResultTokens(messages)
+export function estimateConversationTokens(
+  messages: Array<Pick<RequestContextMessage, 'content' | 'thinkingContent' | 'toolCalls' | 'toolCallId'>>,
+): number {
+  let chars = 0
+  for (const message of messages) {
+    chars += message.content.length
+    if (message.thinkingContent) chars += message.thinkingContent.length
+    if (message.toolCallId) chars += message.toolCallId.length
+    for (const toolCall of message.toolCalls ?? []) {
+      chars += toolCall.id.length + toolCall.name.length + JSON.stringify(toolCall.arguments).length
+    }
+  }
+  return messages.length * TOOL_MESSAGE_OVERHEAD_TOKENS + Math.ceil(chars / CHARS_PER_TOKEN)
 }
 
 const CONTEXT_LENGTH_ERROR_PATTERN = /context\s*length|context_length|context window|prompt (?:is )?too long/i
