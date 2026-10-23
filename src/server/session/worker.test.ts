@@ -9,7 +9,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -334,6 +334,96 @@ describe('exclusive children tracking', () => {
           if (!child.pid) continue
           try {
             process.kill(-child.pid, 'SIGKILL')
+          } catch (error) {
+            void error
+          }
+        }
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    10_000,
+  )
+
+  it.skipIf(process.platform !== 'darwin')(
+    'reaps every marked sibling after the reservation process-group leader exits on Darwin',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'openfox-children-darwin-orphan-group-'))
+      const file = join(dir, 'w.children')
+      const firstPidFile = join(dir, 'first.pid')
+      const secondPidFile = join(dir, 'second.pid')
+      const reservationId = `darwin-orphans-${process.pid}-${Date.now()}`
+      writeFileSync(file, `${JSON.stringify({ type: 'reservation', id: reservationId })}\n`, 'utf-8')
+      const childScript = 'setInterval(() => {}, 1000)'
+      const leader = spawn(
+        'sh',
+        [
+          '-c',
+          `${JSON.stringify(process.execPath)} -e ${JSON.stringify(childScript)} & echo $! > "$FIRST_PID"; ${JSON.stringify(process.execPath)} -e ${JSON.stringify(childScript)} & echo $! > "$SECOND_PID"`,
+        ],
+        {
+          detached: true,
+          stdio: 'ignore',
+          env: {
+            ...process.env,
+            OPENFOX_CHILD_RESERVATION_ID: reservationId,
+            FIRST_PID: firstPidFile,
+            SECOND_PID: secondPidFile,
+          },
+        },
+      )
+      leader.unref()
+      let firstPid = 0
+      let secondPid = 0
+      try {
+        await new Promise<void>((resolve) => leader.once('exit', () => resolve()))
+        const deadline = Date.now() + 3000
+        while (Date.now() < deadline && (!existsSync(firstPidFile) || !existsSync(secondPidFile))) {
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        firstPid = Number(readFileSync(firstPidFile, 'utf-8').trim())
+        secondPid = Number(readFileSync(secondPidFile, 'utf-8').trim())
+        expect(firstPid).toBeGreaterThan(0)
+        expect(secondPid).toBeGreaterThan(0)
+        expect(() => process.kill(leader.pid!, 0)).toThrow()
+        expect(() => process.kill(firstPid, 0)).not.toThrow()
+        expect(() => process.kill(secondPid, 0)).not.toThrow()
+
+        const attempted = await killTrackedChildren(file, { killTree: async () => {} })
+        expect(attempted).toEqual(expect.arrayContaining([firstPid, secondPid]))
+        expect(() => process.kill(firstPid, 0)).not.toThrow()
+        expect(() => process.kill(secondPid, 0)).not.toThrow()
+        expect(existsSync(file)).toBe(true)
+
+        const killed = await killTrackedChildren(file)
+        expect(killed).toEqual(expect.arrayContaining([firstPid, secondPid]))
+        const cleanupDeadline = Date.now() + 3000
+        while (Date.now() < cleanupDeadline) {
+          const alive = [firstPid, secondPid].some((pid) => {
+            try {
+              process.kill(pid, 0)
+              return true
+            } catch {
+              return false
+            }
+          })
+          if (!alive) break
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        expect(() => process.kill(firstPid, 0)).toThrow()
+        expect(() => process.kill(secondPid, 0)).toThrow()
+        expect(existsSync(file)).toBe(false)
+      } finally {
+        if (leader.pid) {
+          try {
+            process.kill(-leader.pid, 'SIGKILL')
+          } catch (error) {
+            void error
+          }
+        }
+        for (const pid of [firstPid, secondPid]) {
+          if (!pid) continue
+          try {
+            process.kill(pid, 'SIGKILL')
           } catch (error) {
             void error
           }

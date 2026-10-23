@@ -200,7 +200,7 @@ function findReservationProcesses(reservationId: string): number[] {
   }
   if (process.platform === 'darwin') {
     const output = execFileSync('ps', ['-Eww', '-axo', 'pid=,pgid=,command='], { encoding: 'utf-8' })
-    const groupRoots = new Map<number, number>()
+    const pids = new Set<number>()
     for (const line of output.split('\n')) {
       if (!line.includes(marker)) continue
       const match = /^\s*(\d+)\s+(\d+)\s+/.exec(line)
@@ -208,10 +208,9 @@ function findReservationProcesses(reservationId: string): number[] {
       const pid = Number(match[1])
       const pgid = Number(match[2])
       if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(pgid) || pgid <= 0) continue
-      const current = groupRoots.get(pgid)
-      if (current === undefined || pid === pgid) groupRoots.set(pgid, pid)
+      pids.add(pid)
     }
-    return [...groupRoots.values()]
+    return [...pids]
   }
   throw new Error(`Cannot recover exclusive child reservation on ${process.platform}`)
 }
@@ -271,7 +270,10 @@ export async function killTrackedChildren(
       })
     }
   }
-  if (!hasUnreadableIdentity) removeChildrenFile(path)
+  const hasMarkedReservationProcesses = state.pendingReservationIds.some(
+    (reservationId) => findReservationProcesses(reservationId).length > 0,
+  )
+  if (!hasUnreadableIdentity && !hasMarkedReservationProcesses) removeChildrenFile(path)
   return killed
 }
 
