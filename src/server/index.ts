@@ -10,7 +10,7 @@ import { createServer as createViteServer, type ViteDevServer } from 'vite'
 import type { Config, ModelConfig, ProviderBackend } from '../shared/types.js'
 import type { ServerHandle } from './context.js'
 import type { VisionBackend } from './llm/vision-fallback.js'
-import { initDatabase } from './db/index.js'
+import { initDatabase, getDatabase } from './db/index.js'
 
 import { getProject, deleteProject } from './db/projects.js'
 import { initEventStore, getEventStore, combineEventsWithSnapshot } from './events/index.js'
@@ -40,7 +40,7 @@ import { getSessionDisabledServers, setSessionDisabledServers } from './mcp/sess
 import { setMcpOAuthStoreMode, setMcpOAuthStorePath } from './mcp/oauth-store.js'
 import { setMcpOAuthServerPort } from './mcp/oauth-provider.js'
 import { createServerMessage } from '../shared/protocol.js'
-import { createContextStateMessage } from './ws/protocol.js'
+import { createContextStateMessage, createSessionInterruptedMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
 import { isSessionAlreadyRunningError, SessionRuntimeRegistry, setSessionRuntimeRegistry } from './session/index.js'
@@ -73,6 +73,7 @@ import { createNotificationRoutes } from './routes/notifications.js'
 import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { createDiagnosticsCollector } from './diagnostics/collector.js'
+import { createHealthAggregator } from './diagnostics/aggregator.js'
 import { registerBlobRoutes } from './routes/blobs.js'
 import { logger, setLogLevel } from './utils/logger.js'
 import { requestAbortSignal } from './utils/request-abort.js'
@@ -131,6 +132,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     payload: import('../shared/protocol.js').TasksUpdatePayload,
   ) => void = () => {}
 
+  // Deferred per-session broadcaster for routes mounted before the WebSocket
+  // server exists (e.g. the resume-interruption route). No-op until wired.
+  let broadcastForSessionDeferred: (
+    sessionId: string,
+    msg: import('../shared/protocol.js').ServerMessage,
+  ) => void = () => {}
+
   // Deferred workflow launcher for slash-workflow tasks and the MCP server.
   // Same rationale: the launcher needs the WebSocket broadcaster + LLM
   // client, which only exist after createWebSocketServer below.
@@ -184,11 +192,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
   setSessionRuntimeRegistry(runtimeRegistry)
 
+  const healthAggregator = createHealthAggregator()
   const diagnosticsCollector = createDiagnosticsCollector({
     dbPath: db.name,
     countRunningSessions: () => getEventStore().countRunningSessions(),
     snapshotCacheStats: () => getEventStore().getSnapshotCacheStats(),
     runtimeRegistry,
+    healthAggregator,
   })
   getEventStore().setHealthCollector(diagnosticsCollector)
   diagnosticsCollector.start()
@@ -403,6 +413,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       const ms = typeof requested === 'number' && requested > 0 ? Math.min(requested, 5_000) : 100
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
       res.json({ blockedMs: ms })
+    })
+  }
+
+  // Test-only worker introspection (étape 6a): lets integration tests find the
+  // worker PID to kill and read the crash report (cleanup proof).
+  if (config.mode === 'test') {
+    app.get('/api/test/worker', (_req, res) => {
+      res.json({ active: workerManager.activeWorker(), lastCrash: workerManager.lastCrashReport() })
     })
   }
 
@@ -1032,8 +1050,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   app.get('/api/sessions/:id', async (req, res) => {
     const { getEventStore, combineEventsWithSnapshot } = await import('./events/index.js')
-    const { buildMessagesFromStoredEvents, buildSessionStatsMessages, foldPendingConfirmations } =
-      await import('./events/folding.js')
+    const {
+      buildMessagesFromStoredEvents,
+      buildSessionStatsMessages,
+      foldPendingConfirmations,
+      foldPendingToolReconciliations,
+    } = await import('./events/folding.js')
     const { computeSessionStatsSummary } = await import('../shared/stats.js')
     const { getPendingQuestionsForSession } = await import('./tools/index.js')
     const { getMaxVisibleItems } = await import('./db/settings.js')
@@ -1057,6 +1079,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const queueState = sessionManager.getQueueState(req.params.id)
     const pendingQuestions = getPendingQuestionsForSession(req.params.id)
     const pendingConfirmations = foldPendingConfirmations(events)
+    const pendingToolReconciliations = foldPendingToolReconciliations(events)
     const activeWorkflowExecution = sessionManager.getDisplayWorkflowExecution(req.params.id)
 
     res.json({
@@ -1068,6 +1091,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       queueState,
       pendingQuestions,
       pendingConfirmations,
+      pendingToolReconciliations,
       activeWorkflowExecution,
     })
   })
@@ -1820,6 +1844,66 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     runtimeRegistry.get(sessionId).recordCommand('resume')
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
+  })
+
+  // Explicit resume of a session interrupted by a worker crash (étape 6a).
+  // This is the ONLY way an interrupted turn continues: the continuation turn
+  // gets the same "stream interrupted" reminder as the LLM-drop recovery, so
+  // a tool call with an unknown outcome is never replayed blindly.
+  app.post('/api/sessions/:id/resume-interruption', async (req, res) => {
+    const sessionId = req.params.id
+    const session = sessionManager.getSession(sessionId)
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const db = getDatabase()
+    const { getSessionInterruptedAt, clearSessionInterrupted, planWorkerCrashRecovery } =
+      await import('./session/worker/index.js')
+    if (!getSessionInterruptedAt(db, sessionId)) {
+      return res.status(409).json({ error: 'Session is not interrupted' })
+    }
+
+    const eventStore = getEventStore()
+    const hasActiveWorkflow = sessionManager.getActiveWorkflowExecution(sessionId) != null
+    const plan = planWorkerCrashRecovery(eventStore.getEvents(sessionId), hasActiveWorkflow)
+    if (!plan) {
+      return res.status(409).json({ error: 'Nothing to resume' })
+    }
+
+    clearSessionInterrupted(db, sessionId)
+    sessionManager.queueMessage(sessionId, 'asap', plan.content, undefined, 'auto-prompt')
+    runtimeRegistry.get(sessionId).recordCommand('resume')
+    // Sync the UI: the interruption marker is cleared, so the resume affordance
+    // disappears without a reload.
+    broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
+    logger.info('Interrupted session resumed explicitly', { sessionId })
+    res.json({ success: true })
+  })
+
+  app.post('/api/sessions/:id/reconcile-tools', async (req, res) => {
+    const sessionId = req.params.id
+    if (!sessionManager.getSession(sessionId)) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const { getSessionState, getEventStore } = await import('./events/index.js')
+    const pending = getSessionState(sessionId)?.pendingToolReconciliations ?? []
+    const requested = req.body?.toolCallIds
+    if (requested !== undefined && (!Array.isArray(requested) || requested.some((id) => typeof id !== 'string'))) {
+      return res.status(400).json({ error: 'toolCallIds must be an array of strings' })
+    }
+    const selected = requested === undefined ? pending : pending.filter((item) => requested.includes(item.toolCallId))
+    if (selected.length === 0) {
+      return res.status(409).json({ error: 'No pending tool reconciliation matched' })
+    }
+
+    const eventStore = getEventStore()
+    for (const item of selected) {
+      eventStore.append(sessionId, { type: 'tool.reconciliation_resolved', data: { toolCallId: item.toolCallId } })
+    }
+    const resolved = new Set(selected.map((item) => item.toolCallId))
+    res.json({ success: true, pendingToolReconciliations: pending.filter((item) => !resolved.has(item.toolCallId)) })
   })
 
   // Truncate session messages at a given index
@@ -3743,6 +3827,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   )
   const wss = wssExports.wss
 
+  // Wire the deferred per-session broadcaster now that the WS server exists.
+  broadcastForSessionDeferred = (sessionId, msg) => wssExports.broadcastForSession(sessionId, msg)
+
   // Point the plugin host at the live WebSocket broadcaster now that it exists.
   pluginHost.setBroadcaster((message) => wssExports.broadcastAll(message))
 
@@ -3820,6 +3907,23 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // Wire up QueueProcessor - listens for queue events and starts turns
   const { QueueProcessor } = await import('./queue/processor.js')
+
+  // Session workers (étape 6a): explicit opt-in (setting or env), off by
+  // default, one worker at a time. The supervisor owns crash detection,
+  // interruption marking, exclusive-children reaping, and the resume gate.
+  const { SessionWorkerManager } = await import('./session/worker/index.js')
+  const { getSetting: getWorkerSetting, SETTINGS_KEYS: WORKER_SETTINGS_KEYS } = await import('./db/settings.js')
+  const workerManager = new SessionWorkerManager({
+    db: () => getDatabase(),
+    config,
+    sessionManager,
+    isEnabled: () =>
+      process.env['OPENFOX_SESSION_WORKER'] === 'true' ||
+      getWorkerSetting(WORKER_SETTINGS_KEYS.SESSION_WORKER_MODE) === 'true',
+    broadcastForSession: wssExports.broadcastForSession,
+    healthAggregator,
+  })
+
   const queueProcessor = new QueueProcessor({
     sessionManager,
     providerManager,
@@ -3828,6 +3932,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     getLLMClientForProvider,
     getActiveProvider: () => providerManager.getActiveProvider(),
     broadcastForSession: wssExports.broadcastForSession,
+    workerManager,
   })
   queueProcessor.start()
 
@@ -3853,6 +3958,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   }
 
   const abortSession = (sessionId: string) => {
+    workerManager.requestStop(sessionId)
     const aborted = runtimeRegistry.get(sessionId).stop()
     if (aborted) {
       sessionManager.clearPauseState(sessionId)
@@ -3980,8 +4086,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         httpServer.on('error', reject)
       }),
 
-    close: () =>
-      new Promise<void>((resolve) => {
+    close: () => {
+      workerManager.closeAdmissions()
+      return new Promise<void>((resolve, reject) => {
         logger.info('Shutting down...')
         void (async () => {
           diagnosticsCollector.stop()
@@ -4008,14 +4115,16 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           // Note: Not closing database here - it's a singleton shared across servers.
           // Database should only be closed when the application exits.
           runtimeRegistry.abortAll()
+          await workerManager.shutdown()
           // Terminate all WebSocket connections to allow clean shutdown
           for (const client of wss.clients) {
             client.terminate()
           }
           wss.close()
           httpServer.close(() => resolve())
-        })()
-      }),
+        })().catch(reject)
+      })
+    },
   }
 }
 

@@ -2,7 +2,7 @@ import type { ToolCall, ToolResult } from '../../shared/types.js'
 import type { SessionManager } from '../session/index.js'
 import type { ToolContext, ToolRegistry } from '../tools/types.js'
 import type { TurnMetrics } from './stream-pure.js'
-import type { TurnEvent } from '../events/types.js'
+import type { PendingToolReconciliation, TurnEvent } from '../events/types.js'
 import type { RequestContextMessage } from './request-context.js'
 import type { LLMClientWithModel } from '../llm/client.js'
 import type { StatsIdentity } from '../../shared/types.js'
@@ -33,6 +33,7 @@ export interface ToolBatchContext {
   onToolExecuted?: ((toolCall: ToolCall, result: ToolResult) => void) | undefined
   agentTimeout?: number
   allowParallelSubAgents?: boolean | undefined
+  pendingToolReconciliations?: PendingToolReconciliation[] | undefined
 }
 
 export interface ToolBatchResult {
@@ -53,6 +54,29 @@ export interface ExecutedToolCall {
 // LLM-facing (rendered into the tool content) — English by design.
 function interruptedError(): string {
   return 'Tool execution was interrupted by user'
+}
+
+const READ_ONLY_TOOLS = new Set([
+  'read_file',
+  'glob',
+  'grep',
+  'web_fetch',
+  'web_search',
+  'list_mcp_resources',
+  'list_mcp_resource_templates',
+  'read_mcp_resource',
+])
+
+export function isEffectfulToolCall(toolCall: ToolCall): boolean {
+  if (READ_ONLY_TOOLS.has(toolCall.name)) return false
+  if (toolCall.name === 'session_metadata') {
+    return !['get', 'list', 'schema'].includes(String(toolCall.arguments['action'] ?? ''))
+  }
+  if (toolCall.name === 'project_tasks') {
+    return !['list', 'get_attachment'].includes(String(toolCall.arguments['action'] ?? ''))
+  }
+  if (toolCall.name === 'workspace') return toolCall.arguments['action'] !== 'list'
+  return true
 }
 
 /**
@@ -247,7 +271,16 @@ export async function executeTools(
     // Preflight-rejected calls must never execute: their arguments were cut
     // short (path-only), so running the tool would either crash or produce a
     // misleading result. Surface the preflight error directly instead.
-    if (toolCall.preflightError) {
+    const pendingReconciliations = ctx.pendingToolReconciliations ?? []
+    if (pendingReconciliations.length > 0 && isEffectfulToolCall(toolCall)) {
+      toolResult = {
+        success: false,
+        error: `Effectful tool execution is blocked until pending tool outcomes are explicitly reconciled via POST /api/sessions/${ctx.sessionId}/reconcile-tools. Pending calls: ${pendingReconciliations.map((item) => item.toolCallId).join(', ')}`,
+        durationMs: Date.now() - startTime,
+        truncated: false,
+        metadata: { reconciliationRequired: true },
+      }
+    } else if (toolCall.preflightError) {
       toolResult = {
         success: false,
         error: toolCall.preflightError,

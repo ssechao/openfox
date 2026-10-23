@@ -89,6 +89,7 @@ export type ServerMessageType =
   | 'session.deleted'
   | 'session.deletedAll'
   | 'session.running' // Real-time running state change
+  | 'session.interrupted' // Worker-crash interruption marker (set on crash, cleared on resume)
   | 'session.pause' // Cooperative pause state change (none/pending/paused/resuming)
   | 'session.name_generated' // Session name was auto-generated
   | 'session.confirmation_pending' // Path confirmation waiting in another session (broadcast to all)
@@ -240,6 +241,11 @@ export interface SessionCreatedPayload {
 
 export interface SessionRunningPayload {
   isRunning: boolean
+}
+
+export interface SessionInterruptedPayload {
+  /** ISO timestamp when the worker crashed, or null after an explicit resume. */
+  interruptedAt: string | null
 }
 
 export interface SessionPausePayload {

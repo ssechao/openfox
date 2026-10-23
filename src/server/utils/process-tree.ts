@@ -59,6 +59,30 @@ function killProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
   }
 }
 
+export async function signalProcessGroup(pid: number, immediate = false): Promise<boolean> {
+  if (process.platform === 'win32') return false
+  try {
+    process.kill(-pid, 0)
+  } catch {
+    return false
+  }
+
+  if (!immediate) {
+    try {
+      process.kill(-pid, 'SIGTERM')
+    } catch (error) {
+      void error
+    }
+    await sleep(SIGKILL_TIMEOUT_MS)
+  }
+  try {
+    process.kill(-pid, 'SIGKILL')
+  } catch (error) {
+    void error
+  }
+  return true
+}
+
 /**
  * Kill a process and all its descendants.
  *

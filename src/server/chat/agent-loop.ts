@@ -829,6 +829,7 @@ ${COMPACTION_PROMPT}`,
           llmClient: resolveClient(),
           statsIdentity,
           onToolExecuted: config.onToolExecuted,
+          pendingToolReconciliations: sessionManager.getPendingToolReconciliations?.(sessionId) ?? [],
         }
         if (session.dangerLevel) {
           batchContext.dangerLevel = session.dangerLevel

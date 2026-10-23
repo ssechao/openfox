@@ -17,6 +17,7 @@ export type {
   FoldedSessionState,
   MessageWithId,
 } from './fold-types.js'
+export type { PendingToolReconciliation } from './types.js'
 
 export {
   spreadOptionalMessageFields,
@@ -26,7 +27,7 @@ export {
   handleMessageDelta,
   handleToolCall,
   handleToolResult,
-  stripOrphanedToolCalls,
+  materializeUnknownToolResults,
   reorderToolMessages,
   buildContextMessagesFromEventHistory,
   buildSessionStatsMessages,
@@ -45,6 +46,7 @@ export {
   foldPhase,
   foldIsRunning,
   foldPendingConfirmations,
+  foldPendingToolReconciliations,
   foldSessionState,
   foldWaitingWorkflow,
   buildSnapshot,

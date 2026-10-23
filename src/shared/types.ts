@@ -103,6 +103,9 @@ export interface Session {
   mode: SessionMode
   phase: SessionPhase // Current workflow phase
   isRunning: boolean // Is the agent actively working?
+  /** Set when a session worker process crashed (étape 6a) until the user
+   *  explicitly resumes (« interrompue — reprendre »); null otherwise. */
+  interruptedAt?: string | null
   pauseState?: PauseState // Cooperative pause state (default 'none' when absent)
   providerId?: string | null // Per-session provider override
   providerModel?: string | null // Per-session model override
@@ -164,6 +167,7 @@ export interface SessionSummary {
   mode: SessionMode
   phase: SessionPhase // Current workflow phase
   isRunning: boolean
+  interruptedAt?: string | null // Worker crash marker (étape 6a), null otherwise
   isFavorite: boolean // Whether the session is favorited for pinning
   providerId?: string | null // Per-session provider override
   providerModel?: string | null // Per-session model override

@@ -971,6 +971,112 @@ describe('session.deletedAll handler', () => {
   })
 })
 
+describe('session.interrupted handler', () => {
+  beforeEach(() => {
+    wsSendMock.mockClear()
+    wsSubscribeMock.mockClear()
+    wsConnectMock.mockClear()
+    wsDisconnectMock.mockClear()
+    wsStatusMock.mockClear()
+    playNotificationMock.mockClear()
+    playInterventionMock.mockClear()
+    playWaitingForUserMock.mockClear()
+    playNewMessageMock.mockClear()
+    fetchMock.mockClear()
+  })
+
+  function minimalSession(overrides: Record<string, unknown> = {}): any {
+    return {
+      id: 'session-1',
+      projectId: 'project-1',
+      workdir: '/tmp/test',
+      mode: 'builder',
+      phase: 'build',
+      isRunning: false,
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+      messages: [],
+      criteria: [],
+      contextWindows: [],
+      executionState: null,
+      metadata: { totalTokensUsed: 0, totalToolCalls: 0, iterationCount: 0 },
+      metadataEntries: {},
+      ...overrides,
+    }
+  }
+
+  it('sets interruptedAt on the session and the live pane on crash', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state: any) => ({
+      ...state,
+      sessions: [minimalSession({ interruptedAt: null })],
+      panes: {
+        'session-1': {
+          session: minimalSession({ interruptedAt: null }),
+          messages: [],
+          hiddenCount: 0,
+          sessionStats: null,
+          contextState: null,
+          queuedMessages: [],
+          pendingPathConfirmations: [],
+          pendingQuestions: [],
+          activeWorkflowExecution: null,
+          llmRetry: null,
+          error: null,
+          abortInProgress: false,
+        },
+      },
+    }))
+
+    useSessionStore.getState().handleServerMessage({
+      type: 'session.interrupted',
+      sessionId: 'session-1',
+      payload: { interruptedAt: '2026-10-23T10:00:00.000Z' },
+    } as any)
+
+    const state = useSessionStore.getState()
+    expect(state.sessions.find((s: any) => s.id === 'session-1')?.interruptedAt).toBe('2026-10-23T10:00:00.000Z')
+    expect(state.panes['session-1']?.session?.interruptedAt).toBe('2026-10-23T10:00:00.000Z')
+  })
+
+  it('clears interruptedAt and any stale error on resume (null)', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state: any) => ({
+      ...state,
+      sessions: [minimalSession({ interruptedAt: '2026-10-23T10:00:00.000Z' })],
+      panes: {
+        'session-1': {
+          session: minimalSession({ interruptedAt: '2026-10-23T10:00:00.000Z' }),
+          messages: [],
+          hiddenCount: 0,
+          sessionStats: null,
+          contextState: null,
+          queuedMessages: [],
+          pendingPathConfirmations: [],
+          pendingQuestions: [],
+          activeWorkflowExecution: null,
+          llmRetry: null,
+          error: { code: 'resume_failed', message: 'Échec de la reprise (HTTP 409)' },
+          abortInProgress: false,
+        },
+      },
+    }))
+
+    useSessionStore.getState().handleServerMessage({
+      type: 'session.interrupted',
+      sessionId: 'session-1',
+      payload: { interruptedAt: null },
+    } as any)
+
+    const state = useSessionStore.getState()
+    expect(state.sessions.find((s: any) => s.id === 'session-1')?.interruptedAt).toBeNull()
+    expect(state.panes['session-1']?.session?.interruptedAt).toBeNull()
+    expect(state.panes['session-1']?.error).toBeNull()
+  })
+})
+
 describe('feed memory bounds', () => {
   beforeEach(() => {
     wsSendMock.mockClear()

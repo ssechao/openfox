@@ -219,6 +219,17 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
   const exactCommandMatch = prompt.match(/Run the exact command:\s*(.+)$/i) ?? prompt.match(/^Run exactly:\s*(.+)$/i)
   const quotedValues = [...prompt.matchAll(/"([^"]+)"/g)].map((match) => match[1]!)
 
+  // MCP tool exercise (worker crash/cleanup tests): the mock emits the shared
+  // MCP tool call so the gateway-side registry executes it against the real
+  // stdio server.
+  const mcpMatch = prompt.match(/Call the MCP tool (\S+)/i)
+  if (mcpMatch) {
+    return {
+      tools: [{ name: mcpMatch[1]!, arguments: { name: 'WorkerCleanupProbe', delay: 10 } }],
+      response: 'Called the MCP tool.',
+    }
+  }
+
   if (/Use the session_metadata tool with key.*todos.*to create a todo list/i.test(prompt)) {
     return {
       tools: [
@@ -381,6 +392,20 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
     }
   }
 
+  const workerLspMatch = prompt.match(/Start the worker LSP probe, then run "([^"]+)"/i)
+  if (workerLspMatch) {
+    return {
+      tools: [
+        {
+          name: 'write_file',
+          arguments: { path: 'src/worker-lsp-probe.ts', content: 'export const workerLspProbe = true' },
+        },
+        { name: 'run_command', arguments: { command: workerLspMatch[1]! } },
+      ],
+      response: 'Started the worker LSP probe.',
+    }
+  }
+
   if (exactCommandMatch) {
     return {
       tools: [{ name: 'run_command', arguments: { command: exactCommandMatch[1]!.trim() } }],
@@ -411,6 +436,16 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
 function getConversationAwareToolResponse(request: LLMCompletionRequest): MockMatchResult | null {
   const prompt = getLastUserPrompt(request)
   const conversationText = getConversationText(request)
+
+  if (/LLM stream was interrupted mid-response|Continue your previous response/i.test(prompt)) {
+    const command = conversationText.match(/Run the exact command:\s*(.+)$/im)?.[1]?.trim()
+    if (command) {
+      return {
+        tools: [{ name: 'run_command', arguments: { command } }],
+        response: 'Retried the interrupted command.',
+      }
+    }
+  }
 
   // Step-done reminder: the transition condition is already satisfied, nothing
   // is left but to signal completion

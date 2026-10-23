@@ -114,6 +114,50 @@ describe('executeTools', () => {
     })
   })
 
+  it('refuses effectful tools while reconciliation is pending', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn()
+    const pendingToolReconciliations = [
+      { messageId: 'old-message', toolCallId: 'unknown-call', name: 'run_command', arguments: { command: 'touch x' } },
+    ]
+
+    const result = await executeTools(
+      'msg-1',
+      [{ id: 'call-1', name: 'run_command', arguments: { command: 'touch x' } }],
+      makeCtx({ pendingToolReconciliations }),
+      append,
+    )
+
+    expect(mockToolRegistry.execute).not.toHaveBeenCalled()
+    expect(result.toolMessages[0]?.content).toContain('explicitly reconciled')
+    expect(
+      append.mock.calls.find((args: unknown[]) => (args[0] as TurnEvent).type === 'tool.result')?.[0],
+    ).toMatchObject({ data: { result: { success: false, metadata: { reconciliationRequired: true } } } })
+  })
+
+  it('allows read-only tools while reconciliation is pending', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'data',
+      durationMs: 1,
+      truncated: false,
+    })
+
+    await executeTools(
+      'msg-1',
+      [{ id: 'call-1', name: 'read_file', arguments: { path: 'a.ts' } }],
+      makeCtx({
+        pendingToolReconciliations: [
+          { messageId: 'old-message', toolCallId: 'unknown-call', name: 'run_command', arguments: {} },
+        ],
+      }),
+      append,
+    )
+
+    expect(mockToolRegistry.execute).toHaveBeenCalledOnce()
+  })
+
   it('executes multiple tool calls in parallel and maintains order', async () => {
     const append = vi.fn()
     const executionOrder: number[] = []

@@ -58,6 +58,18 @@ export interface RuntimeSnapshot {
   lastCommand: RuntimeLastCommand | null
 }
 
+/**
+ * A worker health series that is no longer counted in the aggregated totals
+ * because its worker is dead (crash/shutdown) or its last snapshot is older
+ * than the TTL (2 report intervals). Exposed for debugging only — it never
+ * participates in p50/p99/max or any gauge.
+ */
+export interface StaleWorkerSeries {
+  workerId: string
+  generation: number
+  receivedAt: number
+}
+
 export interface DiagnosticsData {
   collectedAt: number
   intervalMs: number
@@ -66,4 +78,6 @@ export interface DiagnosticsData {
   series: Record<DiagnosticsSeriesName, DiagnosticsSeries>
   history: DiagnosticsHistoryPoint[]
   runtimes: RuntimeSnapshot[]
+  /** Worker series excluded from the aggregated totals (dead or TTL-expired). */
+  staleSeries?: StaleWorkerSeries[]
 }

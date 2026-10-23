@@ -2090,6 +2090,10 @@ export class SessionManager {
   /**
    * Get the current context state for a session.
    */
+  getPendingToolReconciliations(sessionId: string) {
+    return getSessionState(sessionId)?.pendingToolReconciliations ?? []
+  }
+
   getContextState(sessionId: string): ContextState {
     const providerManager = this.providerManager
 

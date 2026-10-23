@@ -9,6 +9,7 @@ import type {
 import type { SessionRuntimeRegistry } from '../session/index.js'
 import type { DiagnosticsCollector } from './types.js'
 import { LatencyHistogram, mergedCount, mergedMax, mergedPercentile } from './histogram.js'
+import type { HealthAggregator } from './aggregator.js'
 
 type LatencyMetric = 'loop' | 'health' | 'read' | 'write'
 type GaugeMetric =
@@ -46,6 +47,7 @@ export interface CollectorOptions {
   historyMs?: number
   loopSampleMs?: number
   enableLoopSampler?: boolean
+  healthAggregator?: HealthAggregator
   now?: () => number
 }
 
@@ -122,7 +124,17 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
     bucket.gauges.heapUsed = memory.heapUsed
     const wal = walSizeBytes(options.dbPath)
     if (wal !== undefined) bucket.gauges.walSize = wal
-    if (options.countRunningSessions) {
+    // The runtime registry is the single owner of executions (including worker
+    // turns, whose handle the gateway holds until the worker settles), so it is
+    // the authoritative "running sessions" count. The EventStore-based count is
+    // only a fallback when no registry is wired (e.g. a worker-side collector).
+    if (options.runtimeRegistry) {
+      try {
+        bucket.gauges.runningSessions = options.runtimeRegistry.countActive()
+      } catch {
+        // Registry unavailable (shutdown): leave the gauge empty for this interval.
+      }
+    } else if (options.countRunningSessions) {
       try {
         bucket.gauges.runningSessions = options.countRunningSessions()
       } catch {
@@ -204,7 +216,7 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
       })
     }
 
-    return {
+    const gatewayData: DiagnosticsData = {
       collectedAt: now,
       intervalMs,
       windowMs,
@@ -229,6 +241,8 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
       history,
       runtimes: options.runtimeRegistry?.list() ?? [],
     }
+
+    return options.healthAggregator?.aggregate(gatewayData) ?? gatewayData
   }
 
   return {

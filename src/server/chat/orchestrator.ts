@@ -47,6 +47,7 @@ import { logger } from '../utils/logger.js'
 import type { RetryPatternConfig } from './auto-patterns.js'
 import { sanitizeRetryPatterns } from './auto-patterns.js'
 import { getConversationMessages, processEventsForConversation } from './conversation-history.js'
+import { isStaleWorkerGenerationError } from '../session/worker/index.js'
 
 // Re-export for runner orchestrator
 export {
@@ -192,8 +193,8 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
   const append = (event: import('../events/types.js').TurnEvent) => {
     try {
       eventStore.append(sessionId, event)
-    } catch {
-      // Session may have been deleted (e.g. during abort) — skip
+    } catch (error) {
+      if (isStaleWorkerGenerationError(error)) throw error
     }
   }
 
@@ -215,6 +216,8 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
       logger.debug('Cleaned up old events after snapshot', { sessionId, deletedCount, snapshotSeq: snapshotEvent.seq })
     }
   } catch (error) {
+    if (isStaleWorkerGenerationError(error)) throw error
+
     if (error instanceof PathAccessDeniedError) {
       const errorMsgId = crypto.randomUUID()
       const reasonText =

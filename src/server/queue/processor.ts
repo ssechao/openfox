@@ -2,6 +2,7 @@ import type { LLMClientWithModel } from '../llm/client.js'
 import type { ProviderManager } from '../provider-manager.js'
 import type { SessionManager } from '../session/manager.js'
 import { isSessionAlreadyRunningError, type ExecutionHandle, type SessionRuntimeRegistry } from '../session/index.js'
+import type { SessionWorkerManager } from '../session/worker/index.js'
 import { logger } from '../utils/logger.js'
 import type { ServerMessage } from '../../shared/protocol.js'
 import { createSessionRunningMessage, createChatMessageMessage } from '../ws/protocol.js'
@@ -21,6 +22,9 @@ interface QueueProcessorDeps {
   ) => LLMClientWithModel | undefined
   getActiveProvider: (() => import('../../shared/types.js').Provider | undefined) | undefined
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
+  /** When set and enabled (explicit opt-in), one session at a time runs its
+   *  turn in its own worker process (étape 6a). */
+  workerManager?: SessionWorkerManager | undefined
 }
 
 export class QueueProcessor {
@@ -61,6 +65,9 @@ export class QueueProcessor {
 
   abortSession(sessionId: string): boolean {
     this.deps.sessionManager.clearPauseState(sessionId)
+    // A turn running in a worker process never sees the in-process abort
+    // signal — ask the worker to abort over IPC too.
+    this.deps.workerManager?.requestStop(sessionId)
     return this.deps.runtimeRegistry.get(sessionId).stop()
   }
 
@@ -102,6 +109,15 @@ export class QueueProcessor {
     const session = sessionManager.getSession(sessionId)
     if (!session || session.isRunning) {
       logger.warn('Cannot start turn: session not found or already running', { sessionId })
+      return
+    }
+
+    // A session interrupted by a worker crash (étape 6a) never auto-starts:
+    // its queued messages wait for the explicit resume gate
+    // (POST /resume-interruption clears interruptedAt before queueing the
+    // continuation).
+    if (session.interruptedAt) {
+      logger.info('Session is interrupted; queued messages wait for explicit resume', { sessionId })
       return
     }
 
@@ -196,6 +212,60 @@ export class QueueProcessor {
 
   private async runTurn(sessionId: string, handle: ExecutionHandle): Promise<void> {
     const { sessionManager, getLLMClient, getActiveProvider, broadcastForSession, providerManager } = this.deps
+
+    // Worker mode (étape 6a, explicit opt-in): this turn executes in its own
+    // process. The gateway keeps the runtime handle acquired until the worker
+    // settles; a crashed worker is finalized by the worker manager
+    // (interrupted marker + explicit resume proposal) and is never
+    // auto-continued here.
+    const workerManager = this.deps.workerManager
+    if (workerManager?.shouldUseWorker(sessionId)) {
+      try {
+        workerManager.launch(sessionId, (outcome) => {
+          const runtime = this.deps.runtimeRegistry.peek(sessionId)
+          const released = runtime?.release(handle) ?? false
+          if (!released) return
+
+          try {
+            const session = sessionManager.getSession(sessionId)
+            if (!session) return
+
+            if (outcome.crashed) {
+              logger.warn('Worker turn crashed; session left interrupted', { sessionId })
+              return
+            }
+
+            const hasMore = sessionManager.hasQueuedMessages(sessionId)
+            if (!hasMore) {
+              finalizeTurnCompletion(sessionId, sessionManager, broadcastForSession)
+              return
+            }
+
+            const currentSession = sessionManager.getSession(sessionId)
+            if (currentSession?.isRunning) {
+              sessionManager.setRunning(sessionId, false)
+            }
+            this.startTurn(sessionId)
+          } catch (error) {
+            logger.error('Error in worker turn completion cleanup', {
+              sessionId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }
+        })
+      } catch (error) {
+        logger.error('Worker launch failed, releasing runtime', { sessionId, error })
+        const runtime = this.deps.runtimeRegistry.peek(sessionId)
+        if (runtime?.release(handle)) {
+          try {
+            finalizeTurnCompletion(sessionId, sessionManager, broadcastForSession)
+          } catch {
+            // Session may have been deleted during the failed launch
+          }
+        }
+      }
+      return
+    }
 
     let runChatTurn: (typeof import('../chat/orchestrator.js'))['runChatTurn']
     let runChatTurnParams: ReturnType<typeof buildRunChatTurnParams>
