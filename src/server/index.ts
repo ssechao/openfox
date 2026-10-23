@@ -3909,6 +3909,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   }
 
   const abortSession = (sessionId: string) => {
+    workerManager.requestStop(sessionId)
     const aborted = runtimeRegistry.get(sessionId).stop()
     if (aborted) {
       sessionManager.clearPauseState(sessionId)
