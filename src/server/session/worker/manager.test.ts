@@ -73,6 +73,12 @@ describe('SessionWorkerManager', () => {
         return [99]
       },
       shutdownTimeoutMs: 25,
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
     })
     Reflect.set(manager, 'active', {
       sessionId: 'sess-1',

@@ -79,6 +79,7 @@ export interface SessionWorkerManagerDeps {
   cleanupChildren?: (path: string) => Promise<number[]>
   shutdownTimeoutMs?: number
   healthAggregator?: HealthAggregator
+  eventStore?: () => ReturnType<typeof getEventStore>
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
@@ -267,6 +268,7 @@ export class SessionWorkerManager {
       await Promise.all([(this.deps.cleanupChildren ?? killTrackedChildren)(worker.childrenPath), exitedBeforeTimeout])
       const interruptedAt = new Date().toISOString()
       markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
+      this.prepareInterruptedEvents(worker.sessionId)
       try {
         this.deps.sessionManager.setRunning(worker.sessionId, false)
         emitRunningChanged(worker.sessionId, false)
@@ -293,6 +295,16 @@ export class SessionWorkerManager {
         error: error instanceof Error ? error.message : String(error),
       })
     }
+  }
+
+  private prepareInterruptedEvents(sessionId: string) {
+    const eventStore = this.deps.eventStore?.() ?? getEventStore()
+    eventStore.invalidateExternalSession(sessionId)
+    const events = eventStore.getEvents(sessionId)
+    for (const pending of findPendingToolReconciliations(events)) {
+      eventStore.append(sessionId, { type: 'tool.reconciliation_required', data: pending })
+    }
+    return { eventStore, events }
   }
 
   private async settle(worker: ActiveWorker, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
@@ -365,12 +377,7 @@ export class SessionWorkerManager {
       killedChildren,
     }
     try {
-      const eventStore = getEventStore()
-      eventStore.invalidateExternalSession(sessionId)
-      const events = eventStore.getEvents(sessionId)
-      for (const pending of findPendingToolReconciliations(events)) {
-        eventStore.append(sessionId, { type: 'tool.reconciliation_required', data: pending })
-      }
+      const { eventStore, events } = this.prepareInterruptedEvents(sessionId)
       const hasActiveWorkflow = this.deps.sessionManager.getActiveWorkflowExecution(sessionId) != null
       const plan = planWorkerCrashRecovery(events, hasActiveWorkflow)
       if (plan?.finalizeMessageId) {

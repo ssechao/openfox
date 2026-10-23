@@ -45,6 +45,7 @@ describe('session worker crash', () => {
   let base: string
   let workdir: string
   let dbDir: string
+  let config: Config
 
   beforeAll(async () => {
     process.env['OPENFOX_MOCK_LLM'] = 'true'
@@ -52,7 +53,7 @@ describe('session worker crash', () => {
     dbDir = join(tmpdir(), `openfox-worker-crash-db-${randomUUID()}`)
     await mkdir(workdir, { recursive: true })
     await mkdir(dbDir, { recursive: true })
-    const config: Config = {
+    config = {
       mode: 'test',
       llm: { baseUrl: 'http://127.0.0.1:9/v1', model: '', backend: 'unknown', timeout: 300000, idleTimeout: 300000 },
       context: { maxTokens: 100000, compactionThreshold: 0.85, compactionTarget: 0.6 },
@@ -321,5 +322,56 @@ describe('session worker crash', () => {
     expect(clearSync.interruptedAt).toBeNull()
 
     ws.close()
+  }, 120_000)
+
+  it('preserves the reconciliation guard across gateway shutdown and restart', async () => {
+    await waitFor(
+      async () => ((await getWorkerIntrospection()).active === null ? true : null),
+      40_000,
+      'previous worker to settle',
+    )
+    await setWorkerMode(true)
+    const sessionId = await createSession('shutdown-reconciliation')
+    const effectPath = join(workdir, 'shutdown-effect.txt')
+    await sendMessage(sessionId, `Run the exact command: printf x >> ${JSON.stringify(effectPath)}; sleep 30`)
+    const active = await waitFor(async () => (await getWorkerIntrospection()).active, 20_000, 'worker to start')
+    expect(active?.sessionId).toBe(sessionId)
+    await waitFor(
+      async () => ((await readFile(effectPath, 'utf-8').catch(() => '')) === 'x' ? true : null),
+      20_000,
+      'shutdown tool side effect',
+    )
+
+    await server.close()
+    const { closeDatabase } = await import('../db/index.js')
+    closeDatabase()
+    const { createServerHandle } = await import('../index.js')
+    server = await createServerHandle(config)
+    const { port } = await server.start(0)
+    base = `http://127.0.0.1:${port}`
+
+    const interrupted = await getSessionView(sessionId)
+    expect(interrupted.session.interruptedAt).toBeTruthy()
+    expect(interrupted.pendingToolReconciliations).toHaveLength(1)
+
+    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+    expect(resumed.status).toBe(200)
+    const recovered = await waitFor(
+      async () => {
+        const view = await getSessionView(sessionId)
+        return !view.session.isRunning && !view.session.interruptedAt ? view : null
+      },
+      30_000,
+      'shutdown-interrupted session to resume',
+    )
+    expect(recovered.pendingToolReconciliations).toHaveLength(1)
+    expect(
+      recovered.messages.some((message) =>
+        message.toolCalls?.some(
+          (call) => call.result?.success === false && call.result.metadata?.['reconciliationRequired'] === true,
+        ),
+      ),
+    ).toBe(true)
+    expect(await readFile(effectPath, 'utf-8')).toBe('x')
   }, 120_000)
 })
