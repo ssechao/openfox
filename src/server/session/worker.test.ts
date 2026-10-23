@@ -9,7 +9,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdtempSync, existsSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -187,15 +187,14 @@ describe('exclusive children tracking', () => {
     try {
       initChildrenTracking(file)
       process.env['OPENFOX_WORKER_CHILDREN'] = file
-      trackExclusiveChild(1234, 'sleep 300')
-      trackExclusiveChild(1234, 'sleep 300') // duplicate ignored
-      trackExclusiveChild(1235)
+      trackExclusiveChild(process.pid, 'current process')
+      trackExclusiveChild(process.pid, 'current process') // duplicate ignored
       delete process.env['OPENFOX_WORKER_CHILDREN']
       // Simulate a worker killed mid-append: truncated trailing line.
       appendFileSync(file, '{"pid": 99')
 
       const children = readTrackedChildren(file)
-      expect(children).toEqual([{ pid: 1234, command: 'sleep 300' }, { pid: 1235 }])
+      expect(children).toEqual([{ pid: process.pid, startedAt: expect.any(String), command: 'current process' }])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -204,6 +203,24 @@ describe('exclusive children tracking', () => {
   it('is a no-op outside a worker process', () => {
     delete process.env['OPENFOX_WORKER_CHILDREN']
     expect(() => trackExclusiveChild(4321, 'sleep 1')).not.toThrow()
+  })
+
+  it('does not kill a foreign process that reused a tracked pid', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-children-'))
+    const file = join(dir, 'w.children')
+    const child = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' })
+    child.unref()
+    try {
+      expect(child.pid).toBeGreaterThan(0)
+      writeFileSync(file, `${JSON.stringify({ pid: child.pid, startedAt: 'foreign-process' })}\n`, 'utf-8')
+
+      const killed = await killTrackedChildren(file)
+      expect(killed).toEqual([])
+      expect(() => process.kill(child.pid!, 0)).not.toThrow()
+    } finally {
+      if (child.pid) process.kill(-child.pid, 'SIGKILL')
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('kills a recorded detached process group and removes the sidecar', async () => {

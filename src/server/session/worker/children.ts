@@ -13,13 +13,41 @@
  * touched by the cleanup.
  */
 
+import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { killProcessTree } from '../../utils/process-tree.js'
 import { logger } from '../../utils/logger.js'
 
 export interface TrackedChild {
   pid: number
+  startedAt: string
   command?: string
+}
+
+function processStartIdentity(pid: number): string | null {
+  try {
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
+      const fields = stat
+        .slice(stat.lastIndexOf(') ') + 2)
+        .trim()
+        .split(/\s+/)
+      const startTicks = fields[19]
+      return startTicks ? `linux:${startTicks}` : null
+    }
+    if (process.platform === 'win32') {
+      const ticks = execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks`],
+        { encoding: 'utf-8', windowsHide: true },
+      ).trim()
+      return ticks ? `win32:${ticks}` : null
+    }
+    const startedAt = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf-8' }).trim()
+    return startedAt ? `${process.platform}:${startedAt}` : null
+  } catch {
+    return null
+  }
 }
 
 export function childrenFilePath(dbPath: string, workerId: string): string {
@@ -43,7 +71,9 @@ export function trackExclusiveChild(pid: number | undefined, command?: string): 
   const path = activeFilePath()
   if (!path || !pid || !Number.isFinite(pid) || pid <= 0) return
   try {
-    const entry: TrackedChild = { pid, ...(command ? { command: command.slice(0, 200) } : {}) }
+    const startedAt = processStartIdentity(pid)
+    if (!startedAt) throw new Error('process start identity unavailable')
+    const entry: TrackedChild = { pid, startedAt, ...(command ? { command: command.slice(0, 200) } : {}) }
     appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf-8')
   } catch (error) {
     logger.warn('Failed to track worker child', {
@@ -61,7 +91,13 @@ export function readTrackedChildren(path: string): TrackedChild[] {
     if (!line.trim()) continue
     try {
       const entry = JSON.parse(line) as TrackedChild
-      if (Number.isFinite(entry.pid) && entry.pid > 0 && !seen.has(entry.pid)) {
+      if (
+        Number.isFinite(entry.pid) &&
+        entry.pid > 0 &&
+        typeof entry.startedAt === 'string' &&
+        entry.startedAt.length > 0 &&
+        !seen.has(entry.pid)
+      ) {
         seen.add(entry.pid)
         children.push(entry)
       }
@@ -82,6 +118,7 @@ export async function killTrackedChildren(path: string): Promise<number[]> {
   const killed: number[] = []
   for (const child of children) {
     try {
+      if (processStartIdentity(child.pid) !== child.startedAt) continue
       await killProcessTree(child.pid)
       killed.push(child.pid)
     } catch (error) {
