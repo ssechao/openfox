@@ -33,8 +33,28 @@ export interface ExclusiveChildReservation {
 
 export const EXCLUSIVE_CHILD_RESERVATION_ENV = 'OPENFOX_CHILD_RESERVATION_ID'
 
-function processStartIdentity(pid: number): string | null {
+export type ProcessIdentityRead =
+  { status: 'found'; identity: string } | { status: 'absent' } | { status: 'unreadable'; error: Error }
+
+export interface ChildrenCleanupDependencies {
+  readProcessIdentity?: (pid: number) => ProcessIdentityRead
+  killTree?: (pid: number) => Promise<void>
+  signalGroup?: (pid: number) => Promise<boolean>
+  retryDelay?: () => Promise<void>
+}
+
+function processRootExists(pid: number): boolean {
   try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+function processStartIdentity(pid: number): ProcessIdentityRead {
+  try {
+    let identity: string | undefined
     if (process.platform === 'linux') {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
       const fields = stat
@@ -42,20 +62,26 @@ function processStartIdentity(pid: number): string | null {
         .trim()
         .split(/\s+/)
       const startTicks = fields[19]
-      return startTicks ? `linux:${startTicks}` : null
-    }
-    if (process.platform === 'win32') {
+      identity = startTicks ? `linux:${startTicks}` : undefined
+    } else if (process.platform === 'win32') {
       const ticks = execFileSync(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks`],
         { encoding: 'utf-8', windowsHide: true },
       ).trim()
-      return ticks ? `win32:${ticks}` : null
+      identity = ticks ? `win32:${ticks}` : undefined
+    } else {
+      const startedAt = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf-8' }).trim()
+      identity = startedAt ? `${process.platform}:${startedAt}` : undefined
     }
-    const startedAt = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf-8' }).trim()
-    return startedAt ? `${process.platform}:${startedAt}` : null
-  } catch {
-    return null
+    if (!identity) throw new Error('process start identity was empty')
+    return { status: 'found', identity }
+  } catch (error) {
+    if (!processRootExists(pid)) return { status: 'absent' }
+    return {
+      status: 'unreadable',
+      error: error instanceof Error ? error : new Error(String(error)),
+    }
   }
 }
 
@@ -95,13 +121,13 @@ export function exclusiveChildReservationEnv(reservation: ExclusiveChildReservat
 export function finalizeExclusiveChild(reservation: ExclusiveChildReservation | null, pid: number | undefined): void {
   if (!reservation) return
   if (!pid || !Number.isFinite(pid) || pid <= 0) throw new Error('spawned child pid unavailable')
-  const startedAt = processStartIdentity(pid)
-  if (!startedAt) throw new Error('process start identity unavailable')
+  const identity = processStartIdentity(pid)
+  if (identity.status !== 'found') throw new Error('process start identity unavailable')
   const entry = {
     type: 'child',
     reservationId: reservation.id,
     pid,
-    startedAt,
+    startedAt: identity.identity,
     ...(reservation.command ? { command: reservation.command } : {}),
   }
   appendFileSync(reservation.path, `${JSON.stringify(entry)}\n`, 'utf-8')
@@ -188,26 +214,48 @@ function findReservationProcesses(reservationId: string): number[] {
  * the pids that were signaled (the cleanup proof). Missing processes are
  * fine — they may have exited on their own before the worker died.
  */
-export async function killTrackedChildren(path: string): Promise<number[]> {
+export async function killTrackedChildren(
+  path: string,
+  dependencies: ChildrenCleanupDependencies = {},
+): Promise<number[]> {
+  const readProcessIdentity = dependencies.readProcessIdentity ?? processStartIdentity
+  const killTree = dependencies.killTree ?? killProcessTree
+  const signalGroup = dependencies.signalGroup ?? signalProcessGroup
+  const retryDelay = dependencies.retryDelay ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 50)))
   const state = readChildrenState(path)
   const killed: number[] = []
   const killedSet = new Set<number>()
+  let hasUnreadableIdentity = false
   for (const reservationId of state.pendingReservationIds) {
     for (const pid of findReservationProcesses(reservationId)) {
       if (killedSet.has(pid)) continue
-      await killProcessTree(pid)
+      await killTree(pid)
       killedSet.add(pid)
       killed.push(pid)
     }
   }
   for (const child of state.children) {
     try {
-      const currentIdentity = processStartIdentity(child.pid)
-      if (currentIdentity === child.startedAt) {
-        await killProcessTree(child.pid)
+      let identity = readProcessIdentity(child.pid)
+      if (identity.status === 'unreadable') {
+        logger.error('Unable to read worker child process identity; retrying cleanup', {
+          pid: child.pid,
+          error: identity.error.message,
+        })
+        await retryDelay()
+        identity = readProcessIdentity(child.pid)
+      }
+      if (identity.status === 'found' && identity.identity === child.startedAt) {
+        await killTree(child.pid)
         killed.push(child.pid)
-      } else if (currentIdentity === null && (await signalProcessGroup(child.pid))) {
+      } else if (identity.status === 'absent' && (await signalGroup(child.pid))) {
         killed.push(child.pid)
+      } else if (identity.status === 'unreadable') {
+        hasUnreadableIdentity = true
+        logger.error('Unable to read worker child process identity; process group left untouched', {
+          pid: child.pid,
+          error: identity.error.message,
+        })
       }
     } catch (error) {
       logger.debug('Worker child already gone', {
@@ -216,7 +264,7 @@ export async function killTrackedChildren(path: string): Promise<number[]> {
       })
     }
   }
-  removeChildrenFile(path)
+  if (!hasUnreadableIdentity) removeChildrenFile(path)
   return killed
 }
 

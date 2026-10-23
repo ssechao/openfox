@@ -297,6 +297,58 @@ describe('exclusive children tracking', () => {
     }
   })
 
+  it('kills a recorded process group when the process root is absent', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-children-absent-root-'))
+    const file = join(dir, 'w.children')
+    const pid = 987_654
+    writeFileSync(file, `${JSON.stringify({ pid, startedAt: 'linux:1' })}\n`, 'utf-8')
+    let groupSignals = 0
+    try {
+      expect(
+        await killTrackedChildren(file, {
+          readProcessIdentity: () => ({ status: 'absent' }),
+          signalGroup: async () => {
+            groupSignals += 1
+            return true
+          },
+        }),
+      ).toEqual([pid])
+      expect(groupSignals).toBe(1)
+      expect(existsSync(file)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('retries an unreadable process identity without blindly killing its group', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-children-unreadable-identity-'))
+    const file = join(dir, 'w.children')
+    const pid = 987_654
+    writeFileSync(file, `${JSON.stringify({ pid, startedAt: 'linux:1' })}\n`, 'utf-8')
+    let identityReads = 0
+    let groupSignals = 0
+    try {
+      expect(
+        await killTrackedChildren(file, {
+          readProcessIdentity: () => {
+            identityReads += 1
+            return { status: 'unreadable', error: new Error('permission denied') }
+          },
+          signalGroup: async () => {
+            groupSignals += 1
+            return true
+          },
+          retryDelay: async () => {},
+        }),
+      ).toEqual([])
+      expect(identityReads).toBe(2)
+      expect(groupSignals).toBe(0)
+      expect(existsSync(file)).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('kills a recorded process group after its root exits', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openfox-children-orphan-group-'))
     const file = join(dir, 'w.children')
