@@ -10,7 +10,7 @@ import { createServer as createViteServer, type ViteDevServer } from 'vite'
 import type { Config, ModelConfig, ProviderBackend } from '../shared/types.js'
 import type { ServerHandle } from './context.js'
 import type { VisionBackend } from './llm/vision-fallback.js'
-import { initDatabase } from './db/index.js'
+import { initDatabase, getDatabase } from './db/index.js'
 
 import { getProject, deleteProject } from './db/projects.js'
 import { initEventStore, getEventStore, combineEventsWithSnapshot } from './events/index.js'
@@ -402,6 +402,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       const ms = typeof requested === 'number' && requested > 0 ? Math.min(requested, 5_000) : 100
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
       res.json({ blockedMs: ms })
+    })
+  }
+
+  // Test-only worker introspection (étape 6a): lets integration tests find the
+  // worker PID to kill and read the crash report (cleanup proof).
+  if (config.mode === 'test') {
+    app.get('/api/test/worker', (_req, res) => {
+      res.json({ active: workerManager.activeWorker(), lastCrash: workerManager.lastCrashReport() })
     })
   }
 
@@ -1819,6 +1827,38 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     runtimeRegistry.get(sessionId).recordCommand('resume')
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
+  })
+
+  // Explicit resume of a session interrupted by a worker crash (étape 6a).
+  // This is the ONLY way an interrupted turn continues: the continuation turn
+  // gets the same "stream interrupted" reminder as the LLM-drop recovery, so
+  // a tool call with an unknown outcome is never replayed blindly.
+  app.post('/api/sessions/:id/resume-interruption', async (req, res) => {
+    const sessionId = req.params.id
+    const session = sessionManager.getSession(sessionId)
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const db = getDatabase()
+    const { getSessionInterruptedAt, clearSessionInterrupted, planWorkerCrashRecovery } =
+      await import('./session/worker/index.js')
+    if (!getSessionInterruptedAt(db, sessionId)) {
+      return res.status(409).json({ error: 'Session is not interrupted' })
+    }
+
+    const eventStore = getEventStore()
+    const hasActiveWorkflow = sessionManager.getActiveWorkflowExecution(sessionId) != null
+    const plan = planWorkerCrashRecovery(eventStore.getEvents(sessionId), hasActiveWorkflow)
+    if (!plan) {
+      return res.status(409).json({ error: 'Nothing to resume' })
+    }
+
+    clearSessionInterrupted(db, sessionId)
+    sessionManager.queueMessage(sessionId, 'asap', plan.content, undefined, 'auto-prompt')
+    runtimeRegistry.get(sessionId).recordCommand('resume')
+    logger.info('Interrupted session resumed explicitly', { sessionId })
+    res.json({ success: true })
   })
 
   // Truncate session messages at a given index
@@ -3819,6 +3859,22 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // Wire up QueueProcessor - listens for queue events and starts turns
   const { QueueProcessor } = await import('./queue/processor.js')
+
+  // Session workers (étape 6a): explicit opt-in (setting or env), off by
+  // default, one worker at a time. The supervisor owns crash detection,
+  // interruption marking, exclusive-children reaping, and the resume gate.
+  const { SessionWorkerManager } = await import('./session/worker/index.js')
+  const { getSetting: getWorkerSetting, SETTINGS_KEYS: WORKER_SETTINGS_KEYS } = await import('./db/settings.js')
+  const workerManager = new SessionWorkerManager({
+    db: () => getDatabase(),
+    config,
+    sessionManager,
+    isEnabled: () =>
+      process.env['OPENFOX_SESSION_WORKER'] === 'true' ||
+      getWorkerSetting(WORKER_SETTINGS_KEYS.SESSION_WORKER_MODE) === 'true',
+    broadcastForSession: wssExports.broadcastForSession,
+  })
+
   const queueProcessor = new QueueProcessor({
     sessionManager,
     providerManager,
@@ -3827,6 +3883,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     getLLMClientForProvider,
     getActiveProvider: () => providerManager.getActiveProvider(),
     broadcastForSession: wssExports.broadcastForSession,
+    workerManager,
   })
   queueProcessor.start()
 
@@ -4007,6 +4064,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           // Note: Not closing database here - it's a singleton shared across servers.
           // Database should only be closed when the application exits.
           runtimeRegistry.abortAll()
+          workerManager.shutdown()
           // Terminate all WebSocket connections to allow clean shutdown
           for (const client of wss.clients) {
             client.terminate()

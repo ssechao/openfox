@@ -219,6 +219,17 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
   const exactCommandMatch = prompt.match(/Run the exact command:\s*(.+)$/i) ?? prompt.match(/^Run exactly:\s*(.+)$/i)
   const quotedValues = [...prompt.matchAll(/"([^"]+)"/g)].map((match) => match[1]!)
 
+  // MCP tool exercise (worker crash/cleanup tests): the mock emits the shared
+  // MCP tool call so the gateway-side registry executes it against the real
+  // stdio server.
+  const mcpMatch = prompt.match(/Call the MCP tool (\S+)/i)
+  if (mcpMatch) {
+    return {
+      tools: [{ name: mcpMatch[1]!, arguments: { name: 'WorkerCleanupProbe', delay: 10 } }],
+      response: 'Called the MCP tool.',
+    }
+  }
+
   if (/Use the session_metadata tool with key.*todos.*to create a todo list/i.test(prompt)) {
     return {
       tools: [
