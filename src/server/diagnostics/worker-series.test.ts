@@ -113,3 +113,73 @@ describe('worker health series', () => {
     expect(aggregator.activeSnapshots()).toHaveLength(1)
   })
 })
+
+describe('worker health series — TTL on receivedAt', () => {
+  const p99 = (value: number): DiagnosticsData['series']['eventLoopDelayP99'] => ({
+    unit: 'ms',
+    window: { startMs: 0, endMs: 10_000 },
+    samples: 10,
+    value,
+  })
+
+  it('treats a snapshot older than 2 intervals as stale: excluded from totals, listed in staleSeries', () => {
+    let clock = 10_000
+    const aggregator = createHealthAggregator({ now: () => clock })
+    const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
+
+    aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
+    // Advance past the 2-interval TTL (2000 ms).
+    clock = 10_000 + 2_001
+
+    const result = aggregator.aggregate(gatewayData)
+    // Stale worker no longer participates in the max.
+    expect(result.series.eventLoopDelayP99.value).toBe(3)
+    expect(aggregator.activeSnapshots()).toHaveLength(0)
+    // But it is exposed for debugging with its identity.
+    expect(result.staleSeries).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000 }])
+    expect(aggregator.staleSeries()).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000 }])
+  })
+
+  it('keeps a snapshot within the TTL active', () => {
+    let clock = 10_000
+    const aggregator = createHealthAggregator({ now: () => clock })
+    const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
+
+    aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
+    // One interval later (1000 ms) is still within the 2000 ms TTL.
+    clock = 10_000 + 1_000
+
+    const result = aggregator.aggregate(gatewayData)
+    expect(result.series.eventLoopDelayP99.value).toBe(7)
+    expect(result.staleSeries).toEqual([])
+  })
+
+  it('a fresh snapshot from a restarted worker revives the series and drops the stale entry', () => {
+    let clock = 10_000
+    const aggregator = createHealthAggregator({ now: () => clock })
+    const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
+
+    aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
+    clock = 10_000 + 2_001 // gen 1 now stale
+    // Worker restarts (same workerId, new generation) and reports fresh.
+    aggregator.recordSnapshot({ workerId: 'w1', generation: 2 }, makeData({ eventLoopDelayP99: p99(9) }))
+
+    const result = aggregator.aggregate(gatewayData)
+    expect(result.series.eventLoopDelayP99.value).toBe(9)
+    // The stale gen-1 entry is still exposed (different identity), the fresh gen-2 is not.
+    expect(result.staleSeries).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000 }])
+  })
+
+  it('expireWorker removes a series entirely (not listed as stale)', () => {
+    let clock = 10_000
+    const aggregator = createHealthAggregator({ now: () => clock })
+    const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
+
+    aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
+    aggregator.expireWorker({ workerId: 'w1', generation: 1 })
+
+    const result = aggregator.aggregate(gatewayData)
+    expect(result.series.eventLoopDelayP99.value).toBe(3)
+    expect(result.staleSeries).toEqual([])
+  })
+})
