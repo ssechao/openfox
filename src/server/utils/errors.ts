@@ -44,6 +44,20 @@ export class ValidationError extends OpenFoxError {
   }
 }
 
+export class SessionQueueFullError extends OpenFoxError {
+  constructor(sessionId: string, limit: number) {
+    super(`Session message queue reached its limit of ${limit}`, 'SESSION_QUEUE_FULL', { sessionId, limit })
+    this.name = 'SessionQueueFullError'
+  }
+}
+
+export class SessionWorkerQueueFullError extends OpenFoxError {
+  constructor(sessionId: string) {
+    super('Session worker queue is full', 'SESSION_WORKER_QUEUE_FULL', { sessionId })
+    this.name = 'SessionWorkerQueueFullError'
+  }
+}
+
 export class WorkspaceInUseError extends OpenFoxError {
   constructor(
     message: string,

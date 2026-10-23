@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import type { Config } from '../../../shared/types.js'
 import type { SessionManager } from '../manager.js'
@@ -50,6 +50,32 @@ afterEach(() => {
 })
 
 describe('SessionWorkerManager', () => {
+  it('cancels a waiting session without assigning a worker generation', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-waiting-stop.db')
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+    })
+    const activeStart = vi.fn()
+    const waitingStart = vi.fn()
+
+    expect(manager.requestTurn('sess-1', activeStart)).toBe('started')
+    expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
+    expect(manager.requestStop('sess-2')).toBe(true)
+    expect(waitingStart).not.toHaveBeenCalled()
+    expect(manager.activeWorker('sess-2')).toBeNull()
+    expect(namedDb.prepare(`SELECT worker_id, worker_generation FROM sessions WHERE id = 'sess-2'`).get()).toEqual({
+      worker_id: null,
+      worker_generation: 0,
+    })
+  })
+
   it('signals the worker, kills its children, waits for exit, and reports a shutdown timeout', async () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-shutdown.db')
     openDbs.push(db)
@@ -83,7 +109,8 @@ describe('SessionWorkerManager', () => {
           append: () => {},
         }) as never,
     })
-    Reflect.set(manager, 'active', {
+    const active = Reflect.get(manager, 'active') as Map<string, unknown>
+    active.set('sess-1', {
       sessionId: 'sess-1',
       token,
       child,
@@ -122,7 +149,7 @@ describe('SessionWorkerManager', () => {
       signalCode: null,
       kill: () => true,
     }) as unknown as ChildProcess
-    Reflect.set(manager, 'active', {
+    active.set('sess-1', {
       sessionId: 'sess-1',
       token: timeoutToken,
       child: stuckChild,

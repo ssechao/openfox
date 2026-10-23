@@ -700,6 +700,27 @@ describe('SessionManager', () => {
       expect(queueState[0]!.messageKind).toBe('command')
     })
 
+    it('refuses the 101st queued message without changing the queue', () => {
+      const session = manager.createSession(projectId)
+      for (let index = 0; index < 100; index += 1) {
+        manager.queueMessage(session.id, 'asap', `message-${index}`)
+      }
+
+      expect(() => manager.queueMessage(session.id, 'asap', 'overflow')).toThrow(/queue.*100/i)
+      expect(manager.getQueueState(session.id)).toHaveLength(100)
+    })
+
+    it('runs the admission guard before changing or announcing the queue', () => {
+      const session = manager.createSession(projectId)
+      const events: any[] = []
+      manager.subscribe((event) => events.push(event))
+      manager.setQueueAdmissionGuard(() => false)
+
+      expect(() => manager.queueMessage(session.id, 'asap', 'rejected')).toThrow(/worker queue/i)
+      expect(manager.getQueueState(session.id)).toEqual([])
+      expect(events).toEqual([])
+    })
+
     it('emits queue_added event when queuing', () => {
       const session = manager.createSession(projectId)
       const events: any[] = []

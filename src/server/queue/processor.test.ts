@@ -477,6 +477,70 @@ describe('QueueProcessor', () => {
     })
   })
 
+  describe('worker admission', () => {
+    it('does not run in the gateway when worker admission is full', () => {
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+      const workerManager = {
+        isEnabled: vi.fn(() => true),
+        requestTurn: vi.fn(() => 'full'),
+        releaseTurn: vi.fn(),
+        requestStop: vi.fn(),
+        launch: vi.fn(),
+      }
+      const qp = new QueueProcessor({
+        sessionManager: mockSessionManager,
+        providerManager: mockProviderManager,
+        runtimeRegistry,
+        getLLMClient: mockGetLLMClient,
+        getActiveProvider: mockGetActiveProvider,
+        broadcastForSession: mockBroadcastForSession,
+        workerManager: workerManager as never,
+      })
+
+      qp.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+
+      expect(workerManager.requestTurn).toHaveBeenCalledWith('sess-1', expect.any(Function))
+      expect(mockSessionManager.setRunning).not.toHaveBeenCalled()
+      expect(workerManager.launch).not.toHaveBeenCalled()
+      qp.stop()
+    })
+
+    it('launches the admitted turn only through the worker manager', () => {
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+      const workerManager = {
+        isEnabled: vi.fn(() => true),
+        requestTurn: vi.fn((_sessionId: string, start: () => void) => {
+          start()
+          return 'started'
+        }),
+        releaseTurn: vi.fn(),
+        requestStop: vi.fn(),
+        launch: vi.fn(),
+      }
+      const qp = new QueueProcessor({
+        sessionManager: mockSessionManager,
+        providerManager: mockProviderManager,
+        runtimeRegistry,
+        getLLMClient: mockGetLLMClient,
+        getActiveProvider: mockGetActiveProvider,
+        broadcastForSession: mockBroadcastForSession,
+        workerManager: workerManager as never,
+      })
+
+      qp.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+
+      expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
+      expect(workerManager.launch).toHaveBeenCalledWith('sess-1', expect.any(Function))
+      qp.stop()
+    })
+  })
+
   describe('runtime release on failure', () => {
     it('releases the runtime when a side effect throws right after acquire', () => {
       sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }

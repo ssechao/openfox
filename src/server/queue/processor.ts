@@ -22,8 +22,7 @@ interface QueueProcessorDeps {
   ) => LLMClientWithModel | undefined
   getActiveProvider: (() => import('../../shared/types.js').Provider | undefined) | undefined
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
-  /** When set and enabled (explicit opt-in), one session at a time runs its
-   *  turn in its own worker process (étape 6a). */
+  /** When enabled, session turns run in the bounded worker process pool. */
   workerManager?: SessionWorkerManager | undefined
 }
 
@@ -103,12 +102,28 @@ export class QueueProcessor {
   }
 
   private startTurn(sessionId: string): void {
-    const { sessionManager, broadcastForSession } = this.deps
+    const workerManager = this.deps.workerManager
+    if (workerManager?.isEnabled()) {
+      const admission = workerManager.requestTurn(sessionId, () => this.startAdmittedTurn(sessionId))
+      if (admission === 'full' || admission === 'closed') {
+        logger.warn('Worker turn admission refused', { sessionId, admission })
+      }
+      return
+    }
+    this.startAdmittedTurn(sessionId)
+  }
+
+  private startAdmittedTurn(sessionId: string): void {
+    const { sessionManager, broadcastForSession, workerManager } = this.deps
+    const releaseAdmission = () => {
+      if (workerManager?.isEnabled()) workerManager.releaseTurn(sessionId)
+    }
     logger.info('Starting turn from queue processor', { sessionId })
 
     const session = sessionManager.getSession(sessionId)
     if (!session || session.isRunning) {
       logger.warn('Cannot start turn: session not found or already running', { sessionId })
+      releaseAdmission()
       return
     }
 
@@ -118,12 +133,14 @@ export class QueueProcessor {
     // continuation).
     if (session.interruptedAt) {
       logger.info('Session is interrupted; queued messages wait for explicit resume', { sessionId })
+      releaseAdmission()
       return
     }
 
     const queue = sessionManager.getQueueState(sessionId)
     if (queue.length === 0) {
       logger.warn('Cannot start turn: queue is empty', { sessionId })
+      releaseAdmission()
       return
     }
 
@@ -139,8 +156,10 @@ export class QueueProcessor {
     } catch (error) {
       if (isSessionAlreadyRunningError(error)) {
         logger.warn('Cannot start turn: session already owned', { sessionId, error: error.message })
+        releaseAdmission()
         return
       }
+      releaseAdmission()
       throw error
     }
 
@@ -198,6 +217,7 @@ export class QueueProcessor {
     } catch (error) {
       logger.error('QueueProcessor turn start failed, releasing runtime', { sessionId, error })
       runtime.release(handle)
+      releaseAdmission()
       try {
         sessionManager.setRunning(sessionId, false)
         broadcastForSession(sessionId, createSessionRunningMessage(false))
@@ -213,13 +233,13 @@ export class QueueProcessor {
   private async runTurn(sessionId: string, handle: ExecutionHandle): Promise<void> {
     const { sessionManager, getLLMClient, getActiveProvider, broadcastForSession, providerManager } = this.deps
 
-    // Worker mode (étape 6a, explicit opt-in): this turn executes in its own
-    // process. The gateway keeps the runtime handle acquired until the worker
+    // Worker mode: this turn executes in its own process. The gateway keeps
+    // the runtime handle acquired until the worker
     // settles; a crashed worker is finalized by the worker manager
     // (interrupted marker + explicit resume proposal) and is never
     // auto-continued here.
     const workerManager = this.deps.workerManager
-    if (workerManager?.shouldUseWorker(sessionId)) {
+    if (workerManager?.isEnabled()) {
       try {
         workerManager.launch(sessionId, (outcome) => {
           const runtime = this.deps.runtimeRegistry.peek(sessionId)
@@ -255,6 +275,7 @@ export class QueueProcessor {
         })
       } catch (error) {
         logger.error('Worker launch failed, releasing runtime', { sessionId, error })
+        workerManager.releaseTurn(sessionId)
         const runtime = this.deps.runtimeRegistry.peek(sessionId)
         if (runtime?.release(handle)) {
           try {

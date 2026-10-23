@@ -71,7 +71,12 @@ import {
   validateWorkspaceName,
 } from '../git/workspace.js'
 import { resolve } from 'node:path'
-import { SessionNotFoundError, WorkspaceInUseError } from '../utils/errors.js'
+import {
+  SessionNotFoundError,
+  SessionQueueFullError,
+  SessionWorkerQueueFullError,
+  WorkspaceInUseError,
+} from '../utils/errors.js'
 import { logger } from '../utils/logger.js'
 import { EventEmitter, type Unsubscribe } from '../utils/async.js'
 import { getLspManager as getOrCreateLspManager, shutdownLspManager, type LspManager } from '../lsp/index.js'
@@ -1865,6 +1870,12 @@ export class SessionManager {
   // ============================================================================
 
   private messageQueues = new Map<string, QueuedMessage[]>()
+  private static readonly MAX_QUEUED_MESSAGES_PER_SESSION = 100
+  private queueAdmissionGuard: ((sessionId: string) => boolean) | undefined
+
+  setQueueAdmissionGuard(guard: (sessionId: string) => boolean): void {
+    this.queueAdmissionGuard = guard
+  }
 
   queueMessage(
     sessionId: string,
@@ -1874,6 +1885,12 @@ export class SessionManager {
     messageKind?: string,
   ): QueuedMessage {
     const queue = this.messageQueues.get(sessionId) ?? []
+    if (this.queueAdmissionGuard && !this.queueAdmissionGuard(sessionId)) {
+      throw new SessionWorkerQueueFullError(sessionId)
+    }
+    if (queue.length >= SessionManager.MAX_QUEUED_MESSAGES_PER_SESSION) {
+      throw new SessionQueueFullError(sessionId, SessionManager.MAX_QUEUED_MESSAGES_PER_SESSION)
+    }
     const msg: QueuedMessage = {
       queueId: crypto.randomUUID(),
       mode,

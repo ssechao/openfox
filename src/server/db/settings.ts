@@ -99,6 +99,7 @@ export const SETTINGS_DEFAULTS: Record<string, string> = {
   [SETTINGS_KEYS.CACHE_WARMING]: 'false',
   [SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT]: 'false',
   [SETTINGS_KEYS.AGENT_ALLOW_PARALLEL_SUB_AGENTS]: 'false',
+  [SETTINGS_KEYS.SESSION_WORKER_MODE]: 'true',
   [SETTINGS_KEYS.RETRY_PATTERNS]: JSON.stringify({ patterns: [], maxRetriesPerTurn: 10 }),
   [SETTINGS_KEYS.KEYBINDINGS]: JSON.stringify({
     terminalToggle: { type: 'double-press', key: 'Control', threshold: 300 },

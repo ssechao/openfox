@@ -1,9 +1,9 @@
 /**
- * Gateway-side supervisor for session workers (étape 6a).
+ * Gateway-side supervisor for session workers.
  *
- * Launches at most ONE session worker at a time (explicit opt-in setting,
- * off by default). The gateway keeps the interface, the API and the
- * WebSockets; the worker executes the turn and writes its own events through
+ * Launches a bounded pool of session workers. The gateway keeps the interface,
+ * the API and the WebSockets; each worker executes one session turn and writes
+ * its own events through
  * the (workerId, generation) fence.
  *
  * Crash handling: the child `exit` handler is the detection point — no
@@ -40,6 +40,7 @@ import { childrenFilePath, initChildrenTracking, killTrackedChildren, removeChil
 import { findPendingToolReconciliations, markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
 import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
 import type { HealthAggregator } from '../../diagnostics/aggregator.js'
+import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
 
 export interface WorkerSettledOutcome {
   crashed: boolean
@@ -79,6 +80,7 @@ export interface SessionWorkerManagerDeps {
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
   cleanupChildren?: (path: string) => Promise<number[]>
   shutdownTimeoutMs?: number
+  maxProcesses?: number
   healthAggregator?: HealthAggregator
   eventStore?: () => ReturnType<typeof getEventStore>
 }
@@ -99,27 +101,47 @@ function resolveWorkerEntry(): { path: string; execArgv: string[] } {
 }
 
 export class SessionWorkerManager {
-  private active: ActiveWorker | null = null
+  private readonly active = new Map<string, ActiveWorker>()
+  private readonly scheduler: SessionTurnScheduler
   private lastCrash: WorkerCrashReport | null = null
   private admissionsClosed = false
 
-  constructor(private readonly deps: SessionWorkerManagerDeps) {}
-
-  /**
-   * True when this session's turn should run in a worker. One worker at a
-   * time: while a worker runs, other sessions fall back to in-process turns.
-   * Interrupted sessions stay in-process (their resume turn runs on the
-   * gateway).
-   */
-  shouldUseWorker(sessionId: string): boolean {
-    if (this.admissionsClosed || !this.deps.isEnabled()) return false
-    if (this.active) return this.active.sessionId === sessionId
-    return true
+  constructor(private readonly deps: SessionWorkerManagerDeps) {
+    this.scheduler = new SessionTurnScheduler({
+      maxConcurrent: deps.maxProcesses ?? resolveWorkerPoolSize(process.env['OPENFOX_SESSION_WORKER_MAX_PROCESSES']),
+      maxWaitingSessions: MAX_WAITING_SESSIONS,
+    })
   }
 
-  activeWorker(): { sessionId: string; token: WorkerToken; pid: number | undefined } | null {
-    if (!this.active) return null
-    return { sessionId: this.active.sessionId, token: this.active.token, pid: this.active.child.pid }
+  isEnabled(): boolean {
+    return this.deps.isEnabled()
+  }
+
+  shouldUseWorker(_sessionId: string): boolean {
+    return !this.admissionsClosed && this.isEnabled()
+  }
+
+  requestTurn(sessionId: string, start: () => void): AdmissionResult {
+    if (!this.shouldUseWorker(sessionId)) return this.admissionsClosed ? 'closed' : 'full'
+    return this.scheduler.admit(sessionId, start)
+  }
+
+  canAcceptTurn(sessionId: string): boolean {
+    return this.shouldUseWorker(sessionId) && this.scheduler.canAccept(sessionId)
+  }
+
+  activeWorker(sessionId?: string): { sessionId: string; token: WorkerToken; pid: number | undefined } | null {
+    const worker = sessionId ? this.active.get(sessionId) : this.active.values().next().value
+    if (!worker) return null
+    return { sessionId: worker.sessionId, token: worker.token, pid: worker.child.pid }
+  }
+
+  activeWorkers(): Array<{ sessionId: string; token: WorkerToken; pid: number | undefined }> {
+    return [...this.active.values()].map((worker) => ({
+      sessionId: worker.sessionId,
+      token: worker.token,
+      pid: worker.child.pid,
+    }))
   }
 
   lastCrashReport(): WorkerCrashReport | null {
@@ -128,18 +150,23 @@ export class SessionWorkerManager {
 
   closeAdmissions(): void {
     this.admissionsClosed = true
+    this.scheduler.closeAdmissions()
   }
 
-  /** Cooperative stop: ask the worker to abort its turn (Stop button path). */
   requestStop(sessionId: string): boolean {
-    if (this.active?.sessionId !== sessionId) return false
-    this.sendTo(this.active, { ...this.active.token, type: 'abort' })
+    const worker = this.active.get(sessionId)
+    if (!worker) return this.scheduler.cancel(sessionId) === 'waiting'
+    this.sendTo(worker, { ...worker.token, type: 'abort' })
     return true
+  }
+
+  releaseTurn(sessionId: string): boolean {
+    return this.scheduler.release(sessionId)
   }
 
   launch(sessionId: string, onSettled: (outcome: WorkerSettledOutcome) => void): void {
     if (this.admissionsClosed) throw new Error('Session worker admissions are closed during shutdown')
-    if (this.active) throw new Error('A session worker is already running')
+    if (this.active.has(sessionId)) throw new Error('This session already has a worker')
 
     const db = this.deps.db()
     const token = assignWorkerToken(db, sessionId)
@@ -187,7 +214,7 @@ export class SessionWorkerManager {
       stderrTail: [],
       onSettled,
     }
-    this.active = worker
+    this.active.set(sessionId, worker)
 
     child.stderr?.on('data', (chunk: Buffer) => {
       for (const line of chunk.toString('utf-8').split('\n')) {
@@ -198,7 +225,7 @@ export class SessionWorkerManager {
     })
 
     child.on('message', (raw) => {
-      if (this.active !== worker) return
+      if (this.active.get(sessionId) !== worker) return
       const msg = raw as WorkerToGatewayMessage
       if (!isWorkerMessageCurrent(worker.token, msg)) {
         logger.warn('Dropping worker message with stale identity', { sessionId })
@@ -228,21 +255,22 @@ export class SessionWorkerManager {
     })
 
     child.on('exit', (code, signal) => {
-      if (this.active !== worker) return
-      this.active = null
+      if (this.active.get(sessionId) !== worker) return
+      this.active.delete(sessionId)
       void this.settle(worker, code, signal)
     })
 
     logger.info('Session worker launched', { sessionId, workerId: token.workerId, generation: token.generation })
   }
 
-  /** Kill the active worker (gateway shutdown). */
   async shutdown(): Promise<void> {
     this.closeAdmissions()
-    const worker = this.active
-    if (!worker) return
-    this.active = null
+    const workers = [...this.active.values()]
+    this.active.clear()
+    await Promise.all(workers.map((worker) => this.shutdownWorker(worker)))
+  }
 
+  private async shutdownWorker(worker: ActiveWorker): Promise<void> {
     let timeout: NodeJS.Timeout | undefined
     try {
       const exited = new Promise<void>((resolve) => {
@@ -264,7 +292,7 @@ export class SessionWorkerManager {
       try {
         worker.child.kill('SIGTERM')
       } catch {
-        // Already gone
+        void 0
       }
       const [cleanup] = await Promise.all([
         this.cleanupWorkerChildren(worker.sessionId, worker.childrenPath),
@@ -345,6 +373,7 @@ export class SessionWorkerManager {
       removeChildrenFile(worker.childrenPath)
       getEventStore().invalidateExternalSession(sessionId)
       logger.info('Session worker exited cleanly', { sessionId, workerId: token.workerId })
+      this.scheduler.release(sessionId)
       worker.onSettled({ crashed: false })
       return
     }
@@ -430,6 +459,7 @@ export class SessionWorkerManager {
 
     this.lastCrash = report
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
+    this.scheduler.release(sessionId)
     worker.onSettled({ crashed: true, ...(worker.doneError ? { error: worker.doneError } : {}) })
   }
 }

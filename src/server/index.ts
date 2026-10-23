@@ -59,7 +59,7 @@ import type { OpenFoxMcpToolDeps } from './mcp/server/types.js'
 import { createDevServerRoutes } from './routes/dev-server.js'
 import { createWorkspaceConfigRoutes } from './routes/workspace-config.js'
 import { createTerminalRoutes } from './routes/terminals.js'
-import { WorkspaceInUseError } from './utils/errors.js'
+import { SessionQueueFullError, SessionWorkerQueueFullError, WorkspaceInUseError } from './utils/errors.js'
 import { createDirectoryRoutes } from './routes/directories.js'
 import { createFileSearchRoutes } from './routes/file-search.js'
 import { createAutoUpdateRoutes } from './routes/auto-update.js'
@@ -420,7 +420,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // worker PID to kill and read the crash report (cleanup proof).
   if (config.mode === 'test') {
     app.get('/api/test/worker', (_req, res) => {
-      res.json({ active: workerManager.activeWorker(), lastCrash: workerManager.lastCrashReport() })
+      res.json({
+        active: workerManager.activeWorker(),
+        activeWorkers: workerManager.activeWorkers(),
+        lastCrash: workerManager.lastCrashReport(),
+      })
     })
   }
 
@@ -1679,9 +1683,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(409).json({ error: 'Session is stopping', code: 'SESSION_ALREADY_RUNNING' })
     }
 
-    // Always queue the message - QueueProcessor will handle it
-    // For running sessions, it waits; for idle sessions, it starts immediately
-    sessionManager.queueMessage(sessionId, 'asap', content, attachments, messageKind)
+    try {
+      sessionManager.queueMessage(sessionId, 'asap', content, attachments, messageKind)
+    } catch (error) {
+      if (error instanceof SessionQueueFullError || error instanceof SessionWorkerQueueFullError) {
+        return res.status(429).json({ error: error.message, code: error.code })
+      }
+      throw error
+    }
 
     // Only return queue state if there are actually queued messages waiting
     // (i.e., session is running or there are multiple messages)
@@ -3908,21 +3917,27 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Wire up QueueProcessor - listens for queue events and starts turns
   const { QueueProcessor } = await import('./queue/processor.js')
 
-  // Session workers (étape 6a): explicit opt-in (setting or env), off by
-  // default, one worker at a time. The supervisor owns crash detection,
-  // interruption marking, exclusive-children reaping, and the resume gate.
-  const { SessionWorkerManager } = await import('./session/worker/index.js')
+  // Session workers: enabled by default with an explicit setting or environment
+  // opt-out. The supervisor owns bounded admission, crash handling, cleanup,
+  // and the explicit resume gate.
+  const { SessionWorkerManager, resolveSessionWorkerEnabled } = await import('./session/worker/index.js')
   const { getSetting: getWorkerSetting, SETTINGS_KEYS: WORKER_SETTINGS_KEYS } = await import('./db/settings.js')
   const workerManager = new SessionWorkerManager({
     db: () => getDatabase(),
     config,
     sessionManager,
     isEnabled: () =>
-      process.env['OPENFOX_SESSION_WORKER'] === 'true' ||
-      getWorkerSetting(WORKER_SETTINGS_KEYS.SESSION_WORKER_MODE) === 'true',
+      resolveSessionWorkerEnabled(
+        process.env['OPENFOX_SESSION_WORKER'],
+        getWorkerSetting(WORKER_SETTINGS_KEYS.SESSION_WORKER_MODE) ?? undefined,
+        config.mode !== 'test',
+      ),
     broadcastForSession: wssExports.broadcastForSession,
     healthAggregator,
   })
+  sessionManager.setQueueAdmissionGuard(
+    (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId),
+  )
 
   const queueProcessor = new QueueProcessor({
     sessionManager,
