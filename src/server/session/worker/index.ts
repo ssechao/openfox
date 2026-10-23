@@ -11,11 +11,14 @@ export {
 export {
   childrenFilePath,
   initChildrenTracking,
+  reserveExclusiveChild,
+  finalizeExclusiveChild,
   killTrackedChildren,
   readTrackedChildren,
   removeChildrenFile,
   trackExclusiveChild,
   type TrackedChild,
+  type ExclusiveChildReservation,
 } from './children.js'
 export {
   clearSessionInterrupted,

@@ -182,9 +182,10 @@ describe('worker crash cleanup', () => {
       async () => {
         if (!existsSync(childrenPath)) return null
         const lines = (await readFile(childrenPath, 'utf-8')).trim().split('\n').filter(Boolean)
-        if (lines.length === 0) return null
-        const entry = JSON.parse(lines[0]!) as { pid: number }
-        return entry.pid
+        const entry = lines
+          .map((line) => JSON.parse(line) as { pid?: number })
+          .find((item) => typeof item.pid === 'number')
+        return entry?.pid ?? null
       },
       20_000,
       'worker child to be tracked',

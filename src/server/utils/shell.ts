@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { getPlatformShell } from './platform.js'
 import { getSetting, SETTINGS_KEYS } from '../db/settings.js'
-import { trackExclusiveChild } from '../session/worker/children.js'
+import { finalizeExclusiveChild, reserveExclusiveChild } from '../session/worker/children.js'
 
 export function checkAborted(signal: AbortSignal | undefined): boolean {
   return !!signal?.aborted
@@ -29,6 +29,7 @@ export function spawnShell(command: string, options: SpawnShellOptions): ChildPr
     proxyEnv['HTTPS_PROXY'] = proxyUrl
   }
 
+  const reservation = reserveExclusiveChild(command)
   const child = spawn(shell.command, args, {
     ...(isCmd ? { windowsVerbatimArguments: true } : {}),
     cwd: options.cwd,
@@ -40,11 +41,23 @@ export function spawnShell(command: string, options: SpawnShellOptions): ChildPr
     // hang on pipes. Tree-kill uses taskkill on win32, so detached is unneeded.
     ...(options.detached && process.platform !== 'win32' ? { detached: true } : {}),
   })
-  // Session workers (étape 6a) record their exclusive shell children so the
-  // gateway can reap the orphaned process groups after a worker crash. No-op
-  // outside a worker, so gateway-side spawns and shared MCP/LSP servers are
-  // never tracked here.
-  trackExclusiveChild(child.pid, command)
+  try {
+    finalizeExclusiveChild(reservation, child.pid)
+  } catch (error) {
+    if (options.detached && process.platform !== 'win32' && child.pid) {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch (killError) {
+        void killError
+      }
+    }
+    try {
+      child.kill('SIGKILL')
+    } catch (killError) {
+      void killError
+    }
+    throw new Error(`Failed to track spawned child: ${error instanceof Error ? error.message : String(error)}`)
+  }
   return child
 }
 

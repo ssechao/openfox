@@ -247,6 +247,16 @@ describe('exclusive children tracking', () => {
     }
   })
 
+  it('fails explicitly when a tracking append is impossible', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-children-unwritable-'))
+    process.env['OPENFOX_WORKER_CHILDREN'] = dir
+    try {
+      expect(() => trackExclusiveChild(process.pid, 'sleep 1')).toThrow()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('is a no-op outside a worker process', () => {
     delete process.env['OPENFOX_WORKER_CHILDREN']
     expect(() => trackExclusiveChild(4321, 'sleep 1')).not.toThrow()

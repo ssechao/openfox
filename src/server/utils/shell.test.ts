@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { spawn } from 'node:child_process'
 
 vi.mock('node:child_process', async (importOriginal) => ({
@@ -16,7 +16,28 @@ vi.mock('./platform.js', () => ({
   getPlatformShell: () => ({ command: '/bin/sh', args: ['-c'] }),
 }))
 
+vi.mock('../session/worker/children.js', () => ({
+  reserveExclusiveChild: vi.fn(),
+  finalizeExclusiveChild: vi.fn(),
+}))
+
+const { reserveExclusiveChild, finalizeExclusiveChild } = await import('../session/worker/children.js')
 const { spawnShell, spawnShellProcess } = await import('./shell.js')
+let killChild: ReturnType<typeof vi.fn>
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(finalizeExclusiveChild).mockReset()
+  killChild = vi.fn()
+  vi.mocked(spawn).mockReturnValue({
+    stdout: { on: vi.fn() },
+    stderr: { on: vi.fn() },
+    on: vi.fn(),
+    kill: killChild,
+    pid: 12345,
+  } as never)
+  vi.mocked(reserveExclusiveChild).mockReturnValue({ id: 'reservation-1', path: '/tmp/children' })
+})
 
 function withPlatform(platform: NodeJS.Platform, fn: () => void): void {
   const original = process.platform
@@ -67,6 +88,36 @@ describe('spawnShell', () => {
     spawnShell('echo hello', { cwd: '/tmp' })
 
     expect(spawn).toHaveBeenCalledWith('/bin/sh', ['-c', 'echo hello'], expect.not.objectContaining({ detached: true }))
+  })
+
+  it('reserves before spawning and finalizes immediately after', () => {
+    spawnShell('echo hello', { cwd: '/tmp' })
+
+    expect(vi.mocked(reserveExclusiveChild).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(spawn).mock.invocationCallOrder[0]!,
+    )
+    expect(vi.mocked(spawn).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(finalizeExclusiveChild).mock.invocationCallOrder[0]!,
+    )
+    expect(finalizeExclusiveChild).toHaveBeenCalledWith({ id: 'reservation-1', path: '/tmp/children' }, 12345)
+  })
+
+  it('refuses to spawn when the reservation cannot be appended', () => {
+    vi.mocked(reserveExclusiveChild).mockImplementation(() => {
+      throw new Error('append impossible')
+    })
+
+    expect(() => spawnShell('sleep 300', { cwd: '/tmp', detached: true })).toThrow(/append impossible/)
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('kills the spawned child and fails when finalization cannot be appended', () => {
+    vi.mocked(finalizeExclusiveChild).mockImplementation(() => {
+      throw new Error('append impossible')
+    })
+
+    expect(() => spawnShell('sleep 300', { cwd: '/tmp', detached: true })).toThrow(/track spawned child/)
+    expect(killChild).toHaveBeenCalledWith('SIGKILL')
   })
 })
 

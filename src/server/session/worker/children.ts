@@ -14,6 +14,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { killProcessTree } from '../../utils/process-tree.js'
 import { logger } from '../../utils/logger.js'
@@ -21,6 +22,12 @@ import { logger } from '../../utils/logger.js'
 export interface TrackedChild {
   pid: number
   startedAt: string
+  command?: string
+}
+
+export interface ExclusiveChildReservation {
+  id: string
+  path: string
   command?: string
 }
 
@@ -63,24 +70,39 @@ export function initChildrenTracking(path: string): void {
   writeFileSync(path, '', { encoding: 'utf-8', mode: 0o600 })
 }
 
-/**
- * Record a spawned exclusive child. Synchronous and best-effort: it must
- * never break the tool call that spawned the process.
- */
-export function trackExclusiveChild(pid: number | undefined, command?: string): void {
+export function reserveExclusiveChild(command?: string): ExclusiveChildReservation | null {
   const path = activeFilePath()
-  if (!path || !pid || !Number.isFinite(pid) || pid <= 0) return
-  try {
-    const startedAt = processStartIdentity(pid)
-    if (!startedAt) throw new Error('process start identity unavailable')
-    const entry: TrackedChild = { pid, startedAt, ...(command ? { command: command.slice(0, 200) } : {}) }
-    appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf-8')
-  } catch (error) {
-    logger.warn('Failed to track worker child', {
-      pid,
-      error: error instanceof Error ? error.message : String(error),
-    })
+  if (!path) return null
+  const reservation: ExclusiveChildReservation = {
+    id: randomUUID(),
+    path,
+    ...(command ? { command: command.slice(0, 200) } : {}),
   }
+  appendFileSync(
+    path,
+    `${JSON.stringify({ type: 'reservation', id: reservation.id, ...(reservation.command ? { command: reservation.command } : {}) })}\n`,
+    'utf-8',
+  )
+  return reservation
+}
+
+export function finalizeExclusiveChild(reservation: ExclusiveChildReservation | null, pid: number | undefined): void {
+  if (!reservation) return
+  if (!pid || !Number.isFinite(pid) || pid <= 0) throw new Error('spawned child pid unavailable')
+  const startedAt = processStartIdentity(pid)
+  if (!startedAt) throw new Error('process start identity unavailable')
+  const entry = {
+    type: 'child',
+    reservationId: reservation.id,
+    pid,
+    startedAt,
+    ...(reservation.command ? { command: reservation.command } : {}),
+  }
+  appendFileSync(reservation.path, `${JSON.stringify(entry)}\n`, 'utf-8')
+}
+
+export function trackExclusiveChild(pid: number | undefined, command?: string): void {
+  finalizeExclusiveChild(reserveExclusiveChild(command), pid)
 }
 
 export function readTrackedChildren(path: string): TrackedChild[] {
@@ -99,7 +121,11 @@ export function readTrackedChildren(path: string): TrackedChild[] {
         !seen.has(entry.pid)
       ) {
         seen.add(entry.pid)
-        children.push(entry)
+        children.push({
+          pid: entry.pid,
+          startedAt: entry.startedAt,
+          ...(entry.command ? { command: entry.command } : {}),
+        })
       }
     } catch {
       // Ignore truncated trailing line (worker killed mid-append)
