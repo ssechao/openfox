@@ -16,7 +16,7 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { killProcessTree } from '../../utils/process-tree.js'
+import { killProcessTree, signalProcessGroup } from '../../utils/process-tree.js'
 import { logger } from '../../utils/logger.js'
 
 export interface TrackedChild {
@@ -108,7 +108,7 @@ export function trackExclusiveChild(pid: number | undefined, command?: string): 
 export function readTrackedChildren(path: string): TrackedChild[] {
   if (!existsSync(path)) return []
   const children: TrackedChild[] = []
-  const seen = new Set<number>()
+  const seen = new Set<string>()
   for (const line of readFileSync(path, 'utf-8').split('\n')) {
     if (!line.trim()) continue
     try {
@@ -118,9 +118,9 @@ export function readTrackedChildren(path: string): TrackedChild[] {
         entry.pid > 0 &&
         typeof entry.startedAt === 'string' &&
         entry.startedAt.length > 0 &&
-        !seen.has(entry.pid)
+        !seen.has(`${entry.pid}:${entry.startedAt}`)
       ) {
-        seen.add(entry.pid)
+        seen.add(`${entry.pid}:${entry.startedAt}`)
         children.push({
           pid: entry.pid,
           startedAt: entry.startedAt,
@@ -144,9 +144,13 @@ export async function killTrackedChildren(path: string): Promise<number[]> {
   const killed: number[] = []
   for (const child of children) {
     try {
-      if (processStartIdentity(child.pid) !== child.startedAt) continue
-      await killProcessTree(child.pid)
-      killed.push(child.pid)
+      const currentIdentity = processStartIdentity(child.pid)
+      if (currentIdentity === child.startedAt) {
+        await killProcessTree(child.pid)
+        killed.push(child.pid)
+      } else if (currentIdentity === null && (await signalProcessGroup(child.pid))) {
+        killed.push(child.pid)
+      }
     } catch (error) {
       logger.debug('Worker child already gone', {
         pid: child.pid,

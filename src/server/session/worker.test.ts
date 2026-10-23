@@ -247,6 +247,23 @@ describe('exclusive children tracking', () => {
     }
   })
 
+  it('keeps reused pids with different start identities', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-children-reused-'))
+    const file = join(dir, 'w.children')
+    try {
+      writeFileSync(
+        file,
+        `${JSON.stringify({ pid: 4321, startedAt: 'linux:1' })}\n${JSON.stringify({ pid: 4321, startedAt: 'linux:2' })}\n`,
+      )
+      expect(readTrackedChildren(file)).toEqual([
+        { pid: 4321, startedAt: 'linux:1' },
+        { pid: 4321, startedAt: 'linux:2' },
+      ])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('fails explicitly when a tracking append is impossible', () => {
     const dir = mkdtempSync(join(tmpdir(), 'openfox-children-unwritable-'))
     process.env['OPENFOX_WORKER_CHILDREN'] = dir
@@ -279,6 +296,42 @@ describe('exclusive children tracking', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('kills a recorded process group after its root exits', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-children-orphan-group-'))
+    const file = join(dir, 'w.children')
+    initChildrenTracking(file)
+    process.env['OPENFOX_WORKER_CHILDREN'] = file
+    const root = spawn('sh', ['-c', 'sleep 60 &'], { detached: true, stdio: 'ignore' })
+    try {
+      trackExclusiveChild(root.pid, 'sleep 60 &')
+      const pid = root.pid!
+      await new Promise<void>((resolve) => root.once('exit', () => resolve()))
+      expect(() => process.kill(pid, 0)).toThrow()
+      expect(() => process.kill(-pid, 0)).not.toThrow()
+
+      expect(await killTrackedChildren(file)).toEqual([pid])
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline) {
+        try {
+          process.kill(-pid, 0)
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        } catch {
+          break
+        }
+      }
+      expect(() => process.kill(-pid, 0)).toThrow()
+    } finally {
+      if (root.pid) {
+        try {
+          process.kill(-root.pid, 'SIGKILL')
+        } catch (error) {
+          void error
+        }
+      }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 10_000)
 
   it('kills a recorded detached process group and removes the sidecar', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openfox-children-'))
