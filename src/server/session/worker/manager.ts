@@ -346,8 +346,9 @@ export class SessionWorkerManager {
       if (this.active.get(sessionId) !== worker) return
       this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
       this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session worker exited')
-      this.active.delete(sessionId)
-      void this.settle(worker, code, signal)
+      void this.settle(worker, code, signal).finally(() => {
+        if (this.active.get(sessionId) === worker) this.active.delete(sessionId)
+      })
     })
 
     logger.info('Session worker launched', { sessionId, workerId: token.workerId, generation: token.generation })
@@ -400,44 +401,6 @@ export class SessionWorkerManager {
     this.closeAdmissions()
     const workers = [...this.active.values()]
     for (const worker of workers) {
-      this.mcpBroker?.cancelWorker({ sessionId: worker.sessionId, ...worker.token })
-      this.interactiveBroker.cancelWorker(
-        { sessionId: worker.sessionId, ...worker.token },
-        'Gateway shutdown interrupted the worker turn',
-      )
-    }
-    this.active.clear()
-    await Promise.all(workers.map((worker) => this.shutdownWorker(worker)))
-  }
-
-  private async shutdownWorker(worker: ActiveWorker): Promise<void> {
-    let timeout: NodeJS.Timeout | undefined
-    try {
-      const exited = new Promise<void>((resolve) => {
-        if (worker.child.exitCode !== null || worker.child.signalCode !== null) resolve()
-        else worker.child.once('exit', () => resolve())
-      })
-      const timeoutMs = this.deps.shutdownTimeoutMs ?? 2000
-      const exitedBeforeTimeout = Promise.race([
-        exited,
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => {
-            reject(
-              new Error(`Session worker ${worker.token.workerId} did not exit within ${timeoutMs}ms during shutdown`),
-            )
-          }, timeoutMs)
-        }),
-      ])
-
-      try {
-        worker.child.kill('SIGTERM')
-      } catch {
-        void 0
-      }
-      const [cleanup] = await Promise.all([
-        this.cleanupWorkerChildren(worker.sessionId, worker.childrenPath),
-        exitedBeforeTimeout,
-      ])
       const interruptedAt = new Date().toISOString()
       markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
       this.prepareInterruptedEvents(worker.sessionId)
@@ -450,17 +413,73 @@ export class SessionWorkerManager {
           error: error instanceof Error ? error.message : String(error),
         })
       }
+      this.mcpBroker?.cancelWorker({ sessionId: worker.sessionId, ...worker.token })
+      this.interactiveBroker.cancelWorker(
+        { sessionId: worker.sessionId, ...worker.token },
+        'Gateway shutdown interrupted the worker turn',
+      )
+      this.sendTo(worker, { ...worker.token, type: 'abort' })
+    }
+    this.active.clear()
+    await Promise.all(workers.map((worker) => this.shutdownWorker(worker)))
+  }
+
+  private async shutdownWorker(worker: ActiveWorker): Promise<void> {
+    const startedAt = Date.now()
+    let cleanupError: string | undefined
+    try {
+      let exited = await this.waitForExit(worker, 1_000)
+      if (!exited) {
+        try {
+          worker.child.kill('SIGTERM')
+        } catch {
+          void 0
+        }
+        exited = await this.waitForExit(worker, 1_000)
+      }
+      if (!exited) {
+        try {
+          worker.child.kill('SIGKILL')
+        } catch {
+          void 0
+        }
+      }
+
+      const cleanupPromise = this.cleanupWorkerChildren(worker.sessionId, worker.childrenPath)
+      const remainingMs = Math.max(0, 3_900 - (Date.now() - startedAt))
+      const [exitResult, cleanupResult] = await Promise.all([
+        exited ? Promise.resolve(true) : this.waitForExit(worker, remainingMs),
+        this.waitForCleanup(cleanupPromise, remainingMs),
+      ])
+      if (!exitResult) cleanupError = 'worker did not exit within 4000ms'
+      if (cleanupResult.cleanupError) cleanupError = cleanupResult.cleanupError
+
       worker.onSettled({
         crashed: true,
-        error: cleanup.cleanupError
-          ? `Gateway shutdown interrupted the worker turn; child cleanup failed: ${cleanup.cleanupError}`
+        error: cleanupError
+          ? `Gateway shutdown interrupted the worker turn; cleanup failed: ${cleanupError}`
           : 'Gateway shutdown interrupted the worker turn',
       })
     } finally {
-      if (timeout) clearTimeout(timeout)
       clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
       this.deps.healthAggregator?.expireWorker(worker.token)
     }
+  }
+
+  private async waitForCleanup(
+    cleanup: Promise<{ killedChildren: number[]; cleanupError?: string }>,
+    timeoutMs: number,
+  ): Promise<{ killedChildren: number[]; cleanupError?: string }> {
+    let timeout: NodeJS.Timeout | undefined
+    const timedOut = new Promise<{ killedChildren: number[]; cleanupError: string }>((resolve) => {
+      timeout = setTimeout(
+        () => resolve({ killedChildren: [], cleanupError: 'child cleanup exceeded shutdown deadline' }),
+        timeoutMs,
+      )
+    })
+    const result = await Promise.race([cleanup, timedOut])
+    if (timeout) clearTimeout(timeout)
+    return result
   }
 
   private async cleanupWorkerChildren(

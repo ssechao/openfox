@@ -1600,10 +1600,12 @@ export function registerPathConfirmation(
   workdir: string,
   reason: 'outside_workdir' | 'sensitive_file' | 'both' | 'dangerous_command' | 'git_no_verify',
 ): Promise<boolean> {
-  return new Promise((resolve, reject) => {
+  const promise = new Promise<boolean>((resolve, reject) => {
     pendingConfirmations.set(callId, { resolve, reject, paths, sessionId, tool, workdir, reason })
     relayWorkerPath({ callId, paths, sessionId, tool, workdir, reason })
   })
+  void promise.catch(() => {})
+  return promise
 }
 
 /**

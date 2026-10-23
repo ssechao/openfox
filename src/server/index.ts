@@ -4204,43 +4204,55 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     close: () => {
       workerManager.closeAdmissions()
+      queueProcessor.stop()
+      taskScheduler.stop()
+      diagnosticsCollector.stop()
+      for (const session of sessionManager.listSessions()) {
+        cancelQuestionsForSession(session.id, 'Gateway shutdown')
+        cancelPathConfirmationsForSession(session.id, 'Gateway shutdown')
+      }
+      runtimeRegistry.abortAll()
+
       return new Promise<void>((resolve, reject) => {
         logger.info('Shutting down...')
+        let completed = false
+        const finish = (error?: unknown) => {
+          if (completed) return
+          completed = true
+          clearTimeout(deadline)
+          for (const client of wss.clients) client.terminate()
+          wss.close()
+          httpServer.closeAllConnections()
+          httpServer.close(() => {
+            if (error) reject(error)
+            else resolve()
+          })
+        }
+        const deadline = setTimeout(() => {
+          logger.error('Gateway shutdown exceeded the 4000ms deadline')
+          finish()
+        }, 4_000)
+
         void (async () => {
-          diagnosticsCollector.stop()
           try {
             getEventStore().flushAllStreaming()
           } catch {
-            // Event store not initialized — nothing to persist
+            void 0
           }
-          await devServerManager.stopAll()
-          await mcpManager.disconnectAll()
-          taskScheduler.stop()
-          const { stopAllInspectProxies } = await import('./dev-server/inspect-proxy.js')
-          stopAllInspectProxies()
-          const { cleanupAllProcesses } = await import('./tools/background-process/store.js')
-          cleanupAllProcesses()
-          viteServer?.close()
-
-          // Clean up isolated config file if one was created
-          if (config.globalConfigPath) {
-            const { unlink } = await import('node:fs/promises')
-            unlink(config.globalConfigPath).catch(() => {})
-          }
-
-          // Note: Not closing database here - it's a singleton shared across servers.
-          // Database should only be closed when the application exits.
-          runtimeRegistry.abortAll()
+          const ancillaryCleanup = Promise.all([
+            devServerManager.stopAll(),
+            import('./dev-server/inspect-proxy.js').then(({ stopAllInspectProxies }) => stopAllInspectProxies()),
+            import('./tools/background-process/store.js').then(({ cleanupAllProcesses }) => cleanupAllProcesses()),
+            Promise.resolve(viteServer?.close()),
+            config.globalConfigPath
+              ? import('node:fs/promises').then(({ unlink }) => unlink(config.globalConfigPath!).catch(() => {}))
+              : Promise.resolve(),
+          ])
           await workerManager.shutdown()
           setExternalGitRunner(null)
-          await processSupervisor?.shutdown()
-          // Terminate all WebSocket connections to allow clean shutdown
-          for (const client of wss.clients) {
-            client.terminate()
-          }
-          wss.close()
-          httpServer.close(() => resolve())
-        })().catch(reject)
+          await Promise.all([ancillaryCleanup, mcpManager.disconnectAll(), processSupervisor?.shutdown()])
+          finish()
+        })().catch(finish)
       })
     },
   }

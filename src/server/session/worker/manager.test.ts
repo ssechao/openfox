@@ -177,32 +177,23 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it('signals the worker, kills its children, waits for exit, and reports a shutdown timeout', async () => {
+  it('closes admissions before parallel abort and escalates every worker at one and two seconds', async () => {
+    vi.useFakeTimers()
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-shutdown.db')
     openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
     const order: string[] = []
-    let settledOutcome: { crashed: boolean; error?: string } | undefined
-    const token = assignWorkerToken(namedDb, 'sess-1')
-    const child = Object.assign(new EventEmitter(), {
-      pid: 42,
-      exitCode: null,
-      signalCode: null,
-      kill: () => {
-        order.push('worker')
-        return true
-      },
-    }) as unknown as ChildProcess
+    const settled: Array<{ sessionId: string; outcome: { crashed: boolean; error?: string } }> = []
     const manager = new SessionWorkerManager({
       db: () => namedDb,
       config,
       sessionManager: { setRunning: () => {} } as unknown as SessionManager,
       isEnabled: () => true,
       broadcastForSession: () => {},
-      cleanupChildren: async () => {
-        order.push('children')
+      cleanupChildren: async (path) => {
+        order.push(`cleanup:${path}`)
         return [99]
       },
-      shutdownTimeoutMs: 25,
       eventStore: () =>
         ({
           invalidateExternalSession: () => {},
@@ -211,57 +202,55 @@ describe('SessionWorkerManager', () => {
         }) as never,
     })
     const active = Reflect.get(manager, 'active') as Map<string, unknown>
-    active.set('sess-1', {
-      sessionId: 'sess-1',
-      token,
-      child,
-      childrenPath: '/tmp/test.children',
-      doneReceived: false,
-      doneOk: false,
-      stderrTail: [],
-      onSettled: (outcome: { crashed: boolean; error?: string }) => {
-        settledOutcome = outcome
-        order.push('settled')
-      },
-    })
 
-    let completed = false
-    const shutdown = manager.shutdown().then(() => {
-      completed = true
-    })
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(order).toEqual(['worker', 'children'])
-    expect(completed).toBe(false)
-    child.emit('exit', 0, null)
-    await shutdown
-    expect(order).toEqual(['worker', 'children', 'settled'])
-    expect(settledOutcome).toMatchObject({ crashed: true, error: expect.stringMatching(/shutdown/i) })
-    expect(manager.shouldUseWorker('sess-1')).toBe(false)
-    expect(() => manager.launch('sess-1', () => {})).toThrow(/admissions.*closed|shutdown/i)
-    const interrupted = namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get() as {
-      interrupted_at: string | null
+    for (const [index, sessionId] of ['sess-1', 'sess-2'].entries()) {
+      const token = assignWorkerToken(namedDb, sessionId)
+      const child = Object.assign(new EventEmitter(), {
+        pid: 42 + index,
+        exitCode: null,
+        signalCode: null,
+        send: (message: { type?: string }) => {
+          order.push(`send:${sessionId}:${message.type}`)
+          return true
+        },
+        kill: (signal: NodeJS.Signals) => {
+          order.push(`kill:${sessionId}:${signal}`)
+          if (signal === 'SIGKILL') queueMicrotask(() => child.emit('exit', null, 'SIGKILL'))
+          return true
+        },
+      }) as unknown as ChildProcess
+      active.set(sessionId, {
+        sessionId,
+        token,
+        child,
+        childrenPath: `/tmp/${sessionId}.children`,
+        doneReceived: false,
+        doneOk: false,
+        stderrTail: [],
+        onSettled: (outcome: { crashed: boolean; error?: string }) => settled.push({ sessionId, outcome }),
+      })
     }
-    expect(interrupted.interrupted_at).toBeTruthy()
 
-    const timeoutToken = assignWorkerToken(namedDb, 'sess-1')
-    const stuckChild = Object.assign(new EventEmitter(), {
-      pid: 43,
-      exitCode: null,
-      signalCode: null,
-      kill: () => true,
-    }) as unknown as ChildProcess
-    active.set('sess-1', {
-      sessionId: 'sess-1',
-      token: timeoutToken,
-      child: stuckChild,
-      childrenPath: '/tmp/test-timeout.children',
-      doneReceived: false,
-      doneOk: false,
-      stderrTail: [],
-      onSettled: () => {},
-    })
+    try {
+      const shutdown = manager.shutdown()
+      expect(manager.shouldUseWorker('sess-1')).toBe(false)
+      expect(order).toEqual(['send:sess-1:abort', 'send:sess-2:abort'])
+      expect(() => manager.launch('sess-1', () => {})).toThrow(/admissions.*closed|shutdown/i)
 
-    await expect(manager.shutdown()).rejects.toThrow(/worker.*did not exit within 25ms.*shutdown/i)
+      await vi.advanceTimersByTimeAsync(999)
+      expect(order.filter((entry) => entry.startsWith('kill:'))).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(order.filter((entry) => entry.includes('SIGTERM'))).toEqual(['kill:sess-1:SIGTERM', 'kill:sess-2:SIGTERM'])
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(order.filter((entry) => entry.includes('SIGKILL'))).toEqual(['kill:sess-1:SIGKILL', 'kill:sess-2:SIGKILL'])
+      await shutdown
+
+      expect(settled).toHaveLength(2)
+      expect(settled.every(({ outcome }) => outcome.crashed && outcome.error?.includes('shutdown'))).toBe(true)
+      expect(order.filter((entry) => entry.startsWith('cleanup:'))).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('finalizes crash interruption when child cleanup fails and preserves the sidecar', async () => {
