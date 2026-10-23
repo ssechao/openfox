@@ -6,7 +6,11 @@ import type { MessageConnection } from 'vscode-jsonrpc'
 import type { Diagnostic } from '../../shared/types.js'
 import type { LanguageConfig, LspServerState } from './types.js'
 import { logger } from '../utils/logger.js'
-import { finalizeExclusiveChild, reserveExclusiveChild } from '../session/worker/children.js'
+import {
+  exclusiveChildReservationEnv,
+  finalizeExclusiveChild,
+  reserveExclusiveChild,
+} from '../session/worker/children.js'
 
 // ============================================================================
 // LSP Protocol Constants & Types (minimal definitions)
@@ -270,6 +274,7 @@ export class LspServer {
           ...process.env,
           HOME: process.env['HOME'],
           PATH: process.env['PATH'],
+          ...exclusiveChildReservationEnv(reservation),
         },
         windowsHide: true,
         shell: needsShell,

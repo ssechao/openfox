@@ -1,7 +1,11 @@
 import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { getPlatformShell } from './platform.js'
 import { getSetting, SETTINGS_KEYS } from '../db/settings.js'
-import { finalizeExclusiveChild, reserveExclusiveChild } from '../session/worker/children.js'
+import {
+  exclusiveChildReservationEnv,
+  finalizeExclusiveChild,
+  reserveExclusiveChild,
+} from '../session/worker/children.js'
 
 export function checkAborted(signal: AbortSignal | undefined): boolean {
   return !!signal?.aborted
@@ -33,7 +37,7 @@ export function spawnShell(command: string, options: SpawnShellOptions): ChildPr
   const child = spawn(shell.command, args, {
     ...(isCmd ? { windowsVerbatimArguments: true } : {}),
     cwd: options.cwd,
-    env: { ...process.env, ...proxyEnv },
+    env: { ...process.env, ...proxyEnv, ...exclusiveChildReservationEnv(reservation) },
     stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
     // detached is only useful for Unix process-group semantics; on win32 it

@@ -18,16 +18,19 @@ vi.mock('./platform.js', () => ({
 
 vi.mock('../session/worker/children.js', () => ({
   reserveExclusiveChild: vi.fn(),
+  exclusiveChildReservationEnv: vi.fn(),
   finalizeExclusiveChild: vi.fn(),
 }))
 
-const { reserveExclusiveChild, finalizeExclusiveChild } = await import('../session/worker/children.js')
+const { reserveExclusiveChild, exclusiveChildReservationEnv, finalizeExclusiveChild } =
+  await import('../session/worker/children.js')
 const { spawnShell, spawnShellProcess } = await import('./shell.js')
 let killChild: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(finalizeExclusiveChild).mockReset()
+  vi.mocked(exclusiveChildReservationEnv).mockReturnValue({ OPENFOX_CHILD_RESERVATION_ID: 'reservation-1' })
   killChild = vi.fn()
   vi.mocked(spawn).mockReturnValue({
     stdout: { on: vi.fn() },
@@ -100,6 +103,9 @@ describe('spawnShell', () => {
       vi.mocked(finalizeExclusiveChild).mock.invocationCallOrder[0]!,
     )
     expect(finalizeExclusiveChild).toHaveBeenCalledWith({ id: 'reservation-1', path: '/tmp/children' }, 12345)
+    expect(vi.mocked(spawn).mock.calls[0]![2]?.env).toMatchObject({
+      OPENFOX_CHILD_RESERVATION_ID: 'reservation-1',
+    })
   })
 
   it('refuses to spawn when the reservation cannot be appended', () => {

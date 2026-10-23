@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { Config } from '../../shared/types.js'
 import type { ServerHandle } from '../context.js'
@@ -172,6 +172,53 @@ describe('worker crash cleanup', () => {
     const data = (await res.json()) as { servers: Array<{ name: string; status: string }> }
     return data.servers.find((s) => s.name === 'test-server')?.status
   }
+
+  it('reaps a marked child when SIGKILL lands before reservation finalization', async () => {
+    const childrenPath = join(dbDir, `reservation-window-${randomUUID()}.children`)
+    const reservationId = randomUUID()
+    const script = `
+      const { appendFileSync } = require('node:fs')
+      const { spawn } = require('node:child_process')
+      appendFileSync(process.env.SIDECAR, JSON.stringify({ type: 'reservation', id: process.env.RESERVATION_ID }) + '\\n')
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, OPENFOX_CHILD_RESERVATION_ID: process.env.RESERVATION_ID },
+      })
+      child.unref()
+      process.stdout.write(String(child.pid) + '\\n')
+      setInterval(() => {}, 1000)
+    `
+    const worker = spawn(process.execPath, ['-e', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, SIDECAR: childrenPath, RESERVATION_ID: reservationId },
+    })
+    const childPid = await new Promise<number>((resolve, reject) => {
+      worker.once('error', reject)
+      worker.stdout!.once('data', (chunk: Buffer) => resolve(Number(chunk.toString('utf-8').trim())))
+    })
+
+    try {
+      expect(pidAlive(childPid)).toBe(true)
+      process.kill(worker.pid!, 'SIGKILL')
+      await new Promise<void>((resolve) => worker.once('exit', () => resolve()))
+
+      const { killTrackedChildren } = await import('./worker/children.js')
+      expect(await killTrackedChildren(childrenPath)).toContain(childPid)
+      await waitFor(async () => (!pidAlive(childPid) ? true : null), 5000, 'unfinalized marked child cleanup')
+    } finally {
+      try {
+        process.kill(-childPid, 'SIGKILL')
+      } catch {
+        void 0
+      }
+      try {
+        process.kill(worker.pid!, 'SIGKILL')
+      } catch {
+        void 0
+      }
+    }
+  }, 15_000)
 
   it('leaves no worker-owned LSP process after Stop and crash', async () => {
     await setWorkerMode(true)

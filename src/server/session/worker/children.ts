@@ -15,7 +15,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { killProcessTree, signalProcessGroup } from '../../utils/process-tree.js'
 import { logger } from '../../utils/logger.js'
 
@@ -30,6 +30,8 @@ export interface ExclusiveChildReservation {
   path: string
   command?: string
 }
+
+export const EXCLUSIVE_CHILD_RESERVATION_ENV = 'OPENFOX_CHILD_RESERVATION_ID'
 
 function processStartIdentity(pid: number): string | null {
   try {
@@ -86,6 +88,10 @@ export function reserveExclusiveChild(command?: string): ExclusiveChildReservati
   return reservation
 }
 
+export function exclusiveChildReservationEnv(reservation: ExclusiveChildReservation | null): NodeJS.ProcessEnv {
+  return reservation ? { [EXCLUSIVE_CHILD_RESERVATION_ENV]: reservation.id } : {}
+}
+
 export function finalizeExclusiveChild(reservation: ExclusiveChildReservation | null, pid: number | undefined): void {
   if (!reservation) return
   if (!pid || !Number.isFinite(pid) || pid <= 0) throw new Error('spawned child pid unavailable')
@@ -105,14 +111,23 @@ export function trackExclusiveChild(pid: number | undefined, command?: string): 
   finalizeExclusiveChild(reserveExclusiveChild(command), pid)
 }
 
-export function readTrackedChildren(path: string): TrackedChild[] {
-  if (!existsSync(path)) return []
+interface ChildrenState {
+  children: TrackedChild[]
+  pendingReservationIds: string[]
+}
+
+function readChildrenState(path: string): ChildrenState {
+  if (!existsSync(path)) return { children: [], pendingReservationIds: [] }
   const children: TrackedChild[] = []
   const seen = new Set<string>()
+  const reservations = new Set<string>()
+  const finalizedReservations = new Set<string>()
   for (const line of readFileSync(path, 'utf-8').split('\n')) {
     if (!line.trim()) continue
     try {
-      const entry = JSON.parse(line) as TrackedChild
+      const entry = JSON.parse(line) as TrackedChild & { type?: string; id?: string; reservationId?: string }
+      if (entry.type === 'reservation' && entry.id) reservations.add(entry.id)
+      if (entry.type === 'child' && entry.reservationId) finalizedReservations.add(entry.reservationId)
       if (
         Number.isFinite(entry.pid) &&
         entry.pid > 0 &&
@@ -128,10 +143,44 @@ export function readTrackedChildren(path: string): TrackedChild[] {
         })
       }
     } catch {
-      // Ignore truncated trailing line (worker killed mid-append)
+      continue
     }
   }
-  return children
+  return {
+    children,
+    pendingReservationIds: [...reservations].filter((id) => !finalizedReservations.has(id)),
+  }
+}
+
+export function readTrackedChildren(path: string): TrackedChild[] {
+  return readChildrenState(path).children
+}
+
+function findReservationProcesses(reservationId: string): number[] {
+  const marker = `${EXCLUSIVE_CHILD_RESERVATION_ENV}=${reservationId}`
+  if (process.platform === 'linux') {
+    const pids: number[] = []
+    for (const entry of readdirSync('/proc', { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
+      try {
+        if (readFileSync(`/proc/${entry.name}/environ`, 'utf-8').split('\0').includes(marker)) {
+          pids.push(Number(entry.name))
+        }
+      } catch {
+        continue
+      }
+    }
+    return pids
+  }
+  if (process.platform === 'darwin') {
+    const output = execFileSync('ps', ['eww', '-axo', 'pid=,command='], { encoding: 'utf-8' })
+    return output
+      .split('\n')
+      .filter((line) => line.includes(marker))
+      .map((line) => Number(/^\s*(\d+)/.exec(line)?.[1]))
+      .filter((pid) => Number.isFinite(pid) && pid > 0)
+  }
+  throw new Error(`Cannot recover exclusive child reservation on ${process.platform}`)
 }
 
 /**
@@ -140,9 +189,18 @@ export function readTrackedChildren(path: string): TrackedChild[] {
  * fine — they may have exited on their own before the worker died.
  */
 export async function killTrackedChildren(path: string): Promise<number[]> {
-  const children = readTrackedChildren(path)
+  const state = readChildrenState(path)
   const killed: number[] = []
-  for (const child of children) {
+  const killedSet = new Set<number>()
+  for (const reservationId of state.pendingReservationIds) {
+    for (const pid of findReservationProcesses(reservationId)) {
+      if (killedSet.has(pid)) continue
+      await killProcessTree(pid)
+      killedSet.add(pid)
+      killed.push(pid)
+    }
+  }
+  for (const child of state.children) {
     try {
       const currentIdentity = processStartIdentity(child.pid)
       if (currentIdentity === child.startedAt) {
