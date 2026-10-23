@@ -120,6 +120,63 @@ describe('SessionWorkerManager', () => {
     })
   })
 
+  it('aborts immediately, escalates at 500 ms intervals, and settles an intentional stop', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const send = vi.fn(() => true)
+    const kill = vi.fn((signal: NodeJS.Signals = 'SIGTERM') => {
+      if (signal === 'SIGKILL') {
+        queueMicrotask(() => child.emit('exit', null, 'SIGKILL'))
+      }
+      return true
+    })
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send,
+      kill,
+    }) as unknown as ChildProcess
+    const settled = vi.fn()
+    const cleanupChildren = vi.fn(async () => [99])
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      cleanupChildren,
+      processSupervisor: { spawnWorker: () => child } as never,
+      eventStore: () => ({ invalidateExternalSession: () => {} }) as never,
+    })
+
+    try {
+      manager.launch('sess-1', settled)
+      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'abort' }))
+      expect(kill).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(499)
+      expect(kill).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(kill).toHaveBeenCalledWith('SIGTERM')
+      await vi.advanceTimersByTimeAsync(500)
+      expect(kill).toHaveBeenCalledWith('SIGKILL')
+      await vi.advanceTimersByTimeAsync(999)
+
+      expect(cleanupChildren).toHaveBeenCalledTimes(1)
+      expect(settled).toHaveBeenCalledWith({ crashed: false })
+      expect(manager.activeWorker('sess-1')).toBeNull()
+      expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+        interrupted_at: null,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('signals the worker, kills its children, waits for exit, and reports a shutdown timeout', async () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-shutdown.db')
     openDbs.push(db)

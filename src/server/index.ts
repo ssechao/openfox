@@ -15,8 +15,12 @@ import { initDatabase, getDatabase } from './db/index.js'
 import { getProject, deleteProject } from './db/projects.js'
 import { initEventStore, getEventStore, combineEventsWithSnapshot } from './events/index.js'
 import { buildMessagesFromStoredEvents } from './events/folding.js'
-import { provideAnswer, getPendingQuestionsForSession } from './tools/ask.js'
-import { providePathConfirmation, getPendingConfirmationsBySession } from './tools/path-security.js'
+import { cancelQuestionsForSession, provideAnswer, getPendingQuestionsForSession } from './tools/ask.js'
+import {
+  cancelPathConfirmationsForSession,
+  providePathConfirmation,
+  getPendingConfirmationsBySession,
+} from './tools/path-security.js'
 import './llm/proxy.js'
 import { detectModel, getLlmStatus, getBackendDisplayName } from './llm/index.js'
 import { detectBackendFromUrl } from './llm/backend.js'
@@ -1162,7 +1166,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     // Cancel any active execution before deleting — mirrors /stop endpoint
     const { stopSessionExecution } = await import('./session/chat-handler.js')
-    const { cancelQuestionsForSession, cancelPathConfirmationsForSession } = await import('./tools/index.js')
 
     sessionManager.clearMessageQueue(sessionId)
     stopSessionExecution(sessionId, sessionManager)
@@ -1805,14 +1808,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
 
   // Chat stop (REST)
-  app.post('/api/sessions/:id/stop', async (req, res) => {
+  app.post('/api/sessions/:id/stop', (req, res) => {
     const sessionId = req.params.id
     const session = sessionManager.getSession(sessionId)
     if (!session) {
       return res.status(404).json({ error: 'Session not found' })
     }
-
-    const { cancelQuestionsForSession, cancelPathConfirmationsForSession } = await import('./tools/index.js')
 
     // Drain queued messages BEFORE stopping execution, so the QueueProcessor
     // doesn't pick them up when running_changed fires from setRunning(false)
@@ -4085,7 +4086,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     stopSession: (sessionId) => {
       void (async () => {
         const { stopSessionExecution } = await import('./session/chat-handler.js')
-        const { cancelQuestionsForSession, cancelPathConfirmationsForSession } = await import('./tools/index.js')
         sessionManager.clearMessageQueue(sessionId)
         stopSessionExecution(sessionId, sessionManager)
         abortSession(sessionId)

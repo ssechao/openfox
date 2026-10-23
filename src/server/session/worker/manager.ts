@@ -67,6 +67,7 @@ interface ActiveWorker {
   doneReceived: boolean
   doneOk: boolean
   doneError?: string
+  stopRequestedAt?: number
   stderrTail: string[]
   command: WorkerTurnCommand
   onSettled: (outcome: WorkerSettledOutcome) => void
@@ -118,6 +119,7 @@ function resolveWorkerEntry(): { path: string; execArgv: string[] } {
 
 export class SessionWorkerManager {
   private readonly active = new Map<string, ActiveWorker>()
+  private readonly exitPromises = new WeakMap<object, Promise<void>>()
   private readonly scheduler: SessionTurnScheduler
   private readonly mcpBroker: WorkerMcpBroker | null
   private readonly interactiveBroker: WorkerInteractiveBroker
@@ -202,7 +204,11 @@ export class SessionWorkerManager {
     if (!worker) return this.scheduler.cancel(sessionId) === 'waiting'
     this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
     this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session stopped by user')
-    this.sendTo(worker, { ...worker.token, type: 'abort' })
+    if (worker.stopRequestedAt === undefined) {
+      worker.stopRequestedAt = Date.now()
+      this.sendTo(worker, { ...worker.token, type: 'abort' })
+      void this.escalateStop(worker)
+    }
     return true
   }
 
@@ -347,6 +353,49 @@ export class SessionWorkerManager {
     logger.info('Session worker launched', { sessionId, workerId: token.workerId, generation: token.generation })
   }
 
+  private exitPromise(worker: ActiveWorker): Promise<void> {
+    const existing = this.exitPromises.get(worker.child)
+    if (existing) return existing
+    const promise = new Promise<void>((resolve) => {
+      if (worker.child.exitCode !== null || worker.child.signalCode !== null) resolve()
+      else worker.child.once('exit', () => resolve())
+    })
+    this.exitPromises.set(worker.child, promise)
+    return promise
+  }
+
+  private async waitForExit(worker: ActiveWorker, timeoutMs: number): Promise<boolean> {
+    let timeout: NodeJS.Timeout | undefined
+    const timedOut = new Promise<false>((resolve) => {
+      timeout = setTimeout(() => resolve(false), timeoutMs)
+    })
+    const exited = this.exitPromise(worker).then(() => true as const)
+    const result = await Promise.race([exited, timedOut])
+    if (timeout) clearTimeout(timeout)
+    return result
+  }
+
+  private async escalateStop(worker: ActiveWorker): Promise<void> {
+    if (await this.waitForExit(worker, 500)) return
+    try {
+      worker.child.kill('SIGTERM')
+    } catch {
+      void 0
+    }
+    if (await this.waitForExit(worker, 500)) return
+    try {
+      worker.child.kill('SIGKILL')
+    } catch {
+      void 0
+    }
+    if (!(await this.waitForExit(worker, 1_000))) {
+      logger.error('Session worker did not exit within the bounded Stop deadline', {
+        sessionId: worker.sessionId,
+        workerId: worker.token.workerId,
+      })
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.closeAdmissions()
     const workers = [...this.active.values()]
@@ -481,6 +530,18 @@ export class SessionWorkerManager {
 
     clearWorkerToken(db, sessionId, token)
     this.deps.healthAggregator?.expireWorker(token)
+
+    if (worker.stopRequestedAt !== undefined) {
+      const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath)
+      const eventStore = this.deps.eventStore?.() ?? getEventStore()
+      eventStore.invalidateExternalSession(sessionId)
+      this.scheduler.release(sessionId)
+      worker.onSettled({
+        crashed: false,
+        ...(cleanup.cleanupError ? { error: `Session stopped; child cleanup failed: ${cleanup.cleanupError}` } : {}),
+      })
+      return
+    }
 
     if (clean) {
       removeChildrenFile(worker.childrenPath)
