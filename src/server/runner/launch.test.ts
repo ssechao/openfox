@@ -139,6 +139,34 @@ describe('launchWorkflowRun', () => {
     expect(onFinished).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the runtime acquired while onFinished runs, then releases it', async () => {
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    const runtime = getSessionRuntimeRegistry().get('sess-1')
+    onFinished.mockImplementation(() => {
+      expect(runtime.currentHandle()).not.toBeNull()
+    })
+    run({ workflowId: 'wf' })
+    await flush()
+    expect(onFinished).toHaveBeenCalledTimes(1)
+    expect(runtime.currentHandle()).toBeNull()
+    expect(runtime.snapshot().state).toBe('idle')
+  })
+
+  it('does not recreate a runtime after the session is deleted mid-run', async () => {
+    let settle!: (value: unknown) => void
+    runOrchestratorMock.mockImplementation(
+      () =>
+        new Promise((done) => {
+          settle = done
+        }),
+    )
+    run({ workflowId: 'wf' })
+    getSessionRuntimeRegistry().remove('sess-1')
+    settle({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    await flush()
+    expect(getSessionRuntimeRegistry().peek('sess-1')).toBeUndefined()
+  })
+
   it('re-activates a blocked execution when retrying its step', async () => {
     runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
     sessionManager.getLatestWorkflowExecution = vi.fn(() => ({

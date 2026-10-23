@@ -142,13 +142,26 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
       broadcastForSession(sessionId, createServerMessage('chat.error', { error: errorMessage, recoverable: false }))
     })
     .finally(() => {
-      const registry = getSessionRuntimeRegistry()
-      if (!registry.get(sessionId).release(runtimeHandle)) return
+      const runtime = getSessionRuntimeRegistry().peek(sessionId)
+      if (!runtime) return
+      if (onFinished) {
+        try {
+          onFinished()
+          // The orchestrator bypasses runChatTurn, so isRunning must be cleared here
+          sessionManager.setRunning(sessionId, false)
+          broadcastForSession(sessionId, createSessionRunningMessage(false))
+        } catch {
+          // Session may have been deleted during execution
+        } finally {
+          runtime.release(runtimeHandle)
+        }
+        return
+      }
+      if (!runtime.release(runtimeHandle)) return
       try {
         // The orchestrator bypasses runChatTurn, so isRunning must be cleared here
         sessionManager.setRunning(sessionId, false)
         broadcastForSession(sessionId, createSessionRunningMessage(false))
-        onFinished?.()
       } catch {
         // Session may have been deleted during execution
       }
