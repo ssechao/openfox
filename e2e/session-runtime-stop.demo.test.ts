@@ -237,8 +237,6 @@ describe('session runtime stop demo', () => {
     const ackSamples: number[] = []
     const treeSamples: number[] = []
     let lastPids = { parent: 0, child: 0, grandchild: 0 }
-    let sawStopping = false
-    let sawDeniedLaunch = false
 
     for (let trial = 0; trial < TRIALS; trial++) {
       await writeFile(join(projectDir, 'pids'), '')
@@ -259,28 +257,19 @@ describe('session runtime stop demo', () => {
       ackSamples.push(ackMs)
 
       const denied = await postMessage(instance.url, sessionId, 'too-soon')
-      if (denied.status === 409) sawDeniedLaunch = true
+      expect(denied.status).toBe(409)
 
       const sessionAfter = (await (await fetch(`${instance.url}/api/sessions/${sessionId}`)).json()) as {
         session: { isRunning: boolean }
       }
-      if (sessionAfter.session.isRunning) {
-        await stopSessionChat(instance.url, sessionId)
-      } else {
-        expect(sessionAfter.session.isRunning).toBe(false)
-      }
+      expect(sessionAfter.session.isRunning).toBe(false)
 
       const settleDeadline = Date.now() + 5_000
       while (Date.now() < settleDeadline) {
         const data = await diagnostics(instance.url)
         const runtime = data.runtimes.find((item) => item.sessionId === sessionId)
         const state = runtime?.state
-        if (state === 'running' && denied.status === 200) {
-          await stopSessionChat(instance.url, sessionId)
-        } else {
-          expect(state).not.toBe('running')
-        }
-        if (state === 'stopping') sawStopping = true
+        expect(state).not.toBe('running')
         if (state === 'idle' || state === undefined) break
         await sleep(10)
       }
@@ -296,9 +285,6 @@ describe('session runtime stop demo', () => {
 
       await waitForIdle(instance.url, sessionId)
     }
-
-    expect(sawStopping).toBe(true)
-    expect(sawDeniedLaunch).toBe(true)
 
     const maxAckMs = Math.max(...ackSamples)
     const maxTreeGoneMs = Math.max(...treeSamples)

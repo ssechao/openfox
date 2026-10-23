@@ -11,7 +11,8 @@
  * 6a scope: plain chat turns with the built-in tools. MCP tools are not
  * registered in the worker (the gateway owns the shared MCP connections) and
  * interactive prompts (ask_user / path confirmations) are not wired across
- * IPC yet — sessions that need them run in-process.
+ * IPC — sessions that need them are not supported in the worker and must run
+ * in-process.
  */
 
 import { installParentExitGuard } from '../../utils/parent-exit-guard.js'

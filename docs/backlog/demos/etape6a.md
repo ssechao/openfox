@@ -23,6 +23,6 @@ Branche : `mt/etape6a-worker`. Option **désactivée par défaut** ; une seule s
 
 ## Limites connues (lot 6a)
 
-- Tours chat simples uniquement : pas d'outils MCP dans le worker (connexions partagées détenues par la gateway), pas d'invite interactive (ask_user / confirmations de chemins) à travers l'IPC — ces sessions restent en-processus.
+- Tours chat simples uniquement : pas d'outils MCP dans le worker (connexions partagées détenues par la gateway), pas d'invite interactive (ask_user / confirmations de chemins) à travers l'IPC. Le mode worker n'est prévu que pour les sessions qui n'ont besoin que des outils intégrés ; une session nécessitant des outils MCP ou des invites interactives n'est pas supportée en worker et doit rester en-processus.
 - Les sessions interrompues ne démarrent pas de tour automatiquement : les messages mis en file attendent la reprise explicite.
 - Enfants exclusifs couverts : shells via `spawnShell`. Les spawns directs hors `spawnShell` (pty terminal, dev-server) ne sont pas encore enregistrés dans le sidecar.
