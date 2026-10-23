@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { createDiagnosticsCollector } from './collector.js'
 import type { DiagnosticsCollector } from './types.js'
+import { SessionRuntimeRegistry } from '../session/runtime.js'
 
 const T0 = Date.UTC(2026, 9, 21, 12, 0, 0)
 
@@ -105,6 +106,31 @@ describe('diagnostics collector', () => {
     expect(data.heapUsed.value).toBe(50)
     expect(data.runningSessions).toMatchObject({ unit: 'count', value: 3 })
     expect(data.runningSessions.samples).toBeGreaterThanOrEqual(2)
+  })
+
+  it('sources runningSessions from the runtime registry (the owner), not the EventStore count', () => {
+    const registry = new SessionRuntimeRegistry()
+    // Two active runtimes (chat + workflow) and one idle one.
+    registry.get('sess-active-1').acquire('chat')
+    registry.get('sess-active-2').acquire('workflow')
+    const idleHandle = registry.get('sess-idle').acquire('chat')
+    registry.get('sess-idle').release(idleHandle)
+
+    const registryCollector = createDiagnosticsCollector({
+      now: () => Date.now(),
+      countRunningSessions: () => 99, // EventStore fallback — must be ignored
+      runtimeRegistry: registry,
+      intervalMs: 1_000,
+      windowMs: 10_000,
+      historyMs: 60_000,
+      enableLoopSampler: false,
+    })
+    registryCollector.start()
+    vi.advanceTimersByTime(1_000)
+    const data = registryCollector.getData()
+    // The registry (owner) reports 2 active, not the EventStore's 99.
+    expect(data.series.runningSessions).toMatchObject({ unit: 'count', value: 2 })
+    registryCollector.stop()
   })
 
   it('measures a real event-loop stall with its own sampler', async () => {

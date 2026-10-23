@@ -106,7 +106,17 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
     bucket.gauges.heapUsed = memory.heapUsed
     const wal = walSizeBytes(options.dbPath)
     if (wal !== undefined) bucket.gauges.walSize = wal
-    if (options.countRunningSessions) {
+    // The runtime registry is the single owner of executions (including worker
+    // turns, whose handle the gateway holds until the worker settles), so it is
+    // the authoritative "running sessions" count. The EventStore-based count is
+    // only a fallback when no registry is wired (e.g. a worker-side collector).
+    if (options.runtimeRegistry) {
+      try {
+        bucket.gauges.runningSessions = options.runtimeRegistry.countActive()
+      } catch {
+        // Registry unavailable (shutdown): leave the gauge empty for this interval.
+      }
+    } else if (options.countRunningSessions) {
       try {
         bucket.gauges.runningSessions = options.countRunningSessions()
       } catch {
