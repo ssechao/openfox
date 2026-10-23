@@ -170,6 +170,7 @@ vi.mock('../agents/registry.js', () => {
 })
 
 import { PathAccessDeniedError } from '../tools/path-security.js'
+import { StaleWorkerGenerationError } from '../session/worker/index.js'
 import { getEnabledSkillMetadata } from '../skills/registry.js'
 import { TurnMetrics, buildRetryPatterns, runAgentTurn, runChatTurn } from './orchestrator.js'
 
@@ -368,6 +369,60 @@ describe('chat orchestrator', () => {
       type: 'turn.snapshot',
       data: expect.objectContaining({ mode: 'planner', phase: 'plan', snapshotSeq: expect.any(Number) }),
     })
+  })
+
+  it('treats a stale worker generation as fatal before any tool or later event', async () => {
+    const eventStore = createEventStore()
+    const appendEvent = eventStore.append.getMockImplementation()!
+    const stale = new StaleWorkerGenerationError('session-1', { workerId: 'worker-1', generation: 1 })
+    let generationCurrent = true
+    eventStore.append.mockImplementation((sessionId, event) => {
+      if (!generationCurrent) throw stale
+      const stored = appendEvent(sessionId, event)
+      generationCurrent = false
+      return stored
+    })
+    getEventStoreMock.mockReturnValue(eventStore)
+    getAllInstructionsMock.mockResolvedValue({ content: '', files: [] })
+    const execute = vi.fn(async () => ({ success: true, output: 'effect', durationMs: 1, truncated: false }))
+    getToolRegistryForModeMock.mockReturnValue({
+      tools: [{ name: 'run_command' }] as any,
+      definitions: [{ type: 'function', function: { name: 'run_command', description: 'Run', parameters: {} } }],
+      execute,
+    })
+    streamLLMPureMock.mockReturnValue({ kind: 'stream' })
+    consumeStreamGeneratorMock.mockResolvedValue({
+      content: '',
+      toolCalls: [{ id: 'call-1', name: 'run_command', arguments: { command: 'touch effect' } }],
+      segments: [],
+      usage: { promptTokens: 10, completionTokens: 5 },
+      timing: { ttft: 1, completionTime: 1, tps: 5, prefillTps: 10 },
+      aborted: false,
+    })
+    const sessionManager = createSessionManager({
+      current: {
+        id: 'session-1',
+        projectId: 'project-1',
+        workdir: '/tmp/project',
+        mode: 'planner',
+        phase: 'plan',
+        isRunning: true,
+        criteria: [],
+        executionState: { currentTokenCount: 0, compactionCount: 0 },
+        messages: [{ id: 'user-1', role: 'user', content: 'Run it' }],
+      },
+    })
+
+    await expect(
+      runChatTurn({
+        sessionManager: sessionManager as never,
+        sessionId: 'session-1',
+        llmClient: { getModel: () => 'qwen3-32b' } as never,
+      }),
+    ).rejects.toBe(stale)
+
+    expect(execute).not.toHaveBeenCalled()
+    expect(eventStore.getEvents('session-1')).toHaveLength(1)
   })
 
   it('auto-compacts planner context before the next LLM call when over threshold', async () => {
