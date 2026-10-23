@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import type { Config } from '../../../shared/types.js'
@@ -131,6 +134,91 @@ describe('SessionWorkerManager', () => {
     })
 
     await expect(manager.shutdown()).rejects.toThrow(/worker.*did not exit within 25ms.*shutdown/i)
+  })
+
+  it('finalizes crash interruption when child cleanup fails and preserves the sidecar', async () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-cleanup-error.db')
+    openDbs.push(db)
+    const dir = mkdtempSync(join(tmpdir(), 'openfox-worker-cleanup-error-'))
+    const childrenPath = join(dir, 'worker.children')
+    writeFileSync(childrenPath, 'pending cleanup', 'utf-8')
+    const appended: string[] = []
+    let cleanupCalls = 0
+    let settled = false
+    const token = assignWorkerToken(namedDb, 'sess-1')
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        setRunning: () => {},
+        getActiveWorkflowExecution: () => null,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      cleanupChildren: async () => {
+        cleanupCalls += 1
+        throw new Error('reservation scan failed')
+      },
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [
+            { seq: 1, timestamp: 1, sessionId: 'sess-1', type: 'message.start', data: { role: 'user' } },
+            {
+              seq: 2,
+              timestamp: 2,
+              sessionId: 'sess-1',
+              type: 'tool.call',
+              data: {
+                messageId: 'assistant-1',
+                toolCall: { id: 'call-1', name: 'run_command', arguments: { command: 'effect' } },
+              },
+            },
+          ],
+          append: (_sessionId: string, event: { type: string }) => {
+            appended.push(event.type)
+          },
+        }) as never,
+    })
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: 'SIGKILL',
+    }) as unknown as ChildProcess
+    const worker = {
+      sessionId: 'sess-1',
+      token,
+      child,
+      childrenPath,
+      doneReceived: false,
+      doneOk: false,
+      stderrTail: [],
+      onSettled: () => {
+        settled = true
+      },
+    }
+
+    try {
+      const settle = Reflect.get(manager, 'settle') as (
+        candidate: typeof worker,
+        exitCode: number | null,
+        signal: NodeJS.Signals | null,
+      ) => Promise<void>
+      await settle.call(manager, worker, null, 'SIGKILL')
+
+      const interrupted = namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get() as {
+        interrupted_at: string | null
+      }
+      expect(cleanupCalls).toBe(1)
+      expect(interrupted.interrupted_at).toBeTruthy()
+      expect(appended).toContain('tool.reconciliation_required')
+      expect(manager.lastCrashReport()?.cleanupError).toMatch(/reservation scan failed/)
+      expect(existsSync(childrenPath)).toBe(true)
+      expect(settled).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('fails before spawning when the child sidecar cannot be initialized', () => {

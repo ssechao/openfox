@@ -67,6 +67,7 @@ export interface WorkerCrashReport {
   signal: NodeJS.Signals | null
   interruptedAt: string
   killedChildren: number[]
+  cleanupError?: string
   finalizedMessageId?: string
 }
 
@@ -265,7 +266,10 @@ export class SessionWorkerManager {
       } catch {
         // Already gone
       }
-      await Promise.all([(this.deps.cleanupChildren ?? killTrackedChildren)(worker.childrenPath), exitedBeforeTimeout])
+      const [cleanup] = await Promise.all([
+        this.cleanupWorkerChildren(worker.sessionId, worker.childrenPath),
+        exitedBeforeTimeout,
+      ])
       const interruptedAt = new Date().toISOString()
       markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
       this.prepareInterruptedEvents(worker.sessionId)
@@ -278,11 +282,33 @@ export class SessionWorkerManager {
           error: error instanceof Error ? error.message : String(error),
         })
       }
-      worker.onSettled({ crashed: true, error: 'Gateway shutdown interrupted the worker turn' })
+      worker.onSettled({
+        crashed: true,
+        error: cleanup.cleanupError
+          ? `Gateway shutdown interrupted the worker turn; child cleanup failed: ${cleanup.cleanupError}`
+          : 'Gateway shutdown interrupted the worker turn',
+      })
     } finally {
       if (timeout) clearTimeout(timeout)
       clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
       this.deps.healthAggregator?.expireWorker(worker.token)
+    }
+  }
+
+  private async cleanupWorkerChildren(
+    sessionId: string,
+    childrenPath: string,
+  ): Promise<{ killedChildren: number[]; cleanupError?: string }> {
+    try {
+      return { killedChildren: await (this.deps.cleanupChildren ?? killTrackedChildren)(childrenPath) }
+    } catch (error) {
+      const cleanupError = error instanceof Error ? error.message : String(error)
+      logger.error('Worker child cleanup failed; sidecar retained', {
+        sessionId,
+        childrenPath,
+        error: cleanupError,
+      })
+      return { killedChildren: [], cleanupError }
     }
   }
 
@@ -338,7 +364,7 @@ export class SessionWorkerManager {
     // Reap the worker's exclusive children (recorded synchronously in the
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
     // the gateway process and are not in that file — never touched.
-    const killedChildren = await killTrackedChildren(worker.childrenPath)
+    const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath)
 
     // Persist the interruption marker FIRST so the running-state reset below
     // (and any queued-message drain it could trigger) sees the session as
@@ -374,7 +400,8 @@ export class SessionWorkerManager {
       exitCode,
       signal,
       interruptedAt,
-      killedChildren,
+      killedChildren: cleanup.killedChildren,
+      ...(cleanup.cleanupError ? { cleanupError: cleanup.cleanupError } : {}),
     }
     try {
       const { eventStore, events } = this.prepareInterruptedEvents(sessionId)

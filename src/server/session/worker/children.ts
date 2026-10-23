@@ -199,7 +199,11 @@ function findReservationProcesses(reservationId: string): number[] {
     return pids
   }
   if (process.platform === 'darwin') {
-    const output = execFileSync('ps', ['-Eww', '-axo', 'pid=,pgid=,command='], { encoding: 'utf-8' })
+    const output = execFileSync('ps', ['-Eww', '-axo', 'pid=,pgid=,command='], {
+      encoding: 'utf-8',
+      timeout: 2000,
+      maxBuffer: 16 * 1024 * 1024,
+    })
     const pids = new Set<number>()
     for (const line of output.split('\n')) {
       if (!line.includes(marker)) continue
