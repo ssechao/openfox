@@ -128,6 +128,15 @@ describe('worker crash cleanup', () => {
     expect(res.status).toBe(200)
   }
 
+  async function setBuilderMode(sessionId: string): Promise<void> {
+    const res = await fetch(`${base}/api/sessions/${sessionId}/mode`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'builder' }),
+    })
+    expect(res.status).toBe(200)
+  }
+
   async function sendMessage(sessionId: string, content: string): Promise<void> {
     const res = await fetch(`${base}/api/sessions/${sessionId}/message`, {
       method: 'POST',
@@ -147,12 +156,87 @@ describe('worker crash cleanup', () => {
     }
   }
 
+  async function trackedLspPid(path: string): Promise<number | null> {
+    if (!existsSync(path)) return null
+    const lines = (await readFile(path, 'utf-8')).trim().split('\n').filter(Boolean)
+    for (const line of lines) {
+      const entry = JSON.parse(line) as { pid?: number; command?: string }
+      if (entry.command === 'lsp:typescript' && typeof entry.pid === 'number') return entry.pid
+    }
+    return null
+  }
+
   async function mcpStatus(): Promise<string | undefined> {
     const res = await fetch(`${base}/api/mcp/servers`)
     expect(res.status).toBe(200)
     const data = (await res.json()) as { servers: Array<{ name: string; status: string }> }
     return data.servers.find((s) => s.name === 'test-server')?.status
   }
+
+  it('leaves no worker-owned LSP process after Stop and crash', async () => {
+    await setWorkerMode(true)
+
+    const stoppedSession = await createSession('lsp-stop-victim')
+    await setBuilderMode(stoppedSession)
+    await sendMessage(stoppedSession, 'Start the worker LSP probe, then run "sleep 3"')
+    const stoppedWorker = await waitFor(
+      async () => {
+        const res = await fetch(`${base}/api/test/worker`)
+        const data = (await res.json()) as WorkerIntrospection
+        return data.active?.sessionId === stoppedSession ? data.active : null
+      },
+      20_000,
+      'Stop victim worker',
+    )
+    const stoppedChildrenPath = `${dbPath}.worker-${stoppedWorker.token.workerId}.children`
+    const stoppedLspPid = await waitFor(() => trackedLspPid(stoppedChildrenPath), 20_000, 'Stop victim LSP process')
+    expect(pidAlive(stoppedLspPid)).toBe(true)
+
+    const stopRes = await fetch(`${base}/api/sessions/${stoppedSession}/stop`, { method: 'POST' })
+    expect(stopRes.status).toBe(200)
+    await waitFor(
+      async () => {
+        const res = await fetch(`${base}/api/test/worker`)
+        const data = (await res.json()) as WorkerIntrospection
+        return data.active === null ? true : null
+      },
+      15_000,
+      'worker exit after Stop',
+    )
+    await waitFor(async () => (!pidAlive(stoppedLspPid) ? true : null), 5000, 'LSP exit after Stop')
+    expect(existsSync(stoppedChildrenPath)).toBe(false)
+
+    const crashedSession = await createSession('lsp-crash-victim')
+    await setBuilderMode(crashedSession)
+    await sendMessage(crashedSession, 'Start the worker LSP probe, then run "sleep 30"')
+    const crashedWorker = await waitFor(
+      async () => {
+        const res = await fetch(`${base}/api/test/worker`)
+        const data = (await res.json()) as WorkerIntrospection
+        return data.active?.sessionId === crashedSession ? data.active : null
+      },
+      20_000,
+      'crash victim worker',
+    )
+    const crashedChildrenPath = `${dbPath}.worker-${crashedWorker.token.workerId}.children`
+    const crashedLspPid = await waitFor(() => trackedLspPid(crashedChildrenPath), 20_000, 'crash victim LSP process')
+    expect(pidAlive(crashedLspPid)).toBe(true)
+
+    process.kill(crashedLspPid, 'SIGSTOP')
+    process.kill(crashedWorker.pid!, 'SIGKILL')
+    const crash = await waitFor(
+      async () => {
+        const res = await fetch(`${base}/api/test/worker`)
+        const data = (await res.json()) as WorkerIntrospection
+        return data.lastCrash?.sessionId === crashedSession ? data.lastCrash : null
+      },
+      10_000,
+      'LSP worker crash report',
+    )
+    expect(crash.killedChildren).toContain(crashedLspPid)
+    await waitFor(async () => (!pidAlive(crashedLspPid) ? true : null), 5000, 'LSP exit after crash')
+    expect(existsSync(crashedChildrenPath)).toBe(false)
+  }, 90_000)
 
   it('reaps exclusive children after kill -9 and preserves the shared MCP server', async () => {
     // Shared MCP server connected before the crash.
@@ -199,7 +283,7 @@ describe('worker crash cleanup', () => {
       async () => {
         const res = await fetch(`${base}/api/test/worker`)
         const data = (await res.json()) as WorkerIntrospection
-        return data.lastCrash
+        return data.lastCrash?.sessionId === sessionA ? data.lastCrash : null
       },
       10_000,
       'crash report',

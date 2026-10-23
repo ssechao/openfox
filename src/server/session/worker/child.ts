@@ -30,6 +30,7 @@ import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.
 import type { LLMClientWithModel } from '../../llm/client.js'
 import type { StatsIdentity } from '../../../shared/types.js'
 import { logger } from '../../utils/logger.js'
+import { shutdownLspManager } from '../../lsp/index.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -73,6 +74,8 @@ async function runTurn(sessionId: string, config: import('../../../shared/types.
     setTimeout(() => process.exit(ok ? 0 : 1), 2000).unref()
   }
 
+  let ok = false
+  let failure: string | undefined
   try {
     setRuntimeConfig(config)
     const db = attachWorkerDatabase(workerEnv.dbPath)
@@ -116,21 +119,31 @@ async function runTurn(sessionId: string, config: import('../../../shared/types.
       onMessage: (msg) => send({ ...token, type: 'ws', msg }),
     })
 
+    ok = true
     logger.info('Worker turn finished', { workerId: token.workerId, generation: token.generation, sessionId })
-    finish(true)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (message === 'Aborted' || controller.signal.aborted) {
+      ok = true
       logger.info('Worker turn aborted', { workerId: token.workerId, generation: token.generation, sessionId })
-      finish(true)
-      return
+    } else {
+      failure = message
+      logger.error('Worker turn failed', {
+        workerId: token.workerId,
+        generation: token.generation,
+        sessionId,
+        error: message,
+      })
     }
-    logger.error('Worker turn failed', {
-      workerId: token.workerId,
-      generation: token.generation,
-      sessionId,
-      error: message,
-    })
-    finish(false, message)
   }
+
+  try {
+    await shutdownLspManager(sessionId)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ok = false
+    failure = `LSP shutdown failed: ${message}`
+    logger.error('Worker LSP shutdown failed', { workerId: token.workerId, sessionId, error: message })
+  }
+  finish(ok, failure)
 }

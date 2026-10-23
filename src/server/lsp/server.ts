@@ -6,6 +6,7 @@ import type { MessageConnection } from 'vscode-jsonrpc'
 import type { Diagnostic } from '../../shared/types.js'
 import type { LanguageConfig, LspServerState } from './types.js'
 import { logger } from '../utils/logger.js'
+import { finalizeExclusiveChild, reserveExclusiveChild } from '../session/worker/children.js'
 
 // ============================================================================
 // LSP Protocol Constants & Types (minimal definitions)
@@ -261,6 +262,7 @@ export class LspServer {
       // keeps cmd.exe happy when the path contains spaces.
       const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(this.commandPath)
       const command = needsShell ? [`"${this.commandPath}"`, ...this.config.serverArgs].join(' ') : this.commandPath
+      const reservation = reserveExclusiveChild(`lsp:${this.config.id}`)
       this.process = spawn(command, needsShell ? [] : this.config.serverArgs, {
         cwd: this.workdir,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -272,6 +274,12 @@ export class LspServer {
         windowsHide: true,
         shell: needsShell,
       })
+      try {
+        finalizeExclusiveChild(reservation, this.process.pid)
+      } catch (error) {
+        this.process.kill('SIGKILL')
+        throw error
+      }
 
       // Register exit handler BEFORE awaiting spawn so we catch rapid failures
       // (e.g., rustup proxy detecting a missing component and exiting right

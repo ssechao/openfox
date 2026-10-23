@@ -392,6 +392,20 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
     }
   }
 
+  const workerLspMatch = prompt.match(/Start the worker LSP probe, then run "([^"]+)"/i)
+  if (workerLspMatch) {
+    return {
+      tools: [
+        {
+          name: 'write_file',
+          arguments: { path: 'src/worker-lsp-probe.ts', content: 'export const workerLspProbe = true' },
+        },
+        { name: 'run_command', arguments: { command: workerLspMatch[1]! } },
+      ],
+      response: 'Started the worker LSP probe.',
+    }
+  }
+
   if (exactCommandMatch) {
     return {
       tools: [{ name: 'run_command', arguments: { command: exactCommandMatch[1]!.trim() } }],
