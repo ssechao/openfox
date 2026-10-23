@@ -350,6 +350,7 @@ describe('McpManager', () => {
         const result = await manager.callTool('timeout-server', 'get_weather', {})
         expect(result.success).toBe(false)
         expect(result.error).toContain('timed out')
+        expect(result.metadata).toEqual({ reconciliationRequired: true })
       } finally {
         mockClientInstance.callTool.mockImplementation(async () => ({
           content: [{ type: 'text', text: 'Sunny, 72°F' }],
@@ -367,7 +368,11 @@ describe('McpManager', () => {
 
         controller.abort(new Error('cancelled by worker'))
 
-        await expect(result).resolves.toEqual({ success: false, error: 'cancelled by worker' })
+        await expect(result).resolves.toEqual({
+          success: false,
+          error: 'cancelled by worker',
+          metadata: { reconciliationRequired: true },
+        })
         expect(lastCallOptions()?.signal?.aborted).toBe(true)
       } finally {
         mockClientInstance.callTool.mockImplementation(async () => ({
@@ -375,6 +380,18 @@ describe('McpManager', () => {
           isError: false,
         }))
       }
+    })
+
+    it('should reject an already-cancelled call before dispatch without marking it uncertain', async () => {
+      await manager.addServer('cancel-before-dispatch', { transport: 'stdio', command: 'node' })
+      const controller = new AbortController()
+      controller.abort(new Error('cancelled before dispatch'))
+      mockClientInstance.callTool.mockClear()
+
+      await expect(
+        manager.callTool('cancel-before-dispatch', 'get_weather', {}, undefined, { signal: controller.signal }),
+      ).resolves.toEqual({ success: false, error: 'cancelled before dispatch' })
+      expect(mockClientInstance.callTool).not.toHaveBeenCalled()
     })
 
     it('should extend the SDK request timeout for the tool timeout arg (no config timeout)', async () => {

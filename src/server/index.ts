@@ -3992,6 +3992,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         success: result.success,
         ...(result.output ? { output: result.output } : {}),
         ...(result.error ? { error: result.error } : {}),
+        ...(result.metadata ? { metadata: result.metadata } : {}),
         durationMs: Date.now() - startedAt,
         truncated: false,
       }

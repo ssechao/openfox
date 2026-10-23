@@ -321,7 +321,7 @@ export class McpManager {
     args: Record<string, unknown>,
     sessionId?: string,
     options?: { signal?: AbortSignal },
-  ): Promise<{ success: boolean; output?: string; error?: string }> {
+  ): Promise<{ success: boolean; output?: string; error?: string; metadata?: { reconciliationRequired: true } }> {
     const entry = this.servers.get(serverName)
     if (!entry) return { success: false, error: `MCP server '${serverName}' not found` }
 
@@ -330,6 +330,11 @@ export class McpManager {
     const forwardedArgs = injected.args
 
     if (!entry.client) return { success: false, error: `MCP server '${serverName}' is not connected` }
+    if (options?.signal?.aborted) {
+      const reason =
+        options.signal.reason instanceof Error ? options.signal.reason : new Error('MCP tool call cancelled')
+      return { success: false, error: reason.message }
+    }
     const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, forwardedArgs)
     const timeoutMs = timeoutSeconds * 1000
     const controller = new AbortController()
@@ -376,7 +381,11 @@ export class McpManager {
       }
       return { success: true, output: text }
     } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        metadata: { reconciliationRequired: true },
+      }
     } finally {
       options?.signal?.removeEventListener('abort', abortFromCaller)
     }

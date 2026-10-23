@@ -158,6 +158,35 @@ describe('WorkerMcpBroker', () => {
     expect(broker.inFlightCount()).toBe(0)
   })
 
+  it('reconciles a dispatched uncertain result once and refuses replay', async () => {
+    const sent: WorkerMcpResponseMessage[] = []
+    const reconcile = vi.fn()
+    const execute = vi.fn(async () => ({
+      success: false,
+      error: 'transport disconnected',
+      durationMs: 1,
+      truncated: false,
+      metadata: { reconciliationRequired: true },
+    }))
+    const broker = new WorkerMcpBroker({
+      execute,
+      isCurrent: () => true,
+      send: (message) => sent.push(message),
+      reconcile,
+    })
+    const input = request({ requestId: 'uncertain' })
+
+    broker.handleRequest(input)
+    await vi.waitFor(() => expect(sent.some((message) => message.type === 'mcp.response.end')).toBe(true))
+    broker.handleRequest(input)
+    await vi.waitFor(() => expect(sent.filter((message) => message.type === 'mcp.response.end')).toHaveLength(2))
+
+    expect(execute).toHaveBeenCalledOnce()
+    expect(reconcile).toHaveBeenCalledOnce()
+    expect(reconcile).toHaveBeenCalledWith(input)
+    expect(decode(sent.slice(-2))).toMatchObject({ success: false, error: expect.stringContaining('replay') })
+  })
+
   it('marks deadline and oversized-response outcomes uncertain', async () => {
     vi.useFakeTimers()
     const sent: WorkerMcpResponseMessage[] = []

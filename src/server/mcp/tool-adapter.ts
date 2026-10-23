@@ -51,6 +51,7 @@ export function createMcpTools(mcpManager: McpManager): Tool[] {
         success: result.success,
         ...(result.output ? { output: result.output } : {}),
         ...(result.error ? { error: result.error } : {}),
+        ...(result.metadata ? { metadata: result.metadata } : {}),
         durationMs: Date.now() - start,
         truncated: false,
       }

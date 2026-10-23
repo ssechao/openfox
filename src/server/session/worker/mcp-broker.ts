@@ -44,6 +44,7 @@ function failure(error: string): ToolResult {
 export class WorkerMcpBroker {
   private readonly inFlight = new Map<string, InFlightRequest>()
   private readonly perWorker = new Map<string, number>()
+  private readonly reconciled = new Set<string>()
 
   constructor(private readonly deps: WorkerMcpBrokerDeps) {}
 
@@ -65,6 +66,10 @@ export class WorkerMcpBroker {
     }
 
     const key = requestKey(request)
+    if (this.reconciled.has(key)) {
+      this.sendResult(request, failure('MCP request replay refused pending reconciliation'))
+      return
+    }
     if (this.inFlight.has(key)) {
       this.sendResult(request, failure('Duplicate MCP request id'))
       return
@@ -86,7 +91,6 @@ export class WorkerMcpBroker {
       const entry = this.take(request)
       if (!entry) return
       entry.controller.abort(new Error('MCP request deadline exceeded'))
-      this.deps.reconcile(request)
       this.sendResult(request, {
         ...failure('MCP request deadline exceeded; external effects may have occurred'),
         metadata: { reconciliationRequired: true },
@@ -113,7 +117,7 @@ export class WorkerMcpBroker {
     const entry = this.take(message)
     if (!entry) return
     entry.controller.abort(new Error('MCP request cancelled'))
-    this.deps.reconcile(entry.request)
+    this.markReconciliation(entry.request)
   }
 
   cancelWorker(identity: WorkerIpcIdentity): void {
@@ -127,7 +131,7 @@ export class WorkerMcpBroker {
       }
       this.take(entry.request)
       entry.controller.abort(new Error('MCP worker stopped'))
-      this.deps.reconcile(entry.request)
+      this.markReconciliation(entry.request)
     }
   }
 
@@ -144,11 +148,19 @@ export class WorkerMcpBroker {
     return entry
   }
 
+  private markReconciliation(request: McpRequestMessage): void {
+    const key = requestKey(request)
+    if (this.reconciled.has(key)) return
+    this.reconciled.add(key)
+    this.deps.reconcile(request)
+  }
+
   private sendResult(request: McpRequestMessage, result: ToolResult): void {
     if (!this.deps.isCurrent(identityOf(request))) return
+    if (result.metadata?.['reconciliationRequired'] === true) this.markReconciliation(request)
     let bytes = Buffer.from(JSON.stringify(result))
     if (bytes.length > MAX_MCP_RESPONSE_BYTES) {
-      this.deps.reconcile(request)
+      this.markReconciliation(request)
       bytes = Buffer.from(
         JSON.stringify({
           ...failure('MCP response exceeded the 8 MiB limit; external effects may have occurred'),
