@@ -33,7 +33,7 @@ import { emitRunningChanged } from '../../events/session.js'
 import type { SessionManager } from '../manager.js'
 import { assignWorkerToken, clearWorkerToken, isWorkerMessageCurrent, type WorkerToken } from './token.js'
 import { childrenFilePath, initChildrenTracking, killTrackedChildren, removeChildrenFile } from './children.js'
-import { markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
+import { findPendingToolReconciliations, markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
 import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
 
 export interface WorkerSettledOutcome {
@@ -336,8 +336,12 @@ export class SessionWorkerManager {
     try {
       const eventStore = getEventStore()
       eventStore.invalidateExternalSession(sessionId)
+      const events = eventStore.getEvents(sessionId)
+      for (const pending of findPendingToolReconciliations(events)) {
+        eventStore.append(sessionId, { type: 'tool.reconciliation_required', data: pending })
+      }
       const hasActiveWorkflow = this.deps.sessionManager.getActiveWorkflowExecution(sessionId) != null
-      const plan = planWorkerCrashRecovery(eventStore.getEvents(sessionId), hasActiveWorkflow)
+      const plan = planWorkerCrashRecovery(events, hasActiveWorkflow)
       if (plan?.finalizeMessageId) {
         eventStore.append(sessionId, createMessageDoneEvent(plan.finalizeMessageId, { partial: true }))
         report.finalizedMessageId = plan.finalizeMessageId

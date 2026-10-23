@@ -143,6 +143,16 @@ export type TurnEvent =
         result: ToolResult
       }
     }
+  | {
+      type: 'tool.reconciliation_required'
+      data: PendingToolReconciliation
+    }
+  | {
+      type: 'tool.reconciliation_resolved'
+      data: {
+        toolCallId: string
+      }
+    }
 
   // ----------------------------------------------------------------------------
   // Session state changes
@@ -448,6 +458,7 @@ export interface SessionSnapshot {
   taskStats?: TaskStats
   messageStats?: MessageStatsEntry[]
   pendingConfirmations?: PendingPathConfirmation[]
+  pendingToolReconciliations?: PendingToolReconciliation[]
   contextWindows?: CompactionRecord[]
   waitingWorkflow?: WorkflowWaitingPayload
 }
@@ -554,6 +565,13 @@ export interface SnapshotMessage {
 
 export interface ToolCallWithResult extends ToolCall {
   result?: ToolResult
+}
+
+export interface PendingToolReconciliation {
+  messageId: string
+  toolCallId: string
+  name: string
+  arguments: Record<string, unknown>
 }
 
 // ============================================================================

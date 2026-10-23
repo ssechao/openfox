@@ -423,6 +423,16 @@ function getConversationAwareToolResponse(request: LLMCompletionRequest): MockMa
   const prompt = getLastUserPrompt(request)
   const conversationText = getConversationText(request)
 
+  if (/LLM stream was interrupted mid-response|Continue your previous response/i.test(prompt)) {
+    const command = conversationText.match(/Run the exact command:\s*(.+)$/im)?.[1]?.trim()
+    if (command) {
+      return {
+        tools: [{ name: 'run_command', arguments: { command } }],
+        response: 'Retried the interrupted command.',
+      }
+    }
+  }
+
   // Step-done reminder: the transition condition is already satisfied, nothing
   // is left but to signal completion
   if (/If you have finished the task, call step_done\(\)/i.test(prompt)) {

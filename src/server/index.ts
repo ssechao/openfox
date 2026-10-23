@@ -1039,8 +1039,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   app.get('/api/sessions/:id', async (req, res) => {
     const { getEventStore, combineEventsWithSnapshot } = await import('./events/index.js')
-    const { buildMessagesFromStoredEvents, buildSessionStatsMessages, foldPendingConfirmations } =
-      await import('./events/folding.js')
+    const {
+      buildMessagesFromStoredEvents,
+      buildSessionStatsMessages,
+      foldPendingConfirmations,
+      foldPendingToolReconciliations,
+    } = await import('./events/folding.js')
     const { computeSessionStatsSummary } = await import('../shared/stats.js')
     const { getPendingQuestionsForSession } = await import('./tools/index.js')
     const { getMaxVisibleItems } = await import('./db/settings.js')
@@ -1064,6 +1068,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const queueState = sessionManager.getQueueState(req.params.id)
     const pendingQuestions = getPendingQuestionsForSession(req.params.id)
     const pendingConfirmations = foldPendingConfirmations(events)
+    const pendingToolReconciliations = foldPendingToolReconciliations(events)
     const activeWorkflowExecution = sessionManager.getDisplayWorkflowExecution(req.params.id)
 
     res.json({
@@ -1075,6 +1080,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       queueState,
       pendingQuestions,
       pendingConfirmations,
+      pendingToolReconciliations,
       activeWorkflowExecution,
     })
   })
@@ -1859,6 +1865,31 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     runtimeRegistry.get(sessionId).recordCommand('resume')
     logger.info('Interrupted session resumed explicitly', { sessionId })
     res.json({ success: true })
+  })
+
+  app.post('/api/sessions/:id/reconcile-tools', async (req, res) => {
+    const sessionId = req.params.id
+    if (!sessionManager.getSession(sessionId)) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const { getSessionState, getEventStore } = await import('./events/index.js')
+    const pending = getSessionState(sessionId)?.pendingToolReconciliations ?? []
+    const requested = req.body?.toolCallIds
+    if (requested !== undefined && (!Array.isArray(requested) || requested.some((id) => typeof id !== 'string'))) {
+      return res.status(400).json({ error: 'toolCallIds must be an array of strings' })
+    }
+    const selected = requested === undefined ? pending : pending.filter((item) => requested.includes(item.toolCallId))
+    if (selected.length === 0) {
+      return res.status(409).json({ error: 'No pending tool reconciliation matched' })
+    }
+
+    const eventStore = getEventStore()
+    for (const item of selected) {
+      eventStore.append(sessionId, { type: 'tool.reconciliation_resolved', data: { toolCallId: item.toolCallId } })
+    }
+    const resolved = new Set(selected.map((item) => item.toolCallId))
+    res.json({ success: true, pendingToolReconciliations: pending.filter((item) => !resolved.has(item.toolCallId)) })
   })
 
   // Truncate session messages at a given index

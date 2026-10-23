@@ -21,6 +21,7 @@ export {
   clearSessionInterrupted,
   getSessionInterruptedAt,
   markSessionInterrupted,
+  findPendingToolReconciliations,
   planWorkerCrashRecovery,
 } from './crash.js'
 export { SessionWorkerManager, type SessionWorkerManagerDeps, type WorkerCrashReport } from './manager.js'

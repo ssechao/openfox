@@ -31,7 +31,12 @@ interface WorkerIntrospection {
 
 interface SessionView {
   session: { id: string; isRunning: boolean; interruptedAt?: string | null }
-  messages: Array<{ role: string; content?: string }>
+  messages: Array<{
+    role: string
+    content?: string
+    toolCalls?: Array<{ result?: { success: boolean; error?: string; metadata?: Record<string, unknown> } }>
+  }>
+  pendingToolReconciliations: Array<{ toolCallId: string; name: string }>
 }
 
 describe('session worker crash', () => {
@@ -164,6 +169,8 @@ describe('session worker crash', () => {
 
     // « interrompue — reprendre »: persisted marker + system resume proposal.
     expect(detected.session.interruptedAt).toBeTruthy()
+    expect(detected.pendingToolReconciliations).toHaveLength(1)
+    expect(detected.pendingToolReconciliations[0]?.name).toBe('run_command')
     expect(
       detected.messages.some(
         (m) => m.role === 'user' && typeof m.content === 'string' && /interromp|interrupted/i.test(m.content),
@@ -219,6 +226,22 @@ describe('session worker crash', () => {
     )
     expect(recovered.session.interruptedAt).toBeNull()
     expect(recovered.messages.some((m) => m.role === 'assistant')).toBe(true)
+    expect(recovered.pendingToolReconciliations).toHaveLength(1)
+    expect(
+      recovered.messages.some((message) =>
+        message.toolCalls?.some(
+          (call) => call.result?.success === false && call.result.metadata?.['reconciliationRequired'] === true,
+        ),
+      ),
+    ).toBe(true)
     expect(await readFile(effectPath, 'utf-8')).toBe('x')
+
+    const reconciled = await fetch(`${base}/api/sessions/${sessionA}/reconcile-tools`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ toolCallIds: [recovered.pendingToolReconciliations[0]!.toolCallId] }),
+    })
+    expect(reconciled.status).toBe(200)
+    expect((await getSessionView(sessionA)).pendingToolReconciliations).toEqual([])
   }, 120_000)
 })

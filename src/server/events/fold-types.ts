@@ -9,6 +9,7 @@ import type {
   MessageStatsEntry,
   CompactionRecord,
   SnapshotMessage,
+  PendingToolReconciliation,
 } from './types.js'
 import type { SessionMode, SessionPhase, ContextState, Criterion, Todo, MetadataEntry } from '../../shared/types.js'
 import type { WorkflowWaitingPayload } from '../../shared/protocol.js'
@@ -53,6 +54,7 @@ export interface FoldedSessionState {
   cachedSystemPrompt?: string
   dynamicContextHash?: string
   pendingConfirmations: PendingPathConfirmation[]
+  pendingToolReconciliations: PendingToolReconciliation[]
   sessionInit?: {
     projectId: string
     workdir: string

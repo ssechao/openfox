@@ -22,6 +22,64 @@ const baseEvent = {
   timestamp: Date.parse('2024-01-01T00:00:00.000Z'),
 }
 
+describe('tool reconciliation folding', () => {
+  const required = {
+    ...baseEvent,
+    type: 'tool.reconciliation_required',
+    data: {
+      messageId: 'm1',
+      toolCallId: 'call-1',
+      name: 'run_command',
+      arguments: { command: 'printf x' },
+    },
+  } as unknown as StoredEvent
+
+  it('keeps required reconciliation pending until explicitly resolved', () => {
+    const pending = foldSessionState([required], 'window-1', 200000)
+    expect(pending.pendingToolReconciliations).toEqual([required.data])
+
+    const resolved = foldSessionState(
+      [
+        required,
+        {
+          ...baseEvent,
+          seq: 2,
+          type: 'tool.reconciliation_resolved',
+          data: { toolCallId: 'call-1' },
+        } as unknown as StoredEvent,
+      ],
+      'window-1',
+      200000,
+    )
+    expect(resolved.pendingToolReconciliations).toEqual([])
+  })
+
+  it('preserves pending reconciliation through a snapshot', () => {
+    const snapshot = buildSnapshotFromSessionState({
+      session: {
+        mode: 'builder',
+        phase: 'build',
+        isRunning: false,
+        criteria: [],
+      },
+      events: [
+        {
+          ...baseEvent,
+          type: 'session.initialized',
+          data: { projectId: 'p', workdir: '/tmp', contextWindowId: 'window-1' },
+        },
+        required,
+      ],
+      latestSeq: 2,
+      snapshotAt: 3,
+    })
+
+    expect(snapshot.pendingToolReconciliations).toEqual([required.data])
+    const replayed = foldSessionState([{ ...baseEvent, type: 'turn.snapshot', data: snapshot }], 'window-1', 200000)
+    expect(replayed.pendingToolReconciliations).toEqual([required.data])
+  })
+})
+
 describe('apply-events.ts new handlers', () => {
   describe('tool.output events', () => {
     it('populates streamingOutput on tool calls', () => {

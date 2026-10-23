@@ -20,6 +20,7 @@ import {
   isWorkerTokenCurrent,
   StaleWorkerGenerationError,
   planWorkerCrashRecovery,
+  findPendingToolReconciliations,
   readTrackedChildren,
   initChildrenTracking,
   trackExclusiveChild,
@@ -148,6 +149,52 @@ describe('fenced worker EventStore', () => {
 })
 
 describe('crash recovery planning (no blind replay)', () => {
+  it('requires reconciliation only for unresolved calls in the current turn', () => {
+    const events = [
+      { ...storedEvent(1, 'message.start', { messageId: 'u1', role: 'user' }), timestamp: 1 },
+      {
+        ...storedEvent(2, 'tool.call', {
+          messageId: 'a1',
+          toolCall: { id: 'old-call', name: 'run_command', arguments: { command: 'old' } },
+        }),
+        timestamp: 2,
+      },
+      { ...storedEvent(3, 'message.start', { messageId: 'u2', role: 'user' }), timestamp: 3 },
+      {
+        ...storedEvent(4, 'tool.call', {
+          messageId: 'a2',
+          toolCall: { id: 'current-call', name: 'run_command', arguments: { command: 'current' } },
+        }),
+        timestamp: 4,
+      },
+    ]
+
+    expect(findPendingToolReconciliations(events)).toEqual([
+      {
+        messageId: 'a2',
+        toolCallId: 'current-call',
+        name: 'run_command',
+        arguments: { command: 'current' },
+      },
+    ])
+  })
+
+  it('excludes current-turn calls that already have results', () => {
+    const events = [
+      { ...storedEvent(1, 'message.start', { messageId: 'u1', role: 'user' }), timestamp: 1 },
+      {
+        ...storedEvent(2, 'tool.call', {
+          messageId: 'a1',
+          toolCall: { id: 'call-1', name: 'run_command', arguments: {} },
+        }),
+        timestamp: 2,
+      },
+      { ...storedEvent(3, 'tool.result', { messageId: 'a1', toolCallId: 'call-1', result: {} }), timestamp: 3 },
+    ]
+
+    expect(findPendingToolReconciliations(events)).toEqual([])
+  })
+
   it('finalizes a partial assistant message and continues with the stream-interrupted reminder', () => {
     const events = [
       storedEvent(1, 'message.start', { messageId: 'u1', role: 'user' }),

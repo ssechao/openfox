@@ -12,6 +12,7 @@ import type {
   CompactionRecord,
   SnapshotMessage,
   ToolCallWithResult,
+  PendingToolReconciliation,
 } from './types.js'
 import type { FormatRetry } from './apply-events.js'
 import type { WorkflowWaitingPayload } from '../../shared/protocol.js'
@@ -177,6 +178,25 @@ export function foldIsRunning(events: EventLike[]): boolean {
   return isRunning
 }
 
+export function foldPendingToolReconciliations(events: EventLike[]): PendingToolReconciliation[] {
+  const pending = new Map<string, PendingToolReconciliation>()
+  for (const event of events) {
+    if (event.type === 'turn.snapshot') {
+      pending.clear()
+      for (const item of (event.data as SessionSnapshot).pendingToolReconciliations ?? []) {
+        pending.set(item.toolCallId, item)
+      }
+    } else if (event.type === 'tool.reconciliation_required') {
+      const data = event.data as PendingToolReconciliation
+      pending.set(data.toolCallId, data)
+    } else if (event.type === 'tool.reconciliation_resolved') {
+      const data = event.data as { toolCallId: string }
+      pending.delete(data.toolCallId)
+    }
+  }
+  return [...pending.values()]
+}
+
 export function foldPendingConfirmations(events: EventLike[]): PendingPathConfirmation[] {
   const pending: PendingPathConfirmation[] = []
   const responded = new Set<string>()
@@ -228,6 +248,7 @@ export function foldSessionState(
   let metadataEntries = foldMetadata(events)
   const contextResult = foldContextState(events, initialWindowId)
   const pendingConfirmations = foldPendingConfirmations(events)
+  const pendingToolReconciliations = foldPendingToolReconciliations(events)
 
   const baseContextState = contextResult.latestContextState ?? {
     currentTokens: 0,
@@ -391,6 +412,7 @@ export function foldSessionState(
     ...(cachedSystemPrompt !== undefined && { cachedSystemPrompt }),
     ...(dynamicContextHash !== undefined && { dynamicContextHash }),
     pendingConfirmations,
+    pendingToolReconciliations,
     ...(sessionInit !== undefined && { sessionInit }),
     ...(sessionTitle !== undefined && { sessionTitle }),
     ...(visionFallbacks.length > 0 && { visionFallbacks }),
@@ -525,6 +547,9 @@ export function buildSnapshot(
     ...(foldedState.taskStats !== undefined && { taskStats: foldedState.taskStats }),
     ...(foldedState.messageStats !== undefined && { messageStats: foldedState.messageStats }),
     ...(foldedState.pendingConfirmations !== undefined && { pendingConfirmations: foldedState.pendingConfirmations }),
+    ...(foldedState.pendingToolReconciliations.length > 0 && {
+      pendingToolReconciliations: foldedState.pendingToolReconciliations,
+    }),
     contextWindows: foldedState.contextWindows ?? [],
     ...(foldedState.waitingWorkflow !== undefined && { waitingWorkflow: foldedState.waitingWorkflow }),
   }
@@ -592,6 +617,9 @@ export function buildSnapshotFromSessionState(input: {
     // empty) so consumers can rely on a stable shape and the next snapshot
     // can carry them forward without losing per-record history.
     formatRetries: foldedState.formatRetries ?? [],
+    ...(foldedState.pendingToolReconciliations.length > 0 && {
+      pendingToolReconciliations: foldedState.pendingToolReconciliations,
+    }),
     contextWindows: foldedState.contextWindows ?? [],
     snapshotSeq: latestSeq,
     snapshotAt,
