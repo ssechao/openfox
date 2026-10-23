@@ -25,7 +25,11 @@ import type Database from 'better-sqlite3'
 import type { Config } from '../../../shared/types.js'
 import type { ServerMessage } from '../../../shared/protocol.js'
 import { logger } from '../../utils/logger.js'
-import { createSessionRunningMessage, createChatMessageMessage } from '../../ws/protocol.js'
+import {
+  createSessionRunningMessage,
+  createSessionInterruptedMessage,
+  createChatMessageMessage,
+} from '../../ws/protocol.js'
 import { createMessageDoneEvent } from '../../chat/stream-pure.js'
 import { serverT } from '../../i18n.js'
 import { getEventStore } from '../../events/index.js'
@@ -35,6 +39,7 @@ import { assignWorkerToken, clearWorkerToken, isWorkerMessageCurrent, type Worke
 import { childrenFilePath, initChildrenTracking, killTrackedChildren, removeChildrenFile } from './children.js'
 import { findPendingToolReconciliations, markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
 import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
+import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 
 export interface WorkerSettledOutcome {
   crashed: boolean
@@ -73,6 +78,7 @@ export interface SessionWorkerManagerDeps {
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
   cleanupChildren?: (path: string) => Promise<number[]>
   shutdownTimeoutMs?: number
+  healthAggregator?: HealthAggregator
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
@@ -206,6 +212,8 @@ export class SessionWorkerManager {
         this.sendTo(worker, { ...token, type: 'start', sessionId, config: this.deps.config })
       } else if (msg.type === 'ws') {
         this.deps.broadcastForSession(sessionId, msg.msg)
+      } else if (msg.type === 'health') {
+        this.deps.healthAggregator?.recordSnapshot(token, msg.data)
       } else if (msg.type === 'done') {
         worker.doneReceived = true
         worker.doneOk = msg.ok
@@ -272,6 +280,7 @@ export class SessionWorkerManager {
     } finally {
       if (timeout) clearTimeout(timeout)
       clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
+      this.deps.healthAggregator?.expireWorker(worker.token)
     }
   }
 
@@ -292,6 +301,7 @@ export class SessionWorkerManager {
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
 
     clearWorkerToken(db, sessionId, token)
+    this.deps.healthAggregator?.expireWorker(token)
 
     if (clean) {
       removeChildrenFile(worker.childrenPath)
@@ -327,6 +337,9 @@ export class SessionWorkerManager {
     } catch {
       // Session may have been deleted while the worker ran
     }
+    // Sync the UI: the session is now « interrompue — reprendre ». The client
+    // shows the resume affordance as soon as it receives this, without a reload.
+    this.deps.broadcastForSession(sessionId, createSessionInterruptedMessage(interruptedAt))
     // Keep the event-sourced running state consistent: the worker died before
     // appending its own running.changed(false). Without this the next gateway
     // boot would treat the session as stale-running and the opt-in boot

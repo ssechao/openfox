@@ -211,6 +211,20 @@ export class SessionRuntimeRegistry {
     return [...this.runtimes.values()].map((runtime) => runtime.snapshot())
   }
 
+  /**
+   * Number of sessions that currently own an execution (state !== 'idle').
+   * The registry is the single owner of runtimes — including worker turns,
+   * whose handle the gateway holds until the worker settles — so this is the
+   * authoritative "running sessions" count for diagnostics.
+   */
+  countActive(): number {
+    let count = 0
+    for (const runtime of this.runtimes.values()) {
+      if (runtime.state !== 'idle') count++
+    }
+    return count
+  }
+
   abortAll(): void {
     for (const runtime of this.runtimes.values()) runtime.stop()
   }

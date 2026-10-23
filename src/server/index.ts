@@ -40,7 +40,7 @@ import { getSessionDisabledServers, setSessionDisabledServers } from './mcp/sess
 import { setMcpOAuthStoreMode, setMcpOAuthStorePath } from './mcp/oauth-store.js'
 import { setMcpOAuthServerPort } from './mcp/oauth-provider.js'
 import { createServerMessage } from '../shared/protocol.js'
-import { createContextStateMessage } from './ws/protocol.js'
+import { createContextStateMessage, createSessionInterruptedMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
 import { isSessionAlreadyRunningError, SessionRuntimeRegistry, setSessionRuntimeRegistry } from './session/index.js'
@@ -73,6 +73,7 @@ import { createNotificationRoutes } from './routes/notifications.js'
 import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { createDiagnosticsCollector } from './diagnostics/collector.js'
+import { createHealthAggregator } from './diagnostics/aggregator.js'
 import { registerBlobRoutes } from './routes/blobs.js'
 import { logger, setLogLevel } from './utils/logger.js'
 import { requestAbortSignal } from './utils/request-abort.js'
@@ -131,6 +132,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     payload: import('../shared/protocol.js').TasksUpdatePayload,
   ) => void = () => {}
 
+  // Deferred per-session broadcaster for routes mounted before the WebSocket
+  // server exists (e.g. the resume-interruption route). No-op until wired.
+  let broadcastForSessionDeferred: (
+    sessionId: string,
+    msg: import('../shared/protocol.js').ServerMessage,
+  ) => void = () => {}
+
   // Deferred workflow launcher for slash-workflow tasks and the MCP server.
   // Same rationale: the launcher needs the WebSocket broadcaster + LLM
   // client, which only exist after createWebSocketServer below.
@@ -184,10 +192,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
   setSessionRuntimeRegistry(runtimeRegistry)
 
+  const healthAggregator = createHealthAggregator()
   const diagnosticsCollector = createDiagnosticsCollector({
     dbPath: db.name,
     countRunningSessions: () => getEventStore().countRunningSessions(),
     runtimeRegistry,
+    healthAggregator,
   })
   getEventStore().setHealthCollector(diagnosticsCollector)
   diagnosticsCollector.start()
@@ -1863,6 +1873,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     clearSessionInterrupted(db, sessionId)
     sessionManager.queueMessage(sessionId, 'asap', plan.content, undefined, 'auto-prompt')
     runtimeRegistry.get(sessionId).recordCommand('resume')
+    // Sync the UI: the interruption marker is cleared, so the resume affordance
+    // disappears without a reload.
+    broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
     logger.info('Interrupted session resumed explicitly', { sessionId })
     res.json({ success: true })
   })
@@ -3813,6 +3826,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   )
   const wss = wssExports.wss
 
+  // Wire the deferred per-session broadcaster now that the WS server exists.
+  broadcastForSessionDeferred = (sessionId, msg) => wssExports.broadcastForSession(sessionId, msg)
+
   // Point the plugin host at the live WebSocket broadcaster now that it exists.
   pluginHost.setBroadcaster((message) => wssExports.broadcastAll(message))
 
@@ -3904,6 +3920,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       process.env['OPENFOX_SESSION_WORKER'] === 'true' ||
       getWorkerSetting(WORKER_SETTINGS_KEYS.SESSION_WORKER_MODE) === 'true',
     broadcastForSession: wssExports.broadcastForSession,
+    healthAggregator,
   })
 
   const queueProcessor = new QueueProcessor({
