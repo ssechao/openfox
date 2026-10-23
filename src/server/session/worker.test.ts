@@ -279,6 +279,71 @@ describe('exclusive children tracking', () => {
     expect(() => trackExclusiveChild(4321, 'sleep 1')).not.toThrow()
   })
 
+  it.skipIf(process.platform !== 'darwin')(
+    'recovers finalized and unfinalized children on Darwin',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'openfox-children-darwin-'))
+      const file = join(dir, 'w.children')
+      initChildrenTracking(file)
+      process.env['OPENFOX_WORKER_CHILDREN'] = file
+      const finalized = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        detached: true,
+        stdio: 'ignore',
+      })
+      finalized.unref()
+      const reservationId = `darwin-${process.pid}-${Date.now()}`
+      const unfinalized = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, OPENFOX_CHILD_RESERVATION_ID: reservationId },
+      })
+      unfinalized.unref()
+      try {
+        await Promise.all(
+          [finalized, unfinalized].map(
+            (child) =>
+              new Promise<void>((resolve, reject) => {
+                child.once('spawn', resolve)
+                child.once('error', reject)
+              }),
+          ),
+        )
+        trackExclusiveChild(finalized.pid, 'darwin-finalized')
+        appendFileSync(file, `${JSON.stringify({ type: 'reservation', id: reservationId })}\n`, 'utf-8')
+
+        const killed = await killTrackedChildren(file)
+        expect(killed).toContain(finalized.pid)
+        expect(killed).toContain(unfinalized.pid)
+        const deadline = Date.now() + 3000
+        while (Date.now() < deadline) {
+          const alive = [finalized.pid, unfinalized.pid].some((pid) => {
+            try {
+              process.kill(pid!, 0)
+              return true
+            } catch {
+              return false
+            }
+          })
+          if (!alive) break
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        expect(() => process.kill(finalized.pid!, 0)).toThrow()
+        expect(() => process.kill(unfinalized.pid!, 0)).toThrow()
+      } finally {
+        for (const child of [finalized, unfinalized]) {
+          if (!child.pid) continue
+          try {
+            process.kill(-child.pid, 'SIGKILL')
+          } catch (error) {
+            void error
+          }
+        }
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    10_000,
+  )
+
   it('does not kill a foreign process that reused a tracked pid', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openfox-children-'))
     const file = join(dir, 'w.children')

@@ -199,12 +199,19 @@ function findReservationProcesses(reservationId: string): number[] {
     return pids
   }
   if (process.platform === 'darwin') {
-    const output = execFileSync('ps', ['eww', '-axo', 'pid=,command='], { encoding: 'utf-8' })
-    return output
-      .split('\n')
-      .filter((line) => line.includes(marker))
-      .map((line) => Number(/^\s*(\d+)/.exec(line)?.[1]))
-      .filter((pid) => Number.isFinite(pid) && pid > 0)
+    const output = execFileSync('ps', ['-Eww', '-axo', 'pid=,pgid=,command='], { encoding: 'utf-8' })
+    const groupRoots = new Map<number, number>()
+    for (const line of output.split('\n')) {
+      if (!line.includes(marker)) continue
+      const match = /^\s*(\d+)\s+(\d+)\s+/.exec(line)
+      if (!match) continue
+      const pid = Number(match[1])
+      const pgid = Number(match[2])
+      if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(pgid) || pgid <= 0) continue
+      const current = groupRoots.get(pgid)
+      if (current === undefined || pid === pgid) groupRoots.set(pgid, pid)
+    }
+    return [...groupRoots.values()]
   }
   throw new Error(`Cannot recover exclusive child reservation on ${process.platform}`)
 }
