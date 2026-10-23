@@ -52,11 +52,22 @@ function payload(): DiagnosticsData {
       snapshotCacheEvictions: series('count', 1, 10),
       snapshotCacheLimitBytes: series('bytes', 16 * 1024 * 1024, 10),
     },
+    runtimes: [],
     history: Array.from({ length: 60 }, (_, index) => ({
       timestamp: NOW - (59 - index) * 1_000,
       eventLoopDelayMax: index === 55 ? 210 : 2,
       eventLoopDelayP99: index === 55 ? 200 : 1,
     })),
+  }
+}
+
+function payloadWithRuntimes(): DiagnosticsData {
+  return {
+    ...payload(),
+    runtimes: [
+      { sessionId: 'sess-a', state: 'running', lastCommand: 'launch' },
+      { sessionId: 'sess-b', state: 'workflow', lastCommand: 'workflow' },
+    ],
   }
 }
 
@@ -113,6 +124,17 @@ describe('SantePage', () => {
     const container = render()
     await flush()
     expect(text(container, 'sante-error')).toContain('/api/diagnostics')
+  })
+
+  it('shows the runtimes panel with state and last command', async () => {
+    vi.mocked(authFetch).mockResolvedValue(ok(payloadWithRuntimes()))
+    const container = render()
+    await flush()
+
+    expect(text(container, 'sante-runtimes')).toContain('Runtimes')
+    expect(text(container, 'runtime-sess-a')).toContain('Running')
+    expect(text(container, 'runtime-sess-a')).toContain('Launch')
+    expect(text(container, 'runtime-sess-b')).toContain('Workflow')
   })
 
   it('refreshes every 2 seconds and stops polling once unmounted', async () => {

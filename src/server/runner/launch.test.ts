@@ -7,7 +7,8 @@ vi.mock('./index.js', () => ({
   runOrchestrator: (...args: unknown[]) => runOrchestratorMock(...args),
 }))
 
-import { launchWorkflowRun, abortRunnerRun } from './launch.js'
+import { launchWorkflowRun } from './launch.js'
+import { getSessionRuntimeRegistry, resetSessionRuntimeRegistry } from '../session/index.js'
 
 const flush = async () => {
   for (let i = 0; i < 5; i++) await Promise.resolve()
@@ -22,10 +23,10 @@ describe('launchWorkflowRun', () => {
   }
   let broadcast: ReturnType<typeof vi.fn>
   let onFinished: ReturnType<typeof vi.fn>
-  let controller: AbortController
 
   beforeEach(() => {
     runOrchestratorMock.mockReset()
+    resetSessionRuntimeRegistry()
     sessionManager = {
       setRunning: vi.fn(),
       getActiveWorkflowExecution: vi.fn(() => null),
@@ -33,12 +34,12 @@ describe('launchWorkflowRun', () => {
       resumeWorkflow: vi.fn(),
     }
     broadcast = vi.fn()
-    onFinished = vi.fn()
-    controller = new AbortController()
+    onFinished = vi.fn(() => 'settled')
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
+    resetSessionRuntimeRegistry()
   })
 
   const run = (payload: Record<string, unknown> = {}) =>
@@ -46,7 +47,7 @@ describe('launchWorkflowRun', () => {
       {
         sessionManager: sessionManager as never,
         sessionId: 'sess-1',
-        controller,
+        runtimeHandle: getSessionRuntimeRegistry().get('sess-1').acquire('workflow'),
         llmClient: { getModel: () => 'm', getBackend: () => 'openai' } as never,
         statsIdentity: { providerId: 'p', providerName: 'pn', backend: 'openai', model: 'm' },
         broadcastForSession: broadcast as never,
@@ -138,6 +139,72 @@ describe('launchWorkflowRun', () => {
     expect(onFinished).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the runtime acquired while onFinished runs, then releases it', async () => {
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    const runtime = getSessionRuntimeRegistry().get('sess-1')
+    onFinished.mockImplementation(() => {
+      expect(runtime.currentHandle()).not.toBeNull()
+      return 'settled'
+    })
+    run({ workflowId: 'wf' })
+    await flush()
+    expect(onFinished).toHaveBeenCalledTimes(1)
+    expect(runtime.currentHandle()).toBeNull()
+    expect(runtime.snapshot().state).toBe('idle')
+  })
+
+  it('leaves the running state to the successor when onFinished restarts a turn', async () => {
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    onFinished.mockImplementation(() => {
+      // cleanupAfterTurn released the workflow handle and acquired the
+      // successor's chat handle before returning.
+      const runtime = getSessionRuntimeRegistry().get('sess-1')
+      runtime.release(runtime.currentHandle()!)
+      runtime.acquire('chat')
+      return 'restarted'
+    })
+    run({ workflowId: 'wf' })
+    await flush()
+
+    expect(onFinished).toHaveBeenCalledTimes(1)
+    // No isRunning=false write, no running=false broadcast: the successor owns it
+    expect(sessionManager.setRunning).toHaveBeenCalledTimes(1)
+    expect(sessionManager.setRunning).toHaveBeenNthCalledWith(1, 'sess-1', true)
+    expect(
+      broadcast.mock.calls.some(([, msg]) => msg.type === 'session.running' && msg.payload.isRunning === false),
+    ).toBe(false)
+    // The old finally must not release the successor's handle either
+    const handle = getSessionRuntimeRegistry().get('sess-1').currentHandle()
+    expect(handle?.kind).toBe('chat')
+  })
+
+  it('does not write the running state when onFinished reports a stale handle', async () => {
+    runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    onFinished.mockReturnValue('stale')
+    run({ workflowId: 'wf' })
+    await flush()
+
+    expect(sessionManager.setRunning).toHaveBeenCalledTimes(1)
+    expect(
+      broadcast.mock.calls.some(([, msg]) => msg.type === 'session.running' && msg.payload.isRunning === false),
+    ).toBe(false)
+  })
+
+  it('does not recreate a runtime after the session is deleted mid-run', async () => {
+    let settle!: (value: unknown) => void
+    runOrchestratorMock.mockImplementation(
+      () =>
+        new Promise((done) => {
+          settle = done
+        }),
+    )
+    run({ workflowId: 'wf' })
+    getSessionRuntimeRegistry().remove('sess-1')
+    settle({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
+    await flush()
+    expect(getSessionRuntimeRegistry().peek('sess-1')).toBeUndefined()
+  })
+
   it('re-activates a blocked execution when retrying its step', async () => {
     runOrchestratorMock.mockResolvedValue({ finalAction: { type: 'DONE' }, iterations: 1, totalTime: 1 })
     sessionManager.getLatestWorkflowExecution = vi.fn(() => ({
@@ -192,38 +259,5 @@ describe('launchWorkflowRun', () => {
     expect(options.params).toBeUndefined()
     expect(options.initialStepOutput).toBeUndefined()
     expect(sessionManager.resumeWorkflow).not.toHaveBeenCalled()
-  })
-})
-
-describe('abortRunnerRun', () => {
-  it('aborts a registered run and reports success', async () => {
-    runOrchestratorMock.mockImplementation(() => new Promise(() => {}))
-    const controller = new AbortController()
-    const abortSpy = vi.spyOn(controller, 'abort')
-
-    launchWorkflowRun(
-      {
-        sessionManager: {
-          setRunning: vi.fn(),
-          getActiveWorkflowExecution: vi.fn(() => null),
-          resumeWorkflow: vi.fn(),
-        } as never,
-        sessionId: 'sess-abort',
-        controller,
-        llmClient: {} as never,
-        statsIdentity: { providerId: 'p', providerName: 'pn', backend: 'openai', model: 'm' },
-        broadcastForSession: vi.fn() as never,
-      },
-      { workflowId: 'wf' } as never,
-    )
-    expect(abortRunnerRun('sess-abort')).toBe(true)
-    expect(abortSpy).toHaveBeenCalled()
-
-    // A second abort reports false (nothing running).
-    expect(abortRunnerRun('sess-abort')).toBe(true)
-  })
-
-  it('returns false when nothing is running for the session', () => {
-    expect(abortRunnerRun('sess-none')).toBe(false)
   })
 })

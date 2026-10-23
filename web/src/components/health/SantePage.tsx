@@ -1,4 +1,10 @@
-import type { DiagnosticsSeries, DiagnosticsSeriesName } from '@shared/diagnostics.js'
+import type {
+  DiagnosticsSeries,
+  DiagnosticsSeriesName,
+  RuntimeLastCommand,
+  RuntimeSnapshot,
+  RuntimeState,
+} from '@shared/diagnostics.js'
 import { DIAGNOSTICS_SERIES_NAMES } from '@shared/diagnostics.js'
 import type { Translation } from '@shared/i18n/index.js'
 import { useDiagnostics } from '../../hooks/useDiagnostics'
@@ -22,6 +28,25 @@ const SERIES_LABELS: Record<DiagnosticsSeriesName, Translation> = {
   snapshotCacheBytes: { en: 'Snapshot cache bytes', fr: 'Cache instantanés octets' },
   snapshotCacheEvictions: { en: 'Snapshot cache evictions', fr: 'Cache instantanés évictions' },
   snapshotCacheLimitBytes: { en: 'Snapshot cache limit', fr: 'Cache instantanés limite' },
+}
+
+const RUNTIME_STATE_LABELS: Record<RuntimeState, Translation> = {
+  idle: { en: 'Idle', fr: 'Inactif' },
+  running: { en: 'Running', fr: 'En cours' },
+  paused: { en: 'Paused', fr: 'En pause' },
+  stopping: { en: 'Stopping', fr: 'Arrêt en cours' },
+  compacting: { en: 'Compacting', fr: 'Compactage' },
+  workflow: { en: 'Workflow', fr: 'Workflow' },
+}
+
+const RUNTIME_COMMAND_LABELS: Record<RuntimeLastCommand, Translation> = {
+  launch: { en: 'Launch', fr: 'Lancement' },
+  stop: { en: 'Stop', fr: 'Arrêt' },
+  pause: { en: 'Pause', fr: 'Pause' },
+  resume: { en: 'Resume', fr: 'Reprise' },
+  answer: { en: 'Answer', fr: 'Réponse' },
+  workflow: { en: 'Workflow', fr: 'Workflow' },
+  compact: { en: 'Compact', fr: 'Compactage' },
 }
 
 function formatValue(series: DiagnosticsSeries): string {
@@ -124,6 +149,31 @@ export function SantePage() {
                   </div>
                 )
               })}
+            </section>
+
+            <section className="rounded border border-border bg-bg-secondary p-3" data-testid="sante-runtimes">
+              <h2 className="text-sm font-medium text-text-primary mb-2">{t({ en: 'Runtimes', fr: 'Runtimes' })}</h2>
+              {data.runtimes.length === 0 ? (
+                <div className="text-sm text-text-muted">
+                  {t({ en: 'No active runtimes', fr: 'Aucun runtime actif' })}
+                </div>
+              ) : (
+                <ul className="space-y-1">
+                  {data.runtimes.map((runtime: RuntimeSnapshot) => (
+                    <li
+                      key={runtime.sessionId}
+                      data-testid={`runtime-${runtime.sessionId}`}
+                      className="flex items-center justify-between text-sm"
+                    >
+                      <span className="text-text-primary truncate">{runtime.sessionId}</span>
+                      <span className="text-text-muted">
+                        {t(RUNTIME_STATE_LABELS[runtime.state])}
+                        {runtime.lastCommand ? ` · ${t(RUNTIME_COMMAND_LABELS[runtime.lastCommand])}` : ''}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </section>
           </>
         )}

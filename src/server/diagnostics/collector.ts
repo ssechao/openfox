@@ -6,6 +6,7 @@ import type {
   DiagnosticsSeries,
   DiagnosticsUnit,
 } from '../../shared/diagnostics.js'
+import type { SessionRuntimeRegistry } from '../session/index.js'
 import type { DiagnosticsCollector } from './types.js'
 import { LatencyHistogram, mergedCount, mergedMax, mergedPercentile } from './histogram.js'
 
@@ -38,6 +39,7 @@ export interface SnapshotCacheGauges {
 export interface CollectorOptions {
   countRunningSessions?: () => number
   snapshotCacheStats?: () => SnapshotCacheGauges
+  runtimeRegistry?: SessionRuntimeRegistry
   dbPath?: string
   intervalMs?: number
   windowMs?: number
@@ -225,6 +227,7 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
         snapshotCacheLimitBytes: liveCache('snapshotCacheLimitBytes', 'limitBytes', 'bytes'),
       },
       history,
+      runtimes: options.runtimeRegistry?.list() ?? [],
     }
   }
 

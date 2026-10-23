@@ -76,10 +76,10 @@ describe('Concurrency Guards', () => {
       // Wait for session to be marked as running
       await client.waitFor('session.running', (p: { isRunning: boolean }) => p.isRunning)
 
-      // Try to launch runner while running - should be queued (new behavior)
+      // Try to launch runner while running - explicitly refused
       const response = await client.send('runner.launch', {})
 
-      expect(response.type).toBe('queue.state')
+      expect(response.type).toBe('error')
 
       // Stop the running chat
       await stopSessionChat(server.url, sessionId)

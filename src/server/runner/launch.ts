@@ -4,9 +4,9 @@
  * Single code path for starting a workflow-orchestrator run in a session,
  * used by the WebSocket `runner.launch` handler and by the project-tasks
  * service when a slash-workflow task is seeded. Owns the running-state
- * lifecycle, error surfacing, and a small registry so `abortRunnerRun` can
- * cancel task-launched runs (the WS layer additionally tracks its own
- * controllers for client-initiated runs).
+ * lifecycle and error surfacing. The caller must acquire a `workflow`
+ * ExecutionHandle from `SessionRuntimeRegistry` and pass it in; abort/stop
+ * is handled by the shared runtime, not by a local controller registry.
  */
 
 import type { Attachment, StatsIdentity, WorkflowLaunchScope } from '../../shared/types.js'
@@ -14,6 +14,7 @@ import type { ServerMessage } from '../../shared/protocol.js'
 import { createServerMessage } from '../../shared/protocol.js'
 import type { LLMClientWithModel } from '../llm/client.js'
 import type { SessionManager } from '../session/index.js'
+import { getSessionRuntimeRegistry, type ExecutionHandle } from '../session/index.js'
 import { runOrchestrator } from './index.js'
 import { normalizeWorkflowScope } from '../workflows/registry.js'
 import { logger } from '../utils/logger.js'
@@ -34,43 +35,40 @@ export interface WorkflowLaunchPayload {
   attachments?: Attachment[]
 }
 
+/**
+ * Outcome of the post-run turn cleanup:
+ * - `restarted`: a queued message started a successor turn — the successor
+ *   owns the session's running state from now on.
+ * - `settled`: no successor — the caller finalizes (isRunning=false).
+ * - `stale`: the handle was no longer current — nothing may be touched.
+ */
+export type TurnCleanupOutcome = 'restarted' | 'settled' | 'stale'
+
 export interface LaunchWorkflowRunDeps {
   sessionManager: SessionManager
   sessionId: string
-  controller: AbortController
+  runtimeHandle: ExecutionHandle
   llmClient: LLMClientWithModel
   /** Re-resolve the session's LLM client per retry attempt (provider switch mid-run). */
   getSessionLLMClient?: () => LLMClientWithModel
   statsIdentity: StatsIdentity
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
   /** Turn-bookkeeping cleanup after the run settles (queue drain, restart, …). */
-  onFinished?: () => void
-}
-
-const activeRuns = new Map<string, AbortController>()
-
-/** Abort a task-launched workflow run for a session. Returns whether one was found. */
-export function abortRunnerRun(sessionId: string): boolean {
-  const controller = activeRuns.get(sessionId)
-  if (!controller) return false
-  controller.abort()
-  return true
+  onFinished?: () => TurnCleanupOutcome
 }
 
 export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: WorkflowLaunchPayload): void {
   const {
     sessionManager,
     sessionId,
-    controller,
+    runtimeHandle,
     llmClient,
     getSessionLLMClient,
     statsIdentity,
     broadcastForSession,
     onFinished,
   } = deps
-  const signal = controller.signal
-
-  activeRuns.set(sessionId, controller)
+  const signal = runtimeHandle.signal
 
   // Mark session as running (emits running.changed event)
   sessionManager.setRunning(sessionId, true)
@@ -153,14 +151,35 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
       broadcastForSession(sessionId, createServerMessage('chat.error', { error: errorMessage, recoverable: false }))
     })
     .finally(() => {
-      if (activeRuns.get(sessionId) === controller) {
-        activeRuns.delete(sessionId)
+      const runtime = getSessionRuntimeRegistry().peek(sessionId)
+      if (!runtime) return
+      if (onFinished) {
+        let outcome: TurnCleanupOutcome
+        try {
+          outcome = onFinished()
+        } catch {
+          // Session may have been deleted during execution. If our handle is
+          // still current, no successor was started: we still own finalization.
+          outcome = runtime.isCurrent(runtimeHandle) ? 'settled' : 'stale'
+        }
+        runtime.release(runtimeHandle)
+        // A successor turn started during cleanup owns the running state now —
+        // never write isRunning=false after it, and never touch a stale handle.
+        if (outcome !== 'settled') return
+        try {
+          // The orchestrator bypasses runChatTurn, so isRunning must be cleared here
+          sessionManager.setRunning(sessionId, false)
+          broadcastForSession(sessionId, createSessionRunningMessage(false))
+        } catch {
+          // Session may have been deleted during execution
+        }
+        return
       }
+      if (!runtime.release(runtimeHandle)) return
       try {
         // The orchestrator bypasses runChatTurn, so isRunning must be cleared here
         sessionManager.setRunning(sessionId, false)
         broadcastForSession(sessionId, createSessionRunningMessage(false))
-        onFinished?.()
       } catch {
         // Session may have been deleted during execution
       }

@@ -43,6 +43,7 @@ import { createServerMessage } from '../shared/protocol.js'
 import { createContextStateMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
+import { isSessionAlreadyRunningError, SessionRuntimeRegistry, setSessionRuntimeRegistry } from './session/index.js'
 import { clearSessionsForDeletedProvider, reconcileSessionProviders } from './session/provider-reconcile.js'
 import { toClientSession } from './session/client-session.js'
 import { setRuntimeConfig } from './runtime-config.js'
@@ -177,10 +178,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Create SessionManager instance (not singleton!)
   const sessionManager = new SessionManager(providerManager)
 
+  // Single in-process runtime owner per session.
+  const runtimeRegistry = new SessionRuntimeRegistry({
+    getPauseState: (sessionId) => sessionManager.getPauseState(sessionId),
+  })
+  setSessionRuntimeRegistry(runtimeRegistry)
+
   const diagnosticsCollector = createDiagnosticsCollector({
     dbPath: db.name,
     countRunningSessions: () => getEventStore().countRunningSessions(),
     snapshotCacheStats: () => getEventStore().getSnapshotCacheStats(),
+    runtimeRegistry,
   })
   getEventStore().setHealthCollector(diagnosticsCollector)
   diagnosticsCollector.start()
@@ -1129,6 +1137,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     cancelQuestionsForSession(sessionId, 'Session deleted')
     cancelPathConfirmationsForSession(sessionId, 'Session deleted')
 
+    runtimeRegistry.remove(sessionId)
     sessionManager.deleteSession(sessionId)
     wssExports.broadcastAll({
       type: 'session.deleted',
@@ -1607,13 +1616,23 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(400).json({ error: 'answer is required when not skipping' })
     }
 
-    const { provideAnswer } = await import('./tools/index.js')
+    const session = sessionManager.getSession(req.params.id)
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const belongsToSession = getPendingQuestionsForSession(req.params.id).some((q) => q.callId === callId)
+    if (!belongsToSession) {
+      return res.status(404).json({ error: 'No pending question with that ID' })
+    }
+
     const found = provideAnswer(callId, answer ?? '', skip ?? false)
 
     if (!found) {
       return res.status(404).json({ error: 'No pending question with that ID' })
     }
 
+    runtimeRegistry.peek(req.params.id)?.recordCommand('answer')
     res.json({ success: true })
   })
 
@@ -1630,6 +1649,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const hasAttachments = Array.isArray(attachments) && attachments.length > 0
     if (!hasContent && !hasAttachments) {
       return res.status(400).json({ error: 'content or attachments is required' })
+    }
+
+    if (runtimeRegistry.peek(sessionId)?.state === 'stopping') {
+      return res.status(409).json({ error: 'Session is stopping', code: 'SESSION_ALREADY_RUNNING' })
     }
 
     // Always queue the message - QueueProcessor will handle it
@@ -1742,7 +1765,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(404).json({ error: 'Session not found' })
     }
 
-    const { stopSessionExecution } = await import('./session/chat-handler.js')
     const { cancelQuestionsForSession, cancelPathConfirmationsForSession } = await import('./tools/index.js')
 
     // Drain queued messages BEFORE stopping execution, so the QueueProcessor
@@ -1750,15 +1772,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const queuedMessages = sessionManager.getQueueState(sessionId)
     sessionManager.clearMessageQueue(sessionId)
 
-    // Abort both plan mode (WS) and build mode (chat-handler) controllers + QueueProcessor
-    stopSessionExecution(sessionId, sessionManager)
+    // Abort the single root runtime controller. This is synchronous before any
+    // further I/O and clears the pause gate so the stop ACK is immediate.
     abortSession(sessionId)
 
     cancelQuestionsForSession(sessionId, 'Session stopped by user')
     cancelPathConfirmationsForSession(sessionId, 'Session stopped by user')
 
-    const eventStore = (await import('./events/index.js')).getEventStore()
-    eventStore.append(sessionId, { type: 'running.changed', data: { isRunning: false } })
+    getEventStore().append(sessionId, { type: 'running.changed', data: { isRunning: false } })
 
     res.json({ success: true, queuedMessages })
   })
@@ -1780,6 +1801,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(409).json({ error: 'A pause is already in progress' })
     }
 
+    runtimeRegistry.get(sessionId).recordCommand('pause')
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
   })
 
@@ -1796,6 +1818,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(409).json({ error: 'Nothing to resume' })
     }
 
+    runtimeRegistry.get(sessionId).recordCommand('resume')
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
   })
 
@@ -3733,7 +3756,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // Point the tasks service at the workflow launcher. Task-seeded workflows run
   // through the same shared launcher as runner.launch (src/server/runner/launch.ts).
-  const { launchWorkflowRun, abortRunnerRun } = await import('./runner/launch.js')
+  const { launchWorkflowRun } = await import('./runner/launch.js')
   deferTasksLaunchWorkflow = (sessionId, launch) => {
     // Honor the session's effective provider/model (agent override > session
     // preference > default) exactly like the WS session-aware client path —
@@ -3747,13 +3770,22 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         getLLMClient()
     }
     const provider = providerManager.getActiveProvider()
-    const controller = new AbortController()
     const statsEffort = llmClient.getReasoningEffort?.()
+    let handle
+    try {
+      handle = runtimeRegistry.get(sessionId).acquire('workflow')
+    } catch (error) {
+      if (isSessionAlreadyRunningError(error)) {
+        logger.warn('Cannot launch workflow: session already owned', { sessionId, error: error.message })
+        return
+      }
+      throw error
+    }
     launchWorkflowRun(
       {
         sessionManager,
         sessionId,
-        controller,
+        runtimeHandle: handle,
         llmClient,
         statsIdentity: {
           providerId: provider?.id ?? `provider:${llmClient.getModel()}`,
@@ -3791,6 +3823,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const queueProcessor = new QueueProcessor({
     sessionManager,
     providerManager,
+    runtimeRegistry,
     getLLMClient,
     getLLMClientForProvider,
     getActiveProvider: () => providerManager.getActiveProvider(),
@@ -3820,11 +3853,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   }
 
   const abortSession = (sessionId: string) => {
-    const wsAborted = wssExports.abortSession(sessionId)
-    const qpAborted = queueProcessor.abortSession(sessionId)
-    const taskAborted = abortRunnerRun(sessionId)
-    const aborted = wsAborted || qpAborted || taskAborted
+    const aborted = runtimeRegistry.get(sessionId).stop()
     if (aborted) {
+      sessionManager.clearPauseState(sessionId)
       sessionManager.setRunning(sessionId, false)
       wssExports.broadcastForSession(sessionId, { type: 'session.running', payload: { isRunning: false } })
     }
@@ -3871,7 +3902,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       })
     },
     stopWorkflow: (sessionId) => {
-      const runningAborted = abortRunnerRun(sessionId)
+      const runningAborted = runtimeRegistry.get(sessionId).abortWorkflow()
       if (runningAborted) return { aborted: 'running' }
       const execution = sessionManager.getActiveWorkflowExecution(sessionId)
       if (execution && execution.status === 'waiting') {
@@ -3976,6 +4007,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
           // Note: Not closing database here - it's a singleton shared across servers.
           // Database should only be closed when the application exits.
+          runtimeRegistry.abortAll()
           // Terminate all WebSocket connections to allow clean shutdown
           for (const client of wss.clients) {
             client.terminate()

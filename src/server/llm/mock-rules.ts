@@ -461,6 +461,31 @@ export const RULES: MockRule[] = [
     response: 'Listed directory contents.',
   },
   {
+    match: /RUNTIME-STOP-DEMO-TREE/i,
+    tools: [{ name: 'run_command', arguments: { command: 'bash ./tree.sh' } }],
+    response: 'Started the process tree for the stop demo.',
+  },
+  {
+    match: /RUNTIME-STOP-DEMO-BG/i,
+    tools: [
+      {
+        name: 'background_process',
+        arguments: {
+          action: 'start',
+          name: 'survivor',
+          command: 'node -e "process.title=\'of-stop-demo-survivor\'; setInterval(()=>{},1000)"',
+          timeout: 120000,
+        },
+      },
+    ],
+    response: 'Started the independent background process.',
+  },
+  {
+    match: /RUNTIME-HOLD-TURN/i,
+    tools: [{ name: 'run_command', arguments: { command: 'sleep 30' } }],
+    response: 'Held the turn.',
+  },
+  {
     match: /run.*command|execute/i,
     tools: [{ name: 'run_command', arguments: { command: 'echo "test"' } }],
     response: 'Executed the command.',

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { QueueProcessor } from './processor.js'
+import { SessionRuntimeRegistry } from '../session/index.js'
 import { initDatabase, closeDatabase } from '../db/index.js'
 import type { Config } from '../config.js'
 
@@ -39,6 +40,7 @@ describe('QueueProcessor', () => {
   let mockGetLLMClient: any
   let mockGetActiveProvider: any
   let mockBroadcastForSession: any
+  let runtimeRegistry: SessionRuntimeRegistry
   let queueProcessor: QueueProcessor
 
   // Stateful session mock: mutations via setRunning are reflected in getSession
@@ -116,10 +118,12 @@ describe('QueueProcessor', () => {
     }))
     mockGetActiveProvider = vi.fn()
     mockBroadcastForSession = vi.fn()
+    runtimeRegistry = new SessionRuntimeRegistry()
 
     queueProcessor = new QueueProcessor({
       sessionManager: mockSessionManager as any,
       providerManager: mockProviderManager as any,
+      runtimeRegistry,
       getLLMClient: mockGetLLMClient,
       getActiveProvider: mockGetActiveProvider,
       broadcastForSession: mockBroadcastForSession,
@@ -128,6 +132,7 @@ describe('QueueProcessor', () => {
 
   afterEach(() => {
     queueProcessor.stop()
+    runtimeRegistry.remove('sess-1')
     vi.clearAllMocks()
   })
 
@@ -164,6 +169,20 @@ describe('QueueProcessor', () => {
 
       expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
       expect(mockSessionManager.addMessage).toHaveBeenCalled()
+    })
+
+    it('does not start a turn while the runtime is stopping', () => {
+      const handle = runtimeRegistry.get('sess-1').acquire('chat')
+      runtimeRegistry.get('sess-1').stop()
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+
+      queueProcessor.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+
+      expect(mockSessionManager.setRunning).not.toHaveBeenCalled()
+      runtimeRegistry.get('sess-1').release(handle)
     })
 
     it('should NOT start turn when session is already running', () => {
@@ -254,6 +273,7 @@ describe('QueueProcessor', () => {
       const qp = new QueueProcessor({
         sessionManager: mockSessionManager as any,
         providerManager: mockProviderManager as any,
+        runtimeRegistry,
         getLLMClient: mockGetLLMClient,
         getLLMClientForProvider: getLLMClientForProviderMock,
         getActiveProvider: mockGetActiveProvider,
@@ -305,6 +325,7 @@ describe('QueueProcessor', () => {
       const qp = new QueueProcessor({
         sessionManager: mockSessionManager as any,
         providerManager: mockProviderManager as any,
+        runtimeRegistry,
         getLLMClient: mockGetLLMClient,
         getLLMClientForProvider: getLLMClientForProviderMock,
         getActiveProvider: mockGetActiveProvider,
@@ -453,6 +474,49 @@ describe('QueueProcessor', () => {
 
       expect(mockSessionManager.cancelWorkflow).not.toHaveBeenCalled()
       expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
+    })
+  })
+
+  describe('runtime release on failure', () => {
+    it('releases the runtime when a side effect throws right after acquire', () => {
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+      mockSessionManager.addMessage = vi.fn(() => {
+        throw new Error('boom')
+      })
+
+      queueProcessor.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+
+      expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', false)
+      const handle = runtimeRegistry.get('sess-1').acquire('chat')
+      expect(handle.sessionId).toBe('sess-1')
+      runtimeRegistry.get('sess-1').release(handle)
+    })
+
+    it('releases the runtime when the async turn setup fails', async () => {
+      mockProviderManager.getActiveProviderId = vi.fn(() => 'provider-global')
+      mockProviderManager.activateProvider = vi.fn().mockRejectedValue(new Error('boom'))
+
+      sessionState = {
+        id: 'sess-1',
+        isRunning: false,
+        metadata: { title: undefined },
+        providerId: 'provider-2',
+        providerModel: 'custom-model',
+      }
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+
+      queueProcessor.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      const handle = runtimeRegistry.get('sess-1').acquire('chat')
+      expect(handle.sessionId).toBe('sess-1')
+      runtimeRegistry.get('sess-1').release(handle)
+      expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', false)
     })
   })
 })
