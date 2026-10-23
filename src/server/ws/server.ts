@@ -1055,62 +1055,75 @@ async function handleClientMessage(
       const compactHandle = acquireRuntime(sessionId, 'compact', message.id, send)
       if (!compactHandle) return
 
-      // Acknowledge immediately
-      send({ type: 'ack', payload: {}, id: message.id })
+      try {
+        // Acknowledge immediately
+        send({ type: 'ack', payload: {}, id: message.id })
 
-      // Append compaction prompt to event store (shared helper, same as agent-loop.ts auto-compaction trigger)
-      appendCompactionPrompt(sessionId, (event) => getEventStore().append(sessionId, event))
+        // Append compaction prompt to event store (shared helper, same as agent-loop.ts auto-compaction trigger)
+        appendCompactionPrompt(sessionId, (event) => getEventStore().append(sessionId, event))
 
-      // Run through the agent loop — same path as auto-compaction and normal turns
-      runChatTurn({
-        sessionManager,
-        sessionId,
-        llmClient: llmForSession(sessionId),
-        getSessionLLMClient: () => llmForSession(sessionId),
-        statsIdentity: statsForSession(sessionId),
-        signal: compactHandle.signal,
-        onMessage: (msg) => _broadcastForSession(sessionId, msg),
-        initialCompacting: true,
-      })
-        .then(() => {
-          const newContextState = sessionManager.getContextState(sessionId)
-          sendForSession(sessionId, createContextStateMessage(newContextState))
+        // Run through the agent loop — same path as auto-compaction and normal turns
+        runChatTurn({
+          sessionManager,
+          sessionId,
+          llmClient: llmForSession(sessionId),
+          getSessionLLMClient: () => llmForSession(sessionId),
+          statsIdentity: statsForSession(sessionId),
+          signal: compactHandle.signal,
+          onMessage: (msg) => _broadcastForSession(sessionId, msg),
+          initialCompacting: true,
         })
-        .catch((error) => {
-          if (error instanceof Error && error.message === 'Aborted') return
-          logger.error('Compaction failed', { error, sessionId })
-          const reason = error instanceof Error ? error.message : serverT(MSG_UNKNOWN_ERROR)
-          sendForSession(
-            sessionId,
-            createChatErrorMessage(
-              serverT({ en: 'Compaction failed: {{reason}}', fr: 'Échec de la compaction : {{reason}}' }, { reason }),
-              true,
-            ),
-          )
-        })
-        .finally(() => {
-          try {
-            const runtime = getSessionRuntimeRegistry().peek(sessionId)
-            const stopped = runtime?.wasStopped(compactHandle) ?? false
-            if (!runtime?.release(compactHandle)) return
+          .then(() => {
+            const newContextState = sessionManager.getContextState(sessionId)
+            sendForSession(sessionId, createContextStateMessage(newContextState))
+          })
+          .catch((error) => {
+            if (error instanceof Error && error.message === 'Aborted') return
+            logger.error('Compaction failed', { error, sessionId })
+            const reason = error instanceof Error ? error.message : serverT(MSG_UNKNOWN_ERROR)
+            sendForSession(
+              sessionId,
+              createChatErrorMessage(
+                serverT({ en: 'Compaction failed: {{reason}}', fr: 'Échec de la compaction : {{reason}}' }, { reason }),
+                true,
+              ),
+            )
+          })
+          .finally(() => {
+            try {
+              const runtime = getSessionRuntimeRegistry().peek(sessionId)
+              const stopped = runtime?.wasStopped(compactHandle) ?? false
+              if (!runtime?.release(compactHandle)) return
 
-            if (stopped) {
-              sessionManager.clearMessageQueue(sessionId)
+              if (stopped) {
+                sessionManager.clearMessageQueue(sessionId)
+              }
+
+              // runChatTurn sets isRunning=true but its finally only appends to EventStore.
+              // We must update the DB and broadcast so the QueueProcessor can process
+              // subsequent messages.
+              sessionManager.setRunning(sessionId, false)
+              sendForSession(sessionId, createSessionRunningMessage(false))
+
+              // Send fresh context state
+              const contextState = sessionManager.getContextState(sessionId)
+              sendForSession(sessionId, createContextStateMessage(contextState))
+            } catch {
+              // Session may have been deleted during execution
             }
-
-            // runChatTurn sets isRunning=true but its finally only appends to EventStore.
-            // We must update the DB and broadcast so the QueueProcessor can process
-            // subsequent messages.
-            sessionManager.setRunning(sessionId, false)
-            sendForSession(sessionId, createSessionRunningMessage(false))
-
-            // Send fresh context state
-            const contextState = sessionManager.getContextState(sessionId)
-            sendForSession(sessionId, createContextStateMessage(contextState))
-          } catch {
-            // Session may have been deleted during execution
-          }
-        })
+          })
+      } catch (error) {
+        logger.error('Compaction failed to start, releasing runtime', { error, sessionId })
+        getSessionRuntimeRegistry().peek(sessionId)?.release(compactHandle)
+        const reason = error instanceof Error ? error.message : serverT(MSG_UNKNOWN_ERROR)
+        sendForSession(
+          sessionId,
+          createChatErrorMessage(
+            serverT({ en: 'Compaction failed: {{reason}}', fr: 'Échec de la compaction : {{reason}}' }, { reason }),
+            true,
+          ),
+        )
+      }
 
       break
     }
