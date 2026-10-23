@@ -168,6 +168,8 @@ export interface SessionState {
   pauseGeneration: (sessionId: string) => void
   /** Cancel a pending pause, or release a paused agent. */
   resumeGeneration: (sessionId: string) => void
+  /** Resume a session that was interrupted by a worker crash (étape 6b). */
+  resumeInterruption: (sessionId: string) => Promise<void>
   launchWorkflow: (
     sessionId: string,
     content?: string,

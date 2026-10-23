@@ -35,6 +35,7 @@ import { assignWorkerToken, clearWorkerToken, isWorkerMessageCurrent, type Worke
 import { childrenFilePath, killTrackedChildren, removeChildrenFile } from './children.js'
 import { markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
 import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
+import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 
 export interface WorkerSettledOutcome {
   crashed: boolean
@@ -71,6 +72,7 @@ export interface SessionWorkerManagerDeps {
   sessionManager: SessionManager
   isEnabled: () => boolean
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
+  healthAggregator?: HealthAggregator
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
@@ -182,6 +184,8 @@ export class SessionWorkerManager {
         this.sendTo(worker, { ...token, type: 'start', sessionId, config: this.deps.config })
       } else if (msg.type === 'ws') {
         this.deps.broadcastForSession(sessionId, msg.msg)
+      } else if (msg.type === 'health') {
+        this.deps.healthAggregator?.recordSnapshot(token, msg.data)
       } else if (msg.type === 'done') {
         worker.doneReceived = true
         worker.doneOk = msg.ok
@@ -214,6 +218,7 @@ export class SessionWorkerManager {
     }
     removeChildrenFile(worker.childrenPath)
     clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
+    this.deps.healthAggregator?.expireWorker(worker.token)
     worker.onSettled({ crashed: false })
   }
 
@@ -234,6 +239,7 @@ export class SessionWorkerManager {
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
 
     clearWorkerToken(db, sessionId, token)
+    this.deps.healthAggregator?.expireWorker(token)
 
     if (clean) {
       removeChildrenFile(worker.childrenPath)

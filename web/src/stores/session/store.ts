@@ -1045,6 +1045,29 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }
     },
 
+    resumeInterruption: async (sessionId) => {
+      const pane = paneFor(get(), sessionId)
+      if (!pane?.session?.interruptedAt) return
+      set((s) => updatePane(s, sessionId, (p) => ({ ...p, abortInProgress: true })))
+      try {
+        const res = await authFetch(`/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({ error: 'Unknown error' }))
+          set((s) =>
+            updatePane(s, sessionId, (p) => ({
+              ...p,
+              error: { code: 'resume_failed', message: body.error ?? 'Resume failed' },
+            })),
+          )
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: { code: 'resume_failed', message } })))
+      } finally {
+        set((s) => updatePane(s, sessionId, (p) => ({ ...p, abortInProgress: false })))
+      }
+    },
+
     launchWorkflow: (sessionId, content?, attachments?, workflowId?, subGroup?, params?, scope?) => {
       if (!paneFor(get(), sessionId)?.session) return
       const payload: Record<string, unknown> = { sessionId }

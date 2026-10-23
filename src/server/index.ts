@@ -73,6 +73,7 @@ import { createNotificationRoutes } from './routes/notifications.js'
 import { pluginAssetToken } from './plugins/asset-auth.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { createDiagnosticsCollector } from './diagnostics/collector.js'
+import { createHealthAggregator } from './diagnostics/aggregator.js'
 import { registerBlobRoutes } from './routes/blobs.js'
 import { logger, setLogLevel } from './utils/logger.js'
 import { requestAbortSignal } from './utils/request-abort.js'
@@ -184,10 +185,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
   setSessionRuntimeRegistry(runtimeRegistry)
 
+  const healthAggregator = createHealthAggregator()
   const diagnosticsCollector = createDiagnosticsCollector({
     dbPath: db.name,
     countRunningSessions: () => getEventStore().countRunningSessions(),
     runtimeRegistry,
+    healthAggregator,
   })
   getEventStore().setHealthCollector(diagnosticsCollector)
   diagnosticsCollector.start()
@@ -3873,6 +3876,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       process.env['OPENFOX_SESSION_WORKER'] === 'true' ||
       getWorkerSetting(WORKER_SETTINGS_KEYS.SESSION_WORKER_MODE) === 'true',
     broadcastForSession: wssExports.broadcastForSession,
+    healthAggregator,
   })
 
   const queueProcessor = new QueueProcessor({

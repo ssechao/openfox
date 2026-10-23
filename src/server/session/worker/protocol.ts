@@ -8,6 +8,7 @@
 
 import type { Config } from '../../../shared/types.js'
 import type { ServerMessage } from '../../../shared/protocol.js'
+import type { DiagnosticsData } from '../../../shared/diagnostics.js'
 import type { WorkerToken } from './token.js'
 
 export type { WorkerToken }
@@ -18,4 +19,5 @@ export type GatewayToWorkerMessage =
 export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'ready'; pid: number })
   | (WorkerToken & { type: 'ws'; msg: ServerMessage })
+  | (WorkerToken & { type: 'health'; data: DiagnosticsData })
   | (WorkerToken & { type: 'done'; ok: boolean; error?: string })

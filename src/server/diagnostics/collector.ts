@@ -9,6 +9,7 @@ import type {
 import type { SessionRuntimeRegistry } from '../session/index.js'
 import type { DiagnosticsCollector } from './types.js'
 import { LatencyHistogram, mergedCount, mergedMax, mergedPercentile } from './histogram.js'
+import type { HealthAggregator } from './aggregator.js'
 
 type LatencyMetric = 'loop' | 'health' | 'read' | 'write'
 type GaugeMetric = 'walSize' | 'runningSessions' | 'rss' | 'heapUsed'
@@ -28,6 +29,7 @@ export interface CollectorOptions {
   historyMs?: number
   loopSampleMs?: number
   enableLoopSampler?: boolean
+  healthAggregator?: HealthAggregator
   now?: () => number
 }
 
@@ -158,7 +160,7 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
       })
     }
 
-    return {
+    const gatewayData: DiagnosticsData = {
       collectedAt: now,
       intervalMs,
       windowMs,
@@ -178,6 +180,8 @@ export function createDiagnosticsCollector(options: CollectorOptions = {}): Diag
       history,
       runtimes: options.runtimeRegistry?.list() ?? [],
     }
+
+    return options.healthAggregator?.aggregate(gatewayData) ?? gatewayData
   }
 
   return {
