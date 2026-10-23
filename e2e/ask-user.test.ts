@@ -16,6 +16,7 @@ import {
   createProject,
   createSession,
   setSessionMode,
+  stopSessionChat,
   type TestClient,
   type TestProject,
   type TestServerHandle,
@@ -45,6 +46,11 @@ describe('Ask User Tool', () => {
   })
 
   afterEach(async () => {
+    // Stop the session's turn before disconnecting: a turn left running keeps
+    // emitting events (e.g. a re-asked question) on the global stream, which
+    // the next test's client would observe as if they were its own.
+    const sessionId = client.getSession()?.id
+    if (sessionId) await stopSessionChat(server.url, sessionId)
     await client.close()
     await testDir.cleanup()
   })
@@ -282,11 +288,13 @@ describe('Ask User Tool', () => {
         content: 'I need clarification. Please ask the user a question.',
       })
 
-      // Wait for chat.ask_user event
+      // Wait for chat.ask_user event (filtered to this session: the global
+      // event stream also carries events from other sessions)
+      const sessionId = client.getSession()!.id
       const askUserEvent = await client.waitFor(
         'chat.ask_user',
-        (payload: { callId: string; question: string }) => {
-          return Boolean(payload.callId && payload.question)
+        (payload: { callId: string; question: string }, message) => {
+          return message.sessionId === sessionId && Boolean(payload.callId && payload.question)
         },
         10000,
       )
@@ -308,8 +316,8 @@ describe('Ask User Tool', () => {
 
       // CRITICAL: The agent should continue and complete after receiving the answer
       // This test will FAIL if the answer is not sent back to the model properly
-      const doneEvent = await client.waitFor('chat.done', (payload: { reason: string }) => {
-        return payload.reason === 'complete' || payload.reason === 'error'
+      const doneEvent = await client.waitFor('chat.done', (payload: { reason: string }, message) => {
+        return message.sessionId === sessionId && (payload.reason === 'complete' || payload.reason === 'error')
       })
 
       // Verify the agent completed (not stuck)

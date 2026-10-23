@@ -48,7 +48,7 @@ export interface TestClient {
   /** Wait for a specific message type */
   waitFor<T = unknown>(
     type: ServerMessageType,
-    predicate?: (payload: T) => boolean,
+    predicate?: (payload: T, message: ServerMessage) => boolean,
     timeout?: number,
   ): Promise<ServerMessage<T>>
 
@@ -246,7 +246,7 @@ export async function createTestClient(options: TestClientOptions = {}): Promise
   >()
   const eventWaiters: Array<{
     type: ServerMessageType
-    predicate: ((payload: unknown) => boolean) | undefined
+    predicate: ((payload: unknown, message: ServerMessage) => boolean) | undefined
     resolve: (msg: ServerMessage) => void
     reject: (err: Error) => void
   }> = []
@@ -338,7 +338,7 @@ export async function createTestClient(options: TestClientOptions = {}): Promise
       for (let i = eventWaiters.length - 1; i >= 0; i--) {
         const waiter = eventWaiters[i]!
         if (waiter.type === msg.type) {
-          if (!waiter.predicate || waiter.predicate(msg.payload)) {
+          if (!waiter.predicate || waiter.predicate(msg.payload, msg)) {
             eventWaiters.splice(i, 1)
             waiter.resolve(msg)
           }
@@ -370,14 +370,14 @@ export async function createTestClient(options: TestClientOptions = {}): Promise
   // Helper function for waiting for events
   function waitForImpl<T = unknown>(
     type: ServerMessageType,
-    predicate?: (payload: T) => boolean,
+    predicate?: (payload: T, message: ServerMessage) => boolean,
     timeout = defaultTimeout,
   ): Promise<ServerMessage<T>> {
     return new Promise((resolve, reject) => {
       // Check if we already have a matching event
       for (const event of events) {
         if (event.type === type) {
-          if (!predicate || predicate(event.payload as T)) {
+          if (!predicate || predicate(event.payload as T, event)) {
             resolve(event as ServerMessage<T>)
             return
           }
@@ -393,7 +393,7 @@ export async function createTestClient(options: TestClientOptions = {}): Promise
 
       eventWaiters.push({
         type,
-        predicate: predicate as ((p: unknown) => boolean) | undefined,
+        predicate: predicate as ((p: unknown, m: ServerMessage) => boolean) | undefined,
         resolve: (msg) => {
           clearTimeout(timer)
           resolve(msg as ServerMessage<T>)

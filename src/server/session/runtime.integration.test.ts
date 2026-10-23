@@ -250,6 +250,78 @@ describe('SessionRuntime REST / WS routes', () => {
     expect(after.pendingQuestions ?? []).toEqual([])
   }, 20_000)
 
+  it('does not recreate a runtime when the session is deleted mid-run', async () => {
+    const sessionId = await createSession()
+    const hold = await fetch(`${base}/api/sessions/${sessionId}/message`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'RUNTIME-HOLD-TURN' }),
+    })
+    expect(hold.status).toBe(200)
+
+    const running = await waitForRuntime(sessionId, (state) => state === 'running')
+    expect(running?.state).toBe('running')
+
+    const del = await fetch(`${base}/api/sessions/${sessionId}`, { method: 'DELETE' })
+    expect(del.status).toBe(200)
+
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      const data = await diagnostics()
+      expect(data.runtimes.find((item) => item.sessionId === sessionId)).toBeUndefined()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }, 30_000)
+
+  it('refuses an answer whose callId belongs to another session', async () => {
+    const sessionA = await createSession()
+    const sessionB = await createSession()
+
+    const asked = await fetch(`${base}/api/sessions/${sessionA}/message`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'ask the user a question' }),
+    })
+    expect(asked.status).toBe(200)
+
+    const deadline = Date.now() + 8_000
+    let callId: string | undefined
+    while (Date.now() < deadline) {
+      const res = await fetch(`${base}/api/sessions/${sessionA}`)
+      const body = (await res.json()) as { pendingQuestions?: Array<{ callId: string }> }
+      callId = body.pendingQuestions?.[0]?.callId
+      if (callId) break
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(callId).toBeTruthy()
+
+    const wrongSession = await fetch(`${base}/api/sessions/${sessionB}/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ callId, answer: 'intruder' }),
+    })
+    expect(wrongSession.status).toBe(404)
+
+    const missingId = randomUUID()
+    const missingSession = await fetch(`${base}/api/sessions/${missingId}/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ callId, answer: 'intruder' }),
+    })
+    expect(missingSession.status).toBe(404)
+    expect((await diagnostics()).runtimes.find((item) => item.sessionId === missingId)).toBeUndefined()
+
+    const stillPending = (await (await fetch(`${base}/api/sessions/${sessionA}`)).json()) as {
+      pendingQuestions?: Array<{ callId: string }>
+    }
+    expect(stillPending.pendingQuestions?.some((q) => q.callId === callId)).toBe(true)
+
+    await fetch(`${base}/api/sessions/${sessionA}/stop`, { method: 'POST' })
+    await waitForRuntime(sessionA, (state) => state === 'idle' || state === undefined, 10_000)
+    await fetch(`${base}/api/sessions/${sessionA}`, { method: 'DELETE' })
+    await fetch(`${base}/api/sessions/${sessionB}`, { method: 'DELETE' })
+  }, 30_000)
+
   it('acquires compaction and workflow through the shared runtime', async () => {
     const sessionId = await createSession()
     await fetch(`${base}/api/sessions/${sessionId}/criteria`, {

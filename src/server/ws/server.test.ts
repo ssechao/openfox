@@ -1018,13 +1018,13 @@ describe('createWebSocketServer', () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
     expect(runOrchestratorMock).toHaveBeenCalled()
 
-    // Session is now running, so runner.launch should queue
+    // Session is now running, so runner.launch is refused explicitly
     sessionState.isRunning = true
 
     harness.send({ id: 'runner-launch-2', type: 'runner.launch', payload: {} })
     expect(await harness.nextMessage((message) => message.id === 'runner-launch-2')).toMatchObject({
-      type: 'queue.state',
-      payload: { success: true },
+      type: 'error',
+      payload: { code: 'SESSION_RUNNING' },
     })
 
     // Stop the session so compact can run
@@ -1093,8 +1093,8 @@ describe('createWebSocketServer', () => {
     sessionState.criteria = [{ id: 'tests-pass', description: 'Tests pass', status: { type: 'pending' }, attempts: [] }]
     harness.send({ id: 'runner-running', type: 'runner.launch', payload: {} })
     expect(await harness.nextMessage((message) => message.id === 'runner-running')).toMatchObject({
-      type: 'queue.state',
-      payload: { success: true },
+      type: 'error',
+      payload: { code: 'SESSION_RUNNING' },
     })
     harness.send({ id: 'compact-running', type: 'context.compact', payload: {} })
     expect(await harness.nextMessage((message) => message.id === 'compact-running')).toMatchObject({
@@ -1471,7 +1471,7 @@ describe('createWebSocketServer', () => {
     expect(callArgs.workflowId).toBe('pr-review')
   })
 
-  it('labels queue.state feedback with the session named in the runner.launch payload', async () => {
+  it('labels the runner.launch refusal with the session named in the payload', async () => {
     const sessionB: any = {
       id: 'session-b',
       projectId: 'project-1',
@@ -1492,7 +1492,7 @@ describe('createWebSocketServer', () => {
     const harness = await createHarness({ sessionManager })
 
     // Active WS session is session-1, but the target session-b is running, so
-    // the launch queues — the queue feedback must be attributed to session-b.
+    // the launch is refused — the error must be attributed to session-b.
     harness.send({ id: 'sl-1', type: 'session.load', payload: { sessionId: 'session-1' } })
     await harness.nextMessage((message) => message.id === 'sl-1')
 
@@ -1502,7 +1502,7 @@ describe('createWebSocketServer', () => {
       payload: { sessionId: 'session-b', workflowId: 'wf-1' },
     })
     const reply = await harness.nextMessage((message) => message.id === 'launch-while-running')
-    expect(reply).toMatchObject({ type: 'queue.state', payload: { success: true } })
+    expect(reply).toMatchObject({ type: 'error', payload: { code: 'SESSION_RUNNING' } })
     expect(reply.sessionId).toBe('session-b')
 
     await harness.close()

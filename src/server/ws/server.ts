@@ -1309,32 +1309,18 @@ async function handleClientMessage(
 
       const session = sessionManager.requireSession(sessionId)
 
-      // If running, queue for later processing instead of rejecting
       if (session.isRunning) {
-        const launchPayload = message.payload as
-          { workflowId?: string; content?: string; attachments?: unknown[] } | undefined
-        const content = launchPayload?.content ?? ''
-        const attachments = launchPayload?.attachments as Attachment[] | undefined
-        const workflowId = launchPayload?.workflowId
-
-        // Build message content with workflow context
-        let fullContent = content
-        if (workflowId) {
-          const workflowInfo = `// Workflow: ${workflowId}`
-          fullContent = content ? `${workflowInfo}\n\n${content}` : workflowInfo
-        }
-
-        // Queue as ASAP message - will be processed at next turn boundary
-        sessionManager.queueMessage(sessionId, 'asap', fullContent, attachments, 'workflow-launch')
-
-        // Return success with queue state, tagged with the target session so
-        // the client attributes the queue feedback to the launching pane.
-        const queueState = sessionManager.getQueueState(sessionId)
-        sendForSession(sessionId, {
-          type: 'queue.state',
-          payload: { success: true, queueState },
-          id: message.id,
-        })
+        sendForSession(
+          sessionId,
+          createErrorMessage(
+            'SESSION_RUNNING',
+            serverT({
+              en: 'Cannot launch a workflow while a turn is running',
+              fr: 'Impossible de lancer un workflow pendant un tour en cours',
+            }),
+            message.id,
+          ),
+        )
         return
       }
 
@@ -1491,6 +1477,22 @@ async function handleClientMessage(
       }
 
       const { callId, answer, skip } = message.payload as { callId: string; answer: string; skip?: boolean }
+      const answerSessionId = client.activeSessionId
+      if (!sessionManager.getSession(answerSessionId)) {
+        send(createErrorMessage('NO_SESSION', serverT(MSG_NO_ACTIVE_SESSION), message.id))
+        return
+      }
+      if (!getPendingQuestionsForSession(answerSessionId).some((q) => q.callId === callId)) {
+        send(
+          createErrorMessage(
+            'NOT_FOUND',
+            serverT({ en: 'No pending question with that ID', fr: 'Aucune question en attente avec cet ID' }),
+            message.id,
+          ),
+        )
+        return
+      }
+
       const found = provideAnswer(callId, answer, skip)
 
       if (!found) {
@@ -1504,7 +1506,7 @@ async function handleClientMessage(
         return
       }
 
-      getSessionRuntimeRegistry().get(client.activeSessionId).recordCommand('answer')
+      getSessionRuntimeRegistry().peek(answerSessionId)?.recordCommand('answer')
 
       logger.debug('Ask user answer received', {
         sessionId: client.activeSessionId,

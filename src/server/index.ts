@@ -1615,14 +1615,23 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(400).json({ error: 'answer is required when not skipping' })
     }
 
-    const { provideAnswer } = await import('./tools/index.js')
+    const session = sessionManager.getSession(req.params.id)
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const belongsToSession = getPendingQuestionsForSession(req.params.id).some((q) => q.callId === callId)
+    if (!belongsToSession) {
+      return res.status(404).json({ error: 'No pending question with that ID' })
+    }
+
     const found = provideAnswer(callId, answer ?? '', skip ?? false)
 
     if (!found) {
       return res.status(404).json({ error: 'No pending question with that ID' })
     }
 
-    runtimeRegistry.get(req.params.id).recordCommand('answer')
+    runtimeRegistry.peek(req.params.id)?.recordCommand('answer')
     res.json({ success: true })
   })
 

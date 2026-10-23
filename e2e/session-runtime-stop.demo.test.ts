@@ -177,9 +177,12 @@ async function readTreePids(pidsPath: string): Promise<{ parent: number; child: 
   }
 }
 
-async function waitForTreeGone(pids: number[], timeoutMs: number): Promise<{ goneMs: number; survivors: number[] }> {
-  const started = performance.now()
-  const deadline = started + timeoutMs
+async function waitForTreeGone(
+  pids: number[],
+  started: number,
+  budgetMs: number,
+): Promise<{ goneMs: number; survivors: number[] }> {
+  const deadline = started + budgetMs
   for (;;) {
     const survivors = pids.filter(isAlive)
     const goneMs = performance.now() - started
@@ -284,6 +287,7 @@ describe('session runtime stop demo', () => {
 
       const { goneMs, survivors } = await waitForTreeGone(
         [tree.parent, tree.child, tree.grandchild],
+        started,
         TREE_GONE_BUDGET_MS,
       )
       expect(survivors).toEqual([])
