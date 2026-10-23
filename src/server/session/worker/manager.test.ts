@@ -50,6 +50,50 @@ afterEach(() => {
 })
 
 describe('SessionWorkerManager', () => {
+  it('starts a saturated turn later and sends its command over worker IPC', () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-worker-command-'))
+    const { db, namedDb } = createDb(join(root, 'sessions.db'))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const send = vi.fn(() => true)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send,
+      kill: () => true,
+    }) as unknown as ChildProcess
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      expect(manager.requestTurn('sess-1', () => {})).toBe('started')
+      expect(manager.requestTurn('sess-2', () => manager.launch('sess-2', () => {}, { kind: 'compact' }))).toBe(
+        'waiting',
+      )
+      expect(send).not.toHaveBeenCalled()
+
+      expect(manager.releaseTurn('sess-1')).toBe(true)
+      const active = manager.activeWorker('sess-2')
+      expect(active).not.toBeNull()
+      child.emit('message', { ...active!.token, type: 'ready', pid: 42 })
+
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'start', sessionId: 'sess-2', command: { kind: 'compact' } }),
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('cancels a waiting session without assigning a worker generation', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-waiting-stop.db')
     openDbs.push(db)

@@ -57,7 +57,7 @@ export interface LaunchWorkflowRunDeps {
   onFinished?: () => TurnCleanupOutcome
 }
 
-export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: WorkflowLaunchPayload): void {
+export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: WorkflowLaunchPayload): Promise<void> {
   const {
     sessionManager,
     sessionId,
@@ -78,7 +78,7 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
   const hasUserContent = payload.content && payload.content.trim().length > 0
   const hasUserAttachments = launchAttachments && launchAttachments.length > 0
 
-  runOrchestrator({
+  return runOrchestrator({
     sessionManager,
     sessionId,
     llmClient,
@@ -184,4 +184,5 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
         // Session may have been deleted during execution
       }
     })
+    .then(() => undefined)
 }

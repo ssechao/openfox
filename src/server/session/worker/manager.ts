@@ -45,6 +45,7 @@ import type {
   WorkerIpcIdentity,
   WorkerMcpTool,
   WorkerToGatewayMessage,
+  WorkerTurnCommand,
 } from './protocol.js'
 import { WorkerMcpBroker } from './mcp-broker.js'
 import { WorkerInteractiveBroker } from './interactive-broker.js'
@@ -67,6 +68,7 @@ interface ActiveWorker {
   doneOk: boolean
   doneError?: string
   stderrTail: string[]
+  command: WorkerTurnCommand
   onSettled: (outcome: WorkerSettledOutcome) => void
 }
 
@@ -220,7 +222,11 @@ export class SessionWorkerManager {
     return this.scheduler.release(sessionId)
   }
 
-  launch(sessionId: string, onSettled: (outcome: WorkerSettledOutcome) => void): void {
+  launch(
+    sessionId: string,
+    onSettled: (outcome: WorkerSettledOutcome) => void,
+    command: WorkerTurnCommand = { kind: 'chat' },
+  ): void {
     if (this.admissionsClosed) throw new Error('Session worker admissions are closed during shutdown')
     if (this.active.has(sessionId)) throw new Error('This session already has a worker')
 
@@ -274,6 +280,7 @@ export class SessionWorkerManager {
       doneReceived: false,
       doneOk: false,
       stderrTail: [],
+      command,
       onSettled,
     }
     this.active.set(sessionId, worker)
@@ -306,6 +313,7 @@ export class SessionWorkerManager {
           sessionId,
           config: this.deps.config,
           mcpTools: this.deps.getMcpTools?.() ?? [],
+          command: worker.command,
         })
       } else if (msg.type === 'ws') {
         this.deps.broadcastForSession(sessionId, msg.msg)

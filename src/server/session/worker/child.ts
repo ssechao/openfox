@@ -21,7 +21,7 @@ import { createProviderManager } from '../../provider-manager.js'
 import { SessionManager } from '../manager.js'
 import { createMockLLMClient } from '../../llm/mock.js'
 import type { WorkerToken } from './token.js'
-import type { GatewayToWorkerMessage, WorkerToGatewayMessage } from './protocol.js'
+import type { GatewayToWorkerMessage, WorkerToGatewayMessage, WorkerTurnCommand } from './protocol.js'
 import type { LLMClientWithModel } from '../../llm/client.js'
 import type { StatsIdentity } from '../../../shared/types.js'
 import { logger } from '../../utils/logger.js'
@@ -68,7 +68,7 @@ process.on('message', (raw) => {
     mcpClient = new WorkerMcpClient(identity, send)
     interactiveClient = new WorkerInteractiveClient(identity, send)
     setMcpTools(mcpClient.createTools(msg.mcpTools ?? []))
-    void runTurn(msg.sessionId, msg.config)
+    void runTurn(msg.sessionId, msg.config, msg.command ?? { kind: 'chat' })
   } else if (msg.type === 'abort') {
     mcpClient?.cancelAll()
     interactiveClient?.close('Session stopped by user')
@@ -81,7 +81,11 @@ process.on('message', (raw) => {
 
 send({ ...token, type: 'ready', pid: process.pid })
 
-async function runTurn(sessionId: string, config: import('../../../shared/types.js').Config): Promise<void> {
+async function runTurn(
+  sessionId: string,
+  config: import('../../../shared/types.js').Config,
+  command: WorkerTurnCommand,
+): Promise<void> {
   healthCollector.start((data) => send({ ...token, type: 'health', data }))
   const finish = (ok: boolean, error?: string): void => {
     healthCollector.stop()
@@ -125,16 +129,49 @@ async function runTurn(sessionId: string, config: import('../../../shared/types.
       ...(sessionEffort ? { reasoningEffort: sessionEffort } : {}),
     }
 
-    const { runChatTurn } = await import('../../chat/orchestrator.js')
-    await runChatTurn({
-      sessionManager,
-      sessionId,
-      llmClient: sessionClient,
-      getSessionLLMClient,
-      statsIdentity,
-      signal: controller.signal,
-      onMessage: (msg) => send({ ...token, type: 'ws', msg }),
-    })
+    const broadcastForSession = (_sessionId: string, msg: import('../../../shared/protocol.js').ServerMessage) =>
+      send({ ...token, type: 'ws', msg })
+
+    if (command.kind === 'workflow') {
+      const { getSessionRuntimeRegistry } = await import('../runtime.js')
+      const { launchWorkflowRun } = await import('../../runner/launch.js')
+      const session = sessionManager.requireSession(sessionId)
+      if (session.phase === 'blocked') sessionManager.setPhase(sessionId, 'build')
+      const runtimeHandle = getSessionRuntimeRegistry().get(sessionId).acquire('workflow')
+      await launchWorkflowRun(
+        {
+          sessionManager,
+          sessionId,
+          runtimeHandle,
+          llmClient: sessionClient,
+          getSessionLLMClient,
+          statsIdentity,
+          broadcastForSession,
+        },
+        command.payload,
+      )
+    } else {
+      if (command.kind === 'retry') {
+        const session = sessionManager.requireSession(sessionId)
+        if (session.phase === 'blocked') sessionManager.setPhase(sessionId, 'build')
+      }
+      if (command.kind === 'compact') {
+        const { appendCompactionPrompt } = await import('../../context/compactor.js')
+        const { getEventStore } = await import('../../events/index.js')
+        appendCompactionPrompt(sessionId, (event) => getEventStore().append(sessionId, event))
+      }
+      const { runChatTurn } = await import('../../chat/orchestrator.js')
+      await runChatTurn({
+        sessionManager,
+        sessionId,
+        llmClient: sessionClient,
+        getSessionLLMClient,
+        statsIdentity,
+        signal: controller.signal,
+        onMessage: (msg) => broadcastForSession(sessionId, msg),
+        ...(command.kind === 'compact' ? { initialCompacting: true } : {}),
+      })
+    }
 
     ok = true
     logger.info('Worker turn finished', { workerId: token.workerId, generation: token.generation, sessionId })

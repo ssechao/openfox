@@ -474,6 +474,7 @@ async function createHarness(
     sessionManager?: ReturnType<typeof createSessionManager>
     eventStore?: ReturnType<typeof createEventStore>
     providerManager?: unknown
+    workerController?: import('./server.js').WebSocketWorkerController
   } = {},
 ) {
   const httpServer = createServer()
@@ -494,6 +495,8 @@ async function createHarness(
     undefined,
     sessionManager as never,
     options.providerManager as never,
+    undefined,
+    () => options.workerController,
   )
 
   await new Promise<void>((resolve) => httpServer.listen(0, resolve))
@@ -2074,6 +2077,71 @@ describe('createWebSocketServer', () => {
     // The override-derived model must never overwrite the sticky manual preference.
     expect(setSessionProvider).not.toHaveBeenCalled()
 
+    await harness.close()
+  })
+
+  it('queues gateway turn commands under worker saturation without mutating before admission', async () => {
+    const sessionState: any = {
+      id: 'session-1',
+      projectId: 'project-1',
+      workdir: '/tmp/project',
+      mode: 'planner',
+      phase: 'blocked',
+      isRunning: false,
+      criteria: [{ id: 'pending', description: 'Pending', status: { type: 'pending' }, attempts: [] }],
+    }
+    const sessionManager = createSessionManager({
+      createSession: vi.fn(() => sessionState),
+      getSession: vi.fn(() => sessionState),
+      requireSession: vi.fn(() => sessionState),
+      getLatestWorkflowExecution: vi.fn(() => null),
+    })
+    const starts: Array<() => void> = []
+    const launch = vi.fn((_sessionId, settled: (outcome: { crashed: boolean }) => void) => {
+      settled({ crashed: false })
+    })
+    const workerController = {
+      isEnabled: () => true,
+      requestTurn: vi.fn((_sessionId: string, start: () => void) => {
+        starts.push(start)
+        return 'waiting' as const
+      }),
+      releaseTurn: vi.fn(() => true),
+      launch,
+    }
+    const harness = await createHarness({ sessionManager, workerController })
+
+    harness.send({ id: 'sl-worker', type: 'session.load', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'sl-worker')
+
+    recordLLMFailure('session-1')
+    const commands = [
+      ['compact-worker', 'context.compact', { kind: 'compact' }],
+      ['runner-worker', 'runner.launch', { kind: 'workflow' }],
+      ['retry-worker', 'chat.retry', { kind: 'retry' }],
+    ] as const
+    for (const [index, [id, type, expectedCommand]] of commands.entries()) {
+      harness.send({ id, type, payload: { sessionId: 'session-1' } })
+      expect(await harness.nextMessage((message) => message.id === id)).toMatchObject({
+        type: 'ack',
+        payload: { admission: 'waiting' },
+      })
+      expect(launch).toHaveBeenCalledTimes(index)
+      expect(sessionManager.setPhase).not.toHaveBeenCalled()
+      expect(harness.eventStore.append).not.toHaveBeenCalled()
+
+      starts.shift()?.()
+      expect(launch).toHaveBeenLastCalledWith(
+        'session-1',
+        expect.any(Function),
+        expect.objectContaining(expectedCommand),
+      )
+    }
+
+    expect(runChatTurnMock).not.toHaveBeenCalled()
+    expect(runOrchestratorMock).not.toHaveBeenCalled()
+
+    clearLLMFailure('session-1')
     await harness.close()
   })
 

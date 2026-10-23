@@ -43,7 +43,12 @@ import { createServerMessage } from '../shared/protocol.js'
 import { createContextStateMessage, createSessionInterruptedMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
-import { isSessionAlreadyRunningError, SessionRuntimeRegistry, setSessionRuntimeRegistry } from './session/index.js'
+import {
+  isSessionAlreadyRunningError,
+  SessionRuntimeRegistry,
+  setSessionRuntimeRegistry,
+  type ExecutionHandle,
+} from './session/index.js'
 import { clearSessionsForDeletedProvider, reconcileSessionProviders } from './session/provider-reconcile.js'
 import { toClientSession } from './session/client-session.js'
 import { setRuntimeConfig } from './runtime-config.js'
@@ -3830,6 +3835,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const httpServer = createHttpServer(app)
 
   // Create WebSocket server attached to HTTP server
+  const webSocketWorkerController: {
+    current?: import('./ws/server.js').WebSocketWorkerController
+  } = {}
   const wssExports = createWebSocketServer(
     httpServer,
     config,
@@ -3838,6 +3846,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     sessionManager,
     providerManager,
     () => mcpManager.getAllServers(),
+    () => webSocketWorkerController.current,
   )
   const wss = wssExports.wss
 
@@ -3859,6 +3868,40 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // through the same shared launcher as runner.launch (src/server/runner/launch.ts).
   const { launchWorkflowRun } = await import('./runner/launch.js')
   deferTasksLaunchWorkflow = (sessionId, launch) => {
+    const workerPayload = {
+      ...(launch.workflowId ? { workflowId: launch.workflowId } : {}),
+      ...(launch.params && Object.keys(launch.params).length > 0 ? { params: launch.params } : {}),
+      ...(launch.subGroup ? { subGroup: launch.subGroup } : {}),
+      ...(launch.scope ? { scope: launch.scope } : {}),
+      ...(launch.resumeFrom ? { resumeFrom: launch.resumeFrom } : {}),
+      ...(launch.stepOutput ? { stepOutput: launch.stepOutput } : {}),
+      ...(launch.userChoice ? { userChoice: launch.userChoice } : {}),
+      ...(launch.content ? { content: launch.content } : {}),
+      ...(launch.attachments && launch.attachments.length > 0 ? { attachments: launch.attachments } : {}),
+    }
+    const workerController = webSocketWorkerController.current
+    if (workerController?.isEnabled()) {
+      const admission = workerController.requestTurn(sessionId, () => {
+        let handle: ExecutionHandle | undefined
+        try {
+          const acquired = runtimeRegistry.get(sessionId).acquire('workflow')
+          handle = acquired
+          workerController.launch(sessionId, () => runtimeRegistry.peek(sessionId)?.release(acquired), {
+            kind: 'workflow',
+            payload: workerPayload,
+          })
+        } catch (error) {
+          if (handle) runtimeRegistry.peek(sessionId)?.release(handle)
+          workerController.releaseTurn(sessionId)
+          logger.error('Task workflow worker launch failed', { sessionId, error })
+        }
+      })
+      if (admission !== 'started' && admission !== 'waiting') {
+        logger.warn('Task workflow worker admission refused', { sessionId, admission })
+      }
+      return
+    }
+
     // Honor the session's effective provider/model (agent override > session
     // preference > default) exactly like the WS session-aware client path —
     // never force the global model.
@@ -3897,17 +3940,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         },
         broadcastForSession: wssExports.broadcastForSession,
       },
-      {
-        ...(launch.workflowId ? { workflowId: launch.workflowId } : {}),
-        ...(launch.params && Object.keys(launch.params).length > 0 ? { params: launch.params } : {}),
-        ...(launch.subGroup ? { subGroup: launch.subGroup } : {}),
-        ...(launch.scope ? { scope: launch.scope } : {}),
-        ...(launch.resumeFrom ? { resumeFrom: launch.resumeFrom } : {}),
-        ...(launch.stepOutput ? { stepOutput: launch.stepOutput } : {}),
-        ...(launch.userChoice ? { userChoice: launch.userChoice } : {}),
-        ...(launch.content ? { content: launch.content } : {}),
-        ...(launch.attachments && launch.attachments.length > 0 ? { attachments: launch.attachments } : {}),
-      },
+      workerPayload,
     )
   }
 
@@ -3964,6 +3997,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }
     },
   })
+  webSocketWorkerController.current = workerManager
   sessionManager.setQueueAdmissionGuard(
     (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId),
   )

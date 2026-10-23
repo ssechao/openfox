@@ -3,6 +3,7 @@ import type { ChoiceOption, ServerMessage } from '../../../shared/protocol.js'
 import type { DiagnosticsData } from '../../../shared/diagnostics.js'
 import type { LLMToolDefinition } from '../../llm/types.js'
 import type { WorkerToken } from './token.js'
+import type { WorkflowLaunchPayload } from '../../runner/launch.js'
 
 export type { WorkerToken }
 
@@ -97,8 +98,17 @@ export type InteractiveCancelledMessage = WorkerIpcIdentity & {
 export type WorkerInteractiveResponseMessage =
   InteractiveQuestionResponseMessage | InteractivePathResponseMessage | InteractiveCancelledMessage
 
+export type WorkerTurnCommand =
+  { kind: 'chat' } | { kind: 'retry' } | { kind: 'compact' } | { kind: 'workflow'; payload: WorkflowLaunchPayload }
+
 export type GatewayToWorkerMessage =
-  | (WorkerToken & { type: 'start'; sessionId: string; config: Config; mcpTools: WorkerMcpTool[] })
+  | (WorkerToken & {
+      type: 'start'
+      sessionId: string
+      config: Config
+      mcpTools: WorkerMcpTool[]
+      command: WorkerTurnCommand
+    })
   | (WorkerToken & { type: 'abort' })
   | WorkerMcpResponseMessage
   | WorkerInteractiveResponseMessage

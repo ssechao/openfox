@@ -41,6 +41,9 @@ import { generateSessionNameForSession, needsNameGeneration } from '../session/n
 import { getSessionMessageCount } from '../utils/session-utils.js'
 import { serverT } from '../i18n.js'
 import type { Translation } from '../../shared/i18n/index.js'
+import type { WorkerSettledOutcome } from '../session/worker/manager.js'
+import type { WorkerTurnCommand } from '../session/worker/protocol.js'
+import type { AdmissionResult } from '../session/worker/scheduler.js'
 
 const MSG_INVALID_MESSAGE_FORMAT: Translation = { en: 'Invalid message format', fr: 'Format de message invalide' }
 const MSG_NO_ACTIVE_SESSION: Translation = { en: 'No active session', fr: 'Aucune session active' }
@@ -336,6 +339,13 @@ const MAX_SEND_QUEUE_SIZE = 1000 // Maximum messages to queue before dropping
  * @see https://github.com/conrad/openfox/issues/XXX
  */
 
+export interface WebSocketWorkerController {
+  isEnabled(): boolean
+  requestTurn(sessionId: string, start: () => void): AdmissionResult
+  releaseTurn(sessionId: string): boolean
+  launch(sessionId: string, onSettled: (outcome: WorkerSettledOutcome) => void, command?: WorkerTurnCommand): void
+}
+
 export function createWebSocketServer(
   httpServer: Server,
   _config: Config,
@@ -344,6 +354,7 @@ export function createWebSocketServer(
   sessionManager: SessionManager,
   providerManager?: ProviderManager,
   getMcpServers?: () => import('../mcp/types.js').McpServerState[],
+  getWorkerController?: () => WebSocketWorkerController | undefined,
 ): WebSocketServerExports {
   const wss = new WebSocketServer({ server: httpServer })
   const clients = new Map<WebSocket, ClientConnection>()
@@ -806,6 +817,7 @@ export function createWebSocketServer(
           cleanupAfterTurn,
           enqueueSend,
           getMcpServers,
+          getWorkerController,
         )
       } catch (error) {
         logger.error('Error handling client message', { error, type: message.type })
@@ -886,6 +898,7 @@ async function handleClientMessage(
   ) => TurnCleanupOutcome,
   enqueueSendFn: (client: ClientConnection, data: string, seq: number) => void,
   getMcpServers?: () => import('../mcp/types.js').McpServerState[],
+  getWorkerController?: () => WebSocketWorkerController | undefined,
 ): Promise<void> {
   const send = (msg: ServerMessage) => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -896,6 +909,73 @@ async function handleClientMessage(
 
   const sendForSession = (sessionId: string, msg: ServerMessage) => {
     send({ ...msg, sessionId })
+  }
+
+  const runInWorkerIfEnabled = (
+    sessionId: string,
+    runtimeKind: RuntimeKind,
+    command: WorkerTurnCommand,
+    onSettled?: (outcome: WorkerSettledOutcome) => void,
+  ): boolean => {
+    const workerController = getWorkerController?.()
+    if (!workerController?.isEnabled()) return false
+
+    let startFailure: { code: string; reason: string } | undefined
+    let admissionReturned = false
+    const reportStartFailure = (failure: { code: string; reason: string }): void => {
+      if (admissionReturned) send(createErrorMessage(failure.code, failure.reason, message.id))
+      else startFailure = failure
+    }
+    const admission = workerController.requestTurn(sessionId, () => {
+      let handle: ExecutionHandle
+      try {
+        handle = getSessionRuntimeRegistry().get(sessionId).acquire(runtimeKind)
+      } catch (error) {
+        workerController.releaseTurn(sessionId)
+        reportStartFailure({
+          code: 'SESSION_RUNNING',
+          reason: error instanceof Error ? error.message : serverT(MSG_UNKNOWN_ERROR),
+        })
+        return
+      }
+
+      try {
+        workerController.launch(
+          sessionId,
+          (outcome) => {
+            getSessionRuntimeRegistry().peek(sessionId)?.release(handle)
+            onSettled?.(outcome)
+          },
+          command,
+        )
+      } catch (error) {
+        getSessionRuntimeRegistry().peek(sessionId)?.release(handle)
+        workerController.releaseTurn(sessionId)
+        reportStartFailure({
+          code: 'WORKER_LAUNCH_FAILED',
+          reason: error instanceof Error ? error.message : serverT(MSG_UNKNOWN_ERROR),
+        })
+      }
+    })
+    admissionReturned = true
+
+    if (startFailure) {
+      send(createErrorMessage(startFailure.code, startFailure.reason, message.id))
+    } else if (admission === 'started' || admission === 'waiting') {
+      send({ type: 'ack', payload: { admission }, id: message.id })
+    } else {
+      send(
+        createErrorMessage(
+          'WORKER_ADMISSION_REFUSED',
+          serverT({
+            en: 'The session worker pool cannot accept this turn',
+            fr: 'Le pool de workers de session ne peut pas accepter ce tour',
+          }),
+          message.id,
+        ),
+      )
+    }
+    return true
   }
 
   const ensureEventStoreSubscription = (_sessionId: string) => {
@@ -1046,6 +1126,18 @@ async function handleClientMessage(
             message.id,
           ),
         )
+        return
+      }
+
+      if (
+        runInWorkerIfEnabled(sessionId, 'compact', { kind: 'compact' }, () => {
+          try {
+            sendForSession(sessionId, createContextStateMessage(sessionManager.getContextState(sessionId)))
+          } catch {
+            return
+          }
+        })
+      ) {
         return
       }
 
@@ -1336,18 +1428,6 @@ async function handleClientMessage(
         }
       }
 
-      // Acquire before any side effect so a concurrent chat/compact/stop cannot race.
-      const workflowHandle = acquireRuntime(sessionId, 'workflow', message.id, send)
-      if (!workflowHandle) return
-
-      // Check if session is blocked - user intervention resets it
-      if (session.phase === 'blocked') {
-        logger.info('User launched runner - resetting blocked state', { sessionId })
-        // setPhase emits phase.changed event
-        sessionManager.setPhase(sessionId, 'build')
-      }
-
-      // Parse launch payload
       const launchPayload = message.payload as
         | {
             content?: string
@@ -1361,6 +1441,33 @@ async function handleClientMessage(
             userChoice?: string
           }
         | undefined
+      const workerPayload = {
+        ...(launchPayload?.content ? { content: launchPayload.content } : {}),
+        ...(launchPayload?.attachments ? { attachments: launchPayload.attachments as Attachment[] } : {}),
+        ...(launchPayload?.workflowId ? { workflowId: launchPayload.workflowId } : {}),
+        ...(launchPayload?.scope
+          ? { scope: launchPayload.scope as import('../../shared/types.js').WorkflowLaunchScope }
+          : {}),
+        ...(launchPayload?.subGroup ? { subGroup: launchPayload.subGroup } : {}),
+        ...(launchPayload?.resumeFrom ? { resumeFrom: launchPayload.resumeFrom } : {}),
+        ...(launchPayload?.stepOutput ? { stepOutput: launchPayload.stepOutput } : {}),
+        ...(launchPayload?.params ? { params: launchPayload.params } : {}),
+        ...(launchPayload?.userChoice ? { userChoice: launchPayload.userChoice } : {}),
+      }
+      if (runInWorkerIfEnabled(sessionId, 'workflow', { kind: 'workflow', payload: workerPayload })) return
+
+      // Acquire before any side effect so a concurrent chat/compact/stop cannot race.
+      const workflowHandle = acquireRuntime(sessionId, 'workflow', message.id, send)
+      if (!workflowHandle) return
+
+      // Check if session is blocked - user intervention resets it
+      if (session.phase === 'blocked') {
+        logger.info('User launched runner - resetting blocked state', { sessionId })
+        // setPhase emits phase.changed event
+        sessionManager.setPhase(sessionId, 'build')
+      }
+
+      // Parse launch payload
       const launchAttachments = launchPayload?.attachments as Attachment[] | undefined
       const hasUserContent =
         launchPayload?.content && typeof launchPayload.content === 'string' && launchPayload.content.trim()
@@ -1623,6 +1730,8 @@ async function handleClientMessage(
         )
         return
       }
+
+      if (runInWorkerIfEnabled(retrySessionId, 'chat', { kind: 'retry' })) return
 
       const retryHandle = acquireRuntime(retrySessionId, 'chat', message.id, send)
       if (!retryHandle) return
