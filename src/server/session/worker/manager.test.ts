@@ -277,6 +277,21 @@ describe('SessionWorkerManager', () => {
         cleanupCalls += 1
         throw new Error('reservation scan failed')
       },
+      captureInventory: (pid) => ({
+        capturedAt: 100,
+        worker: { pid, startedAt: 'linux:42', pgid: 42 },
+        children: [{ pid: 99, startedAt: 'linux:99', pgid: 99 }],
+        reservations: [],
+        errors: [],
+      }),
+      verifyInventory: async () => ({
+        checkedAt: 2_100,
+        clean: true,
+        survivingIdentities: [],
+        survivingGroups: [],
+        liveReservations: [],
+        errors: [],
+      }),
       eventStore: () =>
         ({
           invalidateExternalSession: () => {},
@@ -330,7 +345,14 @@ describe('SessionWorkerManager', () => {
       expect(cleanupCalls).toBe(1)
       expect(interrupted.interrupted_at).toBeTruthy()
       expect(appended).toContain('tool.reconciliation_required')
-      expect(manager.lastCrashReport()?.cleanupError).toMatch(/reservation scan failed/)
+      await vi.waitFor(() => expect(manager.lastCrashReport()?.orphanCheck?.clean).toBe(true))
+      expect(manager.lastCrashReport()).toMatchObject({
+        cleanupError: expect.stringMatching(/reservation scan failed/),
+        inventory: {
+          worker: { pid: 42, startedAt: 'linux:42', pgid: 42 },
+          children: [{ pid: 99, startedAt: 'linux:99', pgid: 99 }],
+        },
+      })
       expect(existsSync(childrenPath)).toBe(true)
       expect(settled).toBe(true)
     } finally {

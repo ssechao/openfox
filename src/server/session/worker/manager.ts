@@ -37,7 +37,18 @@ import { getEventStore } from '../../events/index.js'
 import { emitRunningChanged } from '../../events/session.js'
 import type { SessionManager } from '../manager.js'
 import { assignWorkerToken, clearWorkerToken, isWorkerMessageCurrent, type WorkerToken } from './token.js'
-import { childrenFilePath, initChildrenTracking, killTrackedChildren, removeChildrenFile } from './children.js'
+import {
+  captureExclusiveProcessInventory,
+  childrenFilePath,
+  initChildrenTracking,
+  killTrackedChildren,
+  readProcessInventory,
+  removeChildrenFile,
+  verifyExclusiveProcessInventoryAfter,
+  type ExclusiveProcessInventory,
+  type OrphanInventoryCheck,
+  type ProcessInventoryEntry,
+} from './children.js'
 import { findPendingToolReconciliations, markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
 import type {
   GatewayToWorkerMessage,
@@ -64,6 +75,7 @@ interface ActiveWorker {
   token: WorkerToken
   child: ChildProcess | SupervisorWorkerHandle
   childrenPath: string
+  workerInventory?: ProcessInventoryEntry
   doneReceived: boolean
   doneOk: boolean
   doneError?: string
@@ -82,6 +94,8 @@ export interface WorkerCrashReport {
   signal: NodeJS.Signals | null
   interruptedAt: string
   killedChildren: number[]
+  inventory: ExclusiveProcessInventory
+  orphanCheck?: OrphanInventoryCheck
   cleanupError?: string
   finalizedMessageId?: string
 }
@@ -93,6 +107,8 @@ export interface SessionWorkerManagerDeps {
   isEnabled: () => boolean
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
   cleanupChildren?: (path: string) => Promise<number[]>
+  captureInventory?: (workerPid: number, path: string, worker?: ProcessInventoryEntry) => ExclusiveProcessInventory
+  verifyInventory?: (inventory: ExclusiveProcessInventory) => Promise<OrphanInventoryCheck>
   shutdownTimeoutMs?: number
   maxProcesses?: number
   processSupervisor?: SessionProcessSupervisor
@@ -278,11 +294,14 @@ export class SessionWorkerManager {
       throw new Error('Cannot launch session worker: process spawn failed', { cause: error })
     }
 
+    const workerInventoryRead =
+      child.pid === undefined ? { status: 'absent' as const } : readProcessInventory(child.pid)
     const worker: ActiveWorker = {
       sessionId,
       token,
       child,
       childrenPath,
+      ...(workerInventoryRead.status === 'found' ? { workerInventory: workerInventoryRead.process } : {}),
       doneReceived: false,
       doneOk: false,
       stderrTail: [],
@@ -482,6 +501,57 @@ export class SessionWorkerManager {
     return result
   }
 
+  private captureWorkerInventory(worker: ActiveWorker): ExclusiveProcessInventory {
+    const workerPid = worker.child.pid ?? -1
+    try {
+      return this.deps.captureInventory
+        ? this.deps.captureInventory(workerPid, worker.childrenPath, worker.workerInventory)
+        : captureExclusiveProcessInventory(workerPid, worker.childrenPath, {
+            ...(worker.workerInventory ? { recordedWorker: worker.workerInventory } : {}),
+          })
+    } catch (error) {
+      return {
+        capturedAt: Date.now(),
+        ...(worker.workerInventory ? { worker: worker.workerInventory } : {}),
+        children: [],
+        reservations: [],
+        errors: [`inventory capture failed: ${error instanceof Error ? error.message : String(error)}`],
+      }
+    }
+  }
+
+  private verifyWorkerInventory(report: WorkerCrashReport): void {
+    const verification = this.deps.verifyInventory
+      ? this.deps.verifyInventory(report.inventory)
+      : verifyExclusiveProcessInventoryAfter(report.inventory)
+    void verification
+      .then((orphanCheck) => {
+        report.orphanCheck = orphanCheck
+        if (!orphanCheck.clean) {
+          logger.error('Worker zero-orphan proof failed', {
+            sessionId: report.sessionId,
+            workerId: report.workerId,
+            orphanCheck,
+          })
+        }
+      })
+      .catch((error) => {
+        report.orphanCheck = {
+          checkedAt: Date.now(),
+          clean: false,
+          survivingIdentities: [],
+          survivingGroups: [],
+          liveReservations: [],
+          errors: [`inventory verification failed: ${error instanceof Error ? error.message : String(error)}`],
+        }
+        logger.error('Worker zero-orphan verification failed', {
+          sessionId: report.sessionId,
+          workerId: report.workerId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+  }
+
   private async cleanupWorkerChildren(
     sessionId: string,
     childrenPath: string,
@@ -583,6 +653,8 @@ export class SessionWorkerManager {
       stderr: worker.stderrTail.slice(-5),
     })
 
+    const inventory = this.captureWorkerInventory(worker)
+
     // Reap the worker's exclusive children (recorded synchronously in the
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
     // the gateway process and are not in that file — never touched.
@@ -623,6 +695,7 @@ export class SessionWorkerManager {
       signal,
       interruptedAt,
       killedChildren: cleanup.killedChildren,
+      inventory,
       ...(cleanup.cleanupError ? { cleanupError: cleanup.cleanupError } : {}),
     }
     try {
@@ -651,6 +724,7 @@ export class SessionWorkerManager {
     }
 
     this.lastCrash = report
+    this.verifyWorkerInventory(report)
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
     this.scheduler.release(sessionId)
     worker.onSettled({ crashed: true, ...(worker.doneError ? { error: worker.doneError } : {}) })

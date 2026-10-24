@@ -14,10 +14,16 @@ export {
   reserveExclusiveChild,
   finalizeExclusiveChild,
   killTrackedChildren,
+  captureExclusiveProcessInventory,
+  verifyExclusiveProcessInventoryAfter,
+  readProcessInventory,
   readTrackedChildren,
   removeChildrenFile,
   trackExclusiveChild,
   type TrackedChild,
+  type ProcessInventoryEntry,
+  type ExclusiveProcessInventory,
+  type OrphanInventoryCheck,
   type ExclusiveChildReservation,
 } from './children.js'
 export {

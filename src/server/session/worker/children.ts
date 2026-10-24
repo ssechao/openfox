@@ -25,6 +25,34 @@ export interface TrackedChild {
   command?: string
 }
 
+export interface ProcessInventoryEntry extends TrackedChild {
+  pgid: number
+}
+
+export interface ExclusiveReservationInventory {
+  id: string
+  command?: string
+  finalized: boolean
+  processes: ProcessInventoryEntry[]
+}
+
+export interface ExclusiveProcessInventory {
+  capturedAt: number
+  worker?: ProcessInventoryEntry
+  children: ProcessInventoryEntry[]
+  reservations: ExclusiveReservationInventory[]
+  errors: string[]
+}
+
+export interface OrphanInventoryCheck {
+  checkedAt: number
+  clean: boolean
+  survivingIdentities: ProcessInventoryEntry[]
+  survivingGroups: number[]
+  liveReservations: Array<{ id: string; pids: number[] }>
+  errors: string[]
+}
+
 export interface ExclusiveChildReservation {
   id: string
   path: string
@@ -36,11 +64,26 @@ export const EXCLUSIVE_CHILD_RESERVATION_ENV = 'OPENFOX_CHILD_RESERVATION_ID'
 export type ProcessIdentityRead =
   { status: 'found'; identity: string } | { status: 'absent' } | { status: 'unreadable'; error: Error }
 
+export type ProcessInventoryRead =
+  { status: 'found'; process: ProcessInventoryEntry } | { status: 'absent' } | { status: 'unreadable'; error: Error }
+
 export interface ChildrenCleanupDependencies {
   readProcessIdentity?: (pid: number) => ProcessIdentityRead
   killTree?: (pid: number) => Promise<void>
   signalGroup?: (pid: number) => Promise<boolean>
+  findReservationPids?: (reservationId: string) => number[]
   retryDelay?: () => Promise<void>
+}
+
+export type ProcessGroupRead = { status: 'found' } | { status: 'absent' } | { status: 'unreadable'; error: Error }
+
+export interface ProcessInventoryDependencies {
+  readInventory?: (pid: number, command?: string) => ProcessInventoryRead
+  findReservationPids?: (reservationId: string) => number[]
+  readGroup?: (pgid: number) => ProcessGroupRead
+  now?: () => number
+  sleep?: (delayMs: number) => Promise<void>
+  recordedWorker?: ProcessInventoryEntry
 }
 
 function processRootExists(pid: number): boolean {
@@ -85,6 +128,42 @@ function processStartIdentity(pid: number): ProcessIdentityRead {
   }
 }
 
+function processGroupId(pid: number): number {
+  if (process.platform === 'linux') {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
+    const fields = stat
+      .slice(stat.lastIndexOf(') ') + 2)
+      .trim()
+      .split(/\s+/)
+    const pgid = Number(fields[2])
+    if (Number.isFinite(pgid) && pgid > 0) return pgid
+    throw new Error('process group identity was empty')
+  }
+  if (process.platform === 'win32') return pid
+  const pgid = Number(execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf-8' }).trim())
+  if (Number.isFinite(pgid) && pgid > 0) return pgid
+  throw new Error('process group identity was empty')
+}
+
+export function readProcessInventory(pid: number, command?: string): ProcessInventoryRead {
+  const identity = processStartIdentity(pid)
+  if (identity.status !== 'found') return identity
+  try {
+    return {
+      status: 'found',
+      process: {
+        pid,
+        startedAt: identity.identity,
+        pgid: processGroupId(pid),
+        ...(command ? { command } : {}),
+      },
+    }
+  } catch (error) {
+    if (!processRootExists(pid)) return { status: 'absent' }
+    return { status: 'unreadable', error: error instanceof Error ? error : new Error(String(error)) }
+  }
+}
+
 export function childrenFilePath(dbPath: string, workerId: string): string {
   return `${dbPath}.worker-${workerId}.children`
 }
@@ -121,13 +200,12 @@ export function exclusiveChildReservationEnv(reservation: ExclusiveChildReservat
 export function finalizeExclusiveChild(reservation: ExclusiveChildReservation | null, pid: number | undefined): void {
   if (!reservation) return
   if (!pid || !Number.isFinite(pid) || pid <= 0) throw new Error('spawned child pid unavailable')
-  const identity = processStartIdentity(pid)
-  if (identity.status !== 'found') throw new Error('process start identity unavailable')
+  const inventory = readProcessInventory(pid)
+  if (inventory.status !== 'found') throw new Error('process identity unavailable')
   const entry = {
     type: 'child',
     reservationId: reservation.id,
-    pid,
-    startedAt: identity.identity,
+    ...inventory.process,
     ...(reservation.command ? { command: reservation.command } : {}),
   }
   appendFileSync(reservation.path, `${JSON.stringify(entry)}\n`, 'utf-8')
@@ -137,22 +215,35 @@ export function trackExclusiveChild(pid: number | undefined, command?: string): 
   finalizeExclusiveChild(reserveExclusiveChild(command), pid)
 }
 
+interface RecordedChild extends TrackedChild {
+  pgid?: number
+  reservationId?: string
+}
+
 interface ChildrenState {
-  children: TrackedChild[]
-  pendingReservationIds: string[]
+  children: RecordedChild[]
+  reservations: Map<string, string | undefined>
+  finalizedReservations: Set<string>
 }
 
 function readChildrenState(path: string): ChildrenState {
-  if (!existsSync(path)) return { children: [], pendingReservationIds: [] }
-  const children: TrackedChild[] = []
+  if (!existsSync(path)) {
+    return { children: [], reservations: new Map(), finalizedReservations: new Set() }
+  }
+  const children: RecordedChild[] = []
   const seen = new Set<string>()
-  const reservations = new Set<string>()
+  const reservations = new Map<string, string | undefined>()
   const finalizedReservations = new Set<string>()
   for (const line of readFileSync(path, 'utf-8').split('\n')) {
     if (!line.trim()) continue
     try {
-      const entry = JSON.parse(line) as TrackedChild & { type?: string; id?: string; reservationId?: string }
-      if (entry.type === 'reservation' && entry.id) reservations.add(entry.id)
+      const entry = JSON.parse(line) as TrackedChild & {
+        type?: string
+        id?: string
+        reservationId?: string
+        pgid?: number
+      }
+      if (entry.type === 'reservation' && entry.id) reservations.set(entry.id, entry.command)
       if (entry.type === 'child' && entry.reservationId) finalizedReservations.add(entry.reservationId)
       if (
         Number.isFinite(entry.pid) &&
@@ -165,6 +256,8 @@ function readChildrenState(path: string): ChildrenState {
         children.push({
           pid: entry.pid,
           startedAt: entry.startedAt,
+          ...(Number.isFinite(entry.pgid) && entry.pgid! > 0 ? { pgid: entry.pgid } : {}),
+          ...(entry.reservationId ? { reservationId: entry.reservationId } : {}),
           ...(entry.command ? { command: entry.command } : {}),
         })
       }
@@ -172,14 +265,15 @@ function readChildrenState(path: string): ChildrenState {
       continue
     }
   }
-  return {
-    children,
-    pendingReservationIds: [...reservations].filter((id) => !finalizedReservations.has(id)),
-  }
+  return { children, reservations, finalizedReservations }
 }
 
 export function readTrackedChildren(path: string): TrackedChild[] {
-  return readChildrenState(path).children
+  return readChildrenState(path).children.map(({ pid, startedAt, command }) => ({
+    pid,
+    startedAt,
+    ...(command ? { command } : {}),
+  }))
 }
 
 function findReservationProcesses(reservationId: string): number[] {
@@ -201,7 +295,7 @@ function findReservationProcesses(reservationId: string): number[] {
   if (process.platform === 'darwin') {
     const output = execFileSync('ps', ['-Eww', '-axo', 'pid=,pgid=,command='], {
       encoding: 'utf-8',
-      timeout: 2000,
+      timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
     })
     const pids = new Set<number>()
@@ -219,6 +313,159 @@ function findReservationProcesses(reservationId: string): number[] {
   throw new Error(`Cannot recover exclusive child reservation on ${process.platform}`)
 }
 
+function readProcessGroup(pgid: number): ProcessGroupRead {
+  if (process.platform === 'win32')
+    return { status: 'unreadable', error: new Error('Process groups unavailable on win32') }
+  try {
+    process.kill(-pgid, 0)
+    return { status: 'found' }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return { status: 'absent' }
+    if (code === 'EPERM') return { status: 'found' }
+    return { status: 'unreadable', error: error instanceof Error ? error : new Error(String(error)) }
+  }
+}
+
+export function captureExclusiveProcessInventory(
+  workerPid: number,
+  path: string,
+  dependencies: ProcessInventoryDependencies = {},
+): ExclusiveProcessInventory {
+  const readInventory = dependencies.readInventory ?? readProcessInventory
+  const findReservationPids = dependencies.findReservationPids ?? findReservationProcesses
+  const now = dependencies.now ?? Date.now
+  const state = readChildrenState(path)
+  const errors: string[] = []
+  const workerRead = dependencies.recordedWorker
+    ? ({ status: 'found', process: dependencies.recordedWorker } as const)
+    : readInventory(workerPid)
+  let worker: ProcessInventoryEntry | undefined
+  if (workerRead.status === 'found') worker = workerRead.process
+  else if (workerRead.status === 'unreadable') errors.push(`worker ${workerPid}: ${workerRead.error.message}`)
+  else errors.push(`worker ${workerPid}: identity unavailable before cleanup`)
+
+  const children: ProcessInventoryEntry[] = []
+  for (const child of state.children) {
+    if (child.pgid !== undefined) {
+      children.push({
+        pid: child.pid,
+        startedAt: child.startedAt,
+        pgid: child.pgid,
+        ...(child.command ? { command: child.command } : {}),
+      })
+      continue
+    }
+    const childRead = readInventory(child.pid, child.command)
+    if (childRead.status === 'found' && childRead.process.startedAt === child.startedAt) {
+      children.push(childRead.process)
+    } else if (childRead.status === 'unreadable') {
+      errors.push(`child ${child.pid}: ${childRead.error.message}`)
+    } else {
+      errors.push(`child ${child.pid}: process group unavailable before cleanup`)
+    }
+  }
+
+  const reservations: ExclusiveReservationInventory[] = []
+  for (const [id, command] of state.reservations) {
+    const processes: ProcessInventoryEntry[] = []
+    try {
+      for (const pid of findReservationPids(id)) {
+        const processRead = readInventory(pid, command)
+        if (processRead.status === 'found') processes.push(processRead.process)
+        else if (processRead.status === 'unreadable')
+          errors.push(`reservation ${id} pid ${pid}: ${processRead.error.message}`)
+        else errors.push(`reservation ${id} pid ${pid}: identity unavailable before cleanup`)
+      }
+    } catch (error) {
+      errors.push(`reservation ${id}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    reservations.push({
+      id,
+      ...(command ? { command } : {}),
+      finalized: state.finalizedReservations.has(id),
+      processes,
+    })
+  }
+
+  return {
+    capturedAt: now(),
+    ...(worker ? { worker } : {}),
+    children,
+    reservations,
+    errors,
+  }
+}
+
+export async function verifyExclusiveProcessInventoryAfter(
+  inventory: ExclusiveProcessInventory,
+  dependencies: ProcessInventoryDependencies = {},
+): Promise<OrphanInventoryCheck> {
+  const readInventory = dependencies.readInventory ?? readProcessInventory
+  const findReservationPids = dependencies.findReservationPids ?? findReservationProcesses
+  const readGroup = dependencies.readGroup ?? readProcessGroup
+  const now = dependencies.now ?? Date.now
+  const sleep =
+    dependencies.sleep ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)))
+  const delayMs = Math.max(0, inventory.capturedAt + 2_000 - now())
+  if (delayMs > 0) await sleep(delayMs)
+
+  const checkedAt = now()
+  const errors = [...inventory.errors]
+  const survivingIdentities: ProcessInventoryEntry[] = []
+  const identities = [
+    ...(inventory.worker ? [inventory.worker] : []),
+    ...inventory.children,
+    ...inventory.reservations.flatMap((reservation) => reservation.processes),
+  ]
+  const seenIdentities = new Set<string>()
+  for (const entry of identities) {
+    const key = `${entry.pid}:${entry.startedAt}`
+    if (seenIdentities.has(key)) continue
+    seenIdentities.add(key)
+    const processRead = readInventory(entry.pid, entry.command)
+    if (processRead.status === 'found' && processRead.process.startedAt === entry.startedAt) {
+      survivingIdentities.push(entry)
+    } else if (processRead.status === 'unreadable') {
+      errors.push(`pid ${entry.pid}: ${processRead.error.message}`)
+    }
+  }
+
+  const survivingGroups: number[] = []
+  const groups = new Set([
+    ...inventory.children.map((entry) => entry.pgid),
+    ...inventory.reservations.flatMap((reservation) => reservation.processes.map((entry) => entry.pgid)),
+  ])
+  for (const pgid of groups) {
+    const groupRead = readGroup(pgid)
+    if (groupRead.status === 'found') survivingGroups.push(pgid)
+    else if (groupRead.status === 'unreadable') errors.push(`process group ${pgid}: ${groupRead.error.message}`)
+  }
+
+  const liveReservations: Array<{ id: string; pids: number[] }> = []
+  for (const reservation of inventory.reservations) {
+    try {
+      const pids = findReservationPids(reservation.id)
+      if (pids.length > 0) liveReservations.push({ id: reservation.id, pids })
+    } catch (error) {
+      errors.push(`reservation ${reservation.id}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  return {
+    checkedAt,
+    clean:
+      survivingIdentities.length === 0 &&
+      survivingGroups.length === 0 &&
+      liveReservations.length === 0 &&
+      errors.length === 0,
+    survivingIdentities,
+    survivingGroups,
+    liveReservations,
+    errors,
+  }
+}
+
 /**
  * Kill every recorded child's process group, then unlink the file. Returns
  * the pids that were signaled (the cleanup proof). Missing processes are
@@ -231,13 +478,14 @@ export async function killTrackedChildren(
   const readProcessIdentity = dependencies.readProcessIdentity ?? processStartIdentity
   const killTree = dependencies.killTree ?? killProcessTree
   const signalGroup = dependencies.signalGroup ?? signalProcessGroup
+  const findReservationPids = dependencies.findReservationPids ?? findReservationProcesses
   const retryDelay = dependencies.retryDelay ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 50)))
   const state = readChildrenState(path)
   const killed: number[] = []
   const killedSet = new Set<number>()
   let hasUnreadableIdentity = false
-  for (const reservationId of state.pendingReservationIds) {
-    for (const pid of findReservationProcesses(reservationId)) {
+  for (const reservationId of state.reservations.keys()) {
+    for (const pid of findReservationPids(reservationId)) {
       if (killedSet.has(pid)) continue
       await killTree(pid)
       killedSet.add(pid)
@@ -274,8 +522,8 @@ export async function killTrackedChildren(
       })
     }
   }
-  const hasMarkedReservationProcesses = state.pendingReservationIds.some(
-    (reservationId) => findReservationProcesses(reservationId).length > 0,
+  const hasMarkedReservationProcesses = [...state.reservations.keys()].some(
+    (reservationId) => findReservationPids(reservationId).length > 0,
   )
   if (!hasUnreadableIdentity && !hasMarkedReservationProcesses) removeChildrenFile(path)
   return killed
