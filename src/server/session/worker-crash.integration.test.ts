@@ -261,6 +261,59 @@ describe('session worker crash', () => {
     expect((await getSessionView(sessionA)).pendingToolReconciliations).toEqual([])
   }, 120_000)
 
+  it('treats a forced Stop as interrupted and refuses to replay an unresolved shell effect', async () => {
+    await waitFor(
+      async () => ((await getWorkerIntrospection()).active === null ? true : null),
+      40_000,
+      'previous worker to settle',
+    )
+    await setWorkerMode(true)
+    const sessionId = await createSession('forced-stop-reconciliation')
+    const effectPath = join(workdir, 'forced-stop-effect.txt')
+    await sendMessage(sessionId, `Run the exact command: printf x >> ${JSON.stringify(effectPath)}; sleep 30`)
+    const active = await waitFor(() => getActiveWorker(sessionId), 20_000, 'worker to start')
+    await waitFor(
+      async () => ((await readFile(effectPath, 'utf-8').catch(() => '')) === 'x' ? true : null),
+      20_000,
+      'forced Stop tool side effect',
+    )
+
+    process.kill(active.pid!, 'SIGSTOP')
+    const stopped = await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
+    expect(stopped.status).toBe(200)
+
+    const interrupted = await waitFor(
+      async () => {
+        const view = await getSessionView(sessionId)
+        return view.session.interruptedAt && !view.session.isRunning ? view : null
+      },
+      10_000,
+      'forced Stop interruption',
+    )
+    expect(interrupted.pendingToolReconciliations).toHaveLength(1)
+    expect(interrupted.pendingToolReconciliations[0]?.name).toBe('run_command')
+
+    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+    expect(resumed.status).toBe(200)
+    const recovered = await waitFor(
+      async () => {
+        const view = await getSessionView(sessionId)
+        return !view.session.interruptedAt && !view.session.isRunning ? view : null
+      },
+      30_000,
+      'forced Stop resume',
+    )
+    expect(recovered.pendingToolReconciliations).toHaveLength(1)
+    expect(
+      recovered.messages.some((message) =>
+        message.toolCalls?.some(
+          (call) => call.result?.success === false && call.result.metadata?.['reconciliationRequired'] === true,
+        ),
+      ),
+    ).toBe(true)
+    expect(await readFile(effectPath, 'utf-8')).toBe('x')
+  }, 120_000)
+
   it('syncs interruptedAt over the real WebSocket on crash and clears it on resume', async () => {
     await setWorkerMode(true)
     await waitFor(

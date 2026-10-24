@@ -80,6 +80,7 @@ interface ActiveWorker {
   doneOk: boolean
   doneError?: string
   stopRequestedAt?: number
+  stopEscalatedAt?: number
   stderrTail: string[]
   command: WorkerTurnCommand
   onSettled: (outcome: WorkerSettledOutcome) => void
@@ -398,6 +399,7 @@ export class SessionWorkerManager {
 
   private async escalateStop(worker: ActiveWorker): Promise<void> {
     if (await this.waitForExit(worker, 500)) return
+    worker.stopEscalatedAt = Date.now()
     try {
       worker.child.kill('SIGTERM')
     } catch {
@@ -625,7 +627,7 @@ export class SessionWorkerManager {
     clearWorkerToken(db, sessionId, token)
     this.deps.healthAggregator?.expireWorker(token)
 
-    if (worker.stopRequestedAt !== undefined) {
+    if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
       const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath)
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)

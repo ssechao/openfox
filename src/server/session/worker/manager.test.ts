@@ -120,7 +120,7 @@ describe('SessionWorkerManager', () => {
     })
   })
 
-  it('aborts immediately, escalates at 500 ms intervals, and settles an intentional stop', async () => {
+  it('aborts immediately, escalates at 500 ms intervals, and interrupts a forced stop', async () => {
     vi.useFakeTimers()
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-${crypto.randomUUID()}.db`))
     openDbs.push(db)
@@ -140,16 +140,53 @@ describe('SessionWorkerManager', () => {
       kill,
     }) as unknown as ChildProcess
     const settled = vi.fn()
+    const appended: string[] = []
     const cleanupChildren = vi.fn(async () => [99])
     const manager = new SessionWorkerManager({
       db: () => namedDb,
       config,
-      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      sessionManager: {
+        setRunning: () => {},
+        getActiveWorkflowExecution: () => null,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
       isEnabled: () => true,
       broadcastForSession: () => {},
       cleanupChildren,
       processSupervisor: { spawnWorker: () => child } as never,
-      eventStore: () => ({ invalidateExternalSession: () => {} }) as never,
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [
+            { seq: 1, timestamp: 1, sessionId: 'sess-1', type: 'message.start', data: { role: 'user' } },
+            {
+              seq: 2,
+              timestamp: 2,
+              sessionId: 'sess-1',
+              type: 'tool.call',
+              data: {
+                messageId: 'assistant-1',
+                toolCall: { id: 'call-1', name: 'run_command', arguments: { command: 'effect' } },
+              },
+            },
+          ],
+          append: (_sessionId: string, event: { type: string }) => appended.push(event.type),
+        }) as never,
+      captureInventory: (pid) => ({
+        capturedAt: 1_000,
+        worker: { pid, startedAt: 'linux:42', pgid: 42 },
+        children: [],
+        reservations: [],
+        errors: [],
+      }),
+      verifyInventory: async () => ({
+        checkedAt: 3_000,
+        clean: true,
+        survivingIdentities: [],
+        survivingGroups: [],
+        liveReservations: [],
+        errors: [],
+      }),
     })
 
     try {
@@ -167,11 +204,13 @@ describe('SessionWorkerManager', () => {
       await vi.advanceTimersByTimeAsync(999)
 
       expect(cleanupChildren).toHaveBeenCalledTimes(1)
-      expect(settled).toHaveBeenCalledWith({ crashed: false })
+      expect(settled).toHaveBeenCalledWith({ crashed: true })
+      expect(appended).toContain('tool.reconciliation_required')
       expect(manager.activeWorker('sess-1')).toBeNull()
-      expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
-        interrupted_at: null,
-      })
+      const interrupted = namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get() as {
+        interrupted_at: string | null
+      }
+      expect(interrupted.interrupted_at).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
