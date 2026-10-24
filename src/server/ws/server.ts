@@ -41,6 +41,7 @@ import { generateSessionNameForSession, needsNameGeneration } from '../session/n
 import { getSessionMessageCount } from '../utils/session-utils.js'
 import { serverT } from '../i18n.js'
 import type { Translation } from '../../shared/i18n/index.js'
+import type { InteractiveAnswerResult } from '../session/worker/interactive-broker.js'
 import type { WorkerSettledOutcome } from '../session/worker/manager.js'
 import type { WorkerTurnCommand } from '../session/worker/protocol.js'
 import type { AdmissionResult } from '../session/worker/scheduler.js'
@@ -344,7 +345,7 @@ export interface WebSocketWorkerController {
   requestTurn(sessionId: string, start: () => void): AdmissionResult
   releaseTurn(sessionId: string): boolean
   launch(sessionId: string, onSettled: (outcome: WorkerSettledOutcome) => void, command?: WorkerTurnCommand): void
-  answerQuestion?(callId: string, answer: string, skip: boolean): boolean
+  answerQuestion?(callId: string, answer: string, skip: boolean): InteractiveAnswerResult
 }
 
 export function createWebSocketServer(
@@ -1605,11 +1606,27 @@ async function handleClientMessage(
       }
 
       const workerController = getWorkerController?.()
-      const found = workerController?.isEnabled()
-        ? (workerController.answerQuestion?.(callId, answer, skip ?? false) ?? false)
+      const result = workerController?.isEnabled()
+        ? (workerController.answerQuestion?.(callId, answer, skip ?? false) ?? 'not-handled')
         : provideAnswer(callId, answer, skip)
+          ? 'answered'
+          : 'not-handled'
 
-      if (!found) {
+      if (result === 'rejected') {
+        send(
+          createErrorMessage(
+            'ANSWER_REJECTED',
+            serverT({
+              en: 'The answer exceeds the worker IPC size limit or could not be delivered',
+              fr: 'La réponse dépasse la limite IPC du worker ou n’a pas pu être transmise',
+            }),
+            message.id,
+          ),
+        )
+        return
+      }
+
+      if (result === 'not-handled') {
         send(
           createErrorMessage(
             'NOT_FOUND',

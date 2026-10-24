@@ -2093,9 +2093,14 @@ describe('createWebSocketServer', () => {
   it('brokers worker ask answers and rejects late responses', async () => {
     getPendingQuestionsForSessionMock.mockReturnValue([
       { callId: 'call-1', question: 'Continue?', type: 'confirm' },
+      { callId: 'call-rejected', question: 'Continue?', type: 'confirm' },
       { callId: 'call-late', question: 'Continue?', type: 'confirm' },
     ])
-    const answerQuestion = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
+    const answerQuestion = vi
+      .fn()
+      .mockReturnValueOnce('answered' as const)
+      .mockReturnValueOnce('rejected' as const)
+      .mockReturnValueOnce('not-handled' as const)
     const workerController = {
       isEnabled: () => true,
       requestTurn: vi.fn(() => 'started' as const),
@@ -2112,6 +2117,16 @@ describe('createWebSocketServer', () => {
     expect(await harness.nextMessage((message) => message.id === 'answer-worker')).toMatchObject({ type: 'ack' })
     expect(answerQuestion).toHaveBeenCalledWith('call-1', 'yes', false)
     expect(provideAnswerMock).not.toHaveBeenCalled()
+
+    harness.send({
+      id: 'answer-rejected',
+      type: 'ask.answer',
+      payload: { callId: 'call-rejected', answer: 'oversized' },
+    })
+    expect(await harness.nextMessage((message) => message.id === 'answer-rejected')).toMatchObject({
+      type: 'error',
+      payload: { code: 'ANSWER_REJECTED' },
+    })
 
     harness.send({ id: 'answer-late', type: 'ask.answer', payload: { callId: 'call-late', answer: 'late' } })
     expect(await harness.nextMessage((message) => message.id === 'answer-late')).toMatchObject({

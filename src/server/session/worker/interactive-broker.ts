@@ -7,6 +7,8 @@ import type {
 } from './protocol.js'
 import { MAX_MCP_GLOBAL_IN_FLIGHT, MAX_MCP_REQUEST_BYTES, MAX_MCP_WORKER_IN_FLIGHT } from './mcp-broker.js'
 
+export type InteractiveAnswerResult = 'answered' | 'rejected' | 'not-handled'
+
 interface PendingInteractiveRequest {
   message: InteractiveOpenMessage
   kind: 'question' | 'path'
@@ -113,12 +115,12 @@ export class WorkerInteractiveBroker {
     this.perWorker.set(owner, workerCount + 1)
   }
 
-  answerQuestion(callId: string, answer: string, skip: boolean): boolean {
+  answerQuestion(callId: string, answer: string, skip: boolean): InteractiveAnswerResult {
     const entry = this.find('question', callId)
-    if (!entry || entry.message.type !== 'interactive.question.open') return false
+    if (!entry || entry.message.type !== 'interactive.question.open') return 'not-handled'
     if (!this.deps.isCurrent(identityOf(entry.message))) {
       this.cancelEntry(entry, 'Worker identity is no longer current', false)
-      return false
+      return 'rejected'
     }
     const response: WorkerInteractiveResponseMessage = {
       ...identityOf(entry.message),
@@ -128,14 +130,14 @@ export class WorkerInteractiveBroker {
       answer,
       skip,
     }
-    if (Buffer.byteLength(JSON.stringify(response)) > MAX_MCP_REQUEST_BYTES) return false
+    if (Buffer.byteLength(JSON.stringify(response)) > MAX_MCP_REQUEST_BYTES) return 'rejected'
     if (!this.deps.answerQuestion(callId, answer, skip)) {
       this.take(entry)
-      return false
+      return 'rejected'
     }
     this.deps.send(response)
     this.take(entry)
-    return true
+    return 'answered'
   }
 
   answerPath(callId: string, approved: boolean, alwaysAllow: boolean): boolean {

@@ -1662,9 +1662,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(404).json({ error: 'No pending question with that ID' })
     }
 
+    const workerAnswer = workerManager.answerQuestion(callId, answer ?? '', skip ?? false)
+    if (workerAnswer === 'rejected') {
+      return res.status(413).json({ error: 'Answer exceeds the worker IPC size limit or could not be delivered' })
+    }
     const found =
-      workerManager.answerQuestion(callId, answer ?? '', skip ?? false) ||
-      provideAnswer(callId, answer ?? '', skip ?? false)
+      workerAnswer === 'answered' ||
+      (workerAnswer === 'not-handled' && provideAnswer(callId, answer ?? '', skip ?? false))
 
     if (!found) {
       return res.status(404).json({ error: 'No pending question with that ID' })
@@ -4101,8 +4105,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }
       return null
     },
-    answerQuestion: (callId, answer, skip) =>
-      workerManager.answerQuestion(callId, answer, skip ?? false) || provideAnswer(callId, answer, skip),
+    answerQuestion: (callId, answer, skip) => {
+      const workerAnswer = workerManager.answerQuestion(callId, answer, skip ?? false)
+      if (workerAnswer !== 'not-handled') return workerAnswer
+      return provideAnswer(callId, answer, skip) ? 'answered' : 'not-handled'
+    },
     pendingQuestions: (sessionId) => getPendingQuestionsForSession(sessionId),
     confirmPath: (callId, approved, alwaysAllow) =>
       workerManager.answerPath(callId, approved, alwaysAllow ?? false) ||

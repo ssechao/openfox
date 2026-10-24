@@ -3,8 +3,11 @@ import { mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { Client } from '@modelcontextprotocol/sdk/client'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Config } from '../../../shared/types.js'
 import type { ServerHandle } from '../../context.js'
+import { MAX_MCP_REQUEST_BYTES } from './mcp-broker.js'
 
 interface SessionView {
   session: { isRunning: boolean; interruptedAt?: string | null }
@@ -122,6 +125,53 @@ describe('worker interactive IPC', () => {
       body: JSON.stringify({ callId, answer: 'Late' }),
     })
     expect(late.status).toBe(404)
+  }, 60_000)
+
+  it('keeps a worker question pending after oversized REST and MCP answers', async () => {
+    const sessionId = await createSession('worker-question-oversized')
+    await sendMessage(sessionId, 'ask the user a question')
+
+    const callId = await waitFor(async () => {
+      const view = await getSession(sessionId)
+      return view.pendingQuestions[0]?.callId ?? null
+    }, 'worker question before oversized answers')
+    const oversized = 'x'.repeat(MAX_MCP_REQUEST_BYTES)
+
+    const restAnswer = await fetch(`${base}/api/sessions/${sessionId}/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ callId, answer: oversized }),
+    })
+    expect(restAnswer.status).toBe(413)
+    await expect(restAnswer.json()).resolves.toMatchObject({ error: expect.stringContaining('exceeds') })
+    expect((await getSession(sessionId)).pendingQuestions).toEqual([expect.objectContaining({ callId })])
+
+    const client = new Client({ name: 'worker-answer-test', version: '0.0.1' })
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`)) as any)
+    try {
+      const mcpAnswer = await client.callTool({
+        name: 'openfox_answer',
+        arguments: { sessionId, callId, answer: oversized },
+      })
+      expect(mcpAnswer.isError).toBe(true)
+      expect(JSON.stringify(mcpAnswer.content)).toContain('rejected')
+    } finally {
+      await client.close()
+    }
+    expect((await getSession(sessionId)).pendingQuestions).toEqual([expect.objectContaining({ callId })])
+
+    const smallAnswer = await fetch(`${base}/api/sessions/${sessionId}/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ callId, answer: 'Continue' }),
+    })
+    expect(smallAnswer.status).toBe(200)
+
+    const finished = await waitFor(async () => {
+      const view = await getSession(sessionId)
+      return !view.session.isRunning && view.pendingQuestions.length === 0 ? view : null
+    }, 'question completion after small answer')
+    expect(JSON.stringify(finished.messages)).toContain('Continue')
   }, 60_000)
 
   it('cancels a pending question on Stop', async () => {

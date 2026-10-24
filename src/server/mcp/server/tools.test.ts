@@ -100,7 +100,7 @@ function makeDeps(overrides: Partial<OpenFoxMcpToolDeps> = {}): OpenFoxMcpToolDe
     launchWorkflow: vi.fn(),
     stopSession: vi.fn(),
     stopWorkflow: vi.fn(() => ({ aborted: 'running' as const })),
-    answerQuestion: vi.fn(() => true),
+    answerQuestion: vi.fn(() => 'answered' as const),
     pendingQuestions: vi.fn(() => []),
     confirmPath: vi.fn(() => true),
     pendingConfirmations: vi.fn(() => []),
@@ -1282,6 +1282,20 @@ describe('openfx MCP tools', () => {
       })
       await call(createOpenFoxMcpTools(deps), 'openfox_answer', { sessionId: 's-1', callId: 'q-1', skip: true })
       expect(deps.answerQuestion).toHaveBeenCalledWith('q-1', '', true)
+    })
+
+    it('reports a worker-rejected answer explicitly', async () => {
+      const deps = makeDeps({
+        pendingQuestions: vi.fn(() => pendingQ1),
+        answerQuestion: vi.fn(() => 'rejected' as const),
+      })
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_answer', {
+        sessionId: 's-1',
+        callId: 'q-1',
+        answer: 'oversized',
+      })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('rejected')
     })
 
     it('rejects a callId that belongs to another session', async () => {

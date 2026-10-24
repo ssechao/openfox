@@ -48,7 +48,7 @@ import type {
   WorkerTurnCommand,
 } from './protocol.js'
 import { WorkerMcpBroker } from './mcp-broker.js'
-import { WorkerInteractiveBroker } from './interactive-broker.js'
+import { WorkerInteractiveBroker, type InteractiveAnswerResult } from './interactive-broker.js'
 import { cancelQuestion, registerPendingQuestion, provideAnswer } from '../../tools/ask.js'
 import { cancelPathConfirmation, providePathConfirmation, registerPathConfirmation } from '../../tools/path-security.js'
 import type { HealthAggregator } from '../../diagnostics/aggregator.js'
@@ -206,7 +206,7 @@ export class SessionWorkerManager {
     return true
   }
 
-  answerQuestion(callId: string, answer: string, skip: boolean): boolean {
+  answerQuestion(callId: string, answer: string, skip: boolean): InteractiveAnswerResult {
     return this.interactiveBroker.answerQuestion(callId, answer, skip)
   }
 

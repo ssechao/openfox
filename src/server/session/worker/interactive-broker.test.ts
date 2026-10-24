@@ -44,7 +44,7 @@ describe('WorkerInteractiveBroker', () => {
 
     expect(registerQuestion).toHaveBeenCalledWith('call-1', 'session-1', 'Continue?', 'confirm', undefined)
     expect(broker.pendingCount()).toBe(1)
-    expect(broker.answerQuestion('call-1', 'yes', false)).toBe(true)
+    expect(broker.answerQuestion('call-1', 'yes', false)).toBe('answered')
     expect(answerQuestion).toHaveBeenCalledWith('call-1', 'yes', false)
     expect(sent).toEqual([
       {
@@ -63,7 +63,7 @@ describe('WorkerInteractiveBroker', () => {
     const { broker, sent, answerQuestion } = createHarness()
     broker.handleOpen(question())
 
-    expect(broker.answerQuestion('call-1', 'x'.repeat(MAX_MCP_REQUEST_BYTES), false)).toBe(false)
+    expect(broker.answerQuestion('call-1', 'x'.repeat(MAX_MCP_REQUEST_BYTES), false)).toBe('rejected')
     expect(answerQuestion).not.toHaveBeenCalled()
     expect(sent).toEqual([])
     expect(broker.pendingCount()).toBe(1)
@@ -78,7 +78,7 @@ describe('WorkerInteractiveBroker', () => {
     current.broker.handleOpen(question())
     current.broker.cancelWorker(identity, 'worker stopped')
     expect(current.cancelQuestion).toHaveBeenCalledWith('call-1', 'worker stopped')
-    expect(current.broker.answerQuestion('call-1', 'late', false)).toBe(false)
+    expect(current.broker.answerQuestion('call-1', 'late', false)).toBe('not-handled')
     expect(current.sent).toEqual([
       {
         ...identity,

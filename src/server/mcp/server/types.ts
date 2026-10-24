@@ -2,6 +2,7 @@ import type { MetadataEntry, Message, Project, WorkflowParameter } from '../../.
 import type { PendingPathConfirmationPayload, PendingQuestionPayload } from '../../../shared/protocol.js'
 import type { WorkflowLaunchPayload } from '../../runner/launch.js'
 import type { SessionManager } from '../../session/manager.js'
+import type { InteractiveAnswerResult } from '../../session/worker/interactive-broker.js'
 
 export interface WorkflowListItem {
   id: string
@@ -30,7 +31,7 @@ export interface OpenFoxMcpToolDeps {
   stopSession(sessionId: string): void
   /** Abort the active workflow run only (task/MCP-launched runs): a live run is aborted, a paused (waiting) user-step execution is cancelled. Returns what was stopped, or null when nothing is active. */
   stopWorkflow(sessionId: string): { aborted: 'running' | 'paused' } | null
-  answerQuestion(callId: string, answer: string, skip?: boolean): boolean
+  answerQuestion(callId: string, answer: string, skip?: boolean): InteractiveAnswerResult
   pendingQuestions(sessionId: string): PendingQuestionPayload[]
   confirmPath(callId: string, approved: boolean, alwaysAllow?: boolean): boolean
   pendingConfirmations(sessionId: string): PendingPathConfirmationPayload[]

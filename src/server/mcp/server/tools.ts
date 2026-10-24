@@ -762,8 +762,11 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
           return fail('answer is required unless skip is true')
         }
 
-        const found = deps.answerQuestion(callId, skip ? '' : answer, skip || undefined)
-        if (!found) {
+        const result = deps.answerQuestion(callId, skip ? '' : answer, skip || undefined)
+        if (result === 'rejected') {
+          return fail(`Question ${callId} answer was rejected by the worker`)
+        }
+        if (result === 'not-handled') {
           return fail(`Question ${callId} is no longer pending`)
         }
         return ok({ answered: true, callId, skipped: skip || undefined })
