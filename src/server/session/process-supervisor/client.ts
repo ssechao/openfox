@@ -31,6 +31,7 @@ interface SessionProcessSupervisorOptions {
   entry?: SupervisorEntry
   startupTimeoutMs?: number
   shutdownTimeoutMs?: number
+  signalProcess?: typeof process.kill
 }
 
 interface PendingGit {
@@ -74,6 +75,7 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
   constructor(
     readonly workerKey: string,
     private readonly dispatch: (message: GatewayToSupervisorMessage) => boolean,
+    private readonly signalProcess: typeof process.kill,
   ) {
     super()
   }
@@ -83,7 +85,12 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
   }
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
-    return this.dispatch({ type: 'worker.kill', workerKey: this.workerKey, signal })
+    if (this.pid === undefined) return false
+    try {
+      return this.signalProcess(this.pid, signal)
+    } catch {
+      return false
+    }
   }
 
   markExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -111,10 +118,12 @@ export class SessionProcessSupervisor {
   private lastGitProcess: GitProcessIntrospection | null = null
   private readonly forkProcess: typeof fork
   private readonly entry: SupervisorEntry
+  private readonly signalProcess: typeof process.kill
 
   constructor(private readonly options: SessionProcessSupervisorOptions = {}) {
     this.forkProcess = options.forkProcess ?? fork
     this.entry = options.entry ?? resolveSupervisorEntry()
+    this.signalProcess = options.signalProcess ?? process.kill
   }
 
   isReady(): boolean {
@@ -175,7 +184,7 @@ export class SessionProcessSupervisor {
   }): SupervisorWorkerHandle {
     if (!this.ready) throw new Error('Session process supervisor is not ready')
     if (this.workers.has(options.workerKey)) throw new Error(`Worker already exists: ${options.workerKey}`)
-    const handle = new RemoteWorkerHandle(options.workerKey, (message) => this.dispatch(message))
+    const handle = new RemoteWorkerHandle(options.workerKey, (message) => this.dispatch(message), this.signalProcess)
     this.workers.set(options.workerKey, handle)
     this.dispatch({
       type: 'worker.spawn',

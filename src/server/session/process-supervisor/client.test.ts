@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -56,10 +56,12 @@ describe('SessionProcessSupervisor', () => {
 
   it('relays worker lifecycle without forking from the gateway', async () => {
     const child = fakeChild()
+    const signalProcess = vi.fn((_pid: number, _signal?: string | number) => true as const)
     const supervisor = new SessionProcessSupervisor({
       forkProcess: vi.fn(() => child),
       entry: { path: '/supervisor.js', execArgv: [] },
       startupTimeoutMs: 100,
+      signalProcess,
     })
     const started = supervisor.start()
     child.emit('message', { type: 'ready', pid: 41 })
@@ -96,8 +98,94 @@ describe('SessionProcessSupervisor', () => {
       workerKey: 'worker-1',
       message: { type: 'start' },
     })
-    expect(child.send).toHaveBeenCalledWith({ type: 'worker.kill', workerKey: 'worker-1', signal: 'SIGTERM' })
+    expect(signalProcess).toHaveBeenCalledWith(99, 'SIGTERM')
+    expect(child.send).not.toHaveBeenCalledWith({ type: 'worker.kill', workerKey: 'worker-1', signal: 'SIGTERM' })
   })
+
+  it('signals a second worker while the supervisor event loop is blocked', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-priority-kill-'))
+    const entry = join(root, 'fixture.cjs')
+    const workerEntry = join(root, 'worker.cjs')
+    const stoppedPath = join(root, 'worker-2-stopped')
+    writeFileSync(
+      workerEntry,
+      `process.on('SIGTERM', () => {
+  if (process.env.STOPPED_PATH) require('node:fs').writeFileSync(process.env.STOPPED_PATH, '')
+  process.exit(0)
+})
+process.send('ready')
+setInterval(() => {}, 1000)
+`,
+    )
+    writeFileSync(
+      entry,
+      `
+const { fork } = require('node:child_process')
+const workers = new Map()
+process.send({ type: 'ready', pid: process.pid })
+process.on('message', (message) => {
+  if (message.type === 'worker.spawn') {
+    const worker = fork(message.path, [], { env: message.env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    workers.set(message.workerKey, worker)
+    process.send({ type: 'worker.spawned', requestId: message.requestId, workerKey: message.workerKey, pid: worker.pid })
+    worker.on('message', (payload) => {
+      process.send({ type: 'worker.message', workerKey: message.workerKey, message: payload })
+    })
+    worker.on('exit', (code, signal) => {
+      workers.delete(message.workerKey)
+      process.send({ type: 'worker.exit', workerKey: message.workerKey, code, signal })
+    })
+  }
+  if (message.type === 'children.cleanup') {
+    const until = Date.now() + 3000
+    while (Date.now() < until) {}
+    process.send({ type: 'children.cleanup.result', requestId: message.requestId, killedChildren: [] })
+  }
+  if (message.type === 'shutdown') {
+    for (const worker of workers.values()) worker.kill('SIGKILL')
+    process.send({ type: 'shutdown.complete' })
+    process.exit(0)
+  }
+})
+`,
+    )
+    const supervisor = new SessionProcessSupervisor({ entry: { path: entry, execArgv: [] } })
+
+    try {
+      await supervisor.start()
+      const first = supervisor.spawnWorker({
+        workerKey: 'worker-1',
+        path: workerEntry,
+        execArgv: [],
+        env: process.env,
+      })
+      const second = supervisor.spawnWorker({
+        workerKey: 'worker-2',
+        path: workerEntry,
+        execArgv: [],
+        env: { ...process.env, STOPPED_PATH: stoppedPath },
+      })
+      await Promise.all([
+        new Promise<void>((resolve) => first.on('message', () => resolve())),
+        new Promise<void>((resolve) => second.on('message', () => resolve())),
+      ])
+
+      const cleanup = supervisor.cleanupWorkerChildren('/tmp/worker.children')
+      const startedAt = Date.now()
+      expect(second.kill('SIGTERM')).toBe(true)
+      await vi.waitFor(
+        () => {
+          expect(existsSync(stoppedPath)).toBe(true)
+        },
+        { timeout: 1_900 },
+      )
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(2_000)
+      await cleanup
+    } finally {
+      await supervisor.shutdown()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 10_000)
 
   it('correlates child cleanup results through the supervisor', async () => {
     const child = fakeChild()

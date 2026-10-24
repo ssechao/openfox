@@ -402,6 +402,63 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it('settles Stop failure at two seconds without releasing a live worker slot', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-deadline-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const settled = vi.fn()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+      processSupervisor: {
+        spawnWorker: () => child,
+        captureWorkerInventory: (workerPid: number, _path: string, worker: unknown, capturedAt: number) =>
+          Promise.resolve({
+            capturedAt,
+            worker: worker ?? { pid: workerPid, startedAt: 'linux:42', pgid: 42 },
+            children: [],
+            reservations: [],
+            errors: [],
+          }),
+      } as never,
+    })
+
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(settled).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+
+      expect(settled).toHaveBeenCalledOnce()
+      expect(settled).toHaveBeenCalledWith({
+        crashed: true,
+        error: expect.stringMatching(/did not exit.*Stop deadline/i),
+      })
+      expect(manager.activeWorker('sess-1')).not.toBeNull()
+      const waitingStart = vi.fn()
+      expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
+      expect(waitingStart).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(settled).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('observes orphan state at T+2 even when child cleanup misses the recovery deadline', async () => {
     vi.useFakeTimers()
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-proof-deadline-${crypto.randomUUID()}.db`))

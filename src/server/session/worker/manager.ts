@@ -89,6 +89,7 @@ interface ActiveWorker {
   stopRequestedAt?: number
   stopEscalatedAt?: number
   recoveryDeadlineAt?: number
+  settledNotified: boolean
   stderrTail: string[]
   command: WorkerTurnCommand
   onSettled: (outcome: WorkerSettledOutcome) => void
@@ -319,6 +320,7 @@ export class SessionWorkerManager {
       ...(workerInventoryRead.status === 'found' ? { workerInventory: workerInventoryRead.process } : {}),
       doneReceived: false,
       doneOk: false,
+      settledNotified: false,
       stderrTail: [],
       command,
       onSettled,
@@ -420,31 +422,42 @@ export class SessionWorkerManager {
     return result
   }
 
+  private notifyWorkerSettled(worker: ActiveWorker, outcome: WorkerSettledOutcome): void {
+    if (worker.settledNotified) return
+    worker.settledNotified = true
+    worker.onSettled(outcome)
+  }
+
+  private async waitForExitUntil(worker: ActiveWorker, deadlineAt: number): Promise<boolean> {
+    return this.waitForExit(worker, Math.max(0, deadlineAt - Date.now()))
+  }
+
   private async escalateStop(worker: ActiveWorker): Promise<void> {
-    if (await this.waitForExit(worker, WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS)) return
     const stopRequestedAt = worker.stopRequestedAt ?? Date.now()
-    await this.beginWorkerInventoryCapture(
-      worker,
-      stopRequestedAt,
-      stopRequestedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS,
-    )
+    const termAt = stopRequestedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS
+    if (await this.waitForExitUntil(worker, termAt)) return
+    await this.beginWorkerInventoryCapture(worker, stopRequestedAt, termAt)
     worker.stopEscalatedAt = Date.now()
     try {
       worker.child.kill('SIGTERM')
     } catch {
       void 0
     }
-    if (await this.waitForExit(worker, 500)) return
+    const killAt = stopRequestedAt + 1_000
+    if (await this.waitForExitUntil(worker, killAt)) return
     try {
       worker.child.kill('SIGKILL')
     } catch {
       void 0
     }
-    if (!(await this.waitForExit(worker, 1_000))) {
-      logger.error('Session worker did not exit within the bounded Stop deadline', {
+    const stopDeadlineAt = stopRequestedAt + 2_000
+    if (!(await this.waitForExitUntil(worker, stopDeadlineAt))) {
+      const error = 'Session worker did not exit within the bounded Stop deadline'
+      logger.error(error, {
         sessionId: worker.sessionId,
         workerId: worker.token.workerId,
       })
+      this.notifyWorkerSettled(worker, { crashed: true, error })
     }
   }
 
@@ -526,7 +539,7 @@ export class SessionWorkerManager {
       if (!exitResult) cleanupError = 'worker did not exit before the shutdown deadline'
       if (cleanupResult.cleanupError) cleanupError = cleanupResult.cleanupError
 
-      worker.onSettled({
+      this.notifyWorkerSettled(worker, {
         crashed: true,
         error: cleanupError
           ? `Gateway shutdown interrupted the worker turn; cleanup failed: ${cleanupError}`
@@ -771,7 +784,7 @@ export class SessionWorkerManager {
       eventStore.invalidateExternalSession(sessionId)
       this.retire(worker)
       this.scheduler.release(sessionId)
-      worker.onSettled({
+      this.notifyWorkerSettled(worker, {
         crashed: false,
         ...(recoveryErrors.length > 0
           ? { error: `Session stopped; cleanup proof failed: ${recoveryErrors.join('; ')}` }
@@ -786,7 +799,7 @@ export class SessionWorkerManager {
       logger.info('Session worker exited cleanly', { sessionId, workerId: token.workerId })
       this.retire(worker)
       this.scheduler.release(sessionId)
-      worker.onSettled({ crashed: false })
+      this.notifyWorkerSettled(worker, { crashed: false })
       return
     }
 
@@ -880,7 +893,7 @@ export class SessionWorkerManager {
     this.retire(worker)
     this.scheduler.release(sessionId)
     const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
-    worker.onSettled({
+    this.notifyWorkerSettled(worker, {
       crashed: true,
       ...(worker.doneError || recoveryErrors.length > 0
         ? { error: worker.doneError ?? `Worker interruption recovery failed: ${recoveryErrors.join('; ')}` }
