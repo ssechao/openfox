@@ -335,6 +335,69 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it('bounds forced Stop when inventory capture and child cleanup never settle', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-rpc-deadline-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const kill = vi.fn((signal: NodeJS.Signals = 'SIGTERM') => {
+      if (signal === 'SIGKILL') queueMicrotask(() => child.emit('exit', null, 'SIGKILL'))
+      return true
+    })
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill,
+    }) as unknown as ChildProcess
+    const settled = vi.fn()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        setRunning: () => {},
+        getActiveWorkflowExecution: () => null,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: {
+        spawnWorker: () => child,
+        captureWorkerInventory: () => new Promise(() => {}),
+        cleanupWorkerChildren: () => new Promise(() => {}),
+        verifyWorkerInventory: () => new Promise(() => {}),
+      } as never,
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+
+    try {
+      manager.launch('sess-1', settled)
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(kill).toHaveBeenCalledWith('SIGTERM')
+      await vi.advanceTimersByTimeAsync(500)
+      expect(kill).toHaveBeenCalledWith('SIGKILL')
+      await vi.advanceTimersByTimeAsync(3_000)
+
+      expect(settled).toHaveBeenCalledWith({
+        crashed: true,
+        error: expect.stringMatching(/inventory capture.*deadline|cleanup.*deadline/i),
+      })
+      expect(manager.lastCrashReport()).toMatchObject({
+        cleanupError: expect.stringMatching(/deadline/i),
+        inventory: { errors: [expect.stringMatching(/deadline/i)] },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('finalizes crash interruption when child cleanup fails and preserves the sidecar', async () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-cleanup-error.db')
     openDbs.push(db)

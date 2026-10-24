@@ -38,18 +38,8 @@ interface PendingGit {
   reject: (error: Error) => void
 }
 
-interface PendingChildrenCleanup {
-  resolve: (killedChildren: number[]) => void
-  reject: (error: Error) => void
-}
-
-interface PendingChildrenCapture {
-  resolve: (inventory: ExclusiveProcessInventory) => void
-  reject: (error: Error) => void
-}
-
-interface PendingChildrenVerification {
-  resolve: (orphanCheck: OrphanInventoryCheck) => void
+interface PendingRequest<T> {
+  resolve: (result: T) => void
   reject: (error: Error) => void
 }
 
@@ -114,9 +104,9 @@ export class SessionProcessSupervisor {
   private shutdownTimer: NodeJS.Timeout | null = null
   private readonly workers = new Map<string, RemoteWorkerHandle>()
   private readonly pendingGit = new Map<string, PendingGit>()
-  private readonly pendingChildrenCleanup = new Map<string, PendingChildrenCleanup>()
-  private readonly pendingChildrenCapture = new Map<string, PendingChildrenCapture>()
-  private readonly pendingChildrenVerification = new Map<string, PendingChildrenVerification>()
+  private readonly pendingChildrenCleanup = new Map<string, PendingRequest<number[]>>()
+  private readonly pendingChildrenCapture = new Map<string, PendingRequest<ExclusiveProcessInventory>>()
+  private readonly pendingChildrenVerification = new Map<string, PendingRequest<OrphanInventoryCheck>>()
   private supervisorPid: number | null = null
   private lastGitProcess: GitProcessIntrospection | null = null
   private readonly forkProcess: typeof fork
@@ -198,16 +188,14 @@ export class SessionProcessSupervisor {
     return handle
   }
 
-  cleanupWorkerChildren(path: string): Promise<number[]> {
+  cleanupWorkerChildren(path: string, deadlineAt?: number): Promise<number[]> {
     if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
-    const requestId = crypto.randomUUID()
-    return new Promise((resolve, reject) => {
-      this.pendingChildrenCleanup.set(requestId, { resolve, reject })
-      if (!this.dispatch({ type: 'children.cleanup', requestId, path })) {
-        this.pendingChildrenCleanup.delete(requestId)
-        reject(new Error('Session process supervisor is unavailable'))
-      }
-    })
+    return this.dispatchCorrelated(
+      this.pendingChildrenCleanup,
+      (requestId) => ({ type: 'children.cleanup', requestId, path }),
+      deadlineAt,
+      'Child cleanup exceeded recovery deadline',
+    )
   }
 
   captureWorkerInventory(
@@ -215,37 +203,32 @@ export class SessionProcessSupervisor {
     path: string,
     recordedWorker: ProcessInventoryEntry | undefined,
     capturedAt: number,
+    deadlineAt?: number,
   ): Promise<ExclusiveProcessInventory> {
     if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
-    const requestId = crypto.randomUUID()
-    return new Promise((resolve, reject) => {
-      this.pendingChildrenCapture.set(requestId, { resolve, reject })
-      if (
-        !this.dispatch({
-          type: 'children.capture',
-          requestId,
-          workerPid,
-          path,
-          capturedAt,
-          ...(recordedWorker ? { recordedWorker } : {}),
-        })
-      ) {
-        this.pendingChildrenCapture.delete(requestId)
-        reject(new Error('Session process supervisor is unavailable'))
-      }
-    })
+    return this.dispatchCorrelated(
+      this.pendingChildrenCapture,
+      (requestId) => ({
+        type: 'children.capture',
+        requestId,
+        workerPid,
+        path,
+        capturedAt,
+        ...(recordedWorker ? { recordedWorker } : {}),
+      }),
+      deadlineAt,
+      'Worker inventory capture exceeded recovery deadline',
+    )
   }
 
-  verifyWorkerInventory(inventory: ExclusiveProcessInventory): Promise<OrphanInventoryCheck> {
+  verifyWorkerInventory(inventory: ExclusiveProcessInventory, deadlineAt?: number): Promise<OrphanInventoryCheck> {
     if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
-    const requestId = crypto.randomUUID()
-    return new Promise((resolve, reject) => {
-      this.pendingChildrenVerification.set(requestId, { resolve, reject })
-      if (!this.dispatch({ type: 'children.verify', requestId, inventory })) {
-        this.pendingChildrenVerification.delete(requestId)
-        reject(new Error('Session process supervisor is unavailable'))
-      }
-    })
+    return this.dispatchCorrelated(
+      this.pendingChildrenVerification,
+      (requestId) => ({ type: 'children.verify', requestId, inventory }),
+      deadlineAt,
+      'Worker inventory verification exceeded recovery deadline',
+    )
   }
 
   runGit(cwd: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
@@ -280,6 +263,45 @@ export class SessionProcessSupervisor {
       }
     }, this.options.shutdownTimeoutMs ?? 5_000)
     await completed
+  }
+
+  private dispatchCorrelated<T>(
+    pending: Map<string, PendingRequest<T>>,
+    createMessage: (requestId: string) => GatewayToSupervisorMessage,
+    deadlineAt: number | undefined,
+    deadlineError: string,
+  ): Promise<T> {
+    const requestId = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined
+      const clearTimer = () => {
+        if (timer) clearTimeout(timer)
+      }
+      pending.set(requestId, {
+        resolve: (result) => {
+          clearTimer()
+          resolve(result)
+        },
+        reject: (error) => {
+          clearTimer()
+          reject(error)
+        },
+      })
+      if (deadlineAt !== undefined) {
+        timer = setTimeout(
+          () => {
+            if (!pending.delete(requestId)) return
+            reject(new Error(deadlineError))
+          },
+          Math.max(0, deadlineAt - Date.now()),
+        )
+      }
+      if (!this.dispatch(createMessage(requestId))) {
+        pending.delete(requestId)
+        clearTimer()
+        reject(new Error('Session process supervisor is unavailable'))
+      }
+    })
   }
 
   private dispatch(message: GatewayToSupervisorMessage): boolean {

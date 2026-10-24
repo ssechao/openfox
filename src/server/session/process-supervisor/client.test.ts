@@ -121,6 +121,34 @@ describe('SessionProcessSupervisor', () => {
     await expect(result).resolves.toEqual([99])
   })
 
+  it('rejects an inventory capture that misses its absolute deadline', async () => {
+    vi.useFakeTimers()
+    const child = fakeChild()
+    const supervisor = new SessionProcessSupervisor({
+      forkProcess: vi.fn(() => child),
+      entry: { path: '/supervisor.js', execArgv: [] },
+      startupTimeoutMs: 100,
+    })
+    const started = supervisor.start()
+    child.emit('message', { type: 'ready', pid: 41 })
+    await started
+
+    try {
+      const capture = supervisor.captureWorkerInventory(
+        99,
+        '/tmp/worker.children',
+        undefined,
+        Date.now(),
+        Date.now() + 100,
+      )
+      const rejected = expect(capture).rejects.toThrow(/capture exceeded recovery deadline/i)
+      await vi.advanceTimersByTimeAsync(100)
+      await rejected
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps an HTTP witness responsive while cleanup blocks in the supervisor process', async () => {
     const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-cleanup-'))
     const entry = join(root, 'fixture.cjs')

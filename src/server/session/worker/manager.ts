@@ -64,6 +64,9 @@ import { cancelPathConfirmation, providePathConfirmation, registerPathConfirmati
 import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
 
+const WORKER_RECOVERY_TIMEOUT_MS = 4_000
+const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
+
 export interface WorkerSettledOutcome {
   crashed: boolean
   error?: string
@@ -82,6 +85,7 @@ interface ActiveWorker {
   doneError?: string
   stopRequestedAt?: number
   stopEscalatedAt?: number
+  recoveryDeadlineAt?: number
   stderrTail: string[]
   command: WorkerTurnCommand
   onSettled: (outcome: WorkerSettledOutcome) => void
@@ -224,8 +228,13 @@ export class SessionWorkerManager {
     this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session stopped by user')
     if (worker.stopRequestedAt === undefined) {
       worker.stopRequestedAt = Date.now()
+      worker.recoveryDeadlineAt = worker.stopRequestedAt + WORKER_RECOVERY_TIMEOUT_MS
       this.sendTo(worker, { ...worker.token, type: 'abort' })
-      void this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt)
+      void this.beginWorkerInventoryCapture(
+        worker,
+        worker.stopRequestedAt,
+        worker.stopRequestedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS,
+      )
       void this.escalateStop(worker)
     }
     return true
@@ -375,7 +384,9 @@ export class SessionWorkerManager {
       if (this.active.get(sessionId) !== worker) return
       this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
       this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session worker exited')
-      void this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt ?? Date.now())
+      const capturedAt = worker.stopRequestedAt ?? Date.now()
+      worker.recoveryDeadlineAt ??= capturedAt + WORKER_RECOVERY_TIMEOUT_MS
+      void this.beginWorkerInventoryCapture(worker, capturedAt, worker.recoveryDeadlineAt)
       void this.settle(worker, code, signal).finally(() => {
         if (this.active.get(sessionId) === worker) this.active.delete(sessionId)
       })
@@ -407,8 +418,13 @@ export class SessionWorkerManager {
   }
 
   private async escalateStop(worker: ActiveWorker): Promise<void> {
-    if (await this.waitForExit(worker, 500)) return
-    await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt ?? Date.now())
+    if (await this.waitForExit(worker, WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS)) return
+    const stopRequestedAt = worker.stopRequestedAt ?? Date.now()
+    await this.beginWorkerInventoryCapture(
+      worker,
+      stopRequestedAt,
+      stopRequestedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS,
+    )
     worker.stopEscalatedAt = Date.now()
     try {
       worker.child.kill('SIGTERM')
@@ -432,6 +448,7 @@ export class SessionWorkerManager {
   async shutdown(): Promise<void> {
     this.closeAdmissions()
     const workers = [...this.active.values()]
+    const deadlineAt = Date.now() + (this.deps.shutdownTimeoutMs ?? 3_900)
     for (const worker of workers) {
       const interruptedAt = new Date().toISOString()
       markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
@@ -451,10 +468,14 @@ export class SessionWorkerManager {
         'Gateway shutdown interrupted the worker turn',
       )
       this.sendTo(worker, { ...worker.token, type: 'abort' })
-      void this.beginWorkerInventoryCapture(worker, Date.parse(interruptedAt))
+      const capturedAt = Date.parse(interruptedAt)
+      void this.beginWorkerInventoryCapture(
+        worker,
+        capturedAt,
+        Math.min(deadlineAt, capturedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS),
+      )
     }
     this.active.clear()
-    const deadlineAt = Date.now() + (this.deps.shutdownTimeoutMs ?? 3_900)
     const errors = (await Promise.all(workers.map((worker) => this.shutdownWorker(worker, deadlineAt)))).filter(
       (error): error is string => error !== undefined,
     )
@@ -467,7 +488,12 @@ export class SessionWorkerManager {
       const remaining = () => Math.max(0, deadlineAt - Date.now())
       let exited = await this.waitForExit(worker, Math.min(1_000, remaining()))
       if (!exited) {
-        await this.beginWorkerInventoryCapture(worker, Date.now())
+        const capturedAt = Date.now()
+        await this.beginWorkerInventoryCapture(
+          worker,
+          capturedAt,
+          Math.min(deadlineAt, capturedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS),
+        )
         try {
           worker.child.kill('SIGTERM')
         } catch {
@@ -483,7 +509,12 @@ export class SessionWorkerManager {
         }
       }
 
-      const cleanupPromise = this.cleanupWorkerChildren(worker.sessionId, worker.childrenPath)
+      const cleanupPromise = this.cleanupWorkerChildren(
+        worker.sessionId,
+        worker.childrenPath,
+        deadlineAt,
+        'child cleanup exceeded shutdown deadline',
+      )
       const remainingMs = remaining()
       const [exitResult, cleanupResult] = await Promise.all([
         exited ? Promise.resolve(true) : this.waitForExit(worker, remainingMs),
@@ -508,44 +539,59 @@ export class SessionWorkerManager {
   private async waitForCleanup(
     cleanup: Promise<{ killedChildren: number[]; cleanupError?: string }>,
     timeoutMs: number,
+    timeoutError = 'child cleanup exceeded shutdown deadline',
   ): Promise<{ killedChildren: number[]; cleanupError?: string }> {
     let timeout: NodeJS.Timeout | undefined
     const timedOut = new Promise<{ killedChildren: number[]; cleanupError: string }>((resolve) => {
-      timeout = setTimeout(
-        () => resolve({ killedChildren: [], cleanupError: 'child cleanup exceeded shutdown deadline' }),
-        timeoutMs,
-      )
+      timeout = setTimeout(() => resolve({ killedChildren: [], cleanupError: timeoutError }), timeoutMs)
     })
     const result = await Promise.race([cleanup, timedOut])
     if (timeout) clearTimeout(timeout)
     return result
   }
 
-  private beginWorkerInventoryCapture(worker: ActiveWorker, capturedAt: number): Promise<ExclusiveProcessInventory> {
+  private async waitUntil<T>(operation: Promise<T>, deadlineAt: number, deadlineError: string): Promise<T> {
+    let timeout: NodeJS.Timeout | undefined
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error(deadlineError)), Math.max(0, deadlineAt - Date.now()))
+    })
+    try {
+      return await Promise.race([operation, timedOut])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  }
+
+  private beginWorkerInventoryCapture(
+    worker: ActiveWorker,
+    capturedAt: number,
+    deadlineAt: number,
+  ): Promise<ExclusiveProcessInventory> {
     if (worker.inventory) return Promise.resolve(worker.inventory)
     if (worker.inventoryPromise) return worker.inventoryPromise
     const workerPid = worker.child.pid ?? worker.workerInventory?.pid ?? -1
-    worker.inventoryPromise = Promise.resolve()
-      .then(() => {
-        if (this.deps.captureInventory) {
-          return {
-            ...this.deps.captureInventory(workerPid, worker.childrenPath, worker.workerInventory),
-            capturedAt,
-          }
+    const capture = Promise.resolve().then(() => {
+      if (this.deps.captureInventory) {
+        return {
+          ...this.deps.captureInventory(workerPid, worker.childrenPath, worker.workerInventory),
+          capturedAt,
         }
-        if (this.deps.processSupervisor) {
-          return this.deps.processSupervisor.captureWorkerInventory(
-            workerPid,
-            worker.childrenPath,
-            worker.workerInventory,
-            capturedAt,
-          )
-        }
-        return captureExclusiveProcessInventory(workerPid, worker.childrenPath, {
-          ...(worker.workerInventory ? { recordedWorker: worker.workerInventory } : {}),
-          now: () => capturedAt,
-        })
+      }
+      if (this.deps.processSupervisor) {
+        return this.deps.processSupervisor.captureWorkerInventory(
+          workerPid,
+          worker.childrenPath,
+          worker.workerInventory,
+          capturedAt,
+          deadlineAt,
+        )
+      }
+      return captureExclusiveProcessInventory(workerPid, worker.childrenPath, {
+        ...(worker.workerInventory ? { recordedWorker: worker.workerInventory } : {}),
+        now: () => capturedAt,
       })
+    })
+    worker.inventoryPromise = this.waitUntil(capture, deadlineAt, 'Worker inventory capture exceeded recovery deadline')
       .then((inventory) => {
         worker.inventory = inventory
         return inventory
@@ -601,23 +647,30 @@ export class SessionWorkerManager {
   private async cleanupWorkerChildren(
     sessionId: string,
     childrenPath: string,
+    deadlineAt: number,
+    deadlineError = 'child cleanup exceeded recovery deadline',
   ): Promise<{ killedChildren: number[]; cleanupError?: string }> {
-    try {
-      const cleanup =
-        this.deps.cleanupChildren ??
-        (this.deps.processSupervisor
-          ? (path: string) => this.deps.processSupervisor!.cleanupWorkerChildren(path)
-          : killTrackedChildren)
-      return { killedChildren: await cleanup(childrenPath) }
-    } catch (error) {
-      const cleanupError = error instanceof Error ? error.message : String(error)
+    const cleanup =
+      this.deps.cleanupChildren ??
+      (this.deps.processSupervisor
+        ? (path: string) => this.deps.processSupervisor!.cleanupWorkerChildren(path, deadlineAt)
+        : killTrackedChildren)
+    const result = Promise.resolve()
+      .then(() => cleanup(childrenPath))
+      .then((killedChildren) => ({ killedChildren }))
+      .catch((error) => ({
+        killedChildren: [],
+        cleanupError: error instanceof Error ? error.message : String(error),
+      }))
+    const bounded = await this.waitForCleanup(result, Math.max(0, deadlineAt - Date.now()), deadlineError)
+    if (bounded.cleanupError) {
       logger.error('Worker child cleanup failed; sidecar retained', {
         sessionId,
         childrenPath,
-        error: cleanupError,
+        error: bounded.cleanupError,
       })
-      return { killedChildren: [], cleanupError }
     }
+    return bounded
   }
 
   private retire(worker: ActiveWorker): void {
@@ -671,20 +724,25 @@ export class SessionWorkerManager {
     const { sessionId, token } = worker
     const db = this.deps.db()
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
+    const recoveryStartedAt = worker.stopRequestedAt ?? Date.now()
+    const recoveryDeadlineAt = worker.recoveryDeadlineAt ?? recoveryStartedAt + WORKER_RECOVERY_TIMEOUT_MS
 
     clearWorkerToken(db, sessionId, token)
     this.deps.healthAggregator?.expireWorker(token)
 
     if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
-      await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt)
-      const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath)
+      const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
+      const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
+      const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
       this.retire(worker)
       this.scheduler.release(sessionId)
       worker.onSettled({
         crashed: false,
-        ...(cleanup.cleanupError ? { error: `Session stopped; child cleanup failed: ${cleanup.cleanupError}` } : {}),
+        ...(recoveryErrors.length > 0
+          ? { error: `Session stopped; cleanup proof failed: ${recoveryErrors.join('; ')}` }
+          : {}),
       })
       return
     }
@@ -700,7 +758,7 @@ export class SessionWorkerManager {
     }
 
     // Crash path — detected right here by the exit handler, no timeout.
-    const interruptedAtMs = worker.stopRequestedAt ?? Date.now()
+    const interruptedAtMs = recoveryStartedAt
     const interruptedAt = new Date(interruptedAtMs).toISOString()
     logger.error('Session worker died', {
       sessionId,
@@ -712,12 +770,12 @@ export class SessionWorkerManager {
       stderr: worker.stderrTail.slice(-5),
     })
 
-    const inventory = await this.beginWorkerInventoryCapture(worker, interruptedAtMs)
+    const inventory = await this.beginWorkerInventoryCapture(worker, interruptedAtMs, recoveryDeadlineAt)
 
     // Reap the worker's exclusive children (recorded synchronously in the
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
     // the gateway process and are not in that file — never touched.
-    const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath)
+    const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
 
     // Persist the interruption marker FIRST so the running-state reset below
     // (and any queued-message drain it could trigger) sees the session as
@@ -787,6 +845,12 @@ export class SessionWorkerManager {
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
     this.retire(worker)
     this.scheduler.release(sessionId)
-    worker.onSettled({ crashed: true, ...(worker.doneError ? { error: worker.doneError } : {}) })
+    const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
+    worker.onSettled({
+      crashed: true,
+      ...(worker.doneError || recoveryErrors.length > 0
+        ? { error: worker.doneError ?? `Worker interruption recovery failed: ${recoveryErrors.join('; ')}` }
+        : {}),
+    })
   }
 }
