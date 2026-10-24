@@ -476,6 +476,133 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it('keeps a successor generation admitted when stopped-worker cleanup finishes after T+2', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(
+      join(tmpdir(), `openfox-worker-manager-cleanup-background-${crypto.randomUUID()}.db`),
+    )
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    let finishCleanup: (pids: number[]) => void = () => {}
+    let cleanupCompleted = false
+    const cleanup = new Promise<number[]>((resolve) => {
+      finishCleanup = resolve
+    }).then((pids) => {
+      cleanupCompleted = true
+      return pids
+    })
+    const stoppedChild = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn((message: { type?: string }) => {
+        if (message.type === 'abort') queueMicrotask(() => stoppedChild.emit('exit', null, 'SIGTERM'))
+        return true
+      }),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const successorChild = Object.assign(new EventEmitter(), {
+      pid: 43,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const spawnWorker = vi.fn().mockReturnValueOnce(stoppedChild).mockReturnValueOnce(successorChild)
+    const settled = vi.fn()
+    const successorSettled = vi.fn()
+    const waitingStart = vi.fn()
+    const setRunning = vi.fn()
+    const broadcastForSession = vi.fn()
+    const invalidateExternalSession = vi.fn()
+    const append = vi.fn()
+    const addMessage = vi.fn(() => ({ id: 'notice', role: 'user', content: 'interrupted' }))
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        setRunning,
+        getActiveWorkflowExecution: () => null,
+        addMessage,
+      } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession,
+      maxProcesses: 1,
+      processSupervisor: { spawnWorker } as never,
+      captureInventory: (pid) => ({
+        capturedAt: Date.now(),
+        worker: { pid, startedAt: `linux:${pid}`, pgid: pid },
+        children: [],
+        reservations: [],
+        errors: [],
+      }),
+      cleanupChildren: () => cleanup,
+      verifyInventory: async (inventory) => ({
+        checkedAt: inventory.capturedAt + 2_000,
+        clean: true,
+        survivingIdentities: [],
+        survivingGroups: [],
+        liveReservations: [],
+        errors: [],
+      }),
+      eventStore: () =>
+        ({
+          invalidateExternalSession,
+          getEvents: () => [
+            { seq: 1, timestamp: 1, sessionId: 'sess-1', type: 'message.start', data: { role: 'user' } },
+            {
+              seq: 2,
+              timestamp: 2,
+              sessionId: 'sess-1',
+              type: 'tool.call',
+              data: {
+                messageId: 'assistant-1',
+                toolCall: { id: 'call-1', name: 'run_command', arguments: { command: 'effect' } },
+              },
+            },
+          ],
+          append,
+        }) as never,
+    })
+
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(settled).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+
+      expect(settled).toHaveBeenCalledOnce()
+      expect(settled).toHaveBeenCalledWith({
+        crashed: true,
+        error: expect.stringMatching(/cleanup.*Stop settlement.*background/i),
+      })
+      expect(cleanupCompleted).toBe(false)
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', successorSettled))).toBe('started')
+      const successor = manager.activeWorker('sess-1')
+      expect(successor?.pid).toBe(43)
+      expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
+
+      finishCleanup([99])
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(cleanupCompleted).toBe(true)
+      expect(manager.activeWorker('sess-1')?.token).toEqual(successor?.token)
+      expect(waitingStart).not.toHaveBeenCalled()
+      expect(setRunning).not.toHaveBeenCalled()
+      expect(invalidateExternalSession).not.toHaveBeenCalled()
+      expect(append).not.toHaveBeenCalled()
+      expect(addMessage).not.toHaveBeenCalled()
+      expect(broadcastForSession).not.toHaveBeenCalled()
+      expect(settled).toHaveBeenCalledOnce()
+      expect(successorSettled).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('settles Stop failure at two seconds without releasing a live worker slot', async () => {
     vi.useFakeTimers()
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-deadline-${crypto.randomUUID()}.db`))

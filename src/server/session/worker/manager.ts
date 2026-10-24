@@ -476,7 +476,6 @@ export class SessionWorkerManager {
     const clean =
       worker.doneReceived && worker.doneOk && worker.exitCodeObserved === 0 && worker.exitSignalObserved === null
     this.retire(worker)
-    this.scheduler.release(worker.sessionId)
     this.notifyWorkerSettled(worker, {
       crashed: !clean,
       error: `${clean ? 'Session stopped' : 'Worker interruption'}; cleanup exceeded the Stop settlement deadline and continues in background${signalErrors}`,
@@ -754,8 +753,11 @@ export class SessionWorkerManager {
     return bounded
   }
 
-  private retire(worker: ActiveWorker): void {
-    if (this.active.get(worker.sessionId) === worker) this.active.delete(worker.sessionId)
+  private retire(worker: ActiveWorker): boolean {
+    if (this.active.get(worker.sessionId) !== worker) return false
+    this.active.delete(worker.sessionId)
+    this.scheduler.release(worker.sessionId)
+    return true
   }
 
   private isCurrentIdentity(identity: WorkerIpcIdentity): boolean {
@@ -814,11 +816,12 @@ export class SessionWorkerManager {
     if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
       const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
       const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
+      const activeWorker = this.active.get(sessionId)
+      if (activeWorker && activeWorker !== worker) return
       const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
       this.retire(worker)
-      this.scheduler.release(sessionId)
       this.notifyWorkerSettled(worker, {
         crashed: false,
         ...(recoveryErrors.length > 0
@@ -833,7 +836,6 @@ export class SessionWorkerManager {
       getEventStore().invalidateExternalSession(sessionId)
       logger.info('Session worker exited cleanly', { sessionId, workerId: token.workerId })
       this.retire(worker)
-      this.scheduler.release(sessionId)
       this.notifyWorkerSettled(worker, { crashed: false })
       return
     }
@@ -858,6 +860,8 @@ export class SessionWorkerManager {
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
     // the gateway process and are not in that file — never touched.
     const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
+    const activeWorker = this.active.get(sessionId)
+    if (activeWorker && activeWorker !== worker) return
 
     // Persist the interruption marker FIRST so the running-state reset below
     // (and any queued-message drain it could trigger) sees the session as
@@ -926,7 +930,6 @@ export class SessionWorkerManager {
     this.verifyWorkerInventory(report, verification)
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
     this.retire(worker)
-    this.scheduler.release(sessionId)
     const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
     this.notifyWorkerSettled(worker, {
       crashed: true,
