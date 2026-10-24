@@ -135,13 +135,6 @@ export const readFileTool = createTool<ReadFileArgs>(
           `File size (${stats.size} bytes) exceeds maximum file size (20MB). Use shell command to process large files.`,
         )
       }
-
-      // Check image size limit before reading
-      if (stats.size > OUTPUT_LIMITS.read_file.maxImageBytes) {
-        return helpers.error(
-          `File size (${stats.size} bytes) exceeds image size limit (2MB). Use shell command to process large files.`,
-        )
-      }
     } catch {
       return helpers.error(`File not found: ${args.path}`)
     }
@@ -153,6 +146,12 @@ export const readFileTool = createTool<ReadFileArgs>(
     const mimeType = await detectImageType(rawBuffer, args.path)
 
     if (mimeType) {
+      if (rawBuffer.length > OUTPUT_LIMITS.read_file.maxImageBytes) {
+        return helpers.error(
+          `File size (${rawBuffer.length} bytes) exceeds image size limit (2MB). Use shell command to process large files.`,
+        )
+      }
+
       // Handle as image
       const base64Data = rawBuffer.toString('base64')
       const dataUrl = `data:${mimeType};base64,${base64Data}`

@@ -281,7 +281,12 @@ describe('readFileTool - Image Support', () => {
   describe('size limit enforcement', () => {
     it('should reject images larger than 2MB', async () => {
       const oversizedSize = OUTPUT_LIMITS.read_file.maxImageBytes + 1
+      const image = Buffer.alloc(oversizedSize)
+      Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      ]).copy(image)
 
+      vi.mocked(readFile).mockResolvedValue(image)
       vi.mocked(stat).mockResolvedValue({
         isDirectory: () => false,
         size: oversizedSize,
@@ -441,6 +446,21 @@ describe('readFileTool - Image Support', () => {
       expect(result.metadata?.['format']).toBe('pdf')
       expect(result.metadata?.['pageCount']).toBe(1)
       expect(result.metadata?.['path']).toBe(resolve('/test/workdir/test.pdf'))
+    })
+
+    it('should accept a PDF larger than the image limit', async () => {
+      const pdfBuffer = makeSimplePdf()
+
+      vi.mocked(readFile).mockResolvedValue(pdfBuffer as any)
+      vi.mocked(stat).mockResolvedValue({
+        isDirectory: () => false,
+        size: OUTPUT_LIMITS.read_file.maxImageBytes + 1,
+      } as any)
+
+      const result = await readFileTool.execute({ path: 'large.pdf' }, mockContext)
+
+      expect(result.success).toBe(true)
+      expect(result.metadata?.['format']).toBe('pdf')
     })
 
     it('should return scanned PDF message when no text layer', async () => {

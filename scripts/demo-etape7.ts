@@ -1,6 +1,6 @@
 import { fork, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -24,11 +24,11 @@ const POST_KILL_MS = 10_000
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 
-type LoadName = 'git' | 'pdf' | 'stdout'
-
-interface LoadInterval {
+interface LoadMetric {
   start: number
   end: number
+  bytes: number
+  exitCode: number
 }
 
 interface WorkerIdentity {
@@ -61,7 +61,13 @@ interface SessionView {
     content?: string
     toolCalls?: Array<{
       name?: string
-      result?: { success: boolean; output?: string; error?: string; truncated: boolean }
+      result?: {
+        success: boolean
+        output?: string
+        error?: string
+        truncated: boolean
+        metadata?: Record<string, unknown>
+      }
     }>
   }>
 }
@@ -88,7 +94,13 @@ interface ToolObservation {
   args: Record<string, unknown>
   startAt: number
   endAt: number
-  result: { success: boolean; output?: string; error?: string; truncated: boolean } | null
+  result: {
+    success: boolean
+    output?: string
+    error?: string
+    truncated: boolean
+    metadata?: Record<string, unknown>
+  } | null
 }
 
 interface ObserverResult {
@@ -127,7 +139,6 @@ interface MockState {
   witnessStart: number
   witnessEnd: number
   witnessChunkTimes: number[]
-  loads: Record<LoadName, LoadInterval>
 }
 
 const sleep = (ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms))
@@ -298,12 +309,6 @@ async function sendText(res: ServerResponse, text: string): Promise<void> {
   await finishStream(res, 'stop')
 }
 
-function closePreviousLoad(state: MockState, toolCount: number, now: number): void {
-  const previous: LoadName | undefined =
-    toolCount === 1 ? 'git' : toolCount === 2 ? 'pdf' : toolCount === 3 ? 'stdout' : undefined
-  if (previous && state.loads[previous].end === 0) state.loads[previous].end = now
-}
-
 function createModelServer(state: MockState): Server {
   return createServer((req, res) => {
     void (async () => {
@@ -342,28 +347,20 @@ function createModelServer(state: MockState): Server {
       }
 
       if (serialized.includes(PERTURBATOR_MARKER)) {
-        const now = performance.now()
-        closePreviousLoad(state, toolCount, now)
         if (toolCount === 0) {
-          state.loads.git.start = now
           await sendTool(res, 'etape7-git', 'run_command', {
-            command: 'git diff --no-ext-diff --no-color; sleep 2.2',
+            command: 'node git-load.mjs',
             timeout: 120_000,
           })
           return
         }
         if (toolCount === 1) {
-          state.loads.pdf.start = now
-          await sendTool(res, 'etape7-pdf', 'run_command', {
-            command: './pdf-load.sh demo.pdf',
-            timeout: 120_000,
-          })
+          await sendTool(res, 'etape7-pdf', 'read_file', { path: 'demo.pdf' })
           return
         }
         if (toolCount === 2) {
-          state.loads.stdout.start = now
           await sendTool(res, 'etape7-stdout', 'run_command', {
-            command: `node -e "let n=${STDOUT_BYTES},c='x'.repeat(1024*1024);while(n>0){process.stdout.write(c);n-=c.length}setTimeout(()=>{},2200)"`,
+            command: 'node stdout-load.mjs',
             timeout: 120_000,
           })
           return
@@ -582,25 +579,49 @@ async function prepareWorkload(projectDir: string): Promise<{
   const extracted = await extractPdfText(pdf)
   const pdfTextBytes = Buffer.byteLength(extracted.text)
 
-  const tsxLoader = import.meta.resolve('tsx/esm')
   await writeFile(
-    join(projectDir, 'pdf-load.mjs'),
+    join(projectDir, 'git-load.mjs'),
     [
-      "import { readFile } from 'node:fs/promises'",
-      `import { extractPdfText } from ${JSON.stringify(new URL('../src/server/tools/pdf-utils.ts', import.meta.url).href)}`,
-      'const result = await extractPdfText(await readFile(process.argv[2]))',
-      'process.stdout.write(\`pages=\${result.pageCount} extracted_bytes=\${Buffer.byteLength(result.text)}\\n\`)',
-      'await new Promise((resolve) => setTimeout(resolve, 2200))',
+      "import { spawn } from 'node:child_process'",
+      "import { writeFileSync } from 'node:fs'",
+      "import { once } from 'node:events'",
+      'const start = Date.now()',
+      "const child = spawn('git', ['diff', '--no-ext-diff', '--no-color'], { stdio: ['ignore', 'pipe', 'inherit'] })",
+      'let bytes = 0',
+      "child.stdout.on('data', (chunk) => {",
+      '  bytes += chunk.length',
+      '  if (!process.stdout.write(chunk)) {',
+      '    child.stdout.pause()',
+      "    process.stdout.once('drain', () => child.stdout.resume())",
+      '  }',
+      '})',
+      "const [code] = await once(child, 'exit')",
+      'const end = Date.now()',
+      "writeFileSync('git-load.metric', \`start=\${start}\\nend=\${end}\\nbytes=\${bytes}\\nexit=\${code ?? -1}\\n\`)",
+      'process.exit(code ?? 1)',
     ].join('\n'),
   )
   await writeFile(
-    join(projectDir, 'pdf-load.sh'),
-    `#!/bin/sh\nexec node --import ${JSON.stringify(tsxLoader)} pdf-load.mjs "$@"\n`,
+    join(projectDir, 'stdout-load.mjs'),
+    [
+      "import { once } from 'node:events'",
+      "import { writeFileSync } from 'node:fs'",
+      'const start = Date.now()',
+      `let remaining = ${STDOUT_BYTES}`,
+      'const chunk = Buffer.alloc(1024 * 1024, 0x78)',
+      'let bytes = 0',
+      'while (remaining > 0) {',
+      '  const output = remaining < chunk.length ? chunk.subarray(0, remaining) : chunk',
+      "  if (!process.stdout.write(output)) await once(process.stdout, 'drain')",
+      '  bytes += output.length',
+      '  remaining -= output.length',
+      '}',
+      'const end = Date.now()',
+      "writeFileSync('stdout-load.metric', \`start=\${start}\\nend=\${end}\\nbytes=\${bytes}\\nexit=0\\n\`)",
+    ].join('\n'),
   )
-  await runQuiet('chmod', ['+x', 'pdf-load.sh'], projectDir)
 
-  const generator = `let n=${STDOUT_BYTES},c='x'.repeat(1024*1024);while(n>0){process.stdout.write(c);n-=c.length}`
-  const stdoutBytes = await countStdout(process.execPath, ['-e', generator], projectDir)
+  const stdoutBytes = STDOUT_BYTES
   return {
     diffBytes,
     pdfBytes: (await stat(pdfPath)).size,
@@ -608,6 +629,28 @@ async function prepareWorkload(projectDir: string): Promise<{
     pdfPages: extracted.pageCount,
     stdoutBytes,
   }
+}
+
+async function readLoadMetric(path: string): Promise<LoadMetric> {
+  const fields = Object.fromEntries(
+    (await readFile(path, 'utf-8'))
+      .trim()
+      .split('\n')
+      .map((line) => {
+        const separator = line.indexOf('=')
+        return [line.slice(0, separator), Number(line.slice(separator + 1))]
+      }),
+  )
+  const metric = {
+    start: fields['start'],
+    end: fields['end'],
+    bytes: fields['bytes'],
+    exitCode: fields['exit'],
+  }
+  if (Object.values(metric).some((value) => value === undefined || !Number.isFinite(value))) {
+    throw new Error(`Invalid load metric: ${path}`)
+  }
+  return metric as LoadMetric
 }
 
 function isolatedEnvironment(root: string, dbPath: string): void {
@@ -656,7 +699,13 @@ function alive(pid: number): boolean {
 function toolResult(
   view: SessionView,
   name: string,
-): { success: boolean; output?: string; error?: string; truncated: boolean } | null {
+): {
+  success: boolean
+  output?: string
+  error?: string
+  truncated: boolean
+  metadata?: Record<string, unknown>
+} | null {
   for (const message of view.messages) {
     for (const call of message.toolCalls ?? []) {
       if (call.name === name && call.result) return call.result
@@ -676,7 +725,9 @@ function printSummary(
   streamStats: { received: ReturnType<typeof gapStats>; duration: number; chars: number },
   sessionProbe: ReturnType<typeof latencyStats>,
   healthProbe: ReturnType<typeof latencyStats>,
-  loads: Record<LoadName, LoadInterval>,
+  loadObservations: ToolObservation[],
+  gitMetric: LoadMetric,
+  stdoutMetric: LoadMetric,
   killAt: number,
   streamEnd: number,
   finalWitness: WorkerIdentity,
@@ -688,6 +739,7 @@ function printSummary(
   mcpView: SessionView,
   mcpConnected: boolean,
   gitResult: NonNullable<ReturnType<typeof toolResult>>,
+  pdfResult: NonNullable<ReturnType<typeof toolResult>>,
   stdoutResult: NonNullable<ReturnType<typeof toolResult>>,
 ): boolean {
   const mib = (bytes: number) => round(bytes / (1024 * 1024))
@@ -700,14 +752,19 @@ function printSummary(
       .map((message) => message.content?.length ?? 0),
   )
   const mcpSerialized = JSON.stringify(mcpView.messages)
-  const loadDetails = (Object.entries(loads) as Array<[LoadName, LoadInterval]>).map(([name, interval]) => {
-    const duration = interval.end - interval.start
-    const overlapStart = Math.max(
-      interval.start,
-      streamStats.duration > 0 ? streamEnd - streamStats.duration : interval.start,
-    )
-    const overlapEnd = Math.min(interval.end, streamEnd)
-    return { name, duration, overlap: overlapEnd - overlapStart }
+  const streamStart = streamEnd - streamStats.duration
+  const loadNames = ['git', 'pdf', 'stdout'] as const
+  const loadDetails = loadObservations.slice(0, 3).map((observation, index) => {
+    const duration = observation.endAt - observation.startAt
+    const overlapStart = Math.max(observation.startAt, streamStart)
+    const overlapEnd = Math.min(observation.endAt, streamEnd)
+    return {
+      name: loadNames[index] ?? observation.tool,
+      tool: observation.tool,
+      success: observation.result?.success === true,
+      duration,
+      overlap: Math.max(0, overlapEnd - overlapStart),
+    }
   })
 
   const verdicts: Verdict[] = [
@@ -725,12 +782,24 @@ function printSummary(
         workload.pdfPages === PDF_PAGES &&
         workload.pdfTextBytes >= 100 * 1024 &&
         workload.stdoutBytes === STDOUT_BYTES &&
+        gitMetric.bytes === workload.diffBytes &&
+        gitMetric.exitCode === 0 &&
+        gitMetric.end > gitMetric.start &&
+        stdoutMetric.bytes === STDOUT_BYTES &&
+        stdoutMetric.exitCode === 0 &&
+        stdoutMetric.end > stdoutMetric.start &&
+        gitResult.success &&
         gitResult.truncated &&
         (gitResult.output?.length ?? 0) <= 50_100 &&
+        pdfResult.success &&
+        pdfResult.metadata?.['format'] === 'pdf' &&
+        pdfResult.metadata?.['pageCount'] === PDF_PAGES &&
+        stdoutResult.success &&
         stdoutResult.truncated &&
         (stdoutResult.output?.length ?? 0) <= 50_100 &&
-        loadDetails.every((load) => load.duration >= 2_000 && load.overlap >= 2_000),
-      detail: `files=${FILE_COUNT} diff_mib=${mib(workload.diffBytes)} pdf_pages=${workload.pdfPages} pdf_mib=${mib(workload.pdfBytes)} pdf_text_kib=${round(workload.pdfTextBytes / 1024)} stdout_mib=${mib(workload.stdoutBytes)} tool_caps=${gitResult.output?.length ?? 0}/${stdoutResult.output?.length ?? 0} intervals_ms=${loadDetails.map((load) => `${load.name}:${round(load.duration)}/overlap:${round(load.overlap)}`).join(',')}`,
+        loadDetails.length === 3 &&
+        loadDetails.every((load) => load.success && load.duration > 0 && load.overlap === load.duration),
+      detail: `files=${FILE_COUNT} diff_mib=${mib(gitMetric.bytes)} pdf_pages=${String(pdfResult.metadata?.['pageCount'])} pdf_mib=${mib(workload.pdfBytes)} pdf_text_kib=${round(workload.pdfTextBytes / 1024)} stdout_mib=${mib(stdoutMetric.bytes)} tool_caps=${gitResult.output?.length ?? 0}/${pdfResult.output?.length ?? 0}/${stdoutResult.output?.length ?? 0} generator_ms=git:${gitMetric.end - gitMetric.start},stdout:${stdoutMetric.end - stdoutMetric.start} observed_ms=${loadDetails.map((load) => `${load.name}(${load.tool}):${round(load.duration)}/overlap:${round(load.overlap)}`).join(',')}`,
     },
     {
       label: 'C3.3 sondes session',
@@ -817,11 +886,6 @@ async function main(): Promise<void> {
     witnessStart: 0,
     witnessEnd: 0,
     witnessChunkTimes: [],
-    loads: {
-      git: { start: 0, end: 0 },
-      pdf: { start: 0, end: 0 },
-      stdout: { start: 0, end: 0 },
-    },
   }
   const modelServer = createModelServer(state)
   let server: ServerHandle | undefined
@@ -930,7 +994,15 @@ async function main(): Promise<void> {
       'perturbator worker',
     )
 
-    await waitFor(() => (state.loads.stdout.end > 0 ? true : null), 30_000, 'three perturbator loads')
+    await waitFor(
+      async () => {
+        const view = await api<SessionView>(base, `/api/sessions/${perturbatorId}`)
+        const completed = view.messages.flatMap((message) => message.toolCalls ?? []).filter((call) => call.result)
+        return completed.length >= 3 ? true : null
+      },
+      30_000,
+      'three perturbator loads',
+    )
 
     const identityPoll = setInterval(() => {
       void api<WorkerIntrospection>(base, '/api/test/worker')
@@ -1012,13 +1084,16 @@ async function main(): Promise<void> {
         identity.token.generation === witnessWorker.token.generation,
     )
     const gitResult = toolResult(perturbatorView, 'run_command')
+    const pdfResult = toolResult(perturbatorView, 'read_file')
     const runResults = perturbatorView.messages.flatMap((message) =>
       (message.toolCalls ?? [])
         .filter((call) => call.name === 'run_command' && call.result)
         .map((call) => call.result!),
     )
-    const stdoutResult = runResults[2] ?? null
-    if (!gitResult || !stdoutResult) throw new Error('Perturbator tool results are incomplete')
+    const stdoutResult = runResults[1] ?? null
+    if (!gitResult || !pdfResult || !stdoutResult) throw new Error('Perturbator tool results are incomplete')
+    const gitMetric = await readLoadMetric(join(projectDir, 'git-load.metric'))
+    const stdoutMetric = await readLoadMetric(join(projectDir, 'stdout-load.metric'))
 
     const passed = printSummary(
       root,
@@ -1035,7 +1110,9 @@ async function main(): Promise<void> {
       },
       latencyStats(observed.probes.session),
       latencyStats(observed.probes.health),
-      state.loads,
+      observed.toolCalls.filter((call) => call.endAt > 0),
+      gitMetric,
+      stdoutMetric,
       killAt,
       observed.streamDoneAt,
       finalWitness,
@@ -1047,6 +1124,7 @@ async function main(): Promise<void> {
       mcpView,
       mcpConnected,
       gitResult,
+      pdfResult,
       stdoutResult,
     )
     if (!passed) process.exitCode = 1
