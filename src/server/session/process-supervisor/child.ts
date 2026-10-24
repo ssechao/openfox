@@ -3,7 +3,12 @@ import { spawnGitProcess } from '../../git/spawn.js'
 import { GIT_QUERY_TIMEOUT_MS } from '../../utils/bounded-exec.js'
 import { installParentExitGuard } from '../../utils/parent-exit-guard.js'
 import { terminateProcessTree } from '../../utils/process-tree.js'
-import { captureExclusiveProcessInventoryAsync, killTrackedChildren, readProcessInventory } from '../worker/children.js'
+import {
+  captureExclusiveProcessInventoryAsync,
+  killTrackedChildren,
+  readProcessInventory,
+  verifyExclusiveProcessInventoryAfter,
+} from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
 
 installParentExitGuard()
@@ -187,6 +192,18 @@ process.on('message', (raw) => {
       .catch((error) =>
         send({
           type: 'children.capture.result',
+          requestId: message.requestId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    return
+  }
+  if (message.type === 'children.verify') {
+    void verifyExclusiveProcessInventoryAfter(message.inventory)
+      .then((orphanCheck) => send({ type: 'children.verify.result', requestId: message.requestId, orphanCheck }))
+      .catch((error) =>
+        send({
+          type: 'children.verify.result',
           requestId: message.requestId,
           error: error instanceof Error ? error.message : String(error),
         }),

@@ -1,4 +1,4 @@
-import type { ExclusiveProcessInventory, ProcessInventoryEntry } from '../worker/children.js'
+import type { ExclusiveProcessInventory, OrphanInventoryCheck, ProcessInventoryEntry } from '../worker/children.js'
 
 export interface SupervisorWorkerSpawn {
   type: 'worker.spawn'
@@ -23,6 +23,7 @@ export type GatewayToSupervisorMessage =
       capturedAt: number
       recordedWorker?: ProcessInventoryEntry
     }
+  | { type: 'children.verify'; requestId: string; inventory: ExclusiveProcessInventory }
   | { type: 'shutdown' }
 
 export type SupervisorToGatewayMessage =
@@ -43,4 +44,5 @@ export type SupervisorToGatewayMessage =
   | { type: 'git.result'; requestId: string; code: number | null; stdout: string }
   | { type: 'children.cleanup.result'; requestId: string; killedChildren: number[]; error?: string }
   | { type: 'children.capture.result'; requestId: string; inventory?: ExclusiveProcessInventory; error?: string }
+  | { type: 'children.verify.result'; requestId: string; orphanCheck?: OrphanInventoryCheck; error?: string }
   | { type: 'shutdown.complete' }

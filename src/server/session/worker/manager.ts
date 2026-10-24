@@ -44,7 +44,6 @@ import {
   killTrackedChildren,
   readProcessInventory,
   removeChildrenFile,
-  verifyExclusiveProcessInventoryAfter,
   type ExclusiveProcessInventory,
   type OrphanInventoryCheck,
   type ProcessInventoryEntry,
@@ -568,7 +567,9 @@ export class SessionWorkerManager {
   private verifyWorkerInventory(report: WorkerCrashReport): void {
     const verification = this.deps.verifyInventory
       ? this.deps.verifyInventory(report.inventory)
-      : verifyExclusiveProcessInventoryAfter(report.inventory)
+      : this.deps.processSupervisor
+        ? this.deps.processSupervisor.verifyWorkerInventory(report.inventory)
+        : Promise.reject(new Error('Session process supervisor unavailable for inventory verification'))
     void verification
       .then((orphanCheck) => {
         report.orphanCheck = orphanCheck

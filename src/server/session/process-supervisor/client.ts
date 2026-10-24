@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ExclusiveProcessInventory, ProcessInventoryEntry } from '../worker/children.js'
+import type { ExclusiveProcessInventory, OrphanInventoryCheck, ProcessInventoryEntry } from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
 
 export interface SupervisorWorkerHandle {
@@ -45,6 +45,11 @@ interface PendingChildrenCleanup {
 
 interface PendingChildrenCapture {
   resolve: (inventory: ExclusiveProcessInventory) => void
+  reject: (error: Error) => void
+}
+
+interface PendingChildrenVerification {
+  resolve: (orphanCheck: OrphanInventoryCheck) => void
   reject: (error: Error) => void
 }
 
@@ -111,6 +116,7 @@ export class SessionProcessSupervisor {
   private readonly pendingGit = new Map<string, PendingGit>()
   private readonly pendingChildrenCleanup = new Map<string, PendingChildrenCleanup>()
   private readonly pendingChildrenCapture = new Map<string, PendingChildrenCapture>()
+  private readonly pendingChildrenVerification = new Map<string, PendingChildrenVerification>()
   private supervisorPid: number | null = null
   private lastGitProcess: GitProcessIntrospection | null = null
   private readonly forkProcess: typeof fork
@@ -230,6 +236,18 @@ export class SessionProcessSupervisor {
     })
   }
 
+  verifyWorkerInventory(inventory: ExclusiveProcessInventory): Promise<OrphanInventoryCheck> {
+    if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
+    const requestId = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      this.pendingChildrenVerification.set(requestId, { resolve, reject })
+      if (!this.dispatch({ type: 'children.verify', requestId, inventory })) {
+        this.pendingChildrenVerification.delete(requestId)
+        reject(new Error('Session process supervisor is unavailable'))
+      }
+    })
+  }
+
   runGit(cwd: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
     if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
     const requestId = crypto.randomUUID()
@@ -342,6 +360,17 @@ export class SessionProcessSupervisor {
       else pending.resolve(message.killedChildren)
       return
     }
+    if (message.type === 'children.verify.result') {
+      const pending = this.pendingChildrenVerification.get(message.requestId)
+      if (!pending) return
+      this.pendingChildrenVerification.delete(message.requestId)
+      if (message.error || !message.orphanCheck) {
+        pending.reject(new Error(message.error ?? 'Session process supervisor returned no orphan check'))
+      } else {
+        pending.resolve(message.orphanCheck)
+      }
+      return
+    }
     if (message.type === 'git.spawned') {
       this.lastGitProcess = {
         pid: message.pid,
@@ -385,6 +414,10 @@ export class SessionProcessSupervisor {
       pending.reject(new Error('Session process supervisor exited'))
     }
     this.pendingChildrenCapture.clear()
+    for (const pending of this.pendingChildrenVerification.values()) {
+      pending.reject(new Error('Session process supervisor exited'))
+    }
+    this.pendingChildrenVerification.clear()
     this.finishShutdown()
   }
 

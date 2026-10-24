@@ -164,6 +164,67 @@ process.on('message', (message) => {
     }
   })
 
+  it('keeps an HTTP witness responsive while inventory verification blocks in the supervisor process', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-verify-'))
+    const entry = join(root, 'fixture.cjs')
+    writeFileSync(
+      entry,
+      `
+process.send({ type: 'ready', pid: process.pid })
+process.on('message', (message) => {
+  if (message.type === 'children.verify') {
+    const until = Date.now() + 1500
+    while (Date.now() < until) {}
+    process.send({
+      type: 'children.verify.result',
+      requestId: message.requestId,
+      orphanCheck: {
+        checkedAt: message.inventory.capturedAt + 2000,
+        clean: true,
+        survivingIdentities: [],
+        survivingGroups: [],
+        liveReservations: [],
+        errors: [],
+      },
+    })
+  }
+  if (message.type === 'shutdown') {
+    process.send({ type: 'shutdown.complete' })
+    process.exit(0)
+  }
+})
+`,
+    )
+    const supervisor = new SessionProcessSupervisor({ entry: { path: entry, execArgv: [] } })
+    const witness = createServer((_request, response) => response.end('ok'))
+    await new Promise<void>((resolve) => witness.listen(0, '127.0.0.1', resolve))
+    const address = witness.address()
+    if (!address || typeof address === 'string') throw new Error('HTTP witness did not bind')
+
+    try {
+      await supervisor.start()
+      let verificationSettled = false
+      const verification = supervisor
+        .verifyWorkerInventory({
+          capturedAt: Date.now() - 2_000,
+          children: [],
+          reservations: [],
+          errors: [],
+        })
+        .finally(() => {
+          verificationSettled = true
+        })
+      const response = await fetch(`http://127.0.0.1:${address.port}`)
+      expect(await response.text()).toBe('ok')
+      expect(verificationSettled).toBe(false)
+      await expect(verification).resolves.toMatchObject({ clean: true })
+    } finally {
+      await supervisor.shutdown()
+      await new Promise<void>((resolve, reject) => witness.close((error) => (error ? reject(error) : resolve())))
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('captures worker identity at spawn and anchors inventory through the real supervisor', async () => {
     const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-inventory-'))
     const workerEntry = join(root, 'worker.cjs')
