@@ -141,13 +141,16 @@ function createEventIterator(
       return this
     },
     async next(): Promise<IteratorResult<StoredEvent>> {
-      if (state.closed) {
-        return { value: undefined, done: true }
-      }
-
+      // Drain anything already queued before honouring the closed flag: a
+      // subscriber that closes while events are still buffered must deliver
+      // them (end-of-turn bursts were silently dropped otherwise).
       const queued = state.queue.shift()
       if (queued) {
         return { value: queued, done: false }
+      }
+
+      if (state.closed) {
+        return { value: undefined, done: true }
       }
 
       return new Promise((resolve) => {
@@ -173,8 +176,10 @@ function createIteratorState(): {
     queue: [] as StoredEvent[],
     resolveNext: null as ((value: IteratorResult<StoredEvent>) => void) | null,
     closeIterator: () => {
+      // Stop accepting new events, but let an already-pending consumer drain
+      // the buffered ones first: resolving `done` immediately dropped them.
       state.closed = true
-      if (state.resolveNext) {
+      if (state.queue.length === 0 && state.resolveNext) {
         state.resolveNext({ value: undefined, done: true })
         state.resolveNext = null
       }

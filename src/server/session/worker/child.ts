@@ -209,6 +209,11 @@ async function runTurn(
     }
   }
 
+  // Close the subscription so the relay loop terminates, then await it: the
+  // end-of-turn burst (chat.error / message.start / chat.done / running.changed)
+  // is appended synchronously right before the turn returns and must be
+  // forwarded before the worker reports done. The store drains the buffered
+  // events on close, so nothing queued at this point is dropped.
   unsubscribeEvents?.()
   if (forwardEvents) {
     try {
