@@ -11,6 +11,7 @@ import {
   type ProcessInventoryEntry,
 } from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
+import { spawnLinuxSubreaper } from './linux-subreaper.js'
 
 export interface SupervisorWorkerHandle {
   readonly workerKey: string
@@ -188,11 +189,14 @@ export class SessionProcessSupervisor {
 
     let child: ChildProcess
     try {
-      child = this.forkProcess(this.entry.path, [], {
-        execArgv: this.entry.execArgv,
-        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-        detached: false,
-      })
+      child =
+        process.platform === 'linux' && this.options.forkProcess === undefined
+          ? spawnLinuxSubreaper({ path: this.entry.path, execArgv: this.entry.execArgv, env: process.env })
+          : this.forkProcess(this.entry.path, [], {
+              execArgv: this.entry.execArgv,
+              stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+              detached: false,
+            })
     } catch (error) {
       this.failStart(new Error('Session process supervisor failed to spawn', { cause: error }))
       return started
@@ -312,7 +316,11 @@ export class SessionProcessSupervisor {
     this.dispatch({ type: 'shutdown' })
     this.shutdownTimer = setTimeout(() => {
       try {
-        child.kill('SIGKILL')
+        if (process.platform === 'linux' && this.options.forkProcess === undefined && this.supervisorPid !== null) {
+          process.kill(this.supervisorPid, 'SIGKILL')
+        } else {
+          child.kill('SIGKILL')
+        }
       } catch {
         this.finishShutdown()
       }
