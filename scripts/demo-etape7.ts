@@ -9,6 +9,14 @@ import { fileURLToPath } from 'node:url'
 import type { Config } from '../src/shared/types.js'
 import type { ServerHandle } from '../src/server/context.js'
 import { readProcessInventory } from '../src/server/session/worker/children.js'
+import {
+  classifyLoad,
+  loadThresholdSatisfied,
+  MIN_EFFECTIVE_LOAD_MS,
+  summarizeLoadObservations,
+  type DemoLoadName,
+  type DemoToolObservation,
+} from './demo-etape7-loads.js'
 
 const MODEL = 'etape7-demo'
 const WITNESS_MARKER = 'ETAPE7_WITNESS'
@@ -92,6 +100,7 @@ interface SessionView {
     content?: string
     toolCalls?: Array<{
       name?: string
+      arguments?: Record<string, unknown>
       result?: {
         success: boolean
         output?: string
@@ -119,16 +128,12 @@ interface WitnessObservation {
   generation: number | null
 }
 
-interface ToolObservation {
-  callId: string
-  tool: string
-  args: Record<string, unknown>
-  startAt: number
-  endAt: number
+interface ToolObservation extends Omit<DemoToolObservation, 'result'> {
   result: {
     success: boolean
     output?: string
     error?: string
+    durationMs?: number
     truncated: boolean
     metadata?: Record<string, unknown>
   } | null
@@ -158,6 +163,7 @@ interface ObserverMessage {
   probes?: ObserverResult['probes']
   identityObservations?: WitnessObservation[]
   toolCalls?: ToolObservation[]
+  toolCall?: ToolObservation
 }
 
 interface Verdict {
@@ -170,6 +176,9 @@ interface MockState {
   witnessStart: number
   witnessEnd: number
   witnessChunkTimes: number[]
+  loadDurations: Record<DemoLoadName, number>
+  nextToolCall: number
+  holdIssued: boolean
 }
 
 const sleep = (ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms))
@@ -378,26 +387,29 @@ function createModelServer(state: MockState): Server {
       }
 
       if (serialized.includes(PERTURBATOR_MARKER)) {
-        if (toolCount === 0) {
-          await sendTool(res, 'etape7-git', 'run_command', {
-            command: 'node git-load.mjs',
-            timeout: 120_000,
-          })
+        const pendingLoad = (['git', 'pdf', 'stdout'] as const).find(
+          (name) => state.loadDurations[name] < MIN_EFFECTIVE_LOAD_MS,
+        )
+        if (pendingLoad) {
+          const callId = `etape7-${pendingLoad}-${++state.nextToolCall}`
+          if (pendingLoad === 'git') {
+            await sendTool(res, callId, 'run_command', {
+              command: 'node git-load.mjs',
+              timeout: 120_000,
+            })
+          } else if (pendingLoad === 'pdf') {
+            await sendTool(res, callId, 'read_file', { path: 'demo.pdf' })
+          } else {
+            await sendTool(res, callId, 'run_command', {
+              command: 'node stdout-load.mjs',
+              timeout: 120_000,
+            })
+          }
           return
         }
-        if (toolCount === 1) {
-          await sendTool(res, 'etape7-pdf', 'read_file', { path: 'demo.pdf' })
-          return
-        }
-        if (toolCount === 2) {
-          await sendTool(res, 'etape7-stdout', 'run_command', {
-            command: 'node stdout-load.mjs',
-            timeout: 120_000,
-          })
-          return
-        }
-        if (toolCount === 3) {
-          await sendTool(res, 'etape7-hold', 'run_command', {
+        if (!state.holdIssued) {
+          state.holdIssued = true
+          await sendTool(res, `etape7-hold-${++state.nextToolCall}`, 'run_command', {
             command: 'echo $$ > hold.pid; exec sleep 120',
             timeout: 120_000,
           })
@@ -743,22 +755,20 @@ function findMcpProcess(introspection: WorkerIntrospection, name: string): Proce
   return foundProcess(observation.inventory, `MCP ${name}`)
 }
 
-function toolResult(
-  view: SessionView,
-  name: string,
-): {
+interface PersistedToolResult {
   success: boolean
   output?: string
   error?: string
   truncated: boolean
   metadata?: Record<string, unknown>
-} | null {
-  for (const message of view.messages) {
-    for (const call of message.toolCalls ?? []) {
-      if (call.name === name && call.result) return call.result
-    }
-  }
-  return null
+}
+
+function toolResults(view: SessionView, load: DemoLoadName): PersistedToolResult[] {
+  return view.messages.flatMap((message) =>
+    (message.toolCalls ?? [])
+      .filter((call) => call.result && classifyLoad({ tool: call.name ?? '', args: call.arguments ?? {} }) === load)
+      .map((call) => call.result!),
+  )
 }
 
 function printSummary(
@@ -794,9 +804,9 @@ function printSummary(
   perturbatorView: SessionView,
   mcpView: SessionView,
   mcpConnected: boolean,
-  gitResult: NonNullable<ReturnType<typeof toolResult>>,
-  pdfResult: NonNullable<ReturnType<typeof toolResult>>,
-  stdoutResult: NonNullable<ReturnType<typeof toolResult>>,
+  gitResult: PersistedToolResult,
+  pdfResult: PersistedToolResult,
+  stdoutResult: PersistedToolResult,
 ): boolean {
   const mib = (bytes: number) => round(bytes / (1024 * 1024))
   const postKill = streamEnd - killAt
@@ -825,19 +835,13 @@ function printSummary(
       .map((message) => message.content?.length ?? 0),
   )
   const mcpSerialized = JSON.stringify(mcpView.messages)
-  const loadNames = ['git', 'pdf', 'stdout'] as const
-  const loadDetails = loadObservations.slice(0, 3).map((observation, index) => {
-    const duration = observation.endAt - observation.startAt
-    const overlapStart = Math.max(observation.startAt, streamStart)
-    const overlapEnd = Math.min(observation.endAt, streamEnd)
-    return {
-      name: loadNames[index] ?? observation.tool,
-      tool: observation.tool,
-      success: observation.result?.success === true,
-      duration,
-      overlap: Math.max(0, overlapEnd - overlapStart),
-    }
-  })
+  const loadDetails = summarizeLoadObservations(loadObservations, streamStart, streamEnd)
+  const persistedLoadResults = {
+    git: toolResults(perturbatorView, 'git'),
+    pdf: toolResults(perturbatorView, 'pdf'),
+    stdout: toolResults(perturbatorView, 'stdout'),
+  }
+  const persistedRunsMatch = loadDetails.every((load) => persistedLoadResults[load.name].length === load.runs)
 
   const verdicts: Verdict[] = [
     {
@@ -860,18 +864,19 @@ function printSummary(
         stdoutMetric.bytes === STDOUT_BYTES &&
         stdoutMetric.exitCode === 0 &&
         stdoutMetric.end > stdoutMetric.start &&
-        gitResult.success &&
-        gitResult.truncated &&
-        (gitResult.output?.length ?? 0) <= 50_100 &&
-        pdfResult.success &&
-        pdfResult.metadata?.['format'] === 'pdf' &&
-        pdfResult.metadata?.['pageCount'] === PDF_PAGES &&
-        stdoutResult.success &&
-        stdoutResult.truncated &&
-        (stdoutResult.output?.length ?? 0) <= 50_100 &&
-        loadDetails.length === 3 &&
-        loadDetails.every((load) => load.success && load.duration > 0 && load.overlap === load.duration),
-      detail: `stream_epoch_ms=${round(streamStart)}..${round(streamEnd)} files=${FILE_COUNT} diff_mib=${mib(gitMetric.bytes)} pdf_pages=${String(pdfResult.metadata?.['pageCount'])} pdf_mib=${mib(workload.pdfBytes)} pdf_text_kib=${round(workload.pdfTextBytes / 1024)} stdout_mib=${mib(stdoutMetric.bytes)} tool_caps=${gitResult.output?.length ?? 0}/${pdfResult.output?.length ?? 0}/${stdoutResult.output?.length ?? 0} generator_epoch_ms=git:${gitMetric.start}..${gitMetric.end},stdout:${stdoutMetric.start}..${stdoutMetric.end} observed_ms=${loadDetails.map((load) => `${load.name}(${load.tool}):${round(load.duration)}/overlap:${round(load.overlap)}`).join(',')}`,
+        persistedLoadResults.git.every(
+          (result) => result.success && result.truncated && (result.output?.length ?? 0) <= 50_100,
+        ) &&
+        persistedLoadResults.pdf.every(
+          (result) =>
+            result.success && result.metadata?.['format'] === 'pdf' && result.metadata?.['pageCount'] === PDF_PAGES,
+        ) &&
+        persistedLoadResults.stdout.every(
+          (result) => result.success && result.truncated && (result.output?.length ?? 0) <= 50_100,
+        ) &&
+        persistedRunsMatch &&
+        loadThresholdSatisfied(loadDetails),
+      detail: `stream_epoch_ms=${round(streamStart)}..${round(streamEnd)} threshold_ms=${MIN_EFFECTIVE_LOAD_MS} files=${FILE_COUNT} diff_mib=${mib(gitMetric.bytes)} pdf_pages=${String(pdfResult.metadata?.['pageCount'])} pdf_mib=${mib(workload.pdfBytes)} pdf_text_kib=${round(workload.pdfTextBytes / 1024)} stdout_mib=${mib(stdoutMetric.bytes)} tool_caps=${gitResult.output?.length ?? 0}/${pdfResult.output?.length ?? 0}/${stdoutResult.output?.length ?? 0} generator_epoch_ms=git:${gitMetric.start}..${gitMetric.end},stdout:${stdoutMetric.start}..${stdoutMetric.end} observed_ms=${loadDetails.map((load) => `${load.name}(${load.tool}):runs:${load.runs}/work:${round(load.workMs)}/overlap:${round(load.overlapMs)}`).join(',')}`,
     },
     {
       label: 'C3.3 sondes session',
@@ -969,6 +974,9 @@ async function main(): Promise<void> {
     witnessStart: 0,
     witnessEnd: 0,
     witnessChunkTimes: [],
+    loadDurations: { git: 0, pdf: 0, stdout: 0 },
+    nextToolCall: 0,
+    holdIssued: false,
   }
   const modelServer = createModelServer(state)
   let server: ServerHandle | undefined
@@ -990,7 +998,7 @@ async function main(): Promise<void> {
         idleTimeout: 300_000,
       },
       context: { maxTokens: 262_144, compactionThreshold: 0.85, compactionTarget: 0.6 },
-      agent: { maxIterations: 10, maxConsecutiveFailures: 3, toolTimeout: 120_000 },
+      agent: { maxIterations: 100, maxConsecutiveFailures: 3, toolTimeout: 120_000 },
       server: { port: 0, host: '127.0.0.1' },
       database: { path: dbPath },
       logging: { level: 'error' },
@@ -1030,6 +1038,14 @@ async function main(): Promise<void> {
 
     observer = fork(join(here, 'demo-etape7-observer.mjs'), [base, witnessId, perturbatorId], {
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    })
+    observer.on('message', (value: unknown) => {
+      const message = value as ObserverMessage
+      if (message.type !== 'toolResult' || !message.toolCall) return
+      const load = classifyLoad(message.toolCall)
+      if (!load) return
+      state.loadDurations[load] +=
+        message.toolCall.result?.durationMs ?? message.toolCall.endAt - message.toolCall.startAt
     })
     observer.stderr?.on('data', (chunk: Buffer) => {
       observerStderr += chunk.toString()
@@ -1081,13 +1097,9 @@ async function main(): Promise<void> {
     )
 
     await waitFor(
-      async () => {
-        const view = await api<SessionView>(base, `/api/sessions/${perturbatorId}`)
-        const completed = view.messages.flatMap((message) => message.toolCalls ?? []).filter((call) => call.result)
-        return completed.length >= 3 ? true : null
-      },
+      () => (Object.values(state.loadDurations).every((duration) => duration >= MIN_EFFECTIVE_LOAD_MS) ? true : null),
       30_000,
-      'three perturbator loads',
+      'two seconds of effective work for every perturbator load',
     )
 
     const holdPid = await waitFor(
@@ -1177,14 +1189,9 @@ async function main(): Promise<void> {
     const perturbatorView = await api<SessionView>(base, `/api/sessions/${perturbatorId}`)
     const mcpServers = await api<{ servers: Array<{ name: string; status: string }> }>(base, '/api/mcp/servers')
     const mcpConnected = mcpServers.servers.some((item) => item.name === 'test-server' && item.status === 'connected')
-    const gitResult = toolResult(perturbatorView, 'run_command')
-    const pdfResult = toolResult(perturbatorView, 'read_file')
-    const runResults = perturbatorView.messages.flatMap((message) =>
-      (message.toolCalls ?? [])
-        .filter((call) => call.name === 'run_command' && call.result)
-        .map((call) => call.result!),
-    )
-    const stdoutResult = runResults[1] ?? null
+    const gitResult = toolResults(perturbatorView, 'git').at(-1) ?? null
+    const pdfResult = toolResults(perturbatorView, 'pdf').at(-1) ?? null
+    const stdoutResult = toolResults(perturbatorView, 'stdout').at(-1) ?? null
     if (!gitResult || !pdfResult || !stdoutResult) throw new Error('Perturbator tool results are incomplete')
     const gitMetric = await readLoadMetric(join(projectDir, 'git-load.metric'))
     const stdoutMetric = await readLoadMetric(join(projectDir, 'stdout-load.metric'))

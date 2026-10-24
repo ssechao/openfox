@@ -164,6 +164,7 @@ function handleSocketMessage(raw) {
     if (observed) {
       observed.endAt = at
       observed.result = message.payload.result
+      send({ type: 'toolResult', toolCall: observed })
     }
   }
 }
