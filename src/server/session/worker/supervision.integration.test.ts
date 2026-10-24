@@ -122,7 +122,52 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('w
     })
 
     expect(inventory.children).toEqual([])
+    expect(inventory.groups).toEqual([])
     expect(inventory.errors).toEqual([])
+  })
+
+  it('refuses zero-orphan proof when the leader is gone but its process group survives', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'openfox-supervision-reparented-'))
+    directories.push(directory)
+    const childrenPath = join(directory, 'worker.children')
+    writeFileSync(
+      childrenPath,
+      [
+        JSON.stringify({ type: 'reservation', id: 'reservation-empty', command: 'orphan' }),
+        JSON.stringify({
+          type: 'child',
+          reservationId: 'reservation-empty',
+          pid: 20,
+          startedAt: 'linux:gone',
+          pgid: 200,
+          command: 'orphan',
+        }),
+      ].join('\n') + '\n',
+    )
+
+    const inventory = captureExclusiveProcessInventory(10, childrenPath, {
+      recordedWorker: { pid: 10, startedAt: 'linux:worker', pgid: 10 },
+      readInventory: () => ({ status: 'absent' }),
+      readGroup: (pgid) => (pgid === 200 ? { status: 'found' } : { status: 'absent' }),
+      findReservationPids: () => [],
+      now: () => 100,
+    })
+
+    expect(inventory.children).toEqual([])
+    expect(inventory.groups).toEqual([200])
+    const check = await verifyExclusiveProcessInventoryAfter(inventory, {
+      readInventory: () => ({ status: 'absent' }),
+      readGroup: (pgid) => (pgid === 200 ? { status: 'found' } : { status: 'absent' }),
+      findReservationPids: () => [],
+      now: () => 2_100,
+      sleep: async () => {},
+    })
+
+    expect(check.clean).toBe(false)
+    expect(check.survivingIdentities).toEqual([])
+    expect(check.survivingGroups).toEqual([200])
+    expect(check.liveReservations).toEqual([])
+    expect(check.errors).toEqual([])
   })
 
   it('fails proof on unreadable identities, live reparented groups, or unreadable reservation scans', async () => {
@@ -130,6 +175,7 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('w
       capturedAt: 100,
       worker: { pid: 10, startedAt: 'linux:10', pgid: 1 },
       children: [{ pid: 20, startedAt: 'linux:20', pgid: 200 }],
+      groups: [200],
       reservations: [
         {
           id: 'reservation-1',

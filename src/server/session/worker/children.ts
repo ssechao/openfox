@@ -41,6 +41,7 @@ export interface ExclusiveProcessInventory {
   capturedAt: number
   worker?: ProcessInventoryEntry
   children: ProcessInventoryEntry[]
+  groups: number[]
   reservations: ExclusiveReservationInventory[]
   errors: string[]
 }
@@ -406,6 +407,7 @@ export function captureExclusiveProcessInventory(
 ): ExclusiveProcessInventory {
   const readInventory = dependencies.readInventory ?? readProcessInventory
   const findReservationPids = dependencies.findReservationPids ?? findReservationProcesses
+  const readGroup = dependencies.readGroup ?? readProcessGroup
   const now = dependencies.now ?? Date.now
   const state = readChildrenState(path)
   const errors: string[] = []
@@ -418,12 +420,23 @@ export function captureExclusiveProcessInventory(
   else errors.push(`worker ${workerPid}: identity unavailable before cleanup`)
 
   const children: ProcessInventoryEntry[] = []
+  const groups = new Set<number>()
   for (const child of state.children) {
     const childRead = readInventory(child.pid, child.command)
     if (childRead.status === 'found' && childRead.process.startedAt === child.startedAt) {
       children.push(childRead.process)
-    } else if (childRead.status === 'unreadable') {
-      errors.push(`child ${child.pid}: ${childRead.error.message}`)
+      groups.add(childRead.process.pgid)
+      if (child.pgid) groups.add(child.pgid)
+    } else {
+      if (childRead.status === 'unreadable') errors.push(`child ${child.pid}: ${childRead.error.message}`)
+      if (child.pgid) {
+        const groupRead = readGroup(child.pgid)
+        if (groupRead.status === 'found') groups.add(child.pgid)
+        else if (groupRead.status === 'unreadable')
+          errors.push(`process group ${child.pgid}: ${groupRead.error.message}`)
+      } else {
+        errors.push(`child ${child.pid}: process group unavailable before cleanup`)
+      }
     }
   }
 
@@ -453,6 +466,7 @@ export function captureExclusiveProcessInventory(
     capturedAt: now(),
     ...(worker ? { worker } : {}),
     children,
+    groups: [...groups],
     reservations,
     errors,
   }
@@ -525,6 +539,7 @@ export async function verifyExclusiveProcessInventoryAfter(
 
   const survivingGroups: number[] = []
   const groups = new Set([
+    ...inventory.groups,
     ...inventory.children.map((entry) => entry.pgid),
     ...inventory.reservations.flatMap((reservation) => reservation.processes.map((entry) => entry.pgid)),
   ])

@@ -426,6 +426,7 @@ process.on('message', (message) => {
         .verifyWorkerInventory({
           capturedAt: Date.now() - 2_000,
           children: [],
+          groups: [],
           reservations: [],
           errors: [],
         })

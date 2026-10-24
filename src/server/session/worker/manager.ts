@@ -657,6 +657,7 @@ export class SessionWorkerManager {
           capturedAt,
           ...(worker.workerInventory ? { worker: worker.workerInventory } : {}),
           children: [],
+          groups: [],
           reservations: [],
           errors: [`inventory capture failed: ${error instanceof Error ? error.message : String(error)}`],
         }
