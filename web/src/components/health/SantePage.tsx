@@ -51,18 +51,19 @@ const RUNTIME_COMMAND_LABELS: Record<RuntimeLastCommand, Translation> = {
 
 function formatValue(series: DiagnosticsSeries): string {
   const value = series.value ?? 0
-  if (series.unit === 'bytes') {
-    if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`
-    if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`
-    if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`
-    return `${value} B`
-  }
+  if (series.unit === 'bytes') return formatBytes(value)
   if (series.unit === 'count') return String(Math.round(value))
   return `${value < 10 ? value.toFixed(2) : value.toFixed(0)} ms`
 }
 
 const formatMs = (value: number) => `${value.toFixed(0)} ms`
 const formatSecondsAgo = (value: number) => `${value.toFixed(0)} s`
+const formatBytes = (value: number) => {
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`
+  return `${value} B`
+}
 
 export function SantePage() {
   const t = useT()
@@ -149,6 +150,65 @@ export function SantePage() {
                   </div>
                 )
               })}
+            </section>
+
+            <section className="rounded border border-border bg-bg-secondary p-3" data-testid="sante-workers">
+              <h2 className="text-sm font-medium text-text-primary mb-2">
+                {t({ en: 'Worker processes', fr: 'Processus workers' })}
+              </h2>
+              {(data.workerProcesses ?? []).length === 0 ? (
+                <div className="text-sm text-text-muted">
+                  {t({ en: 'No worker processes', fr: 'Aucun processus worker' })}
+                </div>
+              ) : (
+                <ul className="space-y-2">
+                  {(data.workerProcesses ?? []).map((worker) => (
+                    <li
+                      key={`${worker.workerId}-${worker.generation}`}
+                      data-testid={`sante-worker-${worker.workerId}-${worker.generation}`}
+                      className="rounded border border-border/70 p-2 text-xs"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-text-primary truncate">{worker.sessionId}</span>
+                        <span className={worker.freshness === 'fresh' ? 'text-accent-success' : 'text-accent-warning'}>
+                          {worker.freshness === 'fresh'
+                            ? t({ en: 'Fresh', fr: 'À jour' })
+                            : t({ en: 'Stale', fr: 'Périmé' })}
+                        </span>
+                      </div>
+                      <div className="text-text-muted mt-1 break-all">
+                        {worker.workerId}
+                        {t(
+                          {
+                            en: ' · generation {{generation}} · PID {{pid}}',
+                            fr: ' · génération {{generation}} · PID {{pid}}',
+                          },
+                          { generation: worker.generation, pid: worker.pid },
+                        )}
+                      </div>
+                      <div className="text-text-muted mt-1">
+                        {t(
+                          {
+                            en: 'RSS {{rss}} · Heap {{heap}} · age {{age}} s',
+                            fr: 'RSS {{rss}} · Tas {{heap}} · âge {{age}} s',
+                          },
+                          {
+                            rss:
+                              worker.rss === null
+                                ? t({ en: 'No data', fr: 'Pas de données' })
+                                : formatBytes(worker.rss),
+                            heap:
+                              worker.heapUsed === null
+                                ? t({ en: 'No data', fr: 'Pas de données' })
+                                : formatBytes(worker.heapUsed),
+                            age: (worker.ageMs / 1000).toFixed(1),
+                          },
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </section>
 
             <section className="rounded border border-border bg-bg-secondary p-3" data-testid="sante-runtimes">

@@ -127,14 +127,13 @@ describe('worker health series — TTL on receivedAt', () => {
     value,
   })
 
-  it('treats a snapshot older than 2 intervals as stale: excluded from totals, listed in staleSeries', () => {
+  it('treats a snapshot older than 2500 ms as stale: excluded from totals, listed in staleSeries', () => {
     let clock = 10_000
     const aggregator = createHealthAggregator({ now: () => clock })
     const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
 
     aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
-    // Advance past the 2-interval TTL (2000 ms).
-    clock = 10_000 + 2_001
+    clock = 10_000 + 2_501
 
     const result = aggregator.aggregate(gatewayData)
     // Stale worker no longer participates in the max.
@@ -151,7 +150,7 @@ describe('worker health series — TTL on receivedAt', () => {
     const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
 
     aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
-    // One interval later (1000 ms) is still within the 2000 ms TTL.
+    // One interval later (1000 ms) is still within the 2500 ms TTL.
     clock = 10_000 + 1_000
 
     const result = aggregator.aggregate(gatewayData)
@@ -165,7 +164,7 @@ describe('worker health series — TTL on receivedAt', () => {
     const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
 
     aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
-    clock = 10_000 + 2_001 // gen 1 now stale
+    clock = 10_000 + 2_501 // gen 1 now stale
     // Worker restarts (same workerId, new generation) and reports fresh.
     aggregator.recordSnapshot({ workerId: 'w1', generation: 2 }, makeData({ eventLoopDelayP99: p99(9) }))
 

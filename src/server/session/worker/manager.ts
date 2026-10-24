@@ -343,7 +343,8 @@ export class SessionWorkerManager {
       } else if (msg.type === 'ws') {
         this.deps.broadcastForSession(sessionId, msg.msg)
       } else if (msg.type === 'health') {
-        this.deps.healthAggregator?.recordSnapshot(token, msg.data)
+        const pid = worker.child.pid
+        this.deps.healthAggregator?.recordSnapshot(token, msg.data, pid === undefined ? undefined : { sessionId, pid })
       } else if (msg.type === 'mcp.request') {
         this.mcpBroker?.handleRequest(msg)
       } else if (msg.type === 'mcp.cancel') {

@@ -3,24 +3,30 @@ import type {
   DiagnosticsSeriesName,
   DiagnosticsSeries,
   StaleWorkerSeries,
+  WorkerProcessDiagnostics,
 } from '../../shared/diagnostics.js'
 import type { WorkerToken } from '../session/worker/protocol.js'
+
+interface WorkerProcessOwner {
+  sessionId: string
+  pid: number
+}
 
 interface StoredSnapshot {
   token: WorkerToken
   data: DiagnosticsData
   receivedAt: number
+  owner?: WorkerProcessOwner
 }
 
 export interface HealthAggregatorOptions {
   now?: () => number
-  /** A worker snapshot older than this is treated as stale (default 2 report
-   *  intervals of the 1 s worker report cadence = 2000 ms). */
+  /** A worker snapshot older than this is treated as stale (default 2500 ms). */
   staleAfterMs?: number
 }
 
 export interface HealthAggregator {
-  recordSnapshot(token: WorkerToken, data: DiagnosticsData): void
+  recordSnapshot(token: WorkerToken, data: DiagnosticsData, owner?: WorkerProcessOwner): void
   expireWorker(token: WorkerToken): void
   activeSnapshots(): DiagnosticsData[]
   staleSeries(): StaleWorkerSeries[]
@@ -65,19 +71,19 @@ function mergeSeries(
 
 export function createHealthAggregator(options: HealthAggregatorOptions = {}): HealthAggregator {
   const readClock = options.now ?? Date.now
-  const staleAfterMs = options.staleAfterMs ?? 2_000
+  const staleAfterMs = options.staleAfterMs ?? 2_500
   const snapshots = new Map<string, StoredSnapshot>()
 
-  function recordSnapshot(token: WorkerToken, data: DiagnosticsData): void {
-    snapshots.set(keyFor(token), { token, data, receivedAt: readClock() })
+  function recordSnapshot(token: WorkerToken, data: DiagnosticsData, owner?: WorkerProcessOwner): void {
+    snapshots.set(keyFor(token), { token, data, receivedAt: readClock(), ...(owner ? { owner } : {}) })
   }
 
   function expireWorker(token: WorkerToken): void {
     snapshots.delete(keyFor(token))
   }
 
-  function partition(): { fresh: StoredSnapshot[]; stale: StoredSnapshot[] } {
-    const cutoff = readClock() - staleAfterMs
+  function partition(now = readClock()): { fresh: StoredSnapshot[]; stale: StoredSnapshot[] } {
+    const cutoff = now - staleAfterMs
     const fresh: StoredSnapshot[] = []
     const stale: StoredSnapshot[] = []
     for (const snapshot of snapshots.values()) {
@@ -99,8 +105,25 @@ export function createHealthAggregator(options: HealthAggregatorOptions = {}): H
     }))
   }
 
+  function processSnapshot(snapshot: StoredSnapshot, now: number): WorkerProcessDiagnostics | null {
+    if (!snapshot.owner) return null
+    const ageMs = Math.max(0, now - snapshot.receivedAt)
+    return {
+      sessionId: snapshot.owner.sessionId,
+      workerId: snapshot.token.workerId,
+      generation: snapshot.token.generation,
+      pid: snapshot.owner.pid,
+      rss: snapshot.data.series.rss.value,
+      heapUsed: snapshot.data.series.heapUsed.value,
+      receivedAt: snapshot.receivedAt,
+      ageMs,
+      freshness: ageMs <= staleAfterMs ? 'fresh' : 'stale',
+    }
+  }
+
   function aggregate(gatewayData: DiagnosticsData): DiagnosticsData {
-    const { fresh, stale } = partition()
+    const now = readClock()
+    const { fresh, stale } = partition(now)
     const workerData = fresh.map((s) => s.data)
 
     const series = { ...gatewayData.series }
@@ -126,6 +149,10 @@ export function createHealthAggregator(options: HealthAggregatorOptions = {}): H
         generation: s.token.generation,
         receivedAt: s.receivedAt,
       })),
+      workerProcesses: [...snapshots.values()].flatMap((snapshot) => {
+        const process = processSnapshot(snapshot, now)
+        return process ? [process] : []
+      }),
     }
   }
 

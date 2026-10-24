@@ -53,6 +53,30 @@ function payload(): DiagnosticsData {
       snapshotCacheLimitBytes: series('bytes', 16 * 1024 * 1024, 10),
     },
     runtimes: [],
+    workerProcesses: [
+      {
+        sessionId: 'sess-worker',
+        workerId: 'worker-abc',
+        generation: 7,
+        pid: 4242,
+        rss: 256 * 1024 * 1024,
+        heapUsed: 96 * 1024 * 1024,
+        receivedAt: NOW - 1_250,
+        ageMs: 1_250,
+        freshness: 'fresh',
+      },
+      {
+        sessionId: 'sess-stale',
+        workerId: 'worker-old',
+        generation: 2,
+        pid: 4343,
+        rss: 128 * 1024 * 1024,
+        heapUsed: 48 * 1024 * 1024,
+        receivedAt: NOW - 3_000,
+        ageMs: 3_000,
+        freshness: 'stale',
+      },
+    ],
     history: Array.from({ length: 60 }, (_, index) => ({
       timestamp: NOW - (59 - index) * 1_000,
       eventLoopDelayMax: index === 55 ? 210 : 2,
@@ -124,6 +148,20 @@ describe('SantePage', () => {
     const container = render()
     await flush()
     expect(text(container, 'sante-error')).toContain('/api/diagnostics')
+  })
+
+  it('shows each worker process with identity, memory, age, and freshness', async () => {
+    vi.mocked(authFetch).mockResolvedValue(ok(payload()))
+    const container = render()
+    await flush()
+
+    expect(text(container, 'sante-worker-worker-abc-7')).toContain('sess-worker')
+    expect(text(container, 'sante-worker-worker-abc-7')).toContain('PID 4242')
+    expect(text(container, 'sante-worker-worker-abc-7')).toContain('RSS 256.0 MiB')
+    expect(text(container, 'sante-worker-worker-abc-7')).toContain('Heap 96.0 MiB')
+    expect(text(container, 'sante-worker-worker-abc-7')).toContain('1.3 s')
+    expect(text(container, 'sante-worker-worker-abc-7')).toContain('Fresh')
+    expect(text(container, 'sante-worker-worker-old-2')).toContain('Stale')
   })
 
   it('shows the runtimes panel with state and last command', async () => {
