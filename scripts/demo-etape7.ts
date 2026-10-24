@@ -17,6 +17,7 @@ import {
   type DemoLoadName,
   type DemoToolObservation,
 } from './demo-etape7-loads.js'
+import { orphanWindowSatisfied } from './demo-etape7-orphans.js'
 
 const MODEL = 'etape7-demo'
 const WITNESS_MARKER = 'ETAPE7_WITNESS'
@@ -941,9 +942,11 @@ function printSummary(
         mcpView.session.interruptedAt == null &&
         mcpStable &&
         crash.orphanCheck?.clean === true &&
-        orphanDelay >= 2_000 &&
-        orphanDelay <= 2_500 &&
-        orphanAfterSignal >= 2_000 &&
+        orphanWindowSatisfied({
+          killAt,
+          capturedAt: crash.inventory.capturedAt,
+          checkedAt: crash.orphanCheck.checkedAt,
+        }) &&
         crash.orphanCheck.survivingIdentities.length === 0 &&
         crash.orphanCheck.survivingGroups.length === 0 &&
         crash.orphanCheck.liveReservations.length === 0 &&
