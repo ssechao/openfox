@@ -65,6 +65,7 @@ import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
 
 const WORKER_RECOVERY_TIMEOUT_MS = 4_000
+const WORKER_STOP_SETTLEMENT_TIMEOUT_MS = 2_000
 const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
 const WORKER_ORPHAN_PROOF_DELAY_MS = 2_000
 const WORKER_ORPHAN_PROOF_TOLERANCE_MS = 500
@@ -89,6 +90,10 @@ interface ActiveWorker {
   stopRequestedAt?: number
   stopEscalatedAt?: number
   recoveryDeadlineAt?: number
+  exitObserved: boolean
+  exitCodeObserved?: number | null
+  exitSignalObserved?: NodeJS.Signals | null
+  signalErrors: string[]
   settledNotified: boolean
   stderrTail: string[]
   command: WorkerTurnCommand
@@ -240,6 +245,7 @@ export class SessionWorkerManager {
         worker.stopRequestedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS,
       )
       void this.escalateStop(worker)
+      void this.settleStopAtDeadline(worker)
     }
     return true
   }
@@ -320,6 +326,8 @@ export class SessionWorkerManager {
       ...(workerInventoryRead.status === 'found' ? { workerInventory: workerInventoryRead.process } : {}),
       doneReceived: false,
       doneOk: false,
+      exitObserved: false,
+      signalErrors: [],
       settledNotified: false,
       stderrTail: [],
       command,
@@ -386,6 +394,9 @@ export class SessionWorkerManager {
     })
 
     child.on('exit', (code, signal) => {
+      worker.exitObserved = true
+      worker.exitCodeObserved = code
+      worker.exitSignalObserved = signal
       if (this.active.get(sessionId) !== worker) return
       this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
       this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session worker exited')
@@ -432,32 +443,66 @@ export class SessionWorkerManager {
     return this.waitForExit(worker, Math.max(0, deadlineAt - Date.now()))
   }
 
+  private async signalWorker(worker: ActiveWorker, signal: NodeJS.Signals, deadlineAt: number): Promise<void> {
+    try {
+      if ('killVerified' in worker.child) await worker.child.killVerified(signal, deadlineAt)
+      else if (!worker.child.kill(signal)) throw new Error('process signal was refused')
+    } catch (error) {
+      const message = `${signal} refused: ${error instanceof Error ? error.message : String(error)}`
+      worker.signalErrors.push(message)
+      logger.error('Session worker signal failed', {
+        sessionId: worker.sessionId,
+        workerId: worker.token.workerId,
+        error: message,
+      })
+    }
+  }
+
+  private async settleStopAtDeadline(worker: ActiveWorker): Promise<void> {
+    const stopRequestedAt = worker.stopRequestedAt
+    if (stopRequestedAt === undefined) return
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.max(0, stopRequestedAt + WORKER_STOP_SETTLEMENT_TIMEOUT_MS - Date.now())),
+    )
+    if (worker.settledNotified) return
+    const signalErrors = worker.signalErrors.length > 0 ? `; ${worker.signalErrors.join('; ')}` : ''
+    if (!worker.exitObserved) {
+      this.notifyWorkerSettled(worker, {
+        crashed: true,
+        error: `Session worker did not exit within the bounded Stop deadline${signalErrors}`,
+      })
+      return
+    }
+    const clean =
+      worker.doneReceived && worker.doneOk && worker.exitCodeObserved === 0 && worker.exitSignalObserved === null
+    this.retire(worker)
+    this.scheduler.release(worker.sessionId)
+    this.notifyWorkerSettled(worker, {
+      crashed: !clean,
+      error: `${clean ? 'Session stopped' : 'Worker interruption'}; cleanup exceeded the Stop settlement deadline and continues in background${signalErrors}`,
+    })
+  }
+
   private async escalateStop(worker: ActiveWorker): Promise<void> {
     const stopRequestedAt = worker.stopRequestedAt ?? Date.now()
     const termAt = stopRequestedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS
     if (await this.waitForExitUntil(worker, termAt)) return
     await this.beginWorkerInventoryCapture(worker, stopRequestedAt, termAt)
     worker.stopEscalatedAt = Date.now()
-    try {
-      worker.child.kill('SIGTERM')
-    } catch {
-      void 0
-    }
     const killAt = stopRequestedAt + 1_000
+    await this.signalWorker(worker, 'SIGTERM', killAt)
     if (await this.waitForExitUntil(worker, killAt)) return
-    try {
-      worker.child.kill('SIGKILL')
-    } catch {
-      void 0
-    }
-    const stopDeadlineAt = stopRequestedAt + 2_000
+    const stopDeadlineAt = stopRequestedAt + WORKER_STOP_SETTLEMENT_TIMEOUT_MS
+    await this.signalWorker(
+      worker,
+      'SIGKILL',
+      Math.min(stopDeadlineAt, Date.now() + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS),
+    )
     if (!(await this.waitForExitUntil(worker, stopDeadlineAt))) {
-      const error = 'Session worker did not exit within the bounded Stop deadline'
-      logger.error(error, {
+      logger.error('Session worker did not exit within the bounded Stop deadline', {
         sessionId: worker.sessionId,
         workerId: worker.token.workerId,
       })
-      this.notifyWorkerSettled(worker, { crashed: true, error })
     }
   }
 
@@ -510,20 +555,10 @@ export class SessionWorkerManager {
           capturedAt,
           Math.min(deadlineAt, capturedAt + WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS),
         )
-        try {
-          worker.child.kill('SIGTERM')
-        } catch {
-          void 0
-        }
+        await this.signalWorker(worker, 'SIGTERM', Math.min(deadlineAt, Date.now() + 1_000))
         exited = await this.waitForExit(worker, Math.min(1_000, remaining()))
       }
-      if (!exited) {
-        try {
-          worker.child.kill('SIGKILL')
-        } catch {
-          void 0
-        }
-      }
+      if (!exited) await this.signalWorker(worker, 'SIGKILL', deadlineAt)
 
       const cleanupPromise = this.cleanupWorkerChildren(
         worker.sessionId,

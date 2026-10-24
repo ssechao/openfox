@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { ChildProcess } from 'node:child_process'
+import { fork, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -62,6 +62,7 @@ describe('SessionProcessSupervisor', () => {
       entry: { path: '/supervisor.js', execArgv: [] },
       startupTimeoutMs: 100,
       signalProcess,
+      readProcessIdentity: async () => ({ status: 'found', identity: 'linux:99' }),
     })
     const started = supervisor.start()
     child.emit('message', { type: 'ready', pid: 41 })
@@ -84,10 +85,11 @@ describe('SessionProcessSupervisor', () => {
       requestId: spawnRequest.requestId,
       workerKey: 'worker-1',
       pid: 99,
+      inventory: { pid: 99, startedAt: 'linux:99', pgid: 99 },
     })
     child.emit('message', { type: 'worker.message', workerKey: 'worker-1', message: { type: 'ready' } })
     handle.send({ type: 'start' })
-    handle.kill('SIGTERM')
+    await handle.killVerified('SIGTERM', Date.now() + 1_000)
     child.emit('message', { type: 'worker.exit', workerKey: 'worker-1', code: 0, signal: null })
 
     expect(handle.pid).toBe(99)
@@ -100,6 +102,97 @@ describe('SessionProcessSupervisor', () => {
     })
     expect(signalProcess).toHaveBeenCalledWith(99, 'SIGTERM')
     expect(child.send).not.toHaveBeenCalledWith({ type: 'worker.kill', workerKey: 'worker-1', signal: 'SIGTERM' })
+  })
+
+  it('refuses signaling when spawn identity is absent or the handle already exited', async () => {
+    const child = fakeChild()
+    const signalProcess = vi.fn((_pid: number, _signal?: string | number) => true as const)
+    const supervisor = new SessionProcessSupervisor({
+      forkProcess: vi.fn(() => child),
+      entry: { path: '/supervisor.js', execArgv: [] },
+      startupTimeoutMs: 100,
+      signalProcess,
+      readProcessIdentity: async () => ({ status: 'found', identity: 'linux:99' }),
+    })
+    const started = supervisor.start()
+    child.emit('message', { type: 'ready', pid: 41 })
+    await started
+    const missing = supervisor.spawnWorker({
+      workerKey: 'worker-missing',
+      path: '/worker.js',
+      execArgv: [],
+      env: process.env,
+    })
+    const missingRequest = child.send.mock.calls.find(
+      ([message]) => message.type === 'worker.spawn' && message.workerKey === 'worker-missing',
+    )![0]
+    child.emit('message', {
+      type: 'worker.spawned',
+      requestId: missingRequest.requestId,
+      workerKey: 'worker-missing',
+      pid: 98,
+    })
+    await expect(missing.killVerified('SIGTERM', Date.now() + 1_000)).rejects.toThrow(/identity.*unavailable/i)
+
+    const exited = supervisor.spawnWorker({
+      workerKey: 'worker-exited',
+      path: '/worker.js',
+      execArgv: [],
+      env: process.env,
+    })
+    const exitedRequest = child.send.mock.calls.find(
+      ([message]) => message.type === 'worker.spawn' && message.workerKey === 'worker-exited',
+    )![0]
+    child.emit('message', {
+      type: 'worker.spawned',
+      requestId: exitedRequest.requestId,
+      workerKey: 'worker-exited',
+      pid: 99,
+      inventory: { pid: 99, startedAt: 'linux:99', pgid: 99 },
+    })
+    child.emit('message', { type: 'worker.exit', workerKey: 'worker-exited', code: 0, signal: null })
+    await expect(exited.killVerified('SIGKILL', Date.now() + 1_000)).rejects.toThrow(/already exited/i)
+    expect(signalProcess).not.toHaveBeenCalled()
+  })
+
+  it('refuses to signal a reused PID whose start identity changed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-reused-pid-'))
+    const workerEntry = join(root, 'foreign.cjs')
+    writeFileSync(workerEntry, `setInterval(() => {}, 1000)\n`)
+    const foreign = fork(workerEntry, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    const child = fakeChild()
+    const supervisor = new SessionProcessSupervisor({
+      forkProcess: vi.fn(() => child),
+      entry: { path: '/supervisor.js', execArgv: [] },
+      startupTimeoutMs: 100,
+    })
+
+    try {
+      const started = supervisor.start()
+      child.emit('message', { type: 'ready', pid: 41 })
+      await started
+      const handle = supervisor.spawnWorker({
+        workerKey: 'worker-reused',
+        path: '/worker.js',
+        execArgv: [],
+        env: process.env,
+      })
+      const request = child.send.mock.calls.find(([message]) => message.type === 'worker.spawn')![0]
+      child.emit('message', {
+        type: 'worker.spawned',
+        requestId: request.requestId,
+        workerKey: 'worker-reused',
+        pid: foreign.pid,
+        inventory: { pid: foreign.pid, startedAt: 'reused:original-worker', pgid: foreign.pid },
+      })
+
+      await expect(handle.killVerified('SIGKILL', Date.now() + 1_000)).rejects.toThrow(/identity.*changed/i)
+      expect(() => process.kill(foreign.pid!, 0)).not.toThrow()
+    } finally {
+      foreign.kill('SIGKILL')
+      await new Promise<void>((resolve) => foreign.once('exit', () => resolve()))
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('signals a second worker while the supervisor event loop is blocked', async () => {
@@ -127,7 +220,13 @@ process.on('message', (message) => {
   if (message.type === 'worker.spawn') {
     const worker = fork(message.path, [], { env: message.env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
     workers.set(message.workerKey, worker)
-    process.send({ type: 'worker.spawned', requestId: message.requestId, workerKey: message.workerKey, pid: worker.pid })
+    process.send({
+      type: 'worker.spawned',
+      requestId: message.requestId,
+      workerKey: message.workerKey,
+      pid: worker.pid,
+      inventory: { pid: worker.pid, startedAt: message.workerKey, pgid: worker.pid },
+    })
     worker.on('message', (payload) => {
       process.send({ type: 'worker.message', workerKey: message.workerKey, message: payload })
     })
@@ -149,7 +248,10 @@ process.on('message', (message) => {
 })
 `,
     )
-    const supervisor = new SessionProcessSupervisor({ entry: { path: entry, execArgv: [] } })
+    const supervisor = new SessionProcessSupervisor({
+      entry: { path: entry, execArgv: [] },
+      readProcessIdentity: async () => ({ status: 'found', identity: 'worker-2' }),
+    })
 
     try {
       await supervisor.start()
@@ -172,7 +274,7 @@ process.on('message', (message) => {
 
       const cleanup = supervisor.cleanupWorkerChildren('/tmp/worker.children')
       const startedAt = Date.now()
-      expect(second.kill('SIGTERM')).toBe(true)
+      await expect(second.killVerified('SIGTERM', Date.now() + 1_000)).resolves.toBeUndefined()
       await vi.waitFor(
         () => {
           expect(existsSync(stoppedPath)).toBe(true)
@@ -376,7 +478,7 @@ process.on('message', (message) => {
         worker: handle.inventory,
         errors: [],
       })
-      handle.kill('SIGKILL')
+      await handle.killVerified('SIGKILL', Date.now() + 1_000)
       await new Promise<void>((resolve) => handle.once('exit', () => resolve()))
     } finally {
       await supervisor.shutdown()

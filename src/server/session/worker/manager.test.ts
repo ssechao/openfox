@@ -383,20 +383,94 @@ describe('SessionWorkerManager', () => {
       expect(kill).toHaveBeenCalledWith('SIGTERM')
       await vi.advanceTimersByTimeAsync(500)
       expect(kill).toHaveBeenCalledWith('SIGKILL')
-      await vi.advanceTimersByTimeAsync(3_000)
+      await vi.advanceTimersByTimeAsync(1_000)
 
       expect(settled).toHaveBeenCalledWith({
         crashed: true,
-        error: expect.stringMatching(/inventory capture.*deadline|cleanup.*deadline/i),
+        error: expect.stringMatching(/cleanup.*Stop settlement.*background/i),
       })
-      expect(manager.lastCrashReport()).toMatchObject({
-        cleanupError: expect.stringMatching(/deadline/i),
-        inventory: { errors: [expect.stringMatching(/deadline/i)] },
-        orphanCheck: {
-          clean: false,
-          errors: expect.arrayContaining([expect.stringMatching(/proof missed.*capture/i)]),
-        },
+      expect(manager.lastCrashReport()).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('settles a stopped worker within two seconds of exit while cleanup continues', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(
+      join(tmpdir(), `openfox-worker-manager-cleanup-background-${crypto.randomUUID()}.db`),
+    )
+    openDbs.push(db)
+    let finishCleanup: (pids: number[]) => void = () => {}
+    let cleanupCompleted = false
+    const cleanup = new Promise<number[]>((resolve) => {
+      finishCleanup = resolve
+    }).then((pids) => {
+      cleanupCompleted = true
+      return pids
+    })
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn((message: { type?: string; workerId?: string; generation?: number }) => {
+        if (message.type === 'abort') {
+          queueMicrotask(() => {
+            child.emit('message', {
+              workerId: message.workerId,
+              generation: message.generation,
+              type: 'done',
+              ok: true,
+            })
+            child.emit('exit', 0, null)
+          })
+        }
+        return true
+      }),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const settled = vi.fn()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+      captureInventory: (pid) => ({
+        capturedAt: Date.now(),
+        worker: { pid, startedAt: 'linux:42', pgid: 42 },
+        children: [],
+        reservations: [],
+        errors: [],
+      }),
+      cleanupChildren: () => cleanup,
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+
+    try {
+      manager.launch('sess-1', settled)
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(settled).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+
+      expect(settled).toHaveBeenCalledWith({
+        crashed: false,
+        error: expect.stringMatching(/cleanup.*Stop settlement.*background/i),
       })
+      expect(cleanupCompleted).toBe(false)
+      expect(manager.activeWorker('sess-1')).toBeNull()
+
+      finishCleanup([99])
+      await Promise.resolve()
+      expect(cleanupCompleted).toBe(true)
     } finally {
       vi.useRealTimers()
     }
@@ -407,13 +481,18 @@ describe('SessionWorkerManager', () => {
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-deadline-${crypto.randomUUID()}.db`))
     openDbs.push(db)
     namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const kill = vi.fn(() => true)
+    const killVerified = vi.fn(async () => {
+      throw new Error('Worker start identity changed; signal refused')
+    })
     const child = Object.assign(new EventEmitter(), {
       pid: 42,
       exitCode: null,
       signalCode: null,
       stderr: new EventEmitter(),
       send: vi.fn(() => true),
-      kill: vi.fn(() => true),
+      kill,
+      killVerified,
     }) as unknown as ChildProcess
     const settled = vi.fn()
     const manager = new SessionWorkerManager({
@@ -446,8 +525,10 @@ describe('SessionWorkerManager', () => {
       expect(settled).toHaveBeenCalledOnce()
       expect(settled).toHaveBeenCalledWith({
         crashed: true,
-        error: expect.stringMatching(/did not exit.*Stop deadline/i),
+        error: expect.stringMatching(/did not exit.*Stop deadline.*identity changed/i),
       })
+      expect(killVerified).toHaveBeenCalledTimes(2)
+      expect(kill).not.toHaveBeenCalled()
       expect(manager.activeWorker('sess-1')).not.toBeNull()
       const waitingStart = vi.fn()
       expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')

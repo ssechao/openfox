@@ -13,9 +13,10 @@
  * touched by the cleanup.
  */
 
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { killProcessTree, signalProcessGroup } from '../../utils/process-tree.js'
 import { logger } from '../../utils/logger.js'
 
@@ -103,36 +104,80 @@ function processRootExists(pid: number): boolean {
   }
 }
 
+function linuxProcessStartIdentity(stat: string): string | undefined {
+  const fields = stat
+    .slice(stat.lastIndexOf(') ') + 2)
+    .trim()
+    .split(/\s+/)
+  const startTicks = fields[19]
+  return startTicks ? `linux:${startTicks}` : undefined
+}
+
+function prefixedProcessStartIdentity(prefix: string, value: string): string | undefined {
+  const identity = value.trim()
+  return identity ? `${prefix}:${identity}` : undefined
+}
+
+function processIdentityFound(identity: string | undefined): ProcessIdentityRead {
+  if (!identity) throw new Error('process start identity was empty')
+  return { status: 'found', identity }
+}
+
+function processIdentityFailure(pid: number, error: unknown): ProcessIdentityRead {
+  if (!processRootExists(pid)) return { status: 'absent' }
+  return {
+    status: 'unreadable',
+    error: error instanceof Error ? error : new Error(String(error)),
+  }
+}
+
 function processStartIdentity(pid: number): ProcessIdentityRead {
   try {
-    let identity: string | undefined
     if (process.platform === 'linux') {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
-      const fields = stat
-        .slice(stat.lastIndexOf(') ') + 2)
-        .trim()
-        .split(/\s+/)
-      const startTicks = fields[19]
-      identity = startTicks ? `linux:${startTicks}` : undefined
-    } else if (process.platform === 'win32') {
+      return processIdentityFound(linuxProcessStartIdentity(readFileSync(`/proc/${pid}/stat`, 'utf-8')))
+    }
+    if (process.platform === 'win32') {
       const ticks = execFileSync(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks`],
         { encoding: 'utf-8', windowsHide: true },
-      ).trim()
-      identity = ticks ? `win32:${ticks}` : undefined
-    } else {
-      const startedAt = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf-8' }).trim()
-      identity = startedAt ? `${process.platform}:${startedAt}` : undefined
+      )
+      return processIdentityFound(prefixedProcessStartIdentity('win32', ticks))
     }
-    if (!identity) throw new Error('process start identity was empty')
-    return { status: 'found', identity }
+    const startedAt = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf-8' })
+    return processIdentityFound(prefixedProcessStartIdentity(process.platform, startedAt))
   } catch (error) {
-    if (!processRootExists(pid)) return { status: 'absent' }
-    return {
-      status: 'unreadable',
-      error: error instanceof Error ? error : new Error(String(error)),
+    return processIdentityFailure(pid, error)
+  }
+}
+
+function execFileText(file: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { encoding: 'utf-8', windowsHide: true }, (error, stdout) => {
+      if (error) reject(error)
+      else resolve(stdout)
+    })
+  })
+}
+
+export async function readProcessStartIdentityAsync(pid: number): Promise<ProcessIdentityRead> {
+  try {
+    if (process.platform === 'linux') {
+      return processIdentityFound(linuxProcessStartIdentity(await readFile(`/proc/${pid}/stat`, 'utf-8')))
     }
+    if (process.platform === 'win32') {
+      const ticks = await execFileText('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks`,
+      ])
+      return processIdentityFound(prefixedProcessStartIdentity('win32', ticks))
+    }
+    const startedAt = await execFileText('ps', ['-o', 'lstart=', '-p', String(pid)])
+    return processIdentityFound(prefixedProcessStartIdentity(process.platform, startedAt))
+  } catch (error) {
+    return processIdentityFailure(pid, error)
   }
 }
 

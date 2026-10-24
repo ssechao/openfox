@@ -3,7 +3,13 @@ import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ExclusiveProcessInventory, OrphanInventoryCheck, ProcessInventoryEntry } from '../worker/children.js'
+import {
+  readProcessStartIdentityAsync,
+  type ExclusiveProcessInventory,
+  type OrphanInventoryCheck,
+  type ProcessIdentityRead,
+  type ProcessInventoryEntry,
+} from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
 
 export interface SupervisorWorkerHandle {
@@ -15,6 +21,7 @@ export interface SupervisorWorkerHandle {
   stderr: EventEmitter
   send(message: unknown): boolean
   kill(signal?: NodeJS.Signals): boolean
+  killVerified(signal: NodeJS.Signals, deadlineAt: number): Promise<void>
   on(event: 'message', listener: (message: unknown) => void): this
   on(event: 'error', listener: (error: Error) => void): this
   on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this
@@ -32,6 +39,7 @@ interface SessionProcessSupervisorOptions {
   startupTimeoutMs?: number
   shutdownTimeoutMs?: number
   signalProcess?: typeof process.kill
+  readProcessIdentity?: (pid: number) => Promise<ProcessIdentityRead>
 }
 
 interface PendingGit {
@@ -76,6 +84,7 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
     readonly workerKey: string,
     private readonly dispatch: (message: GatewayToSupervisorMessage) => boolean,
     private readonly signalProcess: typeof process.kill,
+    private readonly readProcessIdentity: (pid: number) => Promise<ProcessIdentityRead>,
   ) {
     super()
   }
@@ -84,12 +93,42 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
     return this.dispatch({ type: 'worker.send', workerKey: this.workerKey, message })
   }
 
-  kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
-    if (this.pid === undefined) return false
+  kill(_signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    return false
+  }
+
+  async killVerified(signal: NodeJS.Signals, deadlineAt: number): Promise<void> {
+    if (this.exitCode !== null || this.signalCode !== null) throw new Error('Worker already exited; signal refused')
+    const pid = this.pid
+    const inventory = this.inventory
+    if (pid === undefined || !inventory || inventory.pid !== pid) {
+      throw new Error('Worker start identity is unavailable; signal refused')
+    }
+    if (Date.now() >= deadlineAt)
+      throw new Error('Worker start identity check exceeded signal deadline; signal refused')
+    let timer: NodeJS.Timeout | undefined
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('Worker start identity check exceeded signal deadline; signal refused')),
+        Math.max(0, deadlineAt - Date.now()),
+      )
+    })
+    let current: ProcessIdentityRead
     try {
-      return this.signalProcess(this.pid, signal)
-    } catch {
-      return false
+      current = await Promise.race([this.readProcessIdentity(pid), timedOut])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    if (this.exitCode !== null || this.signalCode !== null) throw new Error('Worker already exited; signal refused')
+    if (current.status === 'absent') throw new Error('Worker start identity is absent; signal refused')
+    if (current.status === 'unreadable') {
+      throw new Error(`Worker start identity is unreadable; signal refused: ${current.error.message}`)
+    }
+    if (current.identity !== inventory.startedAt) throw new Error('Worker start identity changed; signal refused')
+    try {
+      this.signalProcess(pid, signal)
+    } catch (error) {
+      throw new Error(`Worker ${signal} signal failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -119,11 +158,13 @@ export class SessionProcessSupervisor {
   private readonly forkProcess: typeof fork
   private readonly entry: SupervisorEntry
   private readonly signalProcess: typeof process.kill
+  private readonly readProcessIdentity: (pid: number) => Promise<ProcessIdentityRead>
 
   constructor(private readonly options: SessionProcessSupervisorOptions = {}) {
     this.forkProcess = options.forkProcess ?? fork
     this.entry = options.entry ?? resolveSupervisorEntry()
     this.signalProcess = options.signalProcess ?? process.kill
+    this.readProcessIdentity = options.readProcessIdentity ?? readProcessStartIdentityAsync
   }
 
   isReady(): boolean {
@@ -184,7 +225,12 @@ export class SessionProcessSupervisor {
   }): SupervisorWorkerHandle {
     if (!this.ready) throw new Error('Session process supervisor is not ready')
     if (this.workers.has(options.workerKey)) throw new Error(`Worker already exists: ${options.workerKey}`)
-    const handle = new RemoteWorkerHandle(options.workerKey, (message) => this.dispatch(message), this.signalProcess)
+    const handle = new RemoteWorkerHandle(
+      options.workerKey,
+      (message) => this.dispatch(message),
+      this.signalProcess,
+      this.readProcessIdentity,
+    )
     this.workers.set(options.workerKey, handle)
     this.dispatch({
       type: 'worker.spawn',
