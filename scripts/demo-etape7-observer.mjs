@@ -12,7 +12,7 @@ if (!base || !witnessId || !perturbatorId || typeof process.send !== 'function')
   throw new Error('Observer requires base URL, witness session, perturbator session, and IPC')
 }
 
-const send = (message) => process.send?.(message)
+const send = (message, callback) => process.send?.(message, callback)
 const stop = { value: false }
 const probes = {
   session: { latencies: [], failures: 0, deadlines: 0, missedDeadlines: 0 },
@@ -26,6 +26,8 @@ let expectedWitness = null
 const identityObservations = []
 const toolCalls = new Map()
 let stopping = false
+let readySent = false
+const loadedSessions = new Set()
 
 async function probeLoop(name, url) {
   const stats = probes[name]
@@ -100,17 +102,29 @@ const probePromises = [
   identityLoop(),
 ]
 
-const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+const wsUrl = `ws://127.0.0.1:${new URL(base).port}/ws`
+const witnessSocket = new WebSocket(wsUrl)
+const perturbatorSocket = new WebSocket(wsUrl)
+const sockets = [witnessSocket, perturbatorSocket]
 
-socket.on('open', () => {
-  socket.send(JSON.stringify({ id: 'observer-load', type: 'session.load', payload: { sessionId: witnessId } }))
-})
+function loadSession(socket, id, sessionId) {
+  socket.on('open', () => {
+    socket.send(JSON.stringify({ id, type: 'session.load', payload: { sessionId } }))
+  })
+}
 
-socket.on('message', (raw) => {
+loadSession(witnessSocket, 'observer-load-witness', witnessId)
+loadSession(perturbatorSocket, 'observer-load-perturbator', perturbatorId)
+
+function handleSocketMessage(raw) {
   const at = now()
   const message = JSON.parse(String(raw))
-  if (message.id === 'observer-load' && message.type === 'ack') {
-    send({ type: 'ready', pid: process.pid, at })
+  if (message.type === 'ack' && message.id?.startsWith('observer-load-')) {
+    loadedSessions.add(message.id)
+    if (!readySent && loadedSessions.size === 2) {
+      readySent = true
+      send({ type: 'ready', pid: process.pid, at })
+    }
     return
   }
   if (message.sessionId === witnessId && message.type === 'chat.delta') {
@@ -152,30 +166,35 @@ socket.on('message', (raw) => {
       observed.result = message.payload.result
     }
   }
-})
+}
 
-socket.on('error', (error) => {
-  send({ type: 'error', error: error.message })
-})
+for (const socket of sockets) {
+  socket.on('message', handleSocketMessage)
+  socket.on('error', (error) => {
+    send({ type: 'error', error: error.message })
+  })
+}
 
 async function finish() {
   if (stopping) return
   stopping = true
   stop.value = true
-  socket.close()
+  for (const socket of sockets) socket.close()
   await Promise.allSettled(probePromises)
-  send({
-    type: 'result',
-    pid: process.pid,
-    deltaTimes,
-    deltaChars,
-    firstDeltaAt,
-    streamDoneAt,
-    probes,
-    identityObservations,
-    toolCalls: [...toolCalls.values()],
-  })
-  process.exit(0)
+  send(
+    {
+      type: 'result',
+      pid: process.pid,
+      deltaTimes,
+      deltaChars,
+      firstDeltaAt,
+      streamDoneAt,
+      probes,
+      identityObservations,
+      toolCalls: [...toolCalls.values()],
+    },
+    () => process.exit(0),
+  )
 }
 
 process.on('message', (message) => {
