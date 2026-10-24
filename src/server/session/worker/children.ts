@@ -465,8 +465,8 @@ export async function verifyExclusiveProcessInventoryAfter(
   const now = dependencies.now ?? Date.now
   const sleep =
     dependencies.sleep ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)))
-  const delayMs = Math.max(0, inventory.capturedAt + 2_000 - now())
-  if (delayMs > 0) await sleep(delayMs)
+  const proofAt = inventory.capturedAt + 2_000
+  while (now() < proofAt) await sleep(proofAt - now())
 
   const checkedAt = now()
   const errors = [...inventory.errors]

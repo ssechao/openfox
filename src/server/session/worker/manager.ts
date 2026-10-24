@@ -66,6 +66,8 @@ import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type
 
 const WORKER_RECOVERY_TIMEOUT_MS = 4_000
 const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
+const WORKER_ORPHAN_PROOF_DELAY_MS = 2_000
+const WORKER_ORPHAN_PROOF_TOLERANCE_MS = 500
 
 export interface WorkerSettledOutcome {
   crashed: boolean
@@ -80,6 +82,7 @@ interface ActiveWorker {
   workerInventory?: ProcessInventoryEntry
   inventory?: ExclusiveProcessInventory
   inventoryPromise?: Promise<ExclusiveProcessInventory>
+  orphanCheckPromise?: Promise<OrphanInventoryCheck>
   doneReceived: boolean
   doneOk: boolean
   doneError?: string
@@ -610,38 +613,68 @@ export class SessionWorkerManager {
     return worker.inventoryPromise
   }
 
-  private verifyWorkerInventory(report: WorkerCrashReport): void {
-    const verification = this.deps.verifyInventory
-      ? this.deps.verifyInventory(report.inventory)
-      : this.deps.processSupervisor
-        ? this.deps.processSupervisor.verifyWorkerInventory(report.inventory)
-        : Promise.reject(new Error('Session process supervisor unavailable for inventory verification'))
-    void verification
-      .then((orphanCheck) => {
-        report.orphanCheck = orphanCheck
-        if (!orphanCheck.clean) {
-          logger.error('Worker zero-orphan proof failed', {
-            sessionId: report.sessionId,
-            workerId: report.workerId,
-            orphanCheck,
-          })
-        }
+  private missedOrphanProof(inventory: ExclusiveProcessInventory, error: string): OrphanInventoryCheck {
+    return {
+      checkedAt: Date.now(),
+      clean: false,
+      survivingIdentities: [],
+      survivingGroups: [],
+      liveReservations: [],
+      errors: [...inventory.errors, `T+2 zero-orphan proof missed: ${error}`],
+    }
+  }
+
+  private beginWorkerInventoryVerification(
+    worker: ActiveWorker,
+    inventory: ExclusiveProcessInventory,
+    recoveryDeadlineAt: number,
+  ): Promise<OrphanInventoryCheck> {
+    if (worker.orphanCheckPromise) return worker.orphanCheckPromise
+    const proofAt = inventory.capturedAt + WORKER_ORPHAN_PROOF_DELAY_MS
+    if (inventory.errors.length > 0) {
+      worker.orphanCheckPromise = new Promise((resolve) => {
+        setTimeout(
+          () => resolve(this.missedOrphanProof(inventory, 'inventory capture was incomplete')),
+          Math.max(0, proofAt - Date.now()),
+        )
       })
-      .catch((error) => {
-        report.orphanCheck = {
-          checkedAt: Date.now(),
-          clean: false,
-          survivingIdentities: [],
-          survivingGroups: [],
-          liveReservations: [],
-          errors: [`inventory verification failed: ${error instanceof Error ? error.message : String(error)}`],
+      return worker.orphanCheckPromise
+    }
+    const deadlineAt = Math.min(recoveryDeadlineAt, proofAt + WORKER_ORPHAN_PROOF_TOLERANCE_MS)
+    const verification = this.deps.verifyInventory
+      ? this.deps.verifyInventory(inventory)
+      : this.deps.processSupervisor
+        ? this.deps.processSupervisor.verifyWorkerInventory(inventory, deadlineAt)
+        : Promise.reject(new Error('Session process supervisor unavailable for inventory verification'))
+    worker.orphanCheckPromise = this.waitUntil(
+      verification,
+      deadlineAt,
+      'inventory verification missed the T+2 observation window',
+    )
+      .then((orphanCheck) => {
+        if (orphanCheck.checkedAt < proofAt || orphanCheck.checkedAt > deadlineAt) {
+          return this.missedOrphanProof(
+            inventory,
+            `observation timestamp ${orphanCheck.checkedAt} is outside ${proofAt}-${deadlineAt}`,
+          )
         }
-        logger.error('Worker zero-orphan verification failed', {
+        return orphanCheck
+      })
+      .catch((error) => this.missedOrphanProof(inventory, error instanceof Error ? error.message : String(error)))
+    return worker.orphanCheckPromise
+  }
+
+  private verifyWorkerInventory(report: WorkerCrashReport, verification: Promise<OrphanInventoryCheck>): void {
+    void verification.then((orphanCheck) => {
+      report.orphanCheck = orphanCheck
+      if (!orphanCheck.clean) {
+        logger.error('Worker zero-orphan proof failed', {
           sessionId: report.sessionId,
           workerId: report.workerId,
-          error: error instanceof Error ? error.message : String(error),
+          orphanCheck,
         })
-      })
+      }
+    })
   }
 
   private async cleanupWorkerChildren(
@@ -771,6 +804,7 @@ export class SessionWorkerManager {
     })
 
     const inventory = await this.beginWorkerInventoryCapture(worker, interruptedAtMs, recoveryDeadlineAt)
+    const verification = this.beginWorkerInventoryVerification(worker, inventory, recoveryDeadlineAt)
 
     // Reap the worker's exclusive children (recorded synchronously in the
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
@@ -841,7 +875,7 @@ export class SessionWorkerManager {
     }
 
     this.lastCrash = report
-    this.verifyWorkerInventory(report)
+    this.verifyWorkerInventory(report, verification)
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
     this.retire(worker)
     this.scheduler.release(sessionId)

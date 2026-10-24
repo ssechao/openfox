@@ -312,6 +312,7 @@ describe('session worker crash', () => {
     expect(report.inventory.capturedAt).toBeGreaterThanOrEqual(stopStartedAt)
     expect(report.inventory.capturedAt).toBeLessThanOrEqual(stopAcknowledgedAt)
     expect(report.orphanCheck?.checkedAt).toBeGreaterThanOrEqual(report.inventory.capturedAt + 2_000)
+    expect(report.orphanCheck?.checkedAt).toBeLessThanOrEqual(report.inventory.capturedAt + 2_500)
     expect(report.orphanCheck).toMatchObject({ clean: true, errors: [] })
 
     const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })

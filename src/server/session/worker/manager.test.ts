@@ -179,8 +179,8 @@ describe('SessionWorkerManager', () => {
         reservations: [],
         errors: [],
       }),
-      verifyInventory: async () => ({
-        checkedAt: 3_000,
+      verifyInventory: async (inventory) => ({
+        checkedAt: inventory.capturedAt + 2_000,
         clean: true,
         survivingIdentities: [],
         survivingGroups: [],
@@ -392,6 +392,84 @@ describe('SessionWorkerManager', () => {
       expect(manager.lastCrashReport()).toMatchObject({
         cleanupError: expect.stringMatching(/deadline/i),
         inventory: { errors: [expect.stringMatching(/deadline/i)] },
+        orphanCheck: {
+          clean: false,
+          errors: expect.arrayContaining([expect.stringMatching(/proof missed.*capture/i)]),
+        },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('observes orphan state at T+2 even when child cleanup misses the recovery deadline', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-proof-deadline-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn((signal: NodeJS.Signals = 'SIGTERM') => {
+        if (signal === 'SIGKILL') queueMicrotask(() => child.emit('exit', null, 'SIGKILL'))
+        return true
+      }),
+    }) as unknown as ChildProcess
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        setRunning: () => {},
+        getActiveWorkflowExecution: () => null,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+      captureInventory: (pid) => ({
+        capturedAt: Date.now(),
+        worker: { pid, startedAt: 'linux:42', pgid: 42 },
+        children: [],
+        reservations: [],
+        errors: [],
+      }),
+      cleanupChildren: () => new Promise<number[]>(() => {}),
+      verifyInventory: async (inventory) => {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, Math.max(0, inventory.capturedAt + 2_000 - Date.now())),
+        )
+        return {
+          checkedAt: Date.now(),
+          clean: true,
+          survivingIdentities: [],
+          survivingGroups: [],
+          liveReservations: [],
+          errors: [],
+        }
+      },
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+
+    try {
+      manager.launch('sess-1', vi.fn())
+      const stopStartedAt = Date.now()
+      manager.requestStop('sess-1')
+      await vi.advanceTimersByTimeAsync(4_000)
+
+      expect(manager.lastCrashReport()).toMatchObject({
+        cleanupError: expect.stringMatching(/deadline/i),
+        orphanCheck: {
+          checkedAt: stopStartedAt + 2_000,
+          clean: true,
+          errors: [],
+        },
       })
     } finally {
       vi.useRealTimers()
@@ -429,8 +507,8 @@ describe('SessionWorkerManager', () => {
         reservations: [],
         errors: [],
       }),
-      verifyInventory: async () => ({
-        checkedAt: 2_100,
+      verifyInventory: async (inventory) => ({
+        checkedAt: inventory.capturedAt + 2_000,
         clean: true,
         survivingIdentities: [],
         survivingGroups: [],
