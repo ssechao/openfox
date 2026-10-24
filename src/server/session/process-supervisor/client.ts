@@ -36,6 +36,18 @@ interface PendingGit {
   reject: (error: Error) => void
 }
 
+interface GitProcessIntrospection {
+  pid: number
+  parentPid: number
+  cwd: string
+  args: string[]
+}
+
+export interface ProcessSupervisorIntrospection {
+  pid: number
+  lastGitProcess: GitProcessIntrospection | null
+}
+
 function resolveSupervisorEntry(): SupervisorEntry {
   const here = dirname(fileURLToPath(import.meta.url))
   const sourceEntry = join(here, 'child.ts')
@@ -84,6 +96,8 @@ export class SessionProcessSupervisor {
   private shutdownTimer: NodeJS.Timeout | null = null
   private readonly workers = new Map<string, RemoteWorkerHandle>()
   private readonly pendingGit = new Map<string, PendingGit>()
+  private supervisorPid: number | null = null
+  private lastGitProcess: GitProcessIntrospection | null = null
   private readonly forkProcess: typeof fork
   private readonly entry: SupervisorEntry
 
@@ -94,6 +108,11 @@ export class SessionProcessSupervisor {
 
   isReady(): boolean {
     return this.ready
+  }
+
+  introspection(): ProcessSupervisorIntrospection | null {
+    if (this.supervisorPid === null) return null
+    return { pid: this.supervisorPid, lastGitProcess: this.lastGitProcess }
   }
 
   start(): Promise<void> {
@@ -207,6 +226,7 @@ export class SessionProcessSupervisor {
     if (message.type === 'ready') {
       if (this.ready) return
       this.ready = true
+      this.supervisorPid = message.pid
       if (this.startTimer) clearTimeout(this.startTimer)
       this.startTimer = null
       this.startResolve?.()
@@ -247,6 +267,15 @@ export class SessionProcessSupervisor {
       handle.markExit(message.code, message.signal)
       return
     }
+    if (message.type === 'git.spawned') {
+      this.lastGitProcess = {
+        pid: message.pid,
+        parentPid: message.parentPid,
+        cwd: message.cwd,
+        args: message.args,
+      }
+      return
+    }
     if (message.type === 'git.result') {
       const pending = this.pendingGit.get(message.requestId)
       if (!pending) return
@@ -261,6 +290,7 @@ export class SessionProcessSupervisor {
     const wasReady = this.ready
     this.ready = false
     this.child = null
+    this.supervisorPid = null
     if (!wasReady) {
       this.failStart(
         new Error(
@@ -289,6 +319,7 @@ export class SessionProcessSupervisor {
     this.shutdownTimer = null
     this.ready = false
     this.child = null
+    this.supervisorPid = null
     this.shutdownResolve?.()
     this.shutdownResolve = null
   }

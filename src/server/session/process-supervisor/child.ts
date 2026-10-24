@@ -25,6 +25,14 @@ function runGit(requestId: string, cwd: string, args: string[]): void {
   }
 
   gitProcesses.set(requestId, proc)
+  send({
+    type: 'git.spawned',
+    requestId,
+    pid: proc.pid ?? -1,
+    parentPid: process.pid,
+    cwd,
+    args,
+  })
   let stdout = ''
   let settled = false
   const finish = (code: number | null): void => {

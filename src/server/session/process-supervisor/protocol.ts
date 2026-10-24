@@ -22,5 +22,6 @@ export type SupervisorToGatewayMessage =
   | { type: 'worker.stderr'; workerKey: string; chunk: string }
   | { type: 'worker.error'; workerKey: string; error: string }
   | { type: 'worker.exit'; workerKey: string; code: number | null; signal: NodeJS.Signals | null }
+  | { type: 'git.spawned'; requestId: string; pid: number; parentPid: number; cwd: string; args: string[] }
   | { type: 'git.result'; requestId: string; code: number | null; stdout: string }
   | { type: 'shutdown.complete' }

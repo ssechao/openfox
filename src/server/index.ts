@@ -429,6 +429,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         active: workerManager.activeWorker(),
         activeWorkers: workerManager.activeWorkers(),
         lastCrash: workerManager.lastCrashReport(),
+        processSupervisor: processSupervisor?.introspection() ?? null,
       })
     })
   }
