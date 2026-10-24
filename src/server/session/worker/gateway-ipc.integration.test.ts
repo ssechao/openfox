@@ -62,6 +62,29 @@ describe('gateway IPC integration', () => {
         ],
       }),
     )
+    await writeFile(
+      join(workflowDir, 'queue-release.workflow.json'),
+      JSON.stringify({
+        metadata: {
+          id: 'queue-release',
+          name: 'Queue release',
+          description: 'Keeps a worker active while a message is queued',
+          version: '1.0.0',
+        },
+        entryStep: 'wait',
+        settings: { maxIterations: 2 },
+        steps: [
+          {
+            id: 'wait',
+            name: 'Wait',
+            type: 'shell',
+            phase: 'build',
+            command: 'sleep 1',
+            transitions: [{ when: { type: 'always' }, goto: '$done' }],
+          },
+        ],
+      }),
+    )
     const config: Config = {
       mode: 'test',
       llm: { baseUrl: 'http://127.0.0.1:9/v1', model: '', backend: 'unknown', timeout: 300000, idleTimeout: 300000 },
@@ -270,6 +293,42 @@ describe('gateway IPC integration', () => {
       }, 'workflow stop')
       await new Promise((resolve) => setTimeout(resolve, 2_500))
       await expect(access(join(root, 'late-effect'))).rejects.toThrow()
+    } finally {
+      ws.close()
+    }
+  }, 60_000)
+
+  it('hands a REST message queued during a workflow back to QueueProcessor after clean settlement', async () => {
+    const sessionId = await createSession('workflow-queue')
+    const ws = await connectWebSocket()
+    try {
+      const loadResponse = waitForWs(ws, (message) => message.id === 'load-queue')
+      ws.send(JSON.stringify({ id: 'load-queue', type: 'session.load', payload: { sessionId } }))
+      await expect(loadResponse).resolves.toMatchObject({ type: 'ack' })
+
+      const launchResponse = waitForWs(ws, (message) => message.id === 'launch-queue')
+      ws.send(
+        JSON.stringify({
+          id: 'launch-queue',
+          type: 'runner.launch',
+          payload: { sessionId, workflowId: 'queue-release', scope: 'project' },
+        }),
+      )
+      await expect(launchResponse).resolves.toMatchObject({ type: 'ack' })
+      await waitFor(async () => {
+        const response = await fetch(`${base}/api/test/worker`)
+        const body = (await response.json()) as { activeWorkers: Array<{ sessionId: string }> }
+        return body.activeWorkers.some((worker) => worker.sessionId === sessionId) ? true : null
+      }, 'workflow worker')
+
+      await sendMessage(sessionId, 'queued-after-workflow')
+
+      const messages = await waitFor(async () => {
+        const view = await getSession(sessionId)
+        const serialized = JSON.stringify(view.messages)
+        return !view.session.isRunning && serialized.includes('queued-after-workflow') ? serialized : null
+      }, 'queued REST successor turn')
+      expect(messages).toContain('I understand. Let me help you with that.')
     } finally {
       ws.close()
     }

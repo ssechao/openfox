@@ -356,6 +356,7 @@ export function createWebSocketServer(
   providerManager?: ProviderManager,
   getMcpServers?: () => import('../mcp/types.js').McpServerState[],
   getWorkerController?: () => WebSocketWorkerController | undefined,
+  onCleanWorkerTurnSettled?: (sessionId: string) => void,
 ): WebSocketServerExports {
   const wss = new WebSocketServer({ server: httpServer })
   const clients = new Map<WebSocket, ClientConnection>()
@@ -819,6 +820,7 @@ export function createWebSocketServer(
           enqueueSend,
           getMcpServers,
           getWorkerController,
+          onCleanWorkerTurnSettled,
         )
       } catch (error) {
         logger.error('Error handling client message', { error, type: message.type })
@@ -900,6 +902,7 @@ async function handleClientMessage(
   enqueueSendFn: (client: ClientConnection, data: string, seq: number) => void,
   getMcpServers?: () => import('../mcp/types.js').McpServerState[],
   getWorkerController?: () => WebSocketWorkerController | undefined,
+  onCleanWorkerTurnSettled?: (sessionId: string) => void,
 ): Promise<void> {
   const send = (msg: ServerMessage) => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -944,8 +947,11 @@ async function handleClientMessage(
         workerController.launch(
           sessionId,
           (outcome) => {
-            getSessionRuntimeRegistry().peek(sessionId)?.release(handle)
+            const runtime = getSessionRuntimeRegistry().peek(sessionId)
+            const stopped = runtime?.wasStopped(handle) ?? false
+            const released = runtime?.release(handle) ?? false
             onSettled?.(outcome)
+            if (released && !stopped && !outcome.crashed) onCleanWorkerTurnSettled?.(sessionId)
           },
           command,
         )

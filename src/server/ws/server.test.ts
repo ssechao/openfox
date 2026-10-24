@@ -480,6 +480,7 @@ async function createHarness(
     eventStore?: ReturnType<typeof createEventStore>
     providerManager?: unknown
     workerController?: import('./server.js').WebSocketWorkerController
+    onCleanWorkerTurnSettled?: (sessionId: string) => void
   } = {},
 ) {
   const httpServer = createServer()
@@ -502,6 +503,7 @@ async function createHarness(
     options.providerManager as never,
     undefined,
     () => options.workerController,
+    options.onCleanWorkerTurnSettled,
   )
 
   await new Promise<void>((resolve) => httpServer.listen(0, resolve))
@@ -2118,6 +2120,72 @@ describe('createWebSocketServer', () => {
     })
     expect(provideAnswerMock).not.toHaveBeenCalled()
 
+    await harness.close()
+  })
+
+  it('wakes QueueProcessor only after clean unstopped gateway worker commands', async () => {
+    const sessionState: any = {
+      id: 'session-1',
+      projectId: 'project-1',
+      workdir: '/tmp/project',
+      mode: 'planner',
+      phase: 'build',
+      isRunning: false,
+      criteria: [],
+    }
+    const sessionManager = createSessionManager({
+      getSession: vi.fn(() => sessionState),
+      requireSession: vi.fn(() => sessionState),
+      getLatestWorkflowExecution: vi.fn(() => null),
+    })
+    const settlements: Array<(outcome: { crashed: boolean }) => void> = []
+    const workerController = {
+      isEnabled: () => true,
+      requestTurn: vi.fn((_sessionId: string, start: () => void) => {
+        start()
+        return 'started' as const
+      }),
+      releaseTurn: vi.fn(() => true),
+      launch: vi.fn((_sessionId: string, settled: (outcome: { crashed: boolean }) => void) => {
+        settlements.push(settled)
+      }),
+    }
+    const wakeQueueProcessor = vi.fn()
+    const harness = await createHarness({
+      sessionManager,
+      workerController,
+      onCleanWorkerTurnSettled: wakeQueueProcessor,
+    })
+
+    harness.send({ id: 'sl-clean-worker', type: 'session.load', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'sl-clean-worker')
+
+    recordLLMFailure('session-1')
+    const commands = [
+      ['compact-clean', 'context.compact', { sessionId: 'session-1' }],
+      ['retry-clean', 'chat.retry', { sessionId: 'session-1' }],
+      ['workflow-clean', 'runner.launch', { sessionId: 'session-1', workflowId: 'test-workflow' }],
+    ] as const
+    for (const [id, type, payload] of commands) {
+      harness.send({ id, type, payload })
+      const reply = await harness.nextMessage((message) => message.id === id)
+      expect(reply, id).toMatchObject({ type: 'ack' })
+      expect(settlements).toHaveLength(1)
+      settlements.shift()?.({ crashed: false })
+    }
+    expect(wakeQueueProcessor).toHaveBeenCalledTimes(3)
+
+    harness.send({ id: 'compact-stopped', type: 'context.compact', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'compact-stopped')
+    getSessionRuntimeRegistry().get('session-1').stop()
+    settlements.shift()?.({ crashed: false })
+
+    harness.send({ id: 'compact-crashed', type: 'context.compact', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'compact-crashed')
+    settlements.shift()?.({ crashed: true })
+    expect(wakeQueueProcessor).toHaveBeenCalledTimes(3)
+
+    clearLLMFailure('session-1')
     await harness.close()
   })
 

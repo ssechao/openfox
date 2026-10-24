@@ -62,6 +62,10 @@ export class QueueProcessor {
     logger.debug('QueueProcessor stopped')
   }
 
+  resumeQueuedSession(sessionId: string): void {
+    this.handleTurnDone(sessionId)
+  }
+
   abortSession(sessionId: string): boolean {
     this.deps.sessionManager.clearPauseState(sessionId)
     // A turn running in a worker process never sees the in-process abort

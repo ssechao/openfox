@@ -3838,6 +3838,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const webSocketWorkerController: {
     current?: import('./ws/server.js').WebSocketWorkerController
   } = {}
+  let resumeQueuedSession = (_sessionId: string): void => {}
   const wssExports = createWebSocketServer(
     httpServer,
     config,
@@ -3847,6 +3848,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     providerManager,
     () => mcpManager.getAllServers(),
     () => webSocketWorkerController.current,
+    (sessionId) => resumeQueuedSession(sessionId),
   )
   const wss = wssExports.wss
 
@@ -4014,6 +4016,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     broadcastForSession: wssExports.broadcastForSession,
     workerManager,
   })
+  resumeQueuedSession = (sessionId) => queueProcessor.resumeQueuedSession(sessionId)
 
   const { getSetting, SETTINGS_KEYS } = await import('./db/settings.js')
   const { getStaleRunningSessionIds } = await import('./events/store.js')
