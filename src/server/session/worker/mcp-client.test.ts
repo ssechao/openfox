@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GatewayToWorkerMessage, WorkerIpcIdentity, WorkerMcpTool, WorkerToGatewayMessage } from './protocol.js'
 import { WorkerMcpClient } from './mcp-client.js'
+import { MAX_MCP_REQUEST_BYTES } from './mcp-broker.js'
 
 const identity: WorkerIpcIdentity = { sessionId: 'session-1', workerId: 'worker-1', generation: 2 }
 const descriptor: WorkerMcpTool = {
@@ -65,6 +66,27 @@ describe('WorkerMcpClient', () => {
     })
 
     await expect(pending).resolves.toMatchObject({ success: true, output: 'ok' })
+  })
+
+  it('rejects oversized requests before IPC emission', async () => {
+    const sent: WorkerToGatewayMessage[] = []
+    const client = new WorkerMcpClient(identity, (message) => sent.push(message))
+    const tool = client.createTools([descriptor])[0]!
+
+    await expect(
+      tool.execute(
+        { value: 'x'.repeat(MAX_MCP_REQUEST_BYTES) },
+        {
+          sessionId: identity.sessionId,
+          workdir: '/tmp',
+          sessionManager: {} as never,
+          toolCallId: 'call-oversized',
+          messageId: 'message-oversized',
+        },
+      ),
+    ).resolves.toMatchObject({ success: false, error: expect.stringContaining('exceeds') })
+    expect(sent).toEqual([])
+    expect(client.pendingCount()).toBe(0)
   })
 
   it('cancels one request through IPC without terminating the client', async () => {

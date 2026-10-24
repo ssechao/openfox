@@ -5,6 +5,7 @@ import {
   providePathConfirmation,
 } from '../../tools/path-security.js'
 import { setWorkerInteractiveRelay, type WorkerPathPrompt, type WorkerQuestionPrompt } from './interactive-relay.js'
+import { MAX_MCP_REQUEST_BYTES } from './mcp-broker.js'
 import type {
   GatewayToWorkerMessage,
   InteractivePathOpenMessage,
@@ -88,7 +89,6 @@ export class WorkerInteractiveClient {
       return
     }
     const requestId = crypto.randomUUID()
-    this.pending.set(requestId, { kind: 'question', callId: prompt.callId })
     const message: InteractiveQuestionOpenMessage = {
       ...this.identity,
       type: 'interactive.question.open',
@@ -98,6 +98,11 @@ export class WorkerInteractiveClient {
       questionType: prompt.type,
       ...(prompt.options ? { options: prompt.options } : {}),
     }
+    if (Buffer.byteLength(JSON.stringify(message)) > MAX_MCP_REQUEST_BYTES) {
+      cancelQuestion(prompt.callId, `Interactive request exceeds ${MAX_MCP_REQUEST_BYTES} bytes`)
+      return
+    }
+    this.pending.set(requestId, { kind: 'question', callId: prompt.callId })
     this.send(message)
   }
 
@@ -107,7 +112,6 @@ export class WorkerInteractiveClient {
       return
     }
     const requestId = crypto.randomUUID()
-    this.pending.set(requestId, { kind: 'path', callId: prompt.callId })
     const message: InteractivePathOpenMessage = {
       ...this.identity,
       type: 'interactive.path.open',
@@ -118,6 +122,11 @@ export class WorkerInteractiveClient {
       workdir: prompt.workdir,
       reason: prompt.reason,
     }
+    if (Buffer.byteLength(JSON.stringify(message)) > MAX_MCP_REQUEST_BYTES) {
+      cancelPathConfirmation(prompt.callId, `Interactive request exceeds ${MAX_MCP_REQUEST_BYTES} bytes`)
+      return
+    }
+    this.pending.set(requestId, { kind: 'path', callId: prompt.callId })
     this.send(message)
   }
 }

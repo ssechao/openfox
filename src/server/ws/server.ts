@@ -344,6 +344,7 @@ export interface WebSocketWorkerController {
   requestTurn(sessionId: string, start: () => void): AdmissionResult
   releaseTurn(sessionId: string): boolean
   launch(sessionId: string, onSettled: (outcome: WorkerSettledOutcome) => void, command?: WorkerTurnCommand): void
+  answerQuestion?(callId: string, answer: string, skip: boolean): boolean
 }
 
 export function createWebSocketServer(
@@ -1597,7 +1598,10 @@ async function handleClientMessage(
         return
       }
 
-      const found = provideAnswer(callId, answer, skip)
+      const workerController = getWorkerController?.()
+      const found = workerController?.isEnabled()
+        ? (workerController.answerQuestion?.(callId, answer, skip ?? false) ?? false)
+        : provideAnswer(callId, answer, skip)
 
       if (!found) {
         send(

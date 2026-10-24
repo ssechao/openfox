@@ -1,6 +1,11 @@
 import type { ToolResult } from '../../../shared/types.js'
 import type { Tool, ToolContext } from '../../tools/types.js'
-import { MAX_MCP_DEADLINE_MS, MAX_MCP_RESPONSE_CHUNK_BYTES, MAX_MCP_RESPONSE_BYTES } from './mcp-broker.js'
+import {
+  MAX_MCP_DEADLINE_MS,
+  MAX_MCP_REQUEST_BYTES,
+  MAX_MCP_RESPONSE_CHUNK_BYTES,
+  MAX_MCP_RESPONSE_BYTES,
+} from './mcp-broker.js'
 import type {
   GatewayToWorkerMessage,
   McpRequestMessage,
@@ -141,6 +146,9 @@ export class WorkerMcpClient {
       messageId: context.messageId,
       toolCallId: context.toolCallId,
       deadlineMs,
+    }
+    if (Buffer.byteLength(JSON.stringify(request)) > MAX_MCP_REQUEST_BYTES) {
+      return Promise.resolve(failure(`MCP request exceeds ${MAX_MCP_REQUEST_BYTES} bytes`))
     }
 
     return new Promise((resolve) => {

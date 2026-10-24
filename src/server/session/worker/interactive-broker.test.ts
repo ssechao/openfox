@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { WorkerInteractiveBroker } from './interactive-broker.js'
+import { MAX_MCP_REQUEST_BYTES } from './mcp-broker.js'
 import type { GatewayToWorkerMessage, InteractiveOpenMessage, WorkerIpcIdentity } from './protocol.js'
 
 const identity: WorkerIpcIdentity = { sessionId: 'session-1', workerId: 'worker-1', generation: 1 }
@@ -56,6 +57,16 @@ describe('WorkerInteractiveBroker', () => {
       },
     ])
     expect(broker.pendingCount()).toBe(0)
+  })
+
+  it('rejects oversized answers before resolving or emitting them', () => {
+    const { broker, sent, answerQuestion } = createHarness()
+    broker.handleOpen(question())
+
+    expect(broker.answerQuestion('call-1', 'x'.repeat(MAX_MCP_REQUEST_BYTES), false)).toBe(false)
+    expect(answerQuestion).not.toHaveBeenCalled()
+    expect(sent).toEqual([])
+    expect(broker.pendingCount()).toBe(1)
   })
 
   it('drops stale opens and late responses', () => {

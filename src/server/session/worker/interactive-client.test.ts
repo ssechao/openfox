@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { askUserTool, getPendingQuestionsForSession } from '../../tools/ask.js'
 import { getPendingConfirmationsBySession, registerPathConfirmation } from '../../tools/path-security.js'
 import { WorkerInteractiveClient } from './interactive-client.js'
+import { MAX_MCP_REQUEST_BYTES } from './mcp-broker.js'
 import type { GatewayToWorkerMessage, WorkerIpcIdentity, WorkerToGatewayMessage } from './protocol.js'
 
 const identity: WorkerIpcIdentity = { sessionId: 'session-1', workerId: 'worker-1', generation: 1 }
@@ -44,6 +45,27 @@ describe('WorkerInteractiveClient', () => {
       answer: 'yes',
       skip: false,
     })
+    expect(getPendingQuestionsForSession(identity.sessionId)).toEqual([])
+  })
+
+  it('rejects oversized prompts before IPC emission', async () => {
+    const sent: WorkerToGatewayMessage[] = []
+    const client = new WorkerInteractiveClient(identity, (message) => sent.push(message))
+    clients.push(client)
+
+    const execution = askUserTool.execute(
+      { question: 'x'.repeat(MAX_MCP_REQUEST_BYTES) },
+      {
+        workdir: '/tmp',
+        sessionId: identity.sessionId,
+        sessionManager: {} as never,
+        toolCallId: 'call-oversized',
+      },
+    )
+
+    await expect(execution).rejects.toMatchObject({ name: 'AskUserInterrupt' })
+    expect(sent).toEqual([])
+    expect(client.pendingCount()).toBe(0)
     expect(getPendingQuestionsForSession(identity.sessionId)).toEqual([])
   })
 

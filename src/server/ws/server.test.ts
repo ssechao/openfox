@@ -16,6 +16,8 @@ const {
   getAllInstructionsMock,
   getToolRegistryForModeMock,
   providePathConfirmationMock,
+  provideAnswerMock,
+  getPendingQuestionsForSessionMock,
   runChatTurnMock,
   runOrchestratorMock,
   streamLLMPureMock,
@@ -42,6 +44,8 @@ const {
   getAllInstructionsMock: vi.fn(),
   getToolRegistryForModeMock: vi.fn(),
   providePathConfirmationMock: vi.fn(),
+  provideAnswerMock: vi.fn(),
+  getPendingQuestionsForSessionMock: vi.fn((): Array<{ callId: string; question: string; type: 'confirm' }> => []),
   runChatTurnMock: vi.fn(),
   runOrchestratorMock: vi.fn(),
   streamLLMPureMock: vi.fn(),
@@ -135,10 +139,11 @@ vi.mock('../tools/index.js', () => ({
     ],
   })),
   providePathConfirmation: providePathConfirmationMock,
+  provideAnswer: provideAnswerMock,
   addAllowedPaths: vi.fn(),
   cancelQuestionsForSession: vi.fn(),
   cancelPathConfirmationsForSession: vi.fn(),
-  getPendingQuestionsForSession: vi.fn(() => []),
+  getPendingQuestionsForSession: getPendingQuestionsForSessionMock,
 }))
 
 vi.mock('../agents/registry.js', () => {
@@ -633,6 +638,9 @@ describe('createWebSocketServer', () => {
     getAllInstructionsMock.mockReset()
     getToolRegistryForModeMock.mockReset()
     providePathConfirmationMock.mockReset()
+    provideAnswerMock.mockReset()
+    getPendingQuestionsForSessionMock.mockReset()
+    getPendingQuestionsForSessionMock.mockReturnValue([])
     runChatTurnMock.mockReset()
     runOrchestratorMock.mockReset()
     streamLLMPureMock.mockReset()
@@ -2076,6 +2084,39 @@ describe('createWebSocketServer', () => {
     expect(createClientMock).toHaveBeenCalledWith('deepseek-provider', 'override-model', undefined)
     // The override-derived model must never overwrite the sticky manual preference.
     expect(setSessionProvider).not.toHaveBeenCalled()
+
+    await harness.close()
+  })
+
+  it('brokers worker ask answers and rejects late responses', async () => {
+    getPendingQuestionsForSessionMock.mockReturnValue([
+      { callId: 'call-1', question: 'Continue?', type: 'confirm' },
+      { callId: 'call-late', question: 'Continue?', type: 'confirm' },
+    ])
+    const answerQuestion = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
+    const workerController = {
+      isEnabled: () => true,
+      requestTurn: vi.fn(() => 'started' as const),
+      releaseTurn: vi.fn(() => true),
+      launch: vi.fn(),
+      answerQuestion,
+    }
+    const harness = await createHarness({ workerController })
+
+    harness.send({ id: 'sl-worker-answer', type: 'session.load', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'sl-worker-answer')
+
+    harness.send({ id: 'answer-worker', type: 'ask.answer', payload: { callId: 'call-1', answer: 'yes' } })
+    expect(await harness.nextMessage((message) => message.id === 'answer-worker')).toMatchObject({ type: 'ack' })
+    expect(answerQuestion).toHaveBeenCalledWith('call-1', 'yes', false)
+    expect(provideAnswerMock).not.toHaveBeenCalled()
+
+    harness.send({ id: 'answer-late', type: 'ask.answer', payload: { callId: 'call-late', answer: 'late' } })
+    expect(await harness.nextMessage((message) => message.id === 'answer-late')).toMatchObject({
+      type: 'error',
+      payload: { code: 'NOT_FOUND' },
+    })
+    expect(provideAnswerMock).not.toHaveBeenCalled()
 
     await harness.close()
   })

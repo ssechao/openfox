@@ -120,18 +120,20 @@ export class WorkerInteractiveBroker {
       this.cancelEntry(entry, 'Worker identity is no longer current', false)
       return false
     }
-    if (!this.deps.answerQuestion(callId, answer, skip)) {
-      this.take(entry)
-      return false
-    }
-    this.deps.send({
+    const response: WorkerInteractiveResponseMessage = {
       ...identityOf(entry.message),
       type: 'interactive.question.response',
       requestId: entry.message.requestId,
       callId,
       answer,
       skip,
-    })
+    }
+    if (Buffer.byteLength(JSON.stringify(response)) > MAX_MCP_REQUEST_BYTES) return false
+    if (!this.deps.answerQuestion(callId, answer, skip)) {
+      this.take(entry)
+      return false
+    }
+    this.deps.send(response)
     this.take(entry)
     return true
   }
