@@ -30,6 +30,7 @@ import { createWorkerDiagnosticsCollector } from '../../diagnostics/worker-colle
 import { setMcpTools } from '../../tools/index.js'
 import { WorkerMcpClient } from './mcp-client.js'
 import { WorkerInteractiveClient } from './interactive-client.js'
+import { linkAbortSignal } from './abort-link.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -137,19 +138,25 @@ async function runTurn(
       const { launchWorkflowRun } = await import('../../runner/launch.js')
       const session = sessionManager.requireSession(sessionId)
       if (session.phase === 'blocked') sessionManager.setPhase(sessionId, 'build')
-      const runtimeHandle = getSessionRuntimeRegistry().get(sessionId).acquire('workflow')
-      await launchWorkflowRun(
-        {
-          sessionManager,
-          sessionId,
-          runtimeHandle,
-          llmClient: sessionClient,
-          getSessionLLMClient,
-          statsIdentity,
-          broadcastForSession,
-        },
-        command.payload,
-      )
+      const runtime = getSessionRuntimeRegistry().get(sessionId)
+      const runtimeHandle = runtime.acquire('workflow')
+      const unlinkAbort = linkAbortSignal(controller.signal, () => runtimeHandle.controller.abort())
+      try {
+        await launchWorkflowRun(
+          {
+            sessionManager,
+            sessionId,
+            runtimeHandle,
+            llmClient: sessionClient,
+            getSessionLLMClient,
+            statsIdentity,
+            broadcastForSession,
+          },
+          command.payload,
+        )
+      } finally {
+        unlinkAbort()
+      }
     } else {
       if (command.kind === 'retry') {
         const session = sessionManager.requireSession(sessionId)

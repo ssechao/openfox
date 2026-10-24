@@ -48,9 +48,10 @@ export function executeShellCommand(
     const onAbort = () => {
       if (!killed) {
         killed = true
-        void terminateProcessTree(proc, { immediate: true })
         clearTimeout(timer)
-        reject(new Error('Aborted'))
+        void terminateProcessTree(proc, { immediate: true })
+          .catch(() => undefined)
+          .then(() => reject(new Error('Aborted')))
       }
     }
     signal?.addEventListener('abort', onAbort)

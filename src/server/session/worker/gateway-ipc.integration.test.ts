@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { access, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import type { Config } from '../../../shared/types.js'
 import type { ServerHandle } from '../../context.js'
+import { linkAbortSignal } from './abort-link.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -26,6 +27,7 @@ describe('gateway IPC integration', () => {
   let server: ServerHandle
   let base: string
   let root: string
+  let projectDir: string
   let projectId: string
 
   beforeAll(async () => {
@@ -33,8 +35,33 @@ describe('gateway IPC integration', () => {
     process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR'] = 'true'
     process.env['OPENFOX_SESSION_WORKER'] = 'true'
     root = join(tmpdir(), `openfox-gateway-ipc-${randomUUID()}`)
-    const projectDir = join(root, 'project')
+    projectDir = join(root, 'project')
     await mkdir(projectDir, { recursive: true })
+    const workflowDir = join(projectDir, '.openfox', 'workflows')
+    await mkdir(workflowDir, { recursive: true })
+    await writeFile(
+      join(workflowDir, 'slow-effect.workflow.json'),
+      JSON.stringify({
+        metadata: {
+          id: 'slow-effect',
+          name: 'Slow effect',
+          description: 'Writes a marker after a delay',
+          version: '1.0.0',
+        },
+        entryStep: 'effect',
+        settings: { maxIterations: 2 },
+        steps: [
+          {
+            id: 'effect',
+            name: 'Effect',
+            type: 'shell',
+            phase: 'build',
+            command: `printf started > ${JSON.stringify(join(root, 'workflow-started'))}; sleep 2; printf late > ${JSON.stringify(join(root, 'late-effect'))}`,
+            transitions: [{ when: { type: 'always' }, goto: '$done' }],
+          },
+        ],
+      }),
+    )
     const config: Config = {
       mode: 'test',
       llm: { baseUrl: 'http://127.0.0.1:9/v1', model: '', backend: 'unknown', timeout: 300000, idleTimeout: 300000 },
@@ -136,6 +163,16 @@ describe('gateway IPC integration', () => {
     })
   }
 
+  it('propagates an abort received before workflow runtime acquisition', () => {
+    const source = new AbortController()
+    const target = new AbortController()
+    source.abort()
+
+    linkAbortSignal(source.signal, () => target.abort())
+
+    expect(target.signal.aborted).toBe(true)
+  })
+
   it('executes gateway-owned MCP through a real external worker', async () => {
     await waitFor(async () => {
       const response = await fetch(`${base}/api/mcp/servers`)
@@ -189,6 +226,50 @@ describe('gateway IPC integration', () => {
       const lateResponse = waitForWs(ws, (message) => message.id === 'late')
       ws.send(JSON.stringify({ id: 'late', type: 'ask.answer', payload: { callId, answer: 'Late' } }))
       await expect(lateResponse).resolves.toMatchObject({ type: 'error', payload: { code: 'NOT_FOUND' } })
+    } finally {
+      ws.close()
+    }
+  }, 60_000)
+
+  it('aborts a workflow even when Stop reaches the worker before runtime acquisition', async () => {
+    const sessionId = await createSession('workflow-stop')
+    const ws = await connectWebSocket()
+    try {
+      const loadResponse = waitForWs(ws, (message) => message.id === 'load-stop')
+      ws.send(JSON.stringify({ id: 'load-stop', type: 'session.load', payload: { sessionId } }))
+      await expect(loadResponse).resolves.toMatchObject({ type: 'ack' })
+
+      const launchResponse = waitForWs(ws, (message) => message.id === 'launch-stop')
+      ws.send(
+        JSON.stringify({
+          id: 'launch-stop',
+          type: 'runner.launch',
+          payload: { sessionId, workflowId: 'slow-effect', scope: 'project' },
+        }),
+      )
+      await expect(launchResponse).resolves.toMatchObject({ type: 'ack' })
+
+      await waitFor(async () => {
+        const response = await fetch(`${base}/api/test/worker`)
+        const body = (await response.json()) as { activeWorkers: Array<{ sessionId: string }> }
+        return body.activeWorkers.some((worker) => worker.sessionId === sessionId) ? true : null
+      }, 'workflow worker allocation')
+      await waitFor(
+        async () =>
+          access(join(root, 'workflow-started'))
+            .then(() => true)
+            .catch(() => null),
+        'workflow start',
+      )
+
+      const stop = await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
+      expect(stop.status).toBe(200)
+      await waitFor(async () => {
+        const view = await getSession(sessionId)
+        return !view.session.isRunning ? true : null
+      }, 'workflow stop')
+      await new Promise((resolve) => setTimeout(resolve, 2_500))
+      await expect(access(join(root, 'late-effect'))).rejects.toThrow()
     } finally {
       ws.close()
     }
