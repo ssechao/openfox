@@ -36,7 +36,13 @@ import { serverT } from '../../i18n.js'
 import { getEventStore } from '../../events/index.js'
 import { emitRunningChanged } from '../../events/session.js'
 import type { SessionManager } from '../manager.js'
-import { assignWorkerToken, clearWorkerToken, isWorkerMessageCurrent, type WorkerToken } from './token.js'
+import {
+  assignWorkerToken,
+  clearWorkerToken,
+  isLatestWorkerGeneration,
+  isWorkerMessageCurrent,
+  type WorkerToken,
+} from './token.js'
 import {
   captureExclusiveProcessInventory,
   childrenFilePath,
@@ -816,8 +822,7 @@ export class SessionWorkerManager {
     if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
       const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
       const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
-      const activeWorker = this.active.get(sessionId)
-      if (activeWorker && activeWorker !== worker) return
+      if (!isLatestWorkerGeneration(db, sessionId, token)) return
       const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
@@ -833,7 +838,8 @@ export class SessionWorkerManager {
 
     if (clean) {
       removeChildrenFile(worker.childrenPath)
-      getEventStore().invalidateExternalSession(sessionId)
+      const eventStore = this.deps.eventStore?.() ?? getEventStore()
+      eventStore.invalidateExternalSession(sessionId)
       logger.info('Session worker exited cleanly', { sessionId, workerId: token.workerId })
       this.retire(worker)
       this.notifyWorkerSettled(worker, { crashed: false })
@@ -860,8 +866,7 @@ export class SessionWorkerManager {
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
     // the gateway process and are not in that file — never touched.
     const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
-    const activeWorker = this.active.get(sessionId)
-    if (activeWorker && activeWorker !== worker) return
+    if (!isLatestWorkerGeneration(db, sessionId, token)) return
 
     // Persist the interruption marker FIRST so the running-state reset below
     // (and any queued-message drain it could trigger) sees the session as
