@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { createToolProgressHandler, parseProgressMessage } from './tool-streaming.js'
+import {
+  MAX_PERSISTED_TOOL_OUTPUT_BYTES,
+  TOOL_OUTPUT_TRUNCATED_MESSAGE,
+  createToolProgressHandler,
+  parseProgressMessage,
+} from './tool-streaming.js'
 import { EventStore } from '../events/store.js'
 import Database from 'better-sqlite3'
 
@@ -103,6 +108,23 @@ describe('tool streaming', () => {
       expect(events[0]!.data).toMatchObject({ stream: 'stdout', content: 'line1' })
       expect(events[1]!.data).toMatchObject({ stream: 'stdout', content: 'line2' })
       expect(events[2]!.data).toMatchObject({ stream: 'stderr', content: 'warning' })
+    })
+
+    it('bounds persisted output and emits one explicit truncation marker', () => {
+      const events: import('../events/types.js').TurnEvent[] = []
+      const handler = createToolProgressHandler((event) => events.push(event), 'msg-1', 'call-1', 'test-session')
+      const chunk = 'x'.repeat(64 * 1024)
+
+      for (let index = 0; index < 20; index++) handler(`[stdout] ${chunk}`)
+      handler('[stderr] ignored after truncation')
+
+      const contents = events.map((event) => (event.data as { content: string }).content)
+      const persistedBytes = contents.reduce((total, content) => total + Buffer.byteLength(content), 0)
+      expect(persistedBytes).toBeLessThanOrEqual(
+        MAX_PERSISTED_TOOL_OUTPUT_BYTES + Buffer.byteLength(TOOL_OUTPUT_TRUNCATED_MESSAGE),
+      )
+      expect(contents.filter((content) => content === TOOL_OUTPUT_TRUNCATED_MESSAGE)).toHaveLength(1)
+      expect(contents.join('')).not.toContain('ignored after truncation')
     })
 
     it('ignores malformed progress messages', () => {

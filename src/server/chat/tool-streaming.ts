@@ -13,6 +13,23 @@ export interface ParsedProgress {
   content: string
 }
 
+export const MAX_PERSISTED_TOOL_OUTPUT_BYTES = 256 * 1024
+export const TOOL_OUTPUT_TRUNCATED_MESSAGE = '\n[Streaming output truncated after 256 KiB]\n'
+
+function utf8Prefix(content: string, maxBytes: number): string {
+  const bytes = Buffer.from(content)
+  if (bytes.length <= maxBytes) return content
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  for (let end = maxBytes; end > Math.max(0, maxBytes - 4); end--) {
+    try {
+      return decoder.decode(bytes.subarray(0, end))
+    } catch {
+      continue
+    }
+  }
+  return ''
+}
+
 /**
  * Parse a progress message from the shell tool.
  * Shell tool emits messages in format: "[stdout] content" or "[stderr] content"
@@ -44,15 +61,36 @@ export function createToolProgressHandler(
   callId: string,
   _sessionId: string,
 ): (message: string) => void {
+  let persistedBytes = 0
+  let truncated = false
   return (message: string) => {
     const parsed = parseProgressMessage(message)
-    if (!parsed) return
+    if (!parsed || truncated) return
+
+    const remainingBytes = MAX_PERSISTED_TOOL_OUTPUT_BYTES - persistedBytes
+    const contentBytes = Buffer.byteLength(parsed.content)
+    const content = contentBytes <= remainingBytes ? parsed.content : utf8Prefix(parsed.content, remainingBytes)
 
     try {
-      append({
-        type: 'tool.output',
-        data: { messageId, toolCallId: callId, stream: parsed.stream, content: parsed.content },
-      })
+      if (content.length > 0) {
+        append({
+          type: 'tool.output',
+          data: { messageId, toolCallId: callId, stream: parsed.stream, content },
+        })
+        persistedBytes += Buffer.byteLength(content)
+      }
+      if (contentBytes > remainingBytes) {
+        append({
+          type: 'tool.output',
+          data: {
+            messageId,
+            toolCallId: callId,
+            stream: parsed.stream,
+            content: TOOL_OUTPUT_TRUNCATED_MESSAGE,
+          },
+        })
+        truncated = true
+      }
     } catch (error) {
       logger.warn('Dropped streamed tool output', {
         toolCallId: callId,
