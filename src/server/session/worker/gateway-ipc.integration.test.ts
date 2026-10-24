@@ -298,6 +298,39 @@ describe('gateway IPC integration', () => {
     }
   }, 60_000)
 
+  it('hands a REST message queued during a task workflow back to QueueProcessor after clean settlement', async () => {
+    const createTask = await fetch(`${base}/api/projects/${projectId}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: '/queue-release' }),
+    })
+    expect(createTask.status).toBe(201)
+    const taskId = ((await createTask.json()) as { task: { id: string } }).task.id
+
+    const moveTask = await fetch(`${base}/api/projects/${projectId}/tasks/${taskId}/move`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'in_progress' }),
+    })
+    expect(moveTask.status).toBe(200)
+    const sessionId = ((await moveTask.json()) as { sessionId: string }).sessionId
+
+    await waitFor(async () => {
+      const response = await fetch(`${base}/api/test/worker`)
+      const body = (await response.json()) as { activeWorkers: Array<{ sessionId: string }> }
+      return body.activeWorkers.some((worker) => worker.sessionId === sessionId) ? true : null
+    }, 'task workflow worker')
+
+    await sendMessage(sessionId, 'queued-after-task-workflow')
+
+    const messages = await waitFor(async () => {
+      const view = await getSession(sessionId)
+      const serialized = JSON.stringify(view.messages)
+      return !view.session.isRunning && serialized.includes('queued-after-task-workflow') ? serialized : null
+    }, 'queued REST successor after task workflow')
+    expect(messages).toContain('I understand. Let me help you with that.')
+  }, 60_000)
+
   it('hands a REST message queued during a workflow back to QueueProcessor after clean settlement', async () => {
     const sessionId = await createSession('workflow-queue')
     const ws = await connectWebSocket()

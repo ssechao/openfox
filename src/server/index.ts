@@ -3892,10 +3892,19 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         try {
           const acquired = runtimeRegistry.get(sessionId).acquire('workflow')
           handle = acquired
-          workerController.launch(sessionId, () => runtimeRegistry.peek(sessionId)?.release(acquired), {
-            kind: 'workflow',
-            payload: workerPayload,
-          })
+          workerController.launch(
+            sessionId,
+            (outcome) => {
+              const runtime = runtimeRegistry.peek(sessionId)
+              const stopped = runtime?.wasStopped(acquired) ?? false
+              const released = runtime?.release(acquired) ?? false
+              if (released && !stopped && !outcome.crashed) resumeQueuedSession(sessionId)
+            },
+            {
+              kind: 'workflow',
+              payload: workerPayload,
+            },
+          )
         } catch (error) {
           if (handle) runtimeRegistry.peek(sessionId)?.release(handle)
           workerController.releaseTurn(sessionId)
