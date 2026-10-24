@@ -127,7 +127,7 @@ socket.on('message', (raw) => {
     message.sessionId === witnessId &&
     message.type === 'chat.message_updated' &&
     firstDeltaAt > 0 &&
-    message.payload?.isStreaming === false
+    message.payload?.updates?.isStreaming === false
   ) {
     streamDoneAt = at
     send({ type: 'streamDone', at })

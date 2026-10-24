@@ -20,7 +20,8 @@ interface SessionView {
 interface WsMessage {
   id?: string
   type?: string
-  payload?: { code?: string }
+  sessionId?: string
+  payload?: { code?: string; content?: string; updates?: { isStreaming?: boolean } }
 }
 
 describe('gateway IPC integration', () => {
@@ -215,6 +216,40 @@ describe('gateway IPC integration', () => {
     }
 
     expect(generations).toEqual([1, 2])
+  }, 60_000)
+
+  it('streams external worker deltas to the subscribed WebSocket client', async () => {
+    const sessionId = await createSession('worker-streaming')
+    const ws = await connectWebSocket()
+    try {
+      const loadResponse = waitForWs(ws, (message) => message.id === 'load-streaming')
+      ws.send(JSON.stringify({ id: 'load-streaming', type: 'session.load', payload: { sessionId } }))
+      await expect(loadResponse).resolves.toMatchObject({ type: 'ack' })
+
+      const delta = waitForWs(ws, (message) => message.type === 'chat.delta' && message.sessionId === sessionId)
+      const completed = waitForWs(
+        ws,
+        (message) =>
+          message.type === 'chat.message_updated' &&
+          message.sessionId === sessionId &&
+          message.payload?.updates?.isStreaming === false,
+      )
+      await sendMessage(sessionId, 'stream a response')
+
+      await expect(delta).resolves.toMatchObject({
+        type: 'chat.delta',
+        sessionId,
+        payload: { content: expect.any(String) },
+      })
+      await expect(completed).resolves.toMatchObject({
+        type: 'chat.message_updated',
+        sessionId,
+        payload: { updates: { isStreaming: false } },
+      })
+      await waitFor(async () => (!(await getSession(sessionId)).session.isRunning ? true : null), 'turn completion')
+    } finally {
+      ws.close()
+    }
   }, 60_000)
 
   it('executes gateway-owned MCP through a real external worker', async () => {

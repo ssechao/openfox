@@ -1056,6 +1056,7 @@ async function main(): Promise<void> {
       60_000,
       'externally received witness completion',
     )
+    void streamDonePromise.catch(() => {})
     await api(base, `/api/sessions/${witnessId}/message`, {
       method: 'POST',
       body: { content: WITNESS_MARKER },

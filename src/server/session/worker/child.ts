@@ -31,6 +31,7 @@ import { setMcpTools } from '../../tools/index.js'
 import { WorkerMcpClient } from './mcp-client.js'
 import { WorkerInteractiveClient } from './interactive-client.js'
 import { linkAbortSignal } from './abort-link.js'
+import { storedEventToServerMessage } from '../../ws/protocol.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -98,10 +99,23 @@ async function runTurn(
 
   let ok = false
   let failure: string | undefined
+  let unsubscribeEvents: (() => void) | undefined
+  let forwardEvents: Promise<void> | undefined
+  const broadcastForSession = (_sessionId: string, msg: import('../../../shared/protocol.js').ServerMessage) =>
+    send({ ...token, type: 'ws', msg })
+
   try {
     setRuntimeConfig(config)
     const db = attachWorkerDatabase(workerEnv.dbPath)
-    attachWorkerEventStore(db, token)
+    const eventStore = attachWorkerEventStore(db, token)
+    const subscription = eventStore.subscribe(sessionId)
+    unsubscribeEvents = subscription.unsubscribe
+    forwardEvents = (async () => {
+      for await (const event of subscription.iterator) {
+        const message = storedEventToServerMessage(event)
+        if (message) broadcastForSession(sessionId, message)
+      }
+    })()
 
     const providerManager = createProviderManager(config)
     const sessionManager = new SessionManager(providerManager)
@@ -129,9 +143,6 @@ async function runTurn(
       model: sessionClient.getModel(),
       ...(sessionEffort ? { reasoningEffort: sessionEffort } : {}),
     }
-
-    const broadcastForSession = (_sessionId: string, msg: import('../../../shared/protocol.js').ServerMessage) =>
-      send({ ...token, type: 'ws', msg })
 
     if (command.kind === 'workflow') {
       const { getSessionRuntimeRegistry } = await import('../runtime.js')
@@ -195,6 +206,16 @@ async function runTurn(
         sessionId,
         error: message,
       })
+    }
+  }
+
+  unsubscribeEvents?.()
+  if (forwardEvents) {
+    try {
+      await forwardEvents
+    } catch (error) {
+      ok = false
+      failure = error instanceof Error ? error.message : String(error)
     }
   }
 
