@@ -443,21 +443,25 @@ export class SessionWorkerManager {
       this.sendTo(worker, { ...worker.token, type: 'abort' })
     }
     this.active.clear()
-    await Promise.all(workers.map((worker) => this.shutdownWorker(worker)))
+    const deadlineAt = Date.now() + (this.deps.shutdownTimeoutMs ?? 3_900)
+    const errors = (await Promise.all(workers.map((worker) => this.shutdownWorker(worker, deadlineAt)))).filter(
+      (error): error is string => error !== undefined,
+    )
+    if (errors.length > 0) throw new Error(`Gateway worker shutdown failed: ${errors.join('; ')}`)
   }
 
-  private async shutdownWorker(worker: ActiveWorker): Promise<void> {
-    const startedAt = Date.now()
+  private async shutdownWorker(worker: ActiveWorker, deadlineAt: number): Promise<string | undefined> {
     let cleanupError: string | undefined
     try {
-      let exited = await this.waitForExit(worker, 1_000)
+      const remaining = () => Math.max(0, deadlineAt - Date.now())
+      let exited = await this.waitForExit(worker, Math.min(1_000, remaining()))
       if (!exited) {
         try {
           worker.child.kill('SIGTERM')
         } catch {
           void 0
         }
-        exited = await this.waitForExit(worker, 1_000)
+        exited = await this.waitForExit(worker, Math.min(1_000, remaining()))
       }
       if (!exited) {
         try {
@@ -468,12 +472,12 @@ export class SessionWorkerManager {
       }
 
       const cleanupPromise = this.cleanupWorkerChildren(worker.sessionId, worker.childrenPath)
-      const remainingMs = Math.max(0, 3_900 - (Date.now() - startedAt))
+      const remainingMs = remaining()
       const [exitResult, cleanupResult] = await Promise.all([
         exited ? Promise.resolve(true) : this.waitForExit(worker, remainingMs),
         this.waitForCleanup(cleanupPromise, remainingMs),
       ])
-      if (!exitResult) cleanupError = 'worker did not exit within 4000ms'
+      if (!exitResult) cleanupError = 'worker did not exit before the shutdown deadline'
       if (cleanupResult.cleanupError) cleanupError = cleanupResult.cleanupError
 
       worker.onSettled({
@@ -482,6 +486,7 @@ export class SessionWorkerManager {
           ? `Gateway shutdown interrupted the worker turn; cleanup failed: ${cleanupError}`
           : 'Gateway shutdown interrupted the worker turn',
       })
+      return cleanupError
     } finally {
       clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
       this.deps.healthAggregator?.expireWorker(worker.token)
@@ -560,7 +565,12 @@ export class SessionWorkerManager {
     childrenPath: string,
   ): Promise<{ killedChildren: number[]; cleanupError?: string }> {
     try {
-      return { killedChildren: await (this.deps.cleanupChildren ?? killTrackedChildren)(childrenPath) }
+      const cleanup =
+        this.deps.cleanupChildren ??
+        (this.deps.processSupervisor
+          ? (path: string) => this.deps.processSupervisor!.cleanupWorkerChildren(path)
+          : killTrackedChildren)
+      return { killedChildren: await cleanup(childrenPath) }
     } catch (error) {
       const cleanupError = error instanceof Error ? error.message : String(error)
       logger.error('Worker child cleanup failed; sidecar retained', {

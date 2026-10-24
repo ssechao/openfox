@@ -4229,8 +4229,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           })
         }
         const deadline = setTimeout(() => {
-          logger.error('Gateway shutdown exceeded the 4000ms deadline')
-          finish()
+          const error = new Error('Gateway shutdown exceeded the 4000ms deadline; process cleanup remains unproven')
+          logger.error(error.message)
+          finish(error)
         }, 4_000)
 
         void (async () => {

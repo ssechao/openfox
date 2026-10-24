@@ -36,6 +36,11 @@ interface PendingGit {
   reject: (error: Error) => void
 }
 
+interface PendingChildrenCleanup {
+  resolve: (killedChildren: number[]) => void
+  reject: (error: Error) => void
+}
+
 interface GitProcessIntrospection {
   pid: number
   parentPid: number
@@ -96,6 +101,7 @@ export class SessionProcessSupervisor {
   private shutdownTimer: NodeJS.Timeout | null = null
   private readonly workers = new Map<string, RemoteWorkerHandle>()
   private readonly pendingGit = new Map<string, PendingGit>()
+  private readonly pendingChildrenCleanup = new Map<string, PendingChildrenCleanup>()
   private supervisorPid: number | null = null
   private lastGitProcess: GitProcessIntrospection | null = null
   private readonly forkProcess: typeof fork
@@ -175,6 +181,18 @@ export class SessionProcessSupervisor {
       env: options.env,
     })
     return handle
+  }
+
+  cleanupWorkerChildren(path: string): Promise<number[]> {
+    if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
+    const requestId = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      this.pendingChildrenCleanup.set(requestId, { resolve, reject })
+      if (!this.dispatch({ type: 'children.cleanup', requestId, path })) {
+        this.pendingChildrenCleanup.delete(requestId)
+        reject(new Error('Session process supervisor is unavailable'))
+      }
+    })
   }
 
   runGit(cwd: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
@@ -267,6 +285,14 @@ export class SessionProcessSupervisor {
       handle.markExit(message.code, message.signal)
       return
     }
+    if (message.type === 'children.cleanup.result') {
+      const pending = this.pendingChildrenCleanup.get(message.requestId)
+      if (!pending) return
+      this.pendingChildrenCleanup.delete(message.requestId)
+      if (message.error) pending.reject(new Error(message.error))
+      else pending.resolve(message.killedChildren)
+      return
+    }
     if (message.type === 'git.spawned') {
       this.lastGitProcess = {
         pid: message.pid,
@@ -302,6 +328,10 @@ export class SessionProcessSupervisor {
     this.workers.clear()
     for (const pending of this.pendingGit.values()) pending.reject(new Error('Session process supervisor exited'))
     this.pendingGit.clear()
+    for (const pending of this.pendingChildrenCleanup.values()) {
+      pending.reject(new Error('Session process supervisor exited'))
+    }
+    this.pendingChildrenCleanup.clear()
     this.finishShutdown()
   }
 

@@ -292,6 +292,49 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it('rejects shutdown when child cleanup exceeds the global deadline', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-deadline-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: (message: { type?: string }) => {
+        if (message.type === 'abort') queueMicrotask(() => child.emit('exit', 0, null))
+        return true
+      },
+      kill: () => true,
+    }) as unknown as ChildProcess
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+      cleanupChildren: () => new Promise<number[]>(() => {}),
+      shutdownTimeoutMs: 100,
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+
+    try {
+      manager.launch('sess-1', vi.fn())
+      const shutdown = manager.shutdown()
+      const rejected = expect(shutdown).rejects.toThrow(/cleanup exceeded shutdown deadline/i)
+      await vi.advanceTimersByTimeAsync(100)
+      await rejected
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('finalizes crash interruption when child cleanup fails and preserves the sidecar', async () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-cleanup-error.db')
     openDbs.push(db)

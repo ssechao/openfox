@@ -3,6 +3,7 @@ import { spawnGitProcess } from '../../git/spawn.js'
 import { GIT_QUERY_TIMEOUT_MS } from '../../utils/bounded-exec.js'
 import { installParentExitGuard } from '../../utils/parent-exit-guard.js'
 import { terminateProcessTree } from '../../utils/process-tree.js'
+import { killTrackedChildren } from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
 
 installParentExitGuard()
@@ -159,6 +160,19 @@ process.on('message', (raw) => {
   }
   if (message.type === 'git.run') {
     runGit(message.requestId, message.cwd, message.args)
+    return
+  }
+  if (message.type === 'children.cleanup') {
+    void killTrackedChildren(message.path)
+      .then((killedChildren) => send({ type: 'children.cleanup.result', requestId: message.requestId, killedChildren }))
+      .catch((error) =>
+        send({
+          type: 'children.cleanup.result',
+          requestId: message.requestId,
+          killedChildren: [],
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
     return
   }
   if (message.type === 'shutdown') void shutdown()

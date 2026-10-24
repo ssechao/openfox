@@ -12,6 +12,7 @@ export type GatewayToSupervisorMessage =
   | { type: 'worker.send'; workerKey: string; message: unknown }
   | { type: 'worker.kill'; workerKey: string; signal: NodeJS.Signals }
   | { type: 'git.run'; requestId: string; cwd: string; args: string[] }
+  | { type: 'children.cleanup'; requestId: string; path: string }
   | { type: 'shutdown' }
 
 export type SupervisorToGatewayMessage =
@@ -24,4 +25,5 @@ export type SupervisorToGatewayMessage =
   | { type: 'worker.exit'; workerKey: string; code: number | null; signal: NodeJS.Signals | null }
   | { type: 'git.spawned'; requestId: string; pid: number; parentPid: number; cwd: string; args: string[] }
   | { type: 'git.result'; requestId: string; code: number | null; stdout: string }
+  | { type: 'children.cleanup.result'; requestId: string; killedChildren: number[]; error?: string }
   | { type: 'shutdown.complete' }
