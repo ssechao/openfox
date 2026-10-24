@@ -71,7 +71,7 @@ export interface ChildrenCleanupDependencies {
   readProcessIdentity?: (pid: number) => ProcessIdentityRead
   killTree?: (pid: number) => Promise<void>
   signalGroup?: (pid: number) => Promise<boolean>
-  findReservationPids?: (reservationId: string) => number[]
+  findReservationPids?: (reservationId: string) => number[] | Promise<number[]>
   retryDelay?: () => Promise<void>
 }
 
@@ -84,6 +84,14 @@ export interface ProcessInventoryDependencies {
   now?: () => number
   sleep?: (delayMs: number) => Promise<void>
   recordedWorker?: ProcessInventoryEntry
+}
+
+export interface AsyncProcessInventoryDependencies extends Omit<
+  ProcessInventoryDependencies,
+  'findReservationPids' | 'now'
+> {
+  findReservationPids?: (reservationId: string) => number[] | Promise<number[]>
+  capturedAt?: number
 }
 
 function processRootExists(pid: number): boolean {
@@ -276,6 +284,20 @@ export function readTrackedChildren(path: string): TrackedChild[] {
   }))
 }
 
+function parseReservationProcesses(output: string, marker: string): number[] {
+  const pids = new Set<number>()
+  for (const line of output.split('\n')) {
+    if (!line.includes(marker)) continue
+    const match = /^\s*(\d+)\s+(\d+)\s+/.exec(line)
+    if (!match) continue
+    const pid = Number(match[1])
+    const pgid = Number(match[2])
+    if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(pgid) || pgid <= 0) continue
+    pids.add(pid)
+  }
+  return [...pids]
+}
+
 function findReservationProcesses(reservationId: string): number[] {
   const marker = `${EXCLUSIVE_CHILD_RESERVATION_ENV}=${reservationId}`
   if (process.platform === 'linux') {
@@ -298,19 +320,24 @@ function findReservationProcesses(reservationId: string): number[] {
       timeout: 10_000,
       maxBuffer: 16 * 1024 * 1024,
     })
-    const pids = new Set<number>()
-    for (const line of output.split('\n')) {
-      if (!line.includes(marker)) continue
-      const match = /^\s*(\d+)\s+(\d+)\s+/.exec(line)
-      if (!match) continue
-      const pid = Number(match[1])
-      const pgid = Number(match[2])
-      if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(pgid) || pgid <= 0) continue
-      pids.add(pid)
-    }
-    return [...pids]
+    return parseReservationProcesses(output, marker)
   }
   throw new Error(`Cannot recover exclusive child reservation on ${process.platform}`)
+}
+
+async function findReservationProcessesAsync(reservationId: string): Promise<number[]> {
+  if (process.platform !== 'darwin') return findReservationProcesses(reservationId)
+  const marker = `${EXCLUSIVE_CHILD_RESERVATION_ENV}=${reservationId}`
+  const { execFile } = await import('node:child_process')
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(
+      'ps',
+      ['-Eww', '-axo', 'pid=,pgid=,command='],
+      { encoding: 'utf-8', timeout: 1_000, maxBuffer: 16 * 1024 * 1024 },
+      (error, output) => (error ? reject(error) : resolve(output)),
+    )
+  })
+  return parseReservationProcesses(stdout, marker)
 }
 
 function readProcessGroup(pgid: number): ProcessGroupRead {
@@ -395,6 +422,37 @@ export function captureExclusiveProcessInventory(
     reservations,
     errors,
   }
+}
+
+export async function captureExclusiveProcessInventoryAsync(
+  workerPid: number,
+  path: string,
+  dependencies: AsyncProcessInventoryDependencies = {},
+): Promise<ExclusiveProcessInventory> {
+  const state = readChildrenState(path)
+  const findReservationPids = dependencies.findReservationPids ?? findReservationProcessesAsync
+  const reservationScans = new Map<string, number[] | Error>()
+  await Promise.all(
+    [...state.reservations.keys()].map(async (id) => {
+      try {
+        reservationScans.set(id, await findReservationPids(id))
+      } catch (error) {
+        reservationScans.set(id, error instanceof Error ? error : new Error(String(error)))
+      }
+    }),
+  )
+  return captureExclusiveProcessInventory(workerPid, path, {
+    ...(dependencies.readInventory ? { readInventory: dependencies.readInventory } : {}),
+    ...(dependencies.readGroup ? { readGroup: dependencies.readGroup } : {}),
+    ...(dependencies.sleep ? { sleep: dependencies.sleep } : {}),
+    ...(dependencies.recordedWorker ? { recordedWorker: dependencies.recordedWorker } : {}),
+    ...(dependencies.capturedAt !== undefined ? { now: () => dependencies.capturedAt! } : {}),
+    findReservationPids: (id) => {
+      const result = reservationScans.get(id)
+      if (result instanceof Error) throw result
+      return result ?? []
+    },
+  })
 }
 
 export async function verifyExclusiveProcessInventoryAfter(
@@ -485,7 +543,7 @@ export async function killTrackedChildren(
   const killedSet = new Set<number>()
   let hasUnreadableIdentity = false
   for (const reservationId of state.reservations.keys()) {
-    for (const pid of findReservationPids(reservationId)) {
+    for (const pid of await findReservationPids(reservationId)) {
       if (killedSet.has(pid)) continue
       await killTree(pid)
       killedSet.add(pid)
@@ -522,9 +580,13 @@ export async function killTrackedChildren(
       })
     }
   }
-  const hasMarkedReservationProcesses = [...state.reservations.keys()].some(
-    (reservationId) => findReservationPids(reservationId).length > 0,
-  )
+  let hasMarkedReservationProcesses = false
+  for (const reservationId of state.reservations.keys()) {
+    if ((await findReservationPids(reservationId)).length > 0) {
+      hasMarkedReservationProcesses = true
+      break
+    }
+  }
   if (!hasUnreadableIdentity && !hasMarkedReservationProcesses) removeChildrenFile(path)
   return killed
 }

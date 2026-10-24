@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { initChildrenTracking } from '../worker/children.js'
 import { SessionProcessSupervisor } from './client.js'
 
 function fakeChild() {
@@ -162,6 +163,49 @@ process.on('message', (message) => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('captures worker identity at spawn and anchors inventory through the real supervisor', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-inventory-'))
+    const workerEntry = join(root, 'worker.cjs')
+    const childrenPath = join(root, 'worker.children')
+    writeFileSync(workerEntry, `process.send({ type: 'ready' }); setInterval(() => {}, 1000)\n`)
+    initChildrenTracking(childrenPath)
+    const supervisor = new SessionProcessSupervisor()
+
+    try {
+      await supervisor.start()
+      const handle = supervisor.spawnWorker({
+        workerKey: 'inventory-worker',
+        path: workerEntry,
+        execArgv: [],
+        env: process.env,
+      })
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('worker readiness timed out')), 5_000)
+        handle.on('message', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      })
+      expect(handle.inventory).toMatchObject({
+        pid: handle.pid,
+        startedAt: expect.any(String),
+        pgid: expect.any(Number),
+      })
+      const capturedAt = Date.now() - 250
+      const inventory = await supervisor.captureWorkerInventory(handle.pid!, childrenPath, handle.inventory, capturedAt)
+      expect(inventory).toMatchObject({
+        capturedAt,
+        worker: handle.inventory,
+        errors: [],
+      })
+      handle.kill('SIGKILL')
+      await new Promise<void>((resolve) => handle.once('exit', () => resolve()))
+    } finally {
+      await supervisor.shutdown()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 20_000)
 
   it('correlates native git results through the supervisor', async () => {
     const child = fakeChild()

@@ -3,11 +3,13 @@ import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { ExclusiveProcessInventory, ProcessInventoryEntry } from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
 
 export interface SupervisorWorkerHandle {
   readonly workerKey: string
   pid: number | undefined
+  inventory: ProcessInventoryEntry | undefined
   exitCode: number | null
   signalCode: NodeJS.Signals | null
   stderr: EventEmitter
@@ -41,6 +43,11 @@ interface PendingChildrenCleanup {
   reject: (error: Error) => void
 }
 
+interface PendingChildrenCapture {
+  resolve: (inventory: ExclusiveProcessInventory) => void
+  reject: (error: Error) => void
+}
+
 interface GitProcessIntrospection {
   pid: number
   parentPid: number
@@ -64,6 +71,7 @@ function resolveSupervisorEntry(): SupervisorEntry {
 
 class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle {
   pid: number | undefined
+  inventory: ProcessInventoryEntry | undefined
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
   readonly stderr = new EventEmitter()
@@ -102,6 +110,7 @@ export class SessionProcessSupervisor {
   private readonly workers = new Map<string, RemoteWorkerHandle>()
   private readonly pendingGit = new Map<string, PendingGit>()
   private readonly pendingChildrenCleanup = new Map<string, PendingChildrenCleanup>()
+  private readonly pendingChildrenCapture = new Map<string, PendingChildrenCapture>()
   private supervisorPid: number | null = null
   private lastGitProcess: GitProcessIntrospection | null = null
   private readonly forkProcess: typeof fork
@@ -195,6 +204,32 @@ export class SessionProcessSupervisor {
     })
   }
 
+  captureWorkerInventory(
+    workerPid: number,
+    path: string,
+    recordedWorker: ProcessInventoryEntry | undefined,
+    capturedAt: number,
+  ): Promise<ExclusiveProcessInventory> {
+    if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
+    const requestId = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      this.pendingChildrenCapture.set(requestId, { resolve, reject })
+      if (
+        !this.dispatch({
+          type: 'children.capture',
+          requestId,
+          workerPid,
+          path,
+          capturedAt,
+          ...(recordedWorker ? { recordedWorker } : {}),
+        })
+      ) {
+        this.pendingChildrenCapture.delete(requestId)
+        reject(new Error('Session process supervisor is unavailable'))
+      }
+    })
+  }
+
   runGit(cwd: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
     if (!this.ready) return Promise.reject(new Error('Session process supervisor is not ready'))
     const requestId = crypto.randomUUID()
@@ -255,7 +290,10 @@ export class SessionProcessSupervisor {
 
     if (message.type === 'worker.spawned') {
       const handle = this.workers.get(message.workerKey)
-      if (handle) handle.pid = message.pid
+      if (handle) {
+        handle.pid = message.pid
+        handle.inventory = message.inventory
+      }
       return
     }
     if (message.type === 'worker.spawn_error') {
@@ -283,6 +321,17 @@ export class SessionProcessSupervisor {
       if (!handle) return
       this.workers.delete(message.workerKey)
       handle.markExit(message.code, message.signal)
+      return
+    }
+    if (message.type === 'children.capture.result') {
+      const pending = this.pendingChildrenCapture.get(message.requestId)
+      if (!pending) return
+      this.pendingChildrenCapture.delete(message.requestId)
+      if (message.error || !message.inventory) {
+        pending.reject(new Error(message.error ?? 'Session process supervisor returned no worker inventory'))
+      } else {
+        pending.resolve(message.inventory)
+      }
       return
     }
     if (message.type === 'children.cleanup.result') {
@@ -332,6 +381,10 @@ export class SessionProcessSupervisor {
       pending.reject(new Error('Session process supervisor exited'))
     }
     this.pendingChildrenCleanup.clear()
+    for (const pending of this.pendingChildrenCapture.values()) {
+      pending.reject(new Error('Session process supervisor exited'))
+    }
+    this.pendingChildrenCapture.clear()
     this.finishShutdown()
   }
 

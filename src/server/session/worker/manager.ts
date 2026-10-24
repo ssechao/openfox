@@ -76,6 +76,8 @@ interface ActiveWorker {
   child: ChildProcess | SupervisorWorkerHandle
   childrenPath: string
   workerInventory?: ProcessInventoryEntry
+  inventory?: ExclusiveProcessInventory
+  inventoryPromise?: Promise<ExclusiveProcessInventory>
   doneReceived: boolean
   doneOk: boolean
   doneError?: string
@@ -224,6 +226,7 @@ export class SessionWorkerManager {
     if (worker.stopRequestedAt === undefined) {
       worker.stopRequestedAt = Date.now()
       this.sendTo(worker, { ...worker.token, type: 'abort' })
+      void this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt)
       void this.escalateStop(worker)
     }
     return true
@@ -327,6 +330,12 @@ export class SessionWorkerManager {
         return
       }
       if (msg.type === 'ready') {
+        if ('inventory' in worker.child && worker.child.inventory) {
+          worker.workerInventory = worker.child.inventory
+        } else if (!worker.workerInventory) {
+          const inventory = readProcessInventory(msg.pid)
+          if (inventory.status === 'found') worker.workerInventory = inventory.process
+        }
         logger.info('Session worker ready', {
           sessionId,
           workerId: token.workerId,
@@ -367,6 +376,7 @@ export class SessionWorkerManager {
       if (this.active.get(sessionId) !== worker) return
       this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
       this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session worker exited')
+      void this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt ?? Date.now())
       void this.settle(worker, code, signal).finally(() => {
         if (this.active.get(sessionId) === worker) this.active.delete(sessionId)
       })
@@ -399,6 +409,7 @@ export class SessionWorkerManager {
 
   private async escalateStop(worker: ActiveWorker): Promise<void> {
     if (await this.waitForExit(worker, 500)) return
+    await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt ?? Date.now())
     worker.stopEscalatedAt = Date.now()
     try {
       worker.child.kill('SIGTERM')
@@ -441,6 +452,7 @@ export class SessionWorkerManager {
         'Gateway shutdown interrupted the worker turn',
       )
       this.sendTo(worker, { ...worker.token, type: 'abort' })
+      void this.beginWorkerInventoryCapture(worker, Date.parse(interruptedAt))
     }
     this.active.clear()
     const deadlineAt = Date.now() + (this.deps.shutdownTimeoutMs ?? 3_900)
@@ -456,6 +468,7 @@ export class SessionWorkerManager {
       const remaining = () => Math.max(0, deadlineAt - Date.now())
       let exited = await this.waitForExit(worker, Math.min(1_000, remaining()))
       if (!exited) {
+        await this.beginWorkerInventoryCapture(worker, Date.now())
         try {
           worker.child.kill('SIGTERM')
         } catch {
@@ -509,23 +522,47 @@ export class SessionWorkerManager {
     return result
   }
 
-  private captureWorkerInventory(worker: ActiveWorker): ExclusiveProcessInventory {
-    const workerPid = worker.child.pid ?? -1
-    try {
-      return this.deps.captureInventory
-        ? this.deps.captureInventory(workerPid, worker.childrenPath, worker.workerInventory)
-        : captureExclusiveProcessInventory(workerPid, worker.childrenPath, {
-            ...(worker.workerInventory ? { recordedWorker: worker.workerInventory } : {}),
-          })
-    } catch (error) {
-      return {
-        capturedAt: Date.now(),
-        ...(worker.workerInventory ? { worker: worker.workerInventory } : {}),
-        children: [],
-        reservations: [],
-        errors: [`inventory capture failed: ${error instanceof Error ? error.message : String(error)}`],
-      }
-    }
+  private beginWorkerInventoryCapture(worker: ActiveWorker, capturedAt: number): Promise<ExclusiveProcessInventory> {
+    if (worker.inventory) return Promise.resolve(worker.inventory)
+    if (worker.inventoryPromise) return worker.inventoryPromise
+    const workerPid = worker.child.pid ?? worker.workerInventory?.pid ?? -1
+    worker.inventoryPromise = Promise.resolve()
+      .then(() => {
+        if (this.deps.captureInventory) {
+          return {
+            ...this.deps.captureInventory(workerPid, worker.childrenPath, worker.workerInventory),
+            capturedAt,
+          }
+        }
+        if (this.deps.processSupervisor) {
+          return this.deps.processSupervisor.captureWorkerInventory(
+            workerPid,
+            worker.childrenPath,
+            worker.workerInventory,
+            capturedAt,
+          )
+        }
+        return captureExclusiveProcessInventory(workerPid, worker.childrenPath, {
+          ...(worker.workerInventory ? { recordedWorker: worker.workerInventory } : {}),
+          now: () => capturedAt,
+        })
+      })
+      .then((inventory) => {
+        worker.inventory = inventory
+        return inventory
+      })
+      .catch((error) => {
+        const inventory: ExclusiveProcessInventory = {
+          capturedAt,
+          ...(worker.workerInventory ? { worker: worker.workerInventory } : {}),
+          children: [],
+          reservations: [],
+          errors: [`inventory capture failed: ${error instanceof Error ? error.message : String(error)}`],
+        }
+        worker.inventory = inventory
+        return inventory
+      })
+    return worker.inventoryPromise
   }
 
   private verifyWorkerInventory(report: WorkerCrashReport): void {
@@ -638,6 +675,7 @@ export class SessionWorkerManager {
     this.deps.healthAggregator?.expireWorker(token)
 
     if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
+      await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt)
       const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath)
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
@@ -661,7 +699,8 @@ export class SessionWorkerManager {
     }
 
     // Crash path — detected right here by the exit handler, no timeout.
-    const interruptedAt = new Date().toISOString()
+    const interruptedAtMs = worker.stopRequestedAt ?? Date.now()
+    const interruptedAt = new Date(interruptedAtMs).toISOString()
     logger.error('Session worker died', {
       sessionId,
       workerId: token.workerId,
@@ -672,7 +711,7 @@ export class SessionWorkerManager {
       stderr: worker.stderrTail.slice(-5),
     })
 
-    const inventory = this.captureWorkerInventory(worker)
+    const inventory = await this.beginWorkerInventoryCapture(worker, interruptedAtMs)
 
     // Reap the worker's exclusive children (recorded synchronously in the
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to

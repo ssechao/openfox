@@ -3,7 +3,7 @@ import { spawnGitProcess } from '../../git/spawn.js'
 import { GIT_QUERY_TIMEOUT_MS } from '../../utils/bounded-exec.js'
 import { installParentExitGuard } from '../../utils/parent-exit-guard.js'
 import { terminateProcessTree } from '../../utils/process-tree.js'
-import { killTrackedChildren } from '../worker/children.js'
+import { captureExclusiveProcessInventoryAsync, killTrackedChildren, readProcessInventory } from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
 
 installParentExitGuard()
@@ -89,11 +89,14 @@ function spawnWorker(message: Extract<GatewayToSupervisorMessage, { type: 'worke
   }
 
   workers.set(message.workerKey, worker)
+  const pid = worker.pid ?? -1
+  const inventory = pid > 0 ? readProcessInventory(pid) : { status: 'absent' as const }
   send({
     type: 'worker.spawned',
     requestId: message.requestId,
     workerKey: message.workerKey,
-    pid: worker.pid ?? -1,
+    pid,
+    ...(inventory.status === 'found' ? { inventory: inventory.process } : {}),
   })
   worker.on('message', (payload) => {
     send({ type: 'worker.message', workerKey: message.workerKey, message: payload })
@@ -170,6 +173,21 @@ process.on('message', (raw) => {
           type: 'children.cleanup.result',
           requestId: message.requestId,
           killedChildren: [],
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    return
+  }
+  if (message.type === 'children.capture') {
+    void captureExclusiveProcessInventoryAsync(message.workerPid, message.path, {
+      capturedAt: message.capturedAt,
+      ...(message.recordedWorker ? { recordedWorker: message.recordedWorker } : {}),
+    })
+      .then((inventory) => send({ type: 'children.capture.result', requestId: message.requestId, inventory }))
+      .catch((error) =>
+        send({
+          type: 'children.capture.result',
+          requestId: message.requestId,
           error: error instanceof Error ? error.message : String(error),
         }),
       )

@@ -34,6 +34,8 @@ interface WorkerIntrospection {
     pid: number
     signal: NodeJS.Signals | null
     killedChildren: number[]
+    inventory: { capturedAt: number; worker?: { pid: number; startedAt: string; pgid: number } }
+    orphanCheck?: { checkedAt: number; clean: boolean; errors: string[] }
   } | null
 }
 
@@ -279,7 +281,9 @@ describe('session worker crash', () => {
     )
 
     process.kill(active.pid!, 'SIGSTOP')
+    const stopStartedAt = Date.now()
     const stopped = await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
+    const stopAcknowledgedAt = Date.now()
     expect(stopped.status).toBe(200)
 
     const interrupted = await waitFor(
@@ -292,6 +296,23 @@ describe('session worker crash', () => {
     )
     expect(interrupted.pendingToolReconciliations).toHaveLength(1)
     expect(interrupted.pendingToolReconciliations[0]?.name).toBe('run_command')
+    const report = await waitFor(
+      async () => {
+        const current = (await getWorkerIntrospection()).lastCrash
+        return current?.sessionId === sessionId && current.orphanCheck ? current : null
+      },
+      10_000,
+      'forced Stop inventory proof',
+    )
+    expect(report.inventory.worker).toMatchObject({
+      pid: active.pid,
+      startedAt: expect.any(String),
+      pgid: expect.any(Number),
+    })
+    expect(report.inventory.capturedAt).toBeGreaterThanOrEqual(stopStartedAt)
+    expect(report.inventory.capturedAt).toBeLessThanOrEqual(stopAcknowledgedAt)
+    expect(report.orphanCheck?.checkedAt).toBeGreaterThanOrEqual(report.inventory.capturedAt + 2_000)
+    expect(report.orphanCheck).toMatchObject({ clean: true, errors: [] })
 
     const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
     expect(resumed.status).toBe(200)
