@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { fork, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -18,7 +18,6 @@ const PDF_PAGES = 50
 const STDOUT_BYTES = 64 * 1024 * 1024
 const WITNESS_CHUNKS = 1_501
 const CHUNK_INTERVAL_MS = 20
-const PROBE_INTERVAL_MS = 50
 const CLIENT_TIMEOUT_MS = 500
 const KILL_AT_MS = 20_000
 const POST_KILL_MS = 10_000
@@ -67,11 +66,55 @@ interface SessionView {
   }>
 }
 
-interface ProbeSample {
+interface ProbeResult {
+  latencies: number[]
+  failures: number
+  deadlines: number
+  missedDeadlines: number
+}
+
+interface WitnessObservation {
   at: number
-  latency: number
   ok: boolean
-  detail: string
+  match: boolean
+  pid: number | null
+  workerId: string | null
+  generation: number | null
+}
+
+interface ToolObservation {
+  callId: string
+  tool: string
+  args: Record<string, unknown>
+  startAt: number
+  endAt: number
+  result: { success: boolean; output?: string; error?: string; truncated: boolean } | null
+}
+
+interface ObserverResult {
+  pid: number
+  deltaTimes: number[]
+  deltaChars: number
+  firstDeltaAt: number
+  streamDoneAt: number
+  probes: { session: ProbeResult; health: ProbeResult }
+  identityObservations: WitnessObservation[]
+  toolCalls: ToolObservation[]
+}
+
+interface ObserverMessage {
+  type: string
+  pid?: number
+  at?: number
+  error?: string
+  identity?: WorkerIdentity
+  deltaTimes?: number[]
+  deltaChars?: number
+  firstDeltaAt?: number
+  streamDoneAt?: number
+  probes?: ObserverResult['probes']
+  identityObservations?: WitnessObservation[]
+  toolCalls?: ToolObservation[]
 }
 
 interface Verdict {
@@ -108,18 +151,77 @@ function gapStats(timestamps: number[]): { count: number; p99: number; max: numb
   }
 }
 
-function latencyStats(samples: ProbeSample[]): {
+function latencyStats(result: ProbeResult): {
   count: number
   failures: number
+  deadlines: number
+  missedDeadlines: number
   p99: number
   max: number
 } {
-  const valid = samples.filter((sample) => sample.ok).map((sample) => sample.latency)
   return {
-    count: valid.length,
-    failures: samples.length - valid.length,
-    p99: round(percentile(valid, 0.99)),
-    max: round(Math.max(...valid, 0)),
+    count: result.latencies.length,
+    failures: result.failures,
+    deadlines: result.deadlines,
+    missedDeadlines: result.missedDeadlines,
+    p99: round(percentile(result.latencies, 0.99)),
+    max: round(Math.max(...result.latencies, 0)),
+  }
+}
+
+function waitForObserverMessage(
+  child: ChildProcess,
+  predicate: (message: ObserverMessage) => boolean,
+  timeoutMs: number,
+  label: string,
+): Promise<ObserverMessage> {
+  return new Promise((resolveMessage, reject) => {
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error(`Timeout waiting for ${label}`))
+    }, timeoutMs)
+    const onMessage = (value: unknown) => {
+      const message = value as ObserverMessage
+      if (!predicate(message)) return
+      cleanup()
+      resolveMessage(message)
+    }
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup()
+      reject(new Error(`Observer exited before ${label}: code=${code} signal=${signal}`))
+    }
+    const cleanup = () => {
+      clearTimeout(timer)
+      child.off('message', onMessage)
+      child.off('exit', onExit)
+    }
+    child.on('message', onMessage)
+    child.on('exit', onExit)
+  })
+}
+
+function observerResult(message: ObserverMessage): ObserverResult {
+  if (
+    message.pid === undefined ||
+    !message.deltaTimes ||
+    message.deltaChars === undefined ||
+    message.firstDeltaAt === undefined ||
+    message.streamDoneAt === undefined ||
+    !message.probes ||
+    !message.identityObservations ||
+    !message.toolCalls
+  ) {
+    throw new Error('Observer returned an incomplete result')
+  }
+  return {
+    pid: message.pid,
+    deltaTimes: message.deltaTimes,
+    deltaChars: message.deltaChars,
+    firstDeltaAt: message.firstDeltaAt,
+    streamDoneAt: message.streamDoneAt,
+    probes: message.probes,
+    identityObservations: message.identityObservations,
+    toolCalls: message.toolCalls,
   }
 }
 
@@ -538,28 +640,6 @@ async function createSession(base: string, projectId: string, title: string): Pr
   return created.session.id
 }
 
-async function probeLoop(url: string, samples: ProbeSample[], stop: { value: boolean }): Promise<void> {
-  let next = performance.now()
-  while (!stop.value) {
-    const started = performance.now()
-    let ok = false
-    let detail = 'ok'
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(CLIENT_TIMEOUT_MS) })
-      await response.arrayBuffer()
-      ok = response.ok
-      if (!response.ok) detail = `HTTP ${response.status}`
-    } catch (error) {
-      detail = error instanceof Error ? error.message : String(error)
-    }
-    samples.push({ at: started, latency: performance.now() - started, ok, detail })
-    next += PROBE_INTERVAL_MS
-    const delay = next - performance.now()
-    if (delay > 0) await sleep(delay)
-    else next = performance.now()
-  }
-}
-
 function findWorker(introspection: WorkerIntrospection, sessionId: string): WorkerIdentity | null {
   return introspection.activeWorkers.find((worker) => worker.sessionId === sessionId) ?? null
 }
@@ -592,7 +672,8 @@ function printSummary(
   gatewayPid: number,
   witnessWorker: WorkerIdentity,
   perturbatorWorker: WorkerIdentity,
-  streamStats: { sent: ReturnType<typeof gapStats>; duration: number },
+  observerPid: number,
+  streamStats: { received: ReturnType<typeof gapStats>; duration: number; chars: number },
   sessionProbe: ReturnType<typeof latencyStats>,
   healthProbe: ReturnType<typeof latencyStats>,
   loads: Record<LoadName, LoadInterval>,
@@ -633,7 +714,7 @@ function printSummary(
     {
       label: 'C3.1 isolation/pool',
       pass: root.startsWith(tmpdir()) && port > 0 && witnessWorker.pid !== perturbatorWorker.pid,
-      detail: `db_temp=true port=${port} pool=2 gateway_pid=${gatewayPid} workers=${witnessWorker.pid},${perturbatorWorker.pid}`,
+      detail: `db_temp=true port=${port} pool=2 gateway_pid=${gatewayPid} observer_pid=${observerPid} observer_external=${observerPid !== gatewayPid} workers=${witnessWorker.pid},${perturbatorWorker.pid}`,
     },
     {
       label: 'C3.2 charges réelles',
@@ -653,23 +734,33 @@ function printSummary(
     },
     {
       label: 'C3.3 sondes session',
-      pass: sessionProbe.count >= 500 && sessionProbe.failures === 0 && sessionProbe.p99 < 100,
-      detail: `responses=${sessionProbe.count} failures=${sessionProbe.failures} p99_ms=${sessionProbe.p99} max_ms=${sessionProbe.max} timeout_ms=${CLIENT_TIMEOUT_MS}`,
+      pass:
+        sessionProbe.count >= 500 &&
+        sessionProbe.failures === 0 &&
+        sessionProbe.missedDeadlines === 0 &&
+        sessionProbe.p99 < 100,
+      detail: `deadlines=${sessionProbe.deadlines} responses=${sessionProbe.count} failures=${sessionProbe.failures} missed_deadlines=${sessionProbe.missedDeadlines} p99_ms=${sessionProbe.p99} max_ms=${sessionProbe.max} timeout_ms=${CLIENT_TIMEOUT_MS}`,
     },
     {
       label: 'C3.4 sondes santé',
-      pass: healthProbe.count >= 500 && healthProbe.failures === 0 && healthProbe.p99 < 100,
-      detail: `responses=${healthProbe.count} failures=${healthProbe.failures} p99_ms=${healthProbe.p99} max_ms=${healthProbe.max} timeout_ms=${CLIENT_TIMEOUT_MS}`,
+      pass:
+        healthProbe.count >= 500 &&
+        healthProbe.failures === 0 &&
+        healthProbe.missedDeadlines === 0 &&
+        healthProbe.p99 < 100,
+      detail: `deadlines=${healthProbe.deadlines} responses=${healthProbe.count} failures=${healthProbe.failures} missed_deadlines=${healthProbe.missedDeadlines} p99_ms=${healthProbe.p99} max_ms=${healthProbe.max} timeout_ms=${CLIENT_TIMEOUT_MS}`,
     },
     {
       label: 'C3.5 stream témoin',
       pass:
-        streamStats.sent.count >= 1_500 &&
-        streamStats.sent.p99 < 100 &&
-        streamStats.sent.max < 250 &&
+        observerPid !== gatewayPid &&
+        streamStats.received.count >= 1_500 &&
+        streamStats.received.p99 < 100 &&
+        streamStats.received.max < 250 &&
         streamStats.duration >= 30_000 &&
+        streamStats.chars === WITNESS_CHUNKS &&
         witnessContent === WITNESS_CHUNKS,
-      detail: `duration_ms=${round(streamStats.duration)} chunks=${streamStats.sent.count} gap_p99_ms=${streamStats.sent.p99} gap_max_ms=${streamStats.sent.max} final_chars=${witnessContent}`,
+      detail: `source=external_ws observer_pid=${observerPid} duration_ms=${round(streamStats.duration)} chunks_received=${streamStats.received.count} chars_received=${streamStats.chars} gap_p99_ms=${streamStats.received.p99} gap_max_ms=${streamStats.received.max} final_chars=${witnessContent}`,
     },
     {
       label: 'C3.6 SIGKILL/isolation',
@@ -734,12 +825,9 @@ async function main(): Promise<void> {
   }
   const modelServer = createModelServer(state)
   let server: ServerHandle | undefined
-  const probeStop = { value: false }
-  const sessionSamples: ProbeSample[] = []
-  const healthSamples: ProbeSample[] = []
+  let observer: ChildProcess | undefined
+  let observerStderr = ''
   const witnessIdentities: WorkerIdentity[] = []
-  let sessionProbePromise: Promise<void> | undefined
-  let healthProbePromise: Promise<void> | undefined
 
   try {
     const workload = await prepareWorkload(projectDir)
@@ -791,8 +879,34 @@ async function main(): Promise<void> {
       'MCP connection',
     )
 
-    sessionProbePromise = probeLoop(`${base}/api/sessions/${witnessId}`, sessionSamples, probeStop)
-    healthProbePromise = probeLoop(`${base}/api/health`, healthSamples, probeStop)
+    observer = fork(join(here, 'demo-etape7-observer.mjs'), [base, witnessId, perturbatorId], {
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    })
+    observer.stderr?.on('data', (chunk: Buffer) => {
+      observerStderr += chunk.toString()
+    })
+    const observerReady = await waitForObserverMessage(
+      observer,
+      (message) => message.type === 'ready',
+      10_000,
+      'external observer readiness',
+    )
+    if (!observerReady.pid || observerReady.pid === process.pid) {
+      throw new Error('External observer did not start in an independent process')
+    }
+
+    const firstDeltaPromise = waitForObserverMessage(
+      observer,
+      (message) => message.type === 'firstDelta',
+      20_000,
+      'first externally received witness delta',
+    )
+    const streamDonePromise = waitForObserverMessage(
+      observer,
+      (message) => message.type === 'streamDone',
+      60_000,
+      'externally received witness completion',
+    )
     await api(base, `/api/sessions/${witnessId}/message`, {
       method: 'POST',
       body: { content: WITNESS_MARKER },
@@ -802,7 +916,9 @@ async function main(): Promise<void> {
       20_000,
       'witness worker',
     )
-    await waitFor(() => (state.witnessStart > 0 ? state.witnessStart : null), 20_000, 'first witness chunk')
+    const firstDelta = await firstDeltaPromise
+    if (firstDelta.at === undefined) throw new Error('External observer omitted first delta time')
+    observer.send?.({ type: 'expectedWitness', identity: witnessWorker })
 
     await api(base, `/api/sessions/${perturbatorId}/message`, {
       method: 'POST',
@@ -825,9 +941,9 @@ async function main(): Promise<void> {
         .catch(() => {})
     }, 100)
 
-    const waitToKill = state.witnessStart + KILL_AT_MS - performance.now()
+    const waitToKill = firstDelta.at + KILL_AT_MS - (performance.timeOrigin + performance.now())
     if (waitToKill > 0) await sleep(waitToKill)
-    const killAt = performance.now()
+    const killAt = performance.timeOrigin + performance.now()
     const beforeKill = await api<WorkerIntrospection>(base, '/api/test/worker')
     const livePerturbator = findWorker(beforeKill, perturbatorId)
     if (!livePerturbator || livePerturbator.pid !== perturbatorWorker.pid) {
@@ -862,9 +978,16 @@ async function main(): Promise<void> {
       20_000,
       'witness completion',
     )
+    await streamDonePromise
     clearInterval(identityPoll)
-    probeStop.value = true
-    await Promise.all([sessionProbePromise, healthProbePromise])
+    const observerResultPromise = waitForObserverMessage(
+      observer,
+      (message) => message.type === 'result',
+      5_000,
+      'external observer result',
+    )
+    observer.send?.({ type: 'stop' })
+    const observed = observerResult(await observerResultPromise)
 
     const crash = await waitFor(
       async () => {
@@ -904,15 +1027,17 @@ async function main(): Promise<void> {
       process.pid,
       witnessWorker,
       perturbatorWorker,
+      observed.pid,
       {
-        sent: gapStats(state.witnessChunkTimes),
-        duration: state.witnessEnd - state.witnessStart,
+        received: gapStats(observed.deltaTimes),
+        duration: observed.streamDoneAt - observed.firstDeltaAt,
+        chars: observed.deltaChars,
       },
-      latencyStats(sessionSamples),
-      latencyStats(healthSamples),
+      latencyStats(observed.probes.session),
+      latencyStats(observed.probes.health),
       state.loads,
       killAt,
-      state.witnessEnd,
+      observed.streamDoneAt,
       finalWitness,
       witnessStable,
       alive(perturbatorWorker.pid),
@@ -926,8 +1051,15 @@ async function main(): Promise<void> {
     )
     if (!passed) process.exitCode = 1
   } finally {
-    probeStop.value = true
-    await Promise.allSettled([sessionProbePromise, healthProbePromise].filter((value) => value !== undefined))
+    if (observer && observer.exitCode === null && observer.signalCode === null) {
+      observer.send?.({ type: 'stop' })
+      await Promise.race([
+        new Promise<void>((resolveExit) => observer?.once('exit', () => resolveExit())),
+        sleep(2_000),
+      ])
+      if (observer.exitCode === null && observer.signalCode === null) observer.kill('SIGKILL')
+    }
+    if (observerStderr) process.stderr.write(observerStderr)
     if (server) await Promise.race([server.close().catch(() => {}), sleep(10_000)])
     await closeServer(modelServer).catch(() => {})
     await rm(root, { recursive: true, force: true })
