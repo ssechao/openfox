@@ -195,6 +195,27 @@ describe('gateway IPC integration', () => {
 
     expect(target.signal.aborted).toBe(true)
   })
+  it('runs two normal messages in the same session with distinct worker generations', async () => {
+    const sessionId = await createSession('sequential-generations')
+    const generations: number[] = []
+
+    for (const content of ['Run the exact command: sleep 1', 'Run the exact command: sleep 1']) {
+      await sendMessage(sessionId, content)
+      const previousGeneration = generations.at(-1) ?? 0
+      const generation = await waitFor(async () => {
+        const response = await fetch(`${base}/api/test/worker`)
+        const body = (await response.json()) as {
+          activeWorkers: Array<{ sessionId: string; token: { generation: number } }>
+        }
+        const current = body.activeWorkers.find((worker) => worker.sessionId === sessionId)?.token.generation
+        return current !== undefined && current > previousGeneration ? current : null
+      }, 'worker generation')
+      generations.push(generation)
+      await waitFor(async () => (!(await getSession(sessionId)).session.isRunning ? true : null), 'turn completion')
+    }
+
+    expect(generations).toEqual([1, 2])
+  }, 60_000)
 
   it('executes gateway-owned MCP through a real external worker', async () => {
     await waitFor(async () => {

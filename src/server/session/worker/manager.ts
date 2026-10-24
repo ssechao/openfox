@@ -570,6 +570,10 @@ export class SessionWorkerManager {
     }
   }
 
+  private retire(worker: ActiveWorker): void {
+    if (this.active.get(worker.sessionId) === worker) this.active.delete(worker.sessionId)
+  }
+
   private isCurrentIdentity(identity: WorkerIpcIdentity): boolean {
     const worker = this.active.get(identity.sessionId)
     return (
@@ -625,6 +629,7 @@ export class SessionWorkerManager {
       const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath)
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
+      this.retire(worker)
       this.scheduler.release(sessionId)
       worker.onSettled({
         crashed: false,
@@ -637,6 +642,7 @@ export class SessionWorkerManager {
       removeChildrenFile(worker.childrenPath)
       getEventStore().invalidateExternalSession(sessionId)
       logger.info('Session worker exited cleanly', { sessionId, workerId: token.workerId })
+      this.retire(worker)
       this.scheduler.release(sessionId)
       worker.onSettled({ crashed: false })
       return
@@ -727,6 +733,7 @@ export class SessionWorkerManager {
     this.lastCrash = report
     this.verifyWorkerInventory(report)
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
+    this.retire(worker)
     this.scheduler.release(sessionId)
     worker.onSettled({ crashed: true, ...(worker.doneError ? { error: worker.doneError } : {}) })
   }
