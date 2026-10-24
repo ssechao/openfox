@@ -1,5 +1,13 @@
 # Étape 7 — Démo C3 chiffrée
 
+## Diagnostic 7d — blocages gateway et orphelin
+
+Profilage sur `.122` du code applicatif `6d5c2b5b` avec `node --cpu-prof` et une sonde de retard de boucle à 20 ms. Les blocages horodatés coïncident avec les charges réelles : jusqu’à 944 ms pendant le diff/stdout, puis 802 ms lors de la récupération après SIGKILL. Sur 39 358 échantillons gateway, les principaux postes non idle sont `express`/`JSON.stringify` (1 695), GC (1 318), décodage des lignes EventStore (`rowToStoredEvent`, 759 sur les entrées sourcemap dupliquées), puis encodage/décodage UTF-8. Git, l’extraction PDF et la capture stdout s’exécutent bien dans le worker; ils ne sont pas dans les piles chaudes gateway.
+
+Cause performance : chaque fragment `tool.output` des 56 Mio de diff et 64 Mio de stdout est persisté, relayé worker → superviseur → gateway, puis diffusé en WS sans budget serveur. Les lectures de session replient ensuite ce journal intégral dans `streamingOutput` et `res.json` le sérialise, bien que le résultat final soit borné à 50 Kio. Le profil montre les deux rafales `rowToStoredEvent`/`stringify`/GC pendant le relais puis lors de la lecture finale de la session perturbatrice. L’écriture SQLite synchrone reste dans le worker et le PDF ne produit pas de gros relais : ce ne sont pas les causes du blocage gateway observé.
+
+Cause orphelin : le nettoyage envoie bien SIGTERM/SIGKILL au groupe enregistré. Une reproduction minimale dans le même conteneur laisse toutefois le descendant tué en état Linux `Z`, `PPID=1`, avec son PGID encore visible; le PID 1 du conteneur ne le réape pas. `readProcessInventory` et `kill(-pgid, 0)` classent ce zombie non exécutable comme vivant, et aucun signal supplémentaire ne peut le faire disparaître. Le nettoyage doit donc garantir le réapage par un ancêtre responsable, pas répéter le kill ni masquer silencieusement l’état.
+
 Exécution UTC du `2026-10-24T10:18:37Z` sur `.122`, depuis le checkout copié dans `/tmp/openfox-etape7`.
 
 SHA testé : `6d5c2b5b6642dbc42e5890ddca32bdea564e7849`
