@@ -680,7 +680,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // missed while OpenFox was off) then every 30s. Stopped in close().
   const { createTaskScheduler } = await import('./tasks/scheduler.js')
   const taskScheduler = createTaskScheduler({ run: () => tasksService.runScheduled() })
-  taskScheduler.start()
   const tasksRouter = express.Router()
   registerTaskRoutes(tasksRouter, tasksService)
   app.use('/api', tasksRouter)
@@ -3960,6 +3959,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // and the explicit resume gate.
   const { SessionWorkerManager, resolveSessionWorkerEnabled } = await import('./session/worker/index.js')
   const { SessionProcessSupervisor } = await import('./session/process-supervisor/client.js')
+  const { startContinuationServices } = await import('./startup-order.js')
   const { setExternalGitRunner } = await import('./git/diff.js')
   const { getSetting: getWorkerSetting, SETTINGS_KEYS: WORKER_SETTINGS_KEYS } = await import('./db/settings.js')
   const externalSupervisorEnabled =
@@ -4013,27 +4013,22 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     broadcastForSession: wssExports.broadcastForSession,
     workerManager,
   })
-  queueProcessor.start()
 
-  // Opt-in boot auto-continuation (Settings > Advanced): sessions that were
-  // running when the server stopped get a continuation turn queued through the
-  // standard queue → turn machinery. Mid-generation sessions receive the same
-  // "stream interrupted" reminder as the LLM-drop retry mechanism.
   const { getSetting, SETTINGS_KEYS } = await import('./db/settings.js')
-  if (getSetting(SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT) === 'true') {
-    const { getStaleRunningSessionIds } = await import('./events/store.js')
-    const { runBootAutoContinuations } = await import('./session/auto-continue.js')
+  const { getStaleRunningSessionIds } = await import('./events/store.js')
+  const { runBootAutoContinuations } = await import('./session/auto-continue.js')
+  const continueStaleSessions = () => {
+    if (getSetting(SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT) !== 'true') return
     const staleIds = getStaleRunningSessionIds()
-    if (staleIds.length > 0) {
-      const continued = runBootAutoContinuations(staleIds, {
-        getEvents: (sessionId) => getEventStore().getEvents(sessionId),
-        hasActiveWorkflow: (sessionId) => sessionManager.getActiveWorkflowExecution(sessionId) !== null,
-        appendEvent: (sessionId, event) => getEventStore().append(sessionId, event),
-        queueMessage: (sessionId, content) =>
-          sessionManager.queueMessage(sessionId, 'asap', content, undefined, 'auto-prompt'),
-      })
-      logger.info('Boot auto-continuation queued', { sessions: staleIds.length, continued })
-    }
+    if (staleIds.length === 0) return
+    const continued = runBootAutoContinuations(staleIds, {
+      getEvents: (sessionId) => getEventStore().getEvents(sessionId),
+      hasActiveWorkflow: (sessionId) => sessionManager.getActiveWorkflowExecution(sessionId) !== null,
+      appendEvent: (sessionId, event) => getEventStore().append(sessionId, event),
+      queueMessage: (sessionId, content) =>
+        sessionManager.queueMessage(sessionId, 'asap', content, undefined, 'auto-prompt'),
+    })
+    logger.info('Boot auto-continuation queued', { sessions: staleIds.length, continued })
   }
 
   const abortSession = (sessionId: string) => {
@@ -4139,10 +4134,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       const listenPort = port ?? config.server.port
       const host = config.server.host
       try {
-        if (processSupervisor) {
-          await processSupervisor.start()
-          setExternalGitRunner((cwd, args) => processSupervisor.runGit(cwd, args))
-        }
+        await startContinuationServices({
+          startSupervisor: async () => {
+            await processSupervisor?.start()
+          },
+          configureSupervisor: () => {
+            if (processSupervisor) setExternalGitRunner((cwd, args) => processSupervisor.runGit(cwd, args))
+          },
+          startQueueProcessor: () => queueProcessor.start(),
+          runBootAutoContinuations: continueStaleSessions,
+          startTaskScheduler: () => taskScheduler.start(),
+        })
         const actualPort = await new Promise<number>((resolve, reject) => {
           const onError = (error: Error) => {
             httpServer.off('error', onError)
