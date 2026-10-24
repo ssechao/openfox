@@ -280,6 +280,16 @@ export class McpManager {
     return this.servers.get(name)?.state
   }
 
+  getStdioProcessIds(): Array<{ name: string; pid: number }> {
+    const processes: Array<{ name: string; pid: number }> = []
+    for (const [name, entry] of this.servers) {
+      if (entry.config.transport !== 'stdio' || entry.state.status !== 'connected' || !entry.transport) continue
+      const pid = (entry.transport as StdioClientTransport).pid
+      if (pid !== null && Number.isInteger(pid) && pid > 0) processes.push({ name, pid })
+    }
+    return processes
+  }
+
   getAllServers(): McpServerState[] {
     return Array.from(this.servers.values())
       .map((e) => e.state)

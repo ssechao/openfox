@@ -47,6 +47,7 @@ import { createServerMessage } from '../shared/protocol.js'
 import { createContextStateMessage, createSessionInterruptedMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
+import { readProcessInventory } from './session/worker/children.js'
 import {
   isSessionAlreadyRunningError,
   SessionRuntimeRegistry,
@@ -433,6 +434,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         active: workerManager.activeWorker(),
         activeWorkers: workerManager.activeWorkers(),
         lastCrash: workerManager.lastCrashReport(),
+        mcpProcesses: mcpManager.getStdioProcessIds().map(({ name, pid }) => ({
+          name,
+          inventory: readProcessInventory(pid),
+        })),
         processSupervisor: processSupervisor?.introspection() ?? null,
       })
     })

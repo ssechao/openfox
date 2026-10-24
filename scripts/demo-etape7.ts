@@ -1,4 +1,4 @@
-import { fork, spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import type { Config } from '../src/shared/types.js'
 import type { ServerHandle } from '../src/server/context.js'
+import { readProcessInventory } from '../src/server/session/worker/children.js'
 
 const MODEL = 'etape7-demo'
 const WITNESS_MARKER = 'ETAPE7_WITNESS'
@@ -37,18 +38,48 @@ interface WorkerIdentity {
   pid: number
 }
 
+interface ProcessInventoryEntry {
+  pid: number
+  startedAt: string
+  pgid: number
+  command?: string
+}
+
+interface ProcessInventoryRead {
+  status: 'found' | 'absent' | 'unreadable'
+  process?: ProcessInventoryEntry
+  error?: { message?: string }
+}
+
+interface McpProcessObservation {
+  name: string
+  inventory: ProcessInventoryRead
+}
+
 interface WorkerIntrospection {
   activeWorkers: WorkerIdentity[]
+  mcpProcesses: McpProcessObservation[]
   lastCrash: {
     sessionId: string
     pid: number
-    inventory: { capturedAt: number }
+    inventory: {
+      capturedAt: number
+      worker?: ProcessInventoryEntry
+      children: ProcessInventoryEntry[]
+      groups: number[]
+      reservations: Array<{
+        id: string
+        finalized: boolean
+        processes: ProcessInventoryEntry[]
+      }>
+      errors: string[]
+    }
     orphanCheck?: {
       checkedAt: number
       clean: boolean
-      survivingIdentities: unknown[]
-      survivingGroups: unknown[]
-      liveReservations: unknown[]
+      survivingIdentities: ProcessInventoryEntry[]
+      survivingGroups: number[]
+      liveReservations: Array<{ id: string; pids: number[] }>
       errors: string[]
     }
   } | null
@@ -366,16 +397,10 @@ function createModelServer(state: MockState): Server {
           return
         }
         if (toolCount === 3) {
-          res.setHeader('content-type', 'text/event-stream')
-          res.setHeader('cache-control', 'no-cache')
-          let closed = false
-          res.once('close', () => {
-            closed = true
+          await sendTool(res, 'etape7-hold', 'run_command', {
+            command: 'echo $$ > hold.pid; exec sleep 120',
+            timeout: 120_000,
           })
-          while (!closed) {
-            await sleep(100)
-            if (!closed) await writeResponse(res, streamChunk({ content: '.' }))
-          }
           return
         }
         await sendText(res, 'Perturbator finished unexpectedly.')
@@ -696,6 +721,28 @@ function alive(pid: number): boolean {
   }
 }
 
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function foundProcess(inventory: ProcessInventoryRead, label: string): ProcessInventoryEntry {
+  if (inventory.status !== 'found' || !inventory.process) {
+    throw new Error(`${label} process inventory is ${inventory.status}`)
+  }
+  return inventory.process
+}
+
+function findMcpProcess(introspection: WorkerIntrospection, name: string): ProcessInventoryEntry {
+  const observation = introspection.mcpProcesses.find((process) => process.name === name)
+  if (!observation) throw new Error(`MCP process ${name} was not exposed by test introspection`)
+  return foundProcess(observation.inventory, `MCP ${name}`)
+}
+
 function toolResult(
   view: SessionView,
   name: string,
@@ -715,6 +762,7 @@ function toolResult(
 }
 
 function printSummary(
+  revision: string,
   root: string,
   port: number,
   workload: Awaited<ReturnType<typeof prepareWorkload>>,
@@ -730,9 +778,17 @@ function printSummary(
   stdoutMetric: LoadMetric,
   killAt: number,
   streamEnd: number,
-  finalWitness: WorkerIdentity,
-  witnessStable: boolean,
+  identityObservations: WitnessObservation[],
   perturbatorAlive: boolean,
+  childBefore: {
+    observedAt: number
+    process: ProcessInventoryEntry
+    pidAlive: boolean
+    groupAlive: boolean
+  },
+  childAfter: { observedAt: number; inventory: ProcessInventoryRead; groupAlive: boolean },
+  mcpBefore: { observedAt: number; process: ProcessInventoryEntry },
+  mcpAfter: { observedAt: number; process: ProcessInventoryEntry },
   crash: NonNullable<WorkerIntrospection['lastCrash']>,
   witnessView: SessionView,
   perturbatorView: SessionView,
@@ -744,7 +800,24 @@ function printSummary(
 ): boolean {
   const mib = (bytes: number) => round(bytes / (1024 * 1024))
   const postKill = streamEnd - killAt
+  const streamStart = streamEnd - streamStats.duration
   const orphanDelay = crash.orphanCheck ? crash.orphanCheck.checkedAt - crash.inventory.capturedAt : Number.NaN
+  const orphanAfterSignal = crash.orphanCheck ? crash.orphanCheck.checkedAt - killAt : Number.NaN
+  const witnessFailures = identityObservations.filter((observation) => !observation.ok)
+  const witnessMismatches = identityObservations.filter((observation) => observation.ok && !observation.match)
+  const witnessBeforeKill = identityObservations.filter((observation) => observation.at < killAt)
+  const witnessAfterKill = identityObservations.filter((observation) => observation.at >= killAt)
+  const firstWitnessObservation = identityObservations.at(0)
+  const finalWitnessObservation = identityObservations.at(-1)
+  const crashChild = crash.inventory.children.find((child) => child.pid === childBefore.process.pid)
+  const crashReservationChild = crash.inventory.reservations
+    .flatMap((reservation) => reservation.processes)
+    .find((child) => child.pid === childBefore.process.pid)
+  const inventoriedChild = crashChild ?? crashReservationChild
+  const childInventoryMatches =
+    inventoriedChild?.startedAt === childBefore.process.startedAt && inventoriedChild.pgid === childBefore.process.pgid
+  const mcpStable =
+    mcpBefore.process.pid === mcpAfter.process.pid && mcpBefore.process.startedAt === mcpAfter.process.startedAt
   const witnessContent = Math.max(
     0,
     ...witnessView.messages
@@ -752,7 +825,6 @@ function printSummary(
       .map((message) => message.content?.length ?? 0),
   )
   const mcpSerialized = JSON.stringify(mcpView.messages)
-  const streamStart = streamEnd - streamStats.duration
   const loadNames = ['git', 'pdf', 'stdout'] as const
   const loadDetails = loadObservations.slice(0, 3).map((observation, index) => {
     const duration = observation.endAt - observation.startAt
@@ -771,7 +843,7 @@ function printSummary(
     {
       label: 'C3.1 isolation/pool',
       pass: root.startsWith(tmpdir()) && port > 0 && witnessWorker.pid !== perturbatorWorker.pid,
-      detail: `db_temp=true port=${port} pool=2 gateway_pid=${gatewayPid} observer_pid=${observerPid} observer_external=${observerPid !== gatewayPid} workers=${witnessWorker.pid},${perturbatorWorker.pid}`,
+      detail: `revision=${revision} db_temp=true port=${port} pool=2 gateway_pid=${gatewayPid} observer_pid=${observerPid} observer_external=${observerPid !== gatewayPid} workers=${witnessWorker.pid},${perturbatorWorker.pid}`,
     },
     {
       label: 'C3.2 charges réelles',
@@ -799,7 +871,7 @@ function printSummary(
         (stdoutResult.output?.length ?? 0) <= 50_100 &&
         loadDetails.length === 3 &&
         loadDetails.every((load) => load.success && load.duration > 0 && load.overlap === load.duration),
-      detail: `files=${FILE_COUNT} diff_mib=${mib(gitMetric.bytes)} pdf_pages=${String(pdfResult.metadata?.['pageCount'])} pdf_mib=${mib(workload.pdfBytes)} pdf_text_kib=${round(workload.pdfTextBytes / 1024)} stdout_mib=${mib(stdoutMetric.bytes)} tool_caps=${gitResult.output?.length ?? 0}/${pdfResult.output?.length ?? 0}/${stdoutResult.output?.length ?? 0} generator_ms=git:${gitMetric.end - gitMetric.start},stdout:${stdoutMetric.end - stdoutMetric.start} observed_ms=${loadDetails.map((load) => `${load.name}(${load.tool}):${round(load.duration)}/overlap:${round(load.overlap)}`).join(',')}`,
+      detail: `stream_epoch_ms=${round(streamStart)}..${round(streamEnd)} files=${FILE_COUNT} diff_mib=${mib(gitMetric.bytes)} pdf_pages=${String(pdfResult.metadata?.['pageCount'])} pdf_mib=${mib(workload.pdfBytes)} pdf_text_kib=${round(workload.pdfTextBytes / 1024)} stdout_mib=${mib(stdoutMetric.bytes)} tool_caps=${gitResult.output?.length ?? 0}/${pdfResult.output?.length ?? 0}/${stdoutResult.output?.length ?? 0} generator_epoch_ms=git:${gitMetric.start}..${gitMetric.end},stdout:${stdoutMetric.start}..${stdoutMetric.end} observed_ms=${loadDetails.map((load) => `${load.name}(${load.tool}):${round(load.duration)}/overlap:${round(load.overlap)}`).join(',')}`,
     },
     {
       label: 'C3.3 sondes session',
@@ -829,7 +901,7 @@ function printSummary(
         streamStats.duration >= 30_000 &&
         streamStats.chars === WITNESS_CHUNKS &&
         witnessContent === WITNESS_CHUNKS,
-      detail: `source=external_ws observer_pid=${observerPid} duration_ms=${round(streamStats.duration)} chunks_received=${streamStats.received.count} chars_received=${streamStats.chars} gap_p99_ms=${streamStats.received.p99} gap_max_ms=${streamStats.received.max} final_chars=${witnessContent}`,
+      detail: `source=external_ws observer_pid=${observerPid} start_epoch_ms=${round(streamStart)} end_epoch_ms=${round(streamEnd)} duration_ms=${round(streamStats.duration)} chunks_received=${streamStats.received.count} chars_received=${streamStats.chars} gap_p99_ms=${streamStats.received.p99} gap_max_ms=${streamStats.received.max} final_chars=${witnessContent}`,
     },
     {
       label: 'C3.6 SIGKILL/isolation',
@@ -839,13 +911,22 @@ function printSummary(
         perturbatorView.session.interruptedAt != null &&
         witnessView.session.interruptedAt == null &&
         !witnessView.session.isRunning &&
-        finalWitness.pid === witnessWorker.pid &&
-        finalWitness.token.workerId === witnessWorker.token.workerId &&
-        finalWitness.token.generation === witnessWorker.token.generation &&
-        witnessStable &&
+        identityObservations.length >= 250 &&
+        witnessFailures.length === 0 &&
+        witnessMismatches.length === 0 &&
+        witnessBeforeKill.length >= 150 &&
+        witnessAfterKill.length >= 75 &&
+        finalWitnessObservation?.pid === witnessWorker.pid &&
+        finalWitnessObservation.workerId === witnessWorker.token.workerId &&
+        finalWitnessObservation.generation === witnessWorker.token.generation &&
+        childBefore.pidAlive &&
+        childBefore.groupAlive &&
+        childInventoryMatches &&
+        childAfter.inventory.status === 'absent' &&
+        !childAfter.groupAlive &&
         gatewayPid === process.pid &&
         postKill >= POST_KILL_MS,
-      detail: `kill_t_ms=${round(killAt - (streamEnd - streamStats.duration))} post_kill_ms=${round(postKill)} gateway_pid=${gatewayPid} witness_pid=${witnessWorker.pid}->${finalWitness.pid} generation=${witnessWorker.token.generation}->${finalWitness.token.generation} stable=${witnessStable} perturbator_pid=${perturbatorWorker.pid} alive=${perturbatorAlive}`,
+      detail: `signal_epoch_ms=${round(killAt)} signal_t_ms=${round(killAt - streamStart)} post_kill_ms=${round(postKill)} gateway_pid=${gatewayPid} witness_pid=${witnessWorker.pid} generation=${witnessWorker.token.generation} witness_observations=${identityObservations.length} witness_first_last_epoch_ms=${round(firstWitnessObservation?.at ?? 0)}..${round(finalWitnessObservation?.at ?? 0)} witness_pre_post=${witnessBeforeKill.length}/${witnessAfterKill.length} witness_failures=${witnessFailures.length} witness_mismatches=${witnessMismatches.length} perturbator_pid=${perturbatorWorker.pid} alive=${perturbatorAlive} child_pid=${childBefore.process.pid} child_pgid=${childBefore.process.pgid} child_start=${childBefore.process.startedAt} pre_epoch_ms=${round(childBefore.observedAt)} pre_pid_alive=${childBefore.pidAlive} pre_group_alive=${childBefore.groupAlive} crash_inventory_epoch_ms=${crash.inventory.capturedAt} crash_inventory_match=${childInventoryMatches} post_epoch_ms=${round(childAfter.observedAt)} post_pid=${childAfter.inventory.status} post_group_alive=${childAfter.groupAlive}`,
     },
     {
       label: 'C3.7 MCP/orphelins',
@@ -853,14 +934,16 @@ function printSummary(
         mcpConnected &&
         mcpSerialized.includes('Hello, Etape7!') &&
         mcpView.session.interruptedAt == null &&
+        mcpStable &&
         crash.orphanCheck?.clean === true &&
         orphanDelay >= 2_000 &&
         orphanDelay <= 2_500 &&
+        orphanAfterSignal >= 2_000 &&
         crash.orphanCheck.survivingIdentities.length === 0 &&
         crash.orphanCheck.survivingGroups.length === 0 &&
         crash.orphanCheck.liveReservations.length === 0 &&
         crash.orphanCheck.errors.length === 0,
-      detail: `mcp_connected=${mcpConnected} mcp_reply=${mcpSerialized.includes('Hello, Etape7!')} orphan_delay_ms=${orphanDelay} identities=${crash.orphanCheck?.survivingIdentities.length ?? -1} groups=${crash.orphanCheck?.survivingGroups.length ?? -1} reservations=${crash.orphanCheck?.liveReservations.length ?? -1} errors=${crash.orphanCheck?.errors.length ?? -1}`,
+      detail: `mcp_connected=${mcpConnected} mcp_reply=${mcpSerialized.includes('Hello, Etape7!')} mcp_pid=${mcpBefore.process.pid}->${mcpAfter.process.pid} mcp_start=${mcpBefore.process.startedAt}->${mcpAfter.process.startedAt} mcp_observed_epoch_ms=${round(mcpBefore.observedAt)}..${round(mcpAfter.observedAt)} stable=${mcpStable} orphan_inventory_epoch_ms=${crash.inventory.capturedAt} orphan_check_epoch_ms=${crash.orphanCheck?.checkedAt ?? -1} orphan_delay_ms=${orphanDelay} orphan_after_signal_ms=${round(orphanAfterSignal)} identities=${crash.orphanCheck?.survivingIdentities.length ?? -1} groups=${crash.orphanCheck?.survivingGroups.length ?? -1} reservations=${crash.orphanCheck?.liveReservations.length ?? -1} errors=${crash.orphanCheck?.errors.length ?? -1}`,
     },
   ]
 
@@ -891,9 +974,9 @@ async function main(): Promise<void> {
   let server: ServerHandle | undefined
   let observer: ChildProcess | undefined
   let observerStderr = ''
-  const witnessIdentities: WorkerIdentity[] = []
 
   try {
+    const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).trim()
     const workload = await prepareWorkload(projectDir)
     const modelPort = await listen(modelServer)
     const config: Config = {
@@ -942,6 +1025,8 @@ async function main(): Promise<void> {
       30_000,
       'MCP connection',
     )
+    const mcpBeforeObservedAt = performance.timeOrigin + performance.now()
+    const mcpBefore = findMcpProcess(await api<WorkerIntrospection>(base, '/api/test/worker'), 'test-server')
 
     observer = fork(join(here, 'demo-etape7-observer.mjs'), [base, witnessId, perturbatorId], {
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -1004,24 +1089,36 @@ async function main(): Promise<void> {
       'three perturbator loads',
     )
 
-    const identityPoll = setInterval(() => {
-      void api<WorkerIntrospection>(base, '/api/test/worker')
-        .then((current) => {
-          const identity = findWorker(current, witnessId)
-          if (identity) witnessIdentities.push(identity)
-        })
-        .catch(() => {})
-    }, 100)
+    const holdPid = await waitFor(
+      async () => {
+        try {
+          const pid = Number((await readFile(join(projectDir, 'hold.pid'), 'utf-8')).trim())
+          if (!Number.isInteger(pid) || pid <= 0) return null
+          return readProcessInventory(pid).status === 'found' ? pid : null
+        } catch {
+          return null
+        }
+      },
+      10_000,
+      'live perturbator shell child',
+    )
 
     const waitToKill = firstDelta.at + KILL_AT_MS - (performance.timeOrigin + performance.now())
     if (waitToKill > 0) await sleep(waitToKill)
-    const killAt = performance.timeOrigin + performance.now()
     const beforeKill = await api<WorkerIntrospection>(base, '/api/test/worker')
     const livePerturbator = findWorker(beforeKill, perturbatorId)
     if (!livePerturbator || livePerturbator.pid !== perturbatorWorker.pid) {
       throw new Error('Perturbator worker was not alive at T+20s')
     }
+    const childProcessBefore = foundProcess(readProcessInventory(holdPid), 'perturbator child before SIGKILL')
+    const childBefore = {
+      observedAt: performance.timeOrigin + performance.now(),
+      process: childProcessBefore,
+      pidAlive: alive(childProcessBefore.pid),
+      groupAlive: groupAlive(childProcessBefore.pgid),
+    }
     process.kill(perturbatorWorker.pid, 'SIGKILL')
+    const killAt = performance.timeOrigin + performance.now()
 
     await waitFor(
       async () => {
@@ -1042,6 +1139,9 @@ async function main(): Promise<void> {
       'post-crash MCP call',
     )
 
+    const mcpAfterObservedAt = performance.timeOrigin + performance.now()
+    const mcpAfter = findMcpProcess(await api<WorkerIntrospection>(base, '/api/test/worker'), 'test-server')
+
     const witnessView = await waitFor(
       async () => {
         const view = await api<SessionView>(base, `/api/sessions/${witnessId}`)
@@ -1051,7 +1151,6 @@ async function main(): Promise<void> {
       'witness completion',
     )
     await streamDonePromise
-    clearInterval(identityPoll)
     const observerResultPromise = waitForObserverMessage(
       observer,
       (message) => message.type === 'result',
@@ -1069,20 +1168,14 @@ async function main(): Promise<void> {
       10_000,
       'zero-orphan proof',
     )
+    const childAfter = {
+      observedAt: performance.timeOrigin + performance.now(),
+      inventory: readProcessInventory(childBefore.process.pid),
+      groupAlive: groupAlive(childBefore.process.pgid),
+    }
     const perturbatorView = await api<SessionView>(base, `/api/sessions/${perturbatorId}`)
     const mcpServers = await api<{ servers: Array<{ name: string; status: string }> }>(base, '/api/mcp/servers')
     const mcpConnected = mcpServers.servers.some((item) => item.name === 'test-server' && item.status === 'connected')
-    const finalWitness =
-      witnessIdentities.at(-1) ??
-      (() => {
-        throw new Error('No witness identity observed after SIGKILL')
-      })()
-    const witnessStable = witnessIdentities.every(
-      (identity) =>
-        identity.pid === witnessWorker.pid &&
-        identity.token.workerId === witnessWorker.token.workerId &&
-        identity.token.generation === witnessWorker.token.generation,
-    )
     const gitResult = toolResult(perturbatorView, 'run_command')
     const pdfResult = toolResult(perturbatorView, 'read_file')
     const runResults = perturbatorView.messages.flatMap((message) =>
@@ -1096,6 +1189,7 @@ async function main(): Promise<void> {
     const stdoutMetric = await readLoadMetric(join(projectDir, 'stdout-load.metric'))
 
     const passed = printSummary(
+      revision,
       root,
       port,
       workload,
@@ -1115,9 +1209,12 @@ async function main(): Promise<void> {
       stdoutMetric,
       killAt,
       observed.streamDoneAt,
-      finalWitness,
-      witnessStable,
+      observed.identityObservations,
       alive(perturbatorWorker.pid),
+      childBefore,
+      childAfter,
+      { observedAt: mcpBeforeObservedAt, process: mcpBefore },
+      { observedAt: mcpAfterObservedAt, process: mcpAfter },
       crash,
       witnessView,
       perturbatorView,

@@ -30,6 +30,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
   StdioClientTransport: vi.fn(function () {
     return {
+      pid: 4321,
       start: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
     }
@@ -70,6 +71,13 @@ describe('applyMcpServerUpdate server isolation', () => {
     expect(alpha.status).toBe('connected')
     expect(alpha.tools).toHaveLength(2)
     expect(beta.tools).toHaveLength(2)
+  })
+
+  it('reports connected stdio process IDs', () => {
+    expect(manager.getStdioProcessIds()).toEqual([
+      { name: 'alpha', pid: 4321 },
+      { name: 'beta', pid: 4321 },
+    ])
   })
 
   it('should toggle alpha disabled without affecting beta', async () => {
