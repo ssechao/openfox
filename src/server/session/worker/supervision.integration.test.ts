@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -95,6 +95,35 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('w
       errors: [],
     })
   }, 10_000)
+
+  it('excludes a historical child whose recorded identity is already absent', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'openfox-supervision-stale-'))
+    directories.push(directory)
+    const childrenPath = join(directory, 'worker.children')
+    writeFileSync(
+      childrenPath,
+      [
+        JSON.stringify({ type: 'reservation', id: 'reservation-done', command: 'done' }),
+        JSON.stringify({
+          type: 'child',
+          reservationId: 'reservation-done',
+          pid: 20,
+          startedAt: 'linux:old',
+          pgid: 200,
+          command: 'done',
+        }),
+      ].join('\n') + '\n',
+    )
+
+    const inventory = captureExclusiveProcessInventory(10, childrenPath, {
+      recordedWorker: { pid: 10, startedAt: 'linux:worker', pgid: 10 },
+      readInventory: () => ({ status: 'absent' }),
+      findReservationPids: () => [],
+    })
+
+    expect(inventory.children).toEqual([])
+    expect(inventory.errors).toEqual([])
+  })
 
   it('fails proof on unreadable identities, live reparented groups, or unreadable reservation scans', async () => {
     const inventory: ExclusiveProcessInventory = {

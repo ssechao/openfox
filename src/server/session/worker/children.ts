@@ -419,22 +419,11 @@ export function captureExclusiveProcessInventory(
 
   const children: ProcessInventoryEntry[] = []
   for (const child of state.children) {
-    if (child.pgid !== undefined) {
-      children.push({
-        pid: child.pid,
-        startedAt: child.startedAt,
-        pgid: child.pgid,
-        ...(child.command ? { command: child.command } : {}),
-      })
-      continue
-    }
     const childRead = readInventory(child.pid, child.command)
     if (childRead.status === 'found' && childRead.process.startedAt === child.startedAt) {
       children.push(childRead.process)
     } else if (childRead.status === 'unreadable') {
       errors.push(`child ${child.pid}: ${childRead.error.message}`)
-    } else {
-      errors.push(`child ${child.pid}: process group unavailable before cleanup`)
     }
   }
 
