@@ -2,7 +2,38 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { spawnLinuxSubreaper } from './linux-subreaper.js'
+import {
+  LINUX_SUBREAPER_PYTHON_ENV,
+  linuxSubreaperSpawnFailure,
+  resolveLinuxSubreaperInterpreter,
+  spawnLinuxSubreaper,
+} from './linux-subreaper.js'
+
+describe('Linux session supervisor python3 prerequisite', () => {
+  it('defaults to python3 and honours the override', () => {
+    expect(resolveLinuxSubreaperInterpreter({})).toBe('python3')
+    expect(resolveLinuxSubreaperInterpreter({ [LINUX_SUBREAPER_PYTHON_ENV]: ' /usr/bin/python3.12 ' })).toBe(
+      '/usr/bin/python3.12',
+    )
+    expect(resolveLinuxSubreaperInterpreter({ [LINUX_SUBREAPER_PYTHON_ENV]: '   ' })).toBe('python3')
+  })
+
+  it('names python3 and the override when the interpreter is missing', () => {
+    const failure = linuxSubreaperSpawnFailure(
+      Object.assign(new Error('spawn python3 ENOENT'), { code: 'ENOENT' }),
+      'python3',
+    )
+    expect(failure?.message).toContain('python3')
+    expect(failure?.message).toContain(LINUX_SUBREAPER_PYTHON_ENV)
+    expect(failure?.message).toContain('PR_SET_CHILD_SUBREAPER')
+  })
+
+  it('leaves unrelated spawn errors untouched', () => {
+    expect(
+      linuxSubreaperSpawnFailure(Object.assign(new Error('permission denied'), { code: 'EACCES' }), 'python3'),
+    ).toBeNull()
+  })
+})
 
 describe.runIf(process.platform === 'linux')('Linux session supervisor subreaper', () => {
   it('reaps an adopted detached descendant after its worker is killed', async () => {
@@ -51,6 +82,21 @@ worker.once('message', (pid) => {
       expect(JSON.parse(stdout)).toEqual({ pid: expect.any(Number), exists: false })
     } finally {
       rmSync(root, { recursive: true, force: true })
+    }
+  }, 10_000)
+
+  it('reports a python3-naming failure when the configured interpreter is missing', async () => {
+    const previous = process.env[LINUX_SUBREAPER_PYTHON_ENV]
+    const missing = join(tmpdir(), `openfox-missing-python-${Date.now()}`)
+    process.env[LINUX_SUBREAPER_PYTHON_ENV] = missing
+    try {
+      const child = spawnLinuxSubreaper({ path: 'ignored.cjs', execArgv: [], env: process.env })
+      const error = await new Promise<NodeJS.ErrnoException>((resolve) => child.once('error', resolve))
+      expect(error.code).toBe('ENOENT')
+      expect(linuxSubreaperSpawnFailure(error, missing)?.message).toContain('OPENFOX_PYTHON')
+    } finally {
+      if (previous === undefined) delete process.env[LINUX_SUBREAPER_PYTHON_ENV]
+      else process.env[LINUX_SUBREAPER_PYTHON_ENV] = previous
     }
   }, 10_000)
 })

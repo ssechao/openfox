@@ -11,7 +11,7 @@ import {
   type ProcessInventoryEntry,
 } from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
-import { spawnLinuxSubreaper } from './linux-subreaper.js'
+import { linuxSubreaperSpawnFailure, resolveLinuxSubreaperInterpreter, spawnLinuxSubreaper } from './linux-subreaper.js'
 
 export interface SupervisorWorkerHandle {
   readonly workerKey: string
@@ -205,7 +205,12 @@ export class SessionProcessSupervisor {
     this.child = child
     child.on('message', (message) => this.handleMessage(message as SupervisorToGatewayMessage))
     child.on('error', (error) => {
-      if (!this.ready) this.failStart(new Error(`Session process supervisor startup failed: ${error.message}`))
+      if (this.ready) return
+      const missingInterpreter =
+        process.platform === 'linux' && this.options.forkProcess === undefined
+          ? linuxSubreaperSpawnFailure(error as NodeJS.ErrnoException, resolveLinuxSubreaperInterpreter())
+          : null
+      this.failStart(missingInterpreter ?? new Error(`Session process supervisor startup failed: ${error.message}`))
     })
     child.on('exit', (code, signal) => this.handleExit(code, signal))
 

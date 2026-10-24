@@ -6,6 +6,29 @@ export interface LinuxSubreaperEntry {
   env: NodeJS.ProcessEnv
 }
 
+/** Overrides the interpreter used for the Linux subreaper (defaults to python3). */
+export const LINUX_SUBREAPER_PYTHON_ENV = 'OPENFOX_PYTHON'
+
+export function resolveLinuxSubreaperInterpreter(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env[LINUX_SUBREAPER_PYTHON_ENV]?.trim()
+  return configured && configured.length > 0 ? configured : 'python3'
+}
+
+/**
+ * Linux-only prerequisite: the subreaper is a small Python 3 program that sets
+ * PR_SET_CHILD_SUBREAPER, so every worker descendant is adopted and reaped
+ * instead of surviving as an orphan. When the interpreter is missing, surface
+ * a startup error that names it instead of a bare "spawn ENOENT".
+ */
+export function linuxSubreaperSpawnFailure(error: NodeJS.ErrnoException, interpreter: string): Error | null {
+  if (error.code !== 'ENOENT') return null
+  return new Error(
+    `${interpreter} is required on Linux to run the OpenFox session process supervisor ` +
+      `(it installs PR_SET_CHILD_SUBREAPER so no worker descendant is orphaned). ` +
+      `Install it (e.g. apt-get install -y python3) or set ${LINUX_SUBREAPER_PYTHON_ENV} to a Python 3 binary.`,
+  )
+}
+
 export const LINUX_SUBREAPER_SCRIPT = String.raw`
 import ctypes
 import os
@@ -87,7 +110,8 @@ sys.exit(os.waitstatus_to_exitcode(supervisor_status))
 `
 
 export function spawnLinuxSubreaper(entry: LinuxSubreaperEntry): ChildProcess {
-  return spawn('python3', ['-c', LINUX_SUBREAPER_SCRIPT, process.execPath, ...entry.execArgv, entry.path], {
+  const interpreter = resolveLinuxSubreaperInterpreter()
+  return spawn(interpreter, ['-c', LINUX_SUBREAPER_SCRIPT, process.execPath, ...entry.execArgv, entry.path], {
     env: entry.env,
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     windowsHide: true,

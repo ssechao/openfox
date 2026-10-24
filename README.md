@@ -67,6 +67,7 @@ openfox provider remove   # Remove provider
 ## Requirements
 
 - Node.js >= 24.0.0
+- **Linux only:** a `python3` interpreter on `PATH`. The session process supervisor runs a small Python 3 helper that installs `PR_SET_CHILD_SUBREAPER`, so worker descendants are reaped instead of surviving as orphans. Startup fails with an explicit error naming `python3` when it is missing; set `OPENFOX_PYTHON` to point at a specific Python 3 binary. (Production on macOS does not need it.)
 - Local LLM backend with OpenAI-compatible API:
   - vLLM
   - sglang
@@ -152,6 +153,7 @@ _Vision Fallback — Image processing configuration_
 | `OPENFOX_MODE`                       | `production`               | Force mode: `production`, `development`, `test`                 |
 | `OPENFOX_SERVICE`                    | `false`                    | Run as systemd service (suppresses browser open)                |
 | `OPENFOX_GIT_POLL_INTERVAL`          | `10000`                    | Git status poll interval in ms                                  |
+| `OPENFOX_PYTHON`                     | `python3`                  | Python 3 interpreter for the Linux session supervisor           |
 | `OPENFOX_DISABLE_AUTO_SESSION_TITLE` | `false`                    | Disable automatic session title generation                      |
 
 ## License
