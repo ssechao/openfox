@@ -5,6 +5,7 @@ import type { TurnEvent } from '../events/types.js'
 import {
   checkToolChangesAndInject,
   computeDynamicContextHash,
+  computeSessionHash,
   getToolFingerprint,
   injectContextDriftReminders,
   injectContextDriftRemindersForSessions,
@@ -545,6 +546,28 @@ describe('injectContextDriftReminders', () => {
     expect(sessionManager.setAnnouncedPromptHash).toHaveBeenCalledWith(
       's1',
       computeDynamicContextHash('instructions', [], undefined, 'concrete-model'),
+    )
+  })
+
+  it('computes the session hash with the concrete session model instead of the active global model', async () => {
+    const definitions = [tool('read_file')]
+    vi.mocked(getToolRegistryForAgent).mockReturnValue({ definitions } as never)
+    const sessionManager = createSelfContainedSessionManager()
+    ;(sessionManager.resolveEffectiveProviderModel as ReturnType<typeof vi.fn>).mockReturnValue({
+      providerId: 'session-provider',
+      model: 'auto',
+      reasoningEffort: 'high',
+    })
+    ;(sessionManager.getProviderManager as ReturnType<typeof vi.fn>).mockReturnValue({
+      resolveModel: () => 'session-concrete-model',
+      createClient: () => ({ getModel: () => 'session-concrete-model' }),
+      getCurrentModel: () => 'global-active-model',
+    })
+
+    const hash = await computeSessionHash(sessionManager, 's1')
+
+    expect(hash).toBe(
+      computeDynamicContextHash('instructions', [], getToolFingerprint(definitions), 'session-concrete-model'),
     )
   })
 

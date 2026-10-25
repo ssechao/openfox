@@ -32,6 +32,7 @@ import { WorkerMcpClient } from './mcp-client.js'
 import { WorkerInteractiveClient } from './interactive-client.js'
 import { linkAbortSignal } from './abort-link.js'
 import { storedEventToServerMessage } from '../../ws/protocol.js'
+import { setRequestInvariantReporter } from '../../llm/request-invariant.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -56,6 +57,8 @@ const send = (msg: WorkerToGatewayMessage, onFlush?: () => void): void => {
     onFlush?.()
   }
 }
+
+setRequestInvariantReporter((data) => send({ ...token, type: 'request.invariant', data }))
 
 const controller = new AbortController()
 let mcpClient: WorkerMcpClient | null = null

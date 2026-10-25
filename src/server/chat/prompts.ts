@@ -66,8 +66,6 @@ export function buildBasePrompt(
 
   return `You are OpenFox, an agentic assistant.
 
-Today's date is ${new Date().toISOString().split('T')[0]!.replace(/-/g, '/')}
-
 ## ENVIRONMENT
 Working directory: ${workdir}
 The working directory may change during a session; if a later <system-reminder> names a workspace, trust that value over this one.

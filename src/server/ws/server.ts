@@ -1092,8 +1092,7 @@ async function handleClientMessage(
           }
 
           if (cachedHash) {
-            const modelName = session.providerModel ?? _providerManager?.getCurrentModel()
-            const currentHash = await computeSessionHash(sessionManager, session.id, modelName)
+            const currentHash = await computeSessionHash(sessionManager, session.id)
             if (currentHash !== cachedHash) {
               sessionManager.setDynamicContextChanged(session.id, true)
               sendContextState()
@@ -1237,9 +1236,7 @@ async function handleClientMessage(
       ;(async () => {
         try {
           await mcpReadyPromise
-          const session = sessionManager.requireSession(sessionId)
-          const modelName = session.providerModel ?? _providerManager?.getCurrentModel()
-          const currentHash = await computeSessionHash(sessionManager, sessionId, modelName)
+          const currentHash = await computeSessionHash(sessionManager, sessionId)
           const cachedHash = sessionManager.getCachedPrompt(sessionId)?.hash
 
           if (cachedHash) {
@@ -1363,8 +1360,7 @@ async function handleClientMessage(
 
       ;(async () => {
         try {
-          const modelName = session.providerModel ?? _providerManager?.getCurrentModel()
-          await applyDynamicContext(sessionManager, sessionId, modelName)
+          await applyDynamicContext(sessionManager, sessionId)
 
           const newContextState = sessionManager.getContextState(sessionId)
           sendForSession(sessionId, createContextStateMessage(newContextState))

@@ -4,6 +4,7 @@ import type { DiagnosticsData } from '../../../shared/diagnostics.js'
 import type { LLMToolDefinition } from '../../llm/types.js'
 import type { WorkerToken } from './token.js'
 import type { WorkflowLaunchPayload } from '../../runner/launch.js'
+import type { RequestInvariantLog } from '../../llm/request-invariant.js'
 
 export type { WorkerToken }
 
@@ -117,6 +118,7 @@ export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'ready'; pid: number })
   | (WorkerToken & { type: 'ws'; msg: ServerMessage })
   | (WorkerToken & { type: 'health'; data: DiagnosticsData })
+  | (WorkerToken & { type: 'request.invariant'; data: RequestInvariantLog })
   | (WorkerToken & { type: 'done'; ok: boolean; error?: string })
   | McpRequestMessage
   | McpCancelMessage

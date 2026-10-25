@@ -25,6 +25,7 @@ import { resolveApiProtocol } from './responses-routing.js'
 import { OpenAIHttpClient } from './http-client.js'
 import { OpenAIResponsesHttpClient } from './responses-native.js'
 import { OllamaHttpClient } from './ollama-native.js'
+import { computeRequestInvariantHashes, reportRequestInvariantHashes } from './request-invariant.js'
 
 /**
  * Extract text and thinking content from structured content blocks
@@ -196,12 +197,20 @@ export function createLLMClient(
           ? undefined
           : ((request.reasoningEffort ?? reasoningEffort) as ReasoningEffort | undefined)
 
+        const apiProtocol = currentApiProtocol()
         const { params: createParams } = await buildNonStreamingCreateParams({
           model,
           request,
           profile,
           capabilities,
           ...buildExtraParams(resolvedEffort),
+        })
+        reportRequestInvariantHashes({
+          ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+          apiProtocol,
+          model,
+          reasoningEffort: resolvedEffort ?? null,
+          ...computeRequestInvariantHashes(createParams, apiProtocol),
         })
         const httpResponse = await httpFor(backend).createChatCompletion(
           createParams,
@@ -289,6 +298,14 @@ export function createLLMClient(
         })
 
         const { params: streamingParams } = createParams
+        const apiProtocol = currentApiProtocol()
+        reportRequestInvariantHashes({
+          ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+          apiProtocol,
+          model,
+          reasoningEffort: resolvedEffort ?? null,
+          ...computeRequestInvariantHashes(streamingParams, apiProtocol),
+        })
 
         // Idle timeout tracking. Set up BEFORE the stream, because the stream has to be given a
         // signal the timeout can pull: aborting a controller nothing listens to only sets a flag,

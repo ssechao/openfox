@@ -25,7 +25,8 @@ vi.mock('./http-client.js', () => ({
   },
 }))
 
-vi.mock('./responses-native.js', () => ({
+vi.mock('./responses-native.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./responses-native.js')>()),
   OpenAIResponsesHttpClient: class MockOpenAIResponsesHttpClient {
     createChatCompletion = responsesCreateMock
     createChatCompletionStream = responsesStreamMock

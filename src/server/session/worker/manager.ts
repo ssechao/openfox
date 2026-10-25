@@ -373,6 +373,8 @@ export class SessionWorkerManager {
       } else if (msg.type === 'health') {
         const pid = worker.child.pid
         this.deps.healthAggregator?.recordSnapshot(token, msg.data, pid === undefined ? undefined : { sessionId, pid })
+      } else if (msg.type === 'request.invariant') {
+        logger.debug('LLM request invariant hashes', { ...msg.data })
       } else if (msg.type === 'mcp.request') {
         this.mcpBroker?.handleRequest(msg)
       } else if (msg.type === 'mcp.cancel') {

@@ -591,11 +591,12 @@ export async function computeSessionHash(
 ): Promise<string> {
   const { instructionContent, skills } = await loadSessionContext(sessionManager, sessionId)
   const agentDef = await resolveAgentDef(sessionManager, sessionId)
+  const effectiveModelName = modelName ?? resolveConcreteModelName(sessionManager, sessionId, agentDef.metadata.id)
 
-  const tools = await getEffectiveToolDefinitions(agentDef, sessionId, modelName)
+  const tools = await getEffectiveToolDefinitions(agentDef, sessionId, effectiveModelName)
   const toolFingerprint = getToolFingerprint(tools)
 
-  return computeDynamicContextHash(instructionContent, skills, toolFingerprint, modelName)
+  return computeDynamicContextHash(instructionContent, skills, toolFingerprint, effectiveModelName)
 }
 
 export async function applyDynamicContext(
@@ -606,11 +607,12 @@ export async function applyDynamicContext(
   const session = sessionManager.requireSession(sessionId)
   const allAgents = await loadAllAgentsDefault(sessionManager.getProjectWorkdir(sessionId))
   const agentDef = findAgentById(session.mode, allAgents) ?? findAgentById(resolveDefaultAgentId(), allAgents)!
+  const effectiveModelName = modelName ?? resolveConcreteModelName(sessionManager, sessionId, agentDef.metadata.id)
   const { systemPrompt, tools, hash, promptHash } = await buildCachedPrompt(
     sessionManager,
     sessionId,
     agentDef,
-    modelName,
+    effectiveModelName,
   )
 
   sessionManager.setCachedPrompt(sessionId, systemPrompt, tools, hash, promptHash)

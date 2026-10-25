@@ -1554,8 +1554,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const messages = session.messages ?? []
     if (messages.length === 0) {
       const { applyDynamicContext } = await import('./chat/dynamic-context.js')
-      const modelName = session.providerModel ?? providerManager.getCurrentModel()
-      await applyDynamicContext(sessionManager, sessionId, modelName)
+      await applyDynamicContext(sessionManager, sessionId)
     } else {
       sessionManager.setDynamicContextChanged(sessionId, true)
     }
