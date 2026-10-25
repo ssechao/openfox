@@ -48,7 +48,7 @@ describe('worker health series', () => {
     expect(live.series.eventLoopDelayP99.value).toBe(7)
     expect(aggregator.activeSnapshots()).toHaveLength(1)
 
-    aggregator.expireWorker(workerToken)
+    aggregator.expireWorker(workerToken, 'crash')
 
     const afterCrash = aggregator.aggregate(gatewayData)
     expect(afterCrash.series.eventLoopDelayP99.value).toBe(3)
@@ -65,7 +65,7 @@ describe('worker health series', () => {
       { workerId: 'w1', generation: 1 },
       makeData({ eventLoopDelayP99: { unit: 'ms', window: { startMs: 0, endMs: 10_000 }, samples: 10, value: 7 } }),
     )
-    aggregator.expireWorker({ workerId: 'w1', generation: 1 })
+    aggregator.expireWorker({ workerId: 'w1', generation: 1 }, 'crash')
     aggregator.recordSnapshot(
       { workerId: 'w1', generation: 2 },
       makeData({ eventLoopDelayP99: { unit: 'ms', window: { startMs: 0, endMs: 10_000 }, samples: 10, value: 9 } }),
@@ -111,7 +111,7 @@ describe('worker health series', () => {
       makeData({ eventLoopDelayP99: { unit: 'ms', window: { startMs: 0, endMs: 10_000 }, samples: 10, value: 12 } }),
     )
 
-    aggregator.expireWorker({ workerId: 'w1', generation: 1 })
+    aggregator.expireWorker({ workerId: 'w1', generation: 1 }, 'crash')
 
     const result = aggregator.aggregate(gatewayData)
     expect(result.series.eventLoopDelayP99.value).toBe(12)
@@ -140,8 +140,8 @@ describe('worker health series — TTL on receivedAt', () => {
     expect(result.series.eventLoopDelayP99.value).toBe(3)
     expect(aggregator.activeSnapshots()).toHaveLength(0)
     // But it is exposed for debugging with its identity.
-    expect(result.staleSeries).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000 }])
-    expect(aggregator.staleSeries()).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000 }])
+    expect(result.staleSeries).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000, reason: 'ttl' }])
+    expect(aggregator.staleSeries()).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000, reason: 'ttl' }])
   })
 
   it('keeps a snapshot within the TTL active', () => {
@@ -171,19 +171,19 @@ describe('worker health series — TTL on receivedAt', () => {
     const result = aggregator.aggregate(gatewayData)
     expect(result.series.eventLoopDelayP99.value).toBe(9)
     // The stale gen-1 entry is still exposed (different identity), the fresh gen-2 is not.
-    expect(result.staleSeries).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000 }])
+    expect(result.staleSeries).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000, reason: 'ttl' }])
   })
 
-  it('expireWorker removes a series entirely (not listed as stale)', () => {
+  it('expireWorker excludes a dead series and retains its crash reason', () => {
     let clock = 10_000
     const aggregator = createHealthAggregator({ now: () => clock })
     const gatewayData = makeData({ eventLoopDelayP99: p99(3) })
 
     aggregator.recordSnapshot({ workerId: 'w1', generation: 1 }, makeData({ eventLoopDelayP99: p99(7) }))
-    aggregator.expireWorker({ workerId: 'w1', generation: 1 })
+    aggregator.expireWorker({ workerId: 'w1', generation: 1 }, 'crash')
 
     const result = aggregator.aggregate(gatewayData)
     expect(result.series.eventLoopDelayP99.value).toBe(3)
-    expect(result.staleSeries).toEqual([])
+    expect(result.staleSeries).toEqual([{ workerId: 'w1', generation: 1, receivedAt: 10_000, reason: 'crash' }])
   })
 })

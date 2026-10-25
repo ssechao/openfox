@@ -4,6 +4,7 @@ import type {
   DiagnosticsSeries,
   StaleWorkerSeries,
   WorkerProcessDiagnostics,
+  WorkerSeriesExpiryReason,
 } from '../../shared/diagnostics.js'
 import type { WorkerToken } from '../session/worker/protocol.js'
 
@@ -17,19 +18,24 @@ interface StoredSnapshot {
   data: DiagnosticsData
   receivedAt: number
   owner?: WorkerProcessOwner
+  expiredAt?: number
+  expiryReason?: Exclude<WorkerSeriesExpiryReason, 'ttl'>
 }
 
 export interface HealthAggregatorOptions {
   now?: () => number
   /** A worker snapshot older than this is treated as stale (default 2500 ms). */
   staleAfterMs?: number
+  staleRetentionMs?: number
+  maxStaleSeries?: number
 }
 
 export interface HealthAggregator {
   recordSnapshot(token: WorkerToken, data: DiagnosticsData, owner?: WorkerProcessOwner): void
-  expireWorker(token: WorkerToken): void
+  expireWorker(token: WorkerToken, reason: Exclude<WorkerSeriesExpiryReason, 'ttl'>): void
   activeSnapshots(): DiagnosticsData[]
   staleSeries(): StaleWorkerSeries[]
+  retainedSnapshots(): number
   aggregate(gatewayData: DiagnosticsData): DiagnosticsData
 }
 
@@ -72,23 +78,56 @@ function mergeSeries(
 export function createHealthAggregator(options: HealthAggregatorOptions = {}): HealthAggregator {
   const readClock = options.now ?? Date.now
   const staleAfterMs = options.staleAfterMs ?? 2_500
+  const staleRetentionMs = options.staleRetentionMs ?? 600_000
+  const maxStaleSeries = Math.max(0, Math.floor(options.maxStaleSeries ?? 1_000))
   const snapshots = new Map<string, StoredSnapshot>()
 
-  function recordSnapshot(token: WorkerToken, data: DiagnosticsData, owner?: WorkerProcessOwner): void {
-    snapshots.set(keyFor(token), { token, data, receivedAt: readClock(), ...(owner ? { owner } : {}) })
+  function isStale(snapshot: StoredSnapshot, now: number): boolean {
+    return snapshot.expiryReason !== undefined || now - snapshot.receivedAt > staleAfterMs
   }
 
-  function expireWorker(token: WorkerToken): void {
-    snapshots.delete(keyFor(token))
+  function staleAt(snapshot: StoredSnapshot): number {
+    return snapshot.expiredAt ?? snapshot.receivedAt + staleAfterMs
+  }
+
+  function prune(now: number): void {
+    const retainedStale: Array<{ key: string; staleAt: number }> = []
+    for (const [key, snapshot] of snapshots) {
+      if (!isStale(snapshot, now)) continue
+      const since = staleAt(snapshot)
+      if (now - since > staleRetentionMs) snapshots.delete(key)
+      else retainedStale.push({ key, staleAt: since })
+    }
+
+    const excess = retainedStale.length - maxStaleSeries
+    if (excess <= 0) return
+    retainedStale.sort((a, b) => a.staleAt - b.staleAt)
+    for (const { key } of retainedStale.slice(0, excess)) snapshots.delete(key)
+  }
+
+  function recordSnapshot(token: WorkerToken, data: DiagnosticsData, owner?: WorkerProcessOwner): void {
+    const now = readClock()
+    prune(now)
+    snapshots.set(keyFor(token), { token, data, receivedAt: now, ...(owner ? { owner } : {}) })
+  }
+
+  function expireWorker(token: WorkerToken, reason: Exclude<WorkerSeriesExpiryReason, 'ttl'>): void {
+    const now = readClock()
+    const snapshot = snapshots.get(keyFor(token))
+    if (snapshot && !snapshot.expiryReason) {
+      snapshot.expiredAt = now
+      snapshot.expiryReason = reason
+    }
+    prune(now)
   }
 
   function partition(now = readClock()): { fresh: StoredSnapshot[]; stale: StoredSnapshot[] } {
-    const cutoff = now - staleAfterMs
+    prune(now)
     const fresh: StoredSnapshot[] = []
     const stale: StoredSnapshot[] = []
     for (const snapshot of snapshots.values()) {
-      if (snapshot.receivedAt >= cutoff) fresh.push(snapshot)
-      else stale.push(snapshot)
+      if (isStale(snapshot, now)) stale.push(snapshot)
+      else fresh.push(snapshot)
     }
     return { fresh, stale }
   }
@@ -97,12 +136,17 @@ export function createHealthAggregator(options: HealthAggregatorOptions = {}): H
     return partition().fresh.map((s) => s.data)
   }
 
+  function staleEntry(snapshot: StoredSnapshot): StaleWorkerSeries {
+    return {
+      workerId: snapshot.token.workerId,
+      generation: snapshot.token.generation,
+      receivedAt: snapshot.receivedAt,
+      reason: snapshot.expiryReason ?? 'ttl',
+    }
+  }
+
   function staleSeries(): StaleWorkerSeries[] {
-    return partition().stale.map((s) => ({
-      workerId: s.token.workerId,
-      generation: s.token.generation,
-      receivedAt: s.receivedAt,
-    }))
+    return partition().stale.map(staleEntry)
   }
 
   function processSnapshot(snapshot: StoredSnapshot, now: number): WorkerProcessDiagnostics | null {
@@ -115,9 +159,10 @@ export function createHealthAggregator(options: HealthAggregatorOptions = {}): H
       pid: snapshot.owner.pid,
       rss: snapshot.data.series.rss.value,
       heapUsed: snapshot.data.series.heapUsed.value,
+      series: snapshot.data.series,
       receivedAt: snapshot.receivedAt,
       ageMs,
-      freshness: ageMs <= staleAfterMs ? 'fresh' : 'stale',
+      freshness: snapshot.expiryReason === undefined && ageMs <= staleAfterMs ? 'fresh' : 'stale',
     }
   }
 
@@ -144,11 +189,7 @@ export function createHealthAggregator(options: HealthAggregatorOptions = {}): H
     return {
       ...gatewayData,
       series,
-      staleSeries: stale.map((s) => ({
-        workerId: s.token.workerId,
-        generation: s.token.generation,
-        receivedAt: s.receivedAt,
-      })),
+      staleSeries: stale.map(staleEntry),
       workerProcesses: [...snapshots.values()].flatMap((snapshot) => {
         const process = processSnapshot(snapshot, now)
         return process ? [process] : []
@@ -161,6 +202,7 @@ export function createHealthAggregator(options: HealthAggregatorOptions = {}): H
     expireWorker,
     activeSnapshots,
     staleSeries,
+    retainedSnapshots: () => snapshots.size,
     aggregate,
   }
 }

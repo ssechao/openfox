@@ -64,10 +64,13 @@ export interface RuntimeSnapshot {
  * than the 2500 ms TTL. Exposed for debugging only — it never
  * participates in p50/p99/max or any gauge.
  */
+export type WorkerSeriesExpiryReason = 'exit' | 'crash' | 'shutdown' | 'ttl'
+
 export interface StaleWorkerSeries {
   workerId: string
   generation: number
   receivedAt: number
+  reason: WorkerSeriesExpiryReason
 }
 
 export type WorkerProcessFreshness = 'fresh' | 'stale'
@@ -79,6 +82,7 @@ export interface WorkerProcessDiagnostics {
   pid: number
   rss: number | null
   heapUsed: number | null
+  series: Record<DiagnosticsSeriesName, DiagnosticsSeries>
   receivedAt: number
   ageMs: number
   freshness: WorkerProcessFreshness

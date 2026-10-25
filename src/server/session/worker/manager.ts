@@ -599,7 +599,7 @@ export class SessionWorkerManager {
       return cleanupError
     } finally {
       clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
-      this.deps.healthAggregator?.expireWorker(worker.token)
+      this.deps.healthAggregator?.expireWorker(worker.token, 'shutdown')
     }
   }
 
@@ -934,7 +934,7 @@ export class SessionWorkerManager {
         logger.error('Worker token recovery deadline exceeded', { sessionId, error: tokenClearError })
       }
     }
-    this.deps.healthAggregator?.expireWorker(token)
+    this.deps.healthAggregator?.expireWorker(token, clean ? 'exit' : 'crash')
 
     if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
       const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
