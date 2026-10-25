@@ -54,6 +54,7 @@ describe('worker process diagnostics', () => {
         pid: 101,
         rss: 300,
         heapUsed: 150,
+        series: makeData(300, 150).series,
         receivedAt: 10_000,
         ageMs: 2_500,
         freshness: 'fresh',
@@ -65,6 +66,7 @@ describe('worker process diagnostics', () => {
         pid: 202,
         rss: 400,
         heapUsed: 200,
+        series: makeData(400, 200).series,
         receivedAt: 11_000,
         ageMs: 1_500,
         freshness: 'fresh',
@@ -76,15 +78,34 @@ describe('worker process diagnostics', () => {
     expect(stale.series.rss.value).toBe(400)
     expect(stale.workerProcesses?.[0]).toMatchObject({ ageMs: 2_501, freshness: 'stale' })
     expect(stale.workerProcesses?.[1]).toMatchObject({ ageMs: 1_501, freshness: 'fresh' })
-    expect(stale.staleSeries).toEqual([{ workerId: 'worker-a', generation: 3, receivedAt: 10_000 }])
+    expect(stale.staleSeries).toEqual([{ workerId: 'worker-a', generation: 3, receivedAt: 10_000, reason: 'ttl' }])
   })
 
-  it('removes a settled worker process from diagnostics', () => {
-    const aggregator = createHealthAggregator()
-    const token = { workerId: 'worker-a', generation: 1 }
-    aggregator.recordSnapshot(token, makeData(300, 150), { sessionId: 'session-a', pid: 101 })
-    aggregator.expireWorker(token)
+  it.each(['exit', 'crash', 'shutdown'] as const)(
+    'retains a worker expired by %s for 10 minutes, then evicts it',
+    (reason) => {
+      let clock = 10_000
+      const aggregator = createHealthAggregator({ now: () => clock })
+      const token = { workerId: 'worker-a', generation: 1 }
+      aggregator.recordSnapshot(token, makeData(300, 150), { sessionId: 'session-a', pid: 101 })
+      aggregator.expireWorker(token, reason)
 
-    expect(aggregator.aggregate(makeData(100, 50)).workerProcesses).toEqual([])
-  })
+      expect(aggregator.activeSnapshots()).toEqual([])
+      expect(aggregator.aggregate(makeData(100, 50))).toMatchObject({
+        staleSeries: [{ workerId: 'worker-a', generation: 1, receivedAt: 10_000, reason }],
+        workerProcesses: [
+          {
+            sessionId: 'session-a',
+            workerId: 'worker-a',
+            generation: 1,
+            freshness: 'stale',
+            series: makeData(300, 150).series,
+          },
+        ],
+      })
+
+      clock += 600_001
+      expect(aggregator.aggregate(makeData(100, 50))).toMatchObject({ staleSeries: [], workerProcesses: [] })
+    },
+  )
 })

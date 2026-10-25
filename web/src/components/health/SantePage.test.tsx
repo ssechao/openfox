@@ -30,28 +30,29 @@ function series(unit: DiagnosticsSeries['unit'], value: number | null, samples: 
 }
 
 function payload(): DiagnosticsData {
+  const diagnosticsSeries: DiagnosticsData['series'] = {
+    eventLoopDelayP50: series('ms', 1.5, 500),
+    eventLoopDelayP99: series('ms', 42, 500),
+    eventLoopDelayMax: series('ms', 210, 500),
+    healthLatencyP99: series('ms', null, 0),
+    eventStoreReadP99: series('ms', 3, 12),
+    eventStoreWriteP99: series('ms', 0.8, 40),
+    walSize: series('bytes', 4 * 1024 * 1024, 10),
+    runningSessions: series('count', 2, 10),
+    rss: series('bytes', 300 * 1024 * 1024, 10),
+    heapUsed: series('bytes', 120 * 1024 * 1024, 10),
+    snapshotCacheHits: series('count', 4, 10),
+    snapshotCacheMisses: series('count', 2, 10),
+    snapshotCacheBytes: series('bytes', 12 * 1024 * 1024, 10),
+    snapshotCacheEvictions: series('count', 1, 10),
+    snapshotCacheLimitBytes: series('bytes', 16 * 1024 * 1024, 10),
+  }
   return {
     collectedAt: NOW,
     intervalMs: 1_000,
     windowMs: 10_000,
     historyMs: 60_000,
-    series: {
-      eventLoopDelayP50: series('ms', 1.5, 500),
-      eventLoopDelayP99: series('ms', 42, 500),
-      eventLoopDelayMax: series('ms', 210, 500),
-      healthLatencyP99: series('ms', null, 0),
-      eventStoreReadP99: series('ms', 3, 12),
-      eventStoreWriteP99: series('ms', 0.8, 40),
-      walSize: series('bytes', 4 * 1024 * 1024, 10),
-      runningSessions: series('count', 2, 10),
-      rss: series('bytes', 300 * 1024 * 1024, 10),
-      heapUsed: series('bytes', 120 * 1024 * 1024, 10),
-      snapshotCacheHits: series('count', 4, 10),
-      snapshotCacheMisses: series('count', 2, 10),
-      snapshotCacheBytes: series('bytes', 12 * 1024 * 1024, 10),
-      snapshotCacheEvictions: series('count', 1, 10),
-      snapshotCacheLimitBytes: series('bytes', 16 * 1024 * 1024, 10),
-    },
+    series: diagnosticsSeries,
     runtimes: [],
     workerProcesses: [
       {
@@ -61,6 +62,11 @@ function payload(): DiagnosticsData {
         pid: 4242,
         rss: 256 * 1024 * 1024,
         heapUsed: 96 * 1024 * 1024,
+        series: {
+          ...diagnosticsSeries,
+          rss: series('bytes', 256 * 1024 * 1024, 1),
+          heapUsed: series('bytes', 96 * 1024 * 1024, 1),
+        },
         receivedAt: NOW - 1_250,
         ageMs: 1_250,
         freshness: 'fresh',
@@ -72,11 +78,17 @@ function payload(): DiagnosticsData {
         pid: 4343,
         rss: 128 * 1024 * 1024,
         heapUsed: 48 * 1024 * 1024,
+        series: {
+          ...diagnosticsSeries,
+          rss: series('bytes', 128 * 1024 * 1024, 1),
+          heapUsed: series('bytes', 48 * 1024 * 1024, 1),
+        },
         receivedAt: NOW - 3_000,
         ageMs: 3_000,
         freshness: 'stale',
       },
     ],
+    staleSeries: [{ workerId: 'worker-old', generation: 2, receivedAt: NOW - 3_000, reason: 'crash' }],
     history: Array.from({ length: 60 }, (_, index) => ({
       timestamp: NOW - (59 - index) * 1_000,
       eventLoopDelayMax: index === 55 ? 210 : 2,
@@ -150,7 +162,7 @@ describe('SantePage', () => {
     expect(text(container, 'sante-error')).toContain('/api/diagnostics')
   })
 
-  it('shows each worker process with identity, memory, age, and freshness', async () => {
+  it('shows each worker process with identity, raw series, age, freshness, and stale reason', async () => {
     vi.mocked(authFetch).mockResolvedValue(ok(payload()))
     const container = render()
     await flush()
@@ -161,7 +173,11 @@ describe('SantePage', () => {
     expect(text(container, 'sante-worker-worker-abc-7')).toContain('Heap 96.0 MiB')
     expect(text(container, 'sante-worker-worker-abc-7')).toContain('1.3 s')
     expect(text(container, 'sante-worker-worker-abc-7')).toContain('Fresh')
+    expect(text(container, 'sante-worker-series-worker-abc-7-eventLoopDelayP99')).toContain('42 ms')
+    expect(text(container, 'sante-worker-series-worker-abc-7-eventLoopDelayP99')).toContain('500 samples')
     expect(text(container, 'sante-worker-worker-old-2')).toContain('Stale')
+    expect(text(container, 'sante-stale-series-worker-old-2')).toContain('worker-old')
+    expect(text(container, 'sante-stale-series-worker-old-2')).toContain('Crashed')
   })
 
   it('shows the runtimes panel with state and last command', async () => {

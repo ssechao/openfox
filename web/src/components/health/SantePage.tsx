@@ -4,6 +4,7 @@ import type {
   RuntimeLastCommand,
   RuntimeSnapshot,
   RuntimeState,
+  WorkerSeriesExpiryReason,
 } from '@shared/diagnostics.js'
 import { DIAGNOSTICS_SERIES_NAMES } from '@shared/diagnostics.js'
 import type { Translation } from '@shared/i18n/index.js'
@@ -47,6 +48,13 @@ const RUNTIME_COMMAND_LABELS: Record<RuntimeLastCommand, Translation> = {
   answer: { en: 'Answer', fr: 'Réponse' },
   workflow: { en: 'Workflow', fr: 'Workflow' },
   compact: { en: 'Compact', fr: 'Compactage' },
+}
+
+const WORKER_EXPIRY_LABELS: Record<WorkerSeriesExpiryReason, Translation> = {
+  exit: { en: 'Exited', fr: 'Sortie normale' },
+  crash: { en: 'Crashed', fr: 'Crash' },
+  shutdown: { en: 'Shutdown', fr: 'Arrêt' },
+  ttl: { en: 'TTL expired', fr: 'Délai dépassé' },
 }
 
 function formatValue(series: DiagnosticsSeries): string {
@@ -205,6 +213,69 @@ export function SantePage() {
                           },
                         )}
                       </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-2">
+                        {DIAGNOSTICS_SERIES_NAMES.map((name) => {
+                          const series = worker.series[name]
+                          return (
+                            <div
+                              key={name}
+                              data-testid={`sante-worker-series-${worker.workerId}-${worker.generation}-${name}`}
+                              className="flex items-center justify-between gap-2 text-text-muted"
+                            >
+                              <span className="truncate">{t(SERIES_LABELS[name])}</span>
+                              <span className="whitespace-nowrap">
+                                {t(
+                                  {
+                                    en: '{{value}} · {{samples}} samples',
+                                    fr: '{{value}} · {{samples}} échantillons',
+                                  },
+                                  {
+                                    value:
+                                      series.value === null
+                                        ? t({ en: 'No data', fr: 'Pas de données' })
+                                        : formatValue(series),
+                                    samples: series.samples,
+                                  },
+                                )}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="rounded border border-border bg-bg-secondary p-3" data-testid="sante-stale-series">
+              <h2 className="text-sm font-medium text-text-primary mb-2">
+                {t({ en: 'Expired worker series', fr: 'Séries workers expirées' })}
+              </h2>
+              {(data.staleSeries ?? []).length === 0 ? (
+                <div className="text-sm text-text-muted">
+                  {t({ en: 'No expired worker series', fr: 'Aucune série worker expirée' })}
+                </div>
+              ) : (
+                <ul className="space-y-1">
+                  {(data.staleSeries ?? []).map((series) => (
+                    <li
+                      key={`${series.workerId}-${series.generation}`}
+                      data-testid={`sante-stale-series-${series.workerId}-${series.generation}`}
+                      className="flex items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="text-text-primary break-all">
+                        {t(
+                          {
+                            en: '{{workerId}} · generation {{generation}}',
+                            fr: '{{workerId}} · génération {{generation}}',
+                          },
+                          { workerId: series.workerId, generation: series.generation },
+                        )}
+                      </span>
+                      <span className="text-accent-warning whitespace-nowrap">
+                        {t(WORKER_EXPIRY_LABELS[series.reason])}
+                      </span>
                     </li>
                   ))}
                 </ul>

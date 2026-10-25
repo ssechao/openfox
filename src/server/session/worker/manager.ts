@@ -575,7 +575,7 @@ export class SessionWorkerManager {
       return cleanupError
     } finally {
       clearWorkerToken(this.deps.db(), worker.sessionId, worker.token)
-      this.deps.healthAggregator?.expireWorker(worker.token)
+      this.deps.healthAggregator?.expireWorker(worker.token, 'shutdown')
     }
   }
 
@@ -805,7 +805,7 @@ export class SessionWorkerManager {
     const recoveryDeadlineAt = worker.recoveryDeadlineAt ?? recoveryStartedAt + WORKER_RECOVERY_TIMEOUT_MS
 
     clearWorkerToken(db, sessionId, token)
-    this.deps.healthAggregator?.expireWorker(token)
+    this.deps.healthAggregator?.expireWorker(token, clean ? 'exit' : 'crash')
 
     if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
       const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
