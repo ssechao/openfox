@@ -130,6 +130,7 @@ describe('executeTools', () => {
 
     expect(mockToolRegistry.execute).not.toHaveBeenCalled()
     expect(result.toolMessages[0]?.content).toContain('explicitly reconciled')
+    expect(result.reconciliationRequired).toBe(true)
     expect(
       append.mock.calls.find((args: unknown[]) => (args[0] as TurnEvent).type === 'tool.result')?.[0],
     ).toMatchObject({ data: { result: { success: false, metadata: { reconciliationRequired: true } } } })

@@ -404,6 +404,28 @@ describe('agentLoop integration', () => {
     expect(chatDoneEvents.length).toBeGreaterThanOrEqual(1)
   })
 
+  it('stops immediately when an effectful tool is refused for reconciliation', async () => {
+    const append = vi.fn()
+    const toolCall: ToolCall = { id: 'call-1', name: 'step_done', arguments: {} }
+
+    ;(consumeStreamGenerator as any).mockResolvedValueOnce(
+      makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }),
+    )
+    ;(executeTools as any).mockResolvedValue({
+      toolMessages: [{ role: 'tool', content: 'reconciliation required', source: 'history', toolCallId: 'call-1' }],
+      stepDoneCalled: false,
+      reconciliationRequired: true,
+    })
+
+    const result = await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+
+    expect(result.failed?.error).toContain('reconciliation')
+    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
+    expect(append.mock.calls).toContainEqual([
+      expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'error' }) }),
+    ])
+  })
+
   it('continues loop when step_done is not called', async () => {
     const append = vi.fn()
     const toolCall: ToolCall = { id: 'call-1', name: 'run_command', arguments: { command: 'echo hi' } }

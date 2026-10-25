@@ -554,12 +554,16 @@ export async function executeWorkflow(
         const agentStep = step as AgentStep
         const STEP_DONE_PROMPT = "\n\nOnce you're done, call step_done()"
 
-        // When resuming from the same step after abort, skip re-injecting the
-        // prompt or nudge — the agent already knows what step it's in and the
-        // user's message (which triggered the resume) is already in context.
-        // LLM-failure retries happen inside streamLLMPure, so the prompt +
-        // reminder stay in history untouched and are never re-injected.
         const isResumingCurrentStep = isResume && step.id === resumeFromStep && !resumeConsumed
+        if (isResumingCurrentStep) {
+          emitWorkflowMessage(
+            eventStore,
+            sessionId,
+            'This workflow step has resumed. Any previous step_done call belongs to the interrupted execution. Call step_done() again when this resumed execution is complete.',
+            currentWindowMessageOptions,
+            onMessage,
+          )
+        }
 
         // Build prompt content
         let promptContent: string | null

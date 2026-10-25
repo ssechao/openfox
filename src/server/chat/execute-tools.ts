@@ -42,6 +42,7 @@ export interface ToolBatchResult {
   returnValueContent?: string | undefined
   returnValueResult?: string | undefined
   stepDoneCalled?: boolean | undefined
+  reconciliationRequired?: boolean | undefined
 }
 
 export interface ExecutedToolCall {
@@ -376,5 +377,15 @@ export async function executeTools(
     })
   }
 
-  return { toolMessages, criteriaChanged: false, returnValueContent, returnValueResult, stepDoneCalled }
+  const reconciliationRequired = results.some(
+    ({ toolResult }) => toolResult.metadata?.['reconciliationRequired'] === true,
+  )
+  return {
+    toolMessages,
+    criteriaChanged: false,
+    returnValueContent,
+    returnValueResult,
+    stepDoneCalled,
+    reconciliationRequired,
+  }
 }

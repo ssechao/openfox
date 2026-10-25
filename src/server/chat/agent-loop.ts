@@ -849,6 +849,21 @@ ${COMPACTION_PROMPT}`,
         batchContext.allowParallelSubAgents = getSetting(SETTINGS_KEYS.AGENT_ALLOW_PARALLEL_SUB_AGENTS) === 'true'
         const batchResult = await executeTools(assistantMsgId, result.toolCalls, batchContext, append)
         pendingToolResultTokens = estimateToolResultTokens(batchResult.toolMessages)
+        if (batchResult.reconciliationRequired) {
+          const error = 'Tool reconciliation is required before this turn can continue'
+          emitDoneAndBreak(
+            assistantMsgId,
+            result.segments,
+            statsIdentity,
+            mode,
+            turnMetrics,
+            append,
+            onMessage,
+            'error',
+            agentType,
+          )
+          return { failed: { error } }
+        }
         if (batchResult.stepDoneCalled) {
           emitDoneAndBreak(
             assistantMsgId,

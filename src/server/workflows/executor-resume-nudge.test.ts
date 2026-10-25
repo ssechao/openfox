@@ -279,4 +279,47 @@ describe('workflow resume nudge injection', () => {
 
     expect(nudgeEvents.length).toBe(3)
   })
+
+  it('reattaches step_done to a resumed Finalize execution', async () => {
+    mockRunAgentTurn.mockImplementation(
+      async (
+        _opts: any,
+        _metrics: any,
+        _agentId: string,
+        _append: any,
+        extra: { onToolExecuted?: (tc: any, tr: any) => void } | undefined,
+      ) => {
+        const reset = mockAppend.mock.calls.some(
+          (call: any[]) =>
+            call[1]?.type === 'message.start' &&
+            typeof call[1]?.data?.content === 'string' &&
+            (call[1].data.content as string).includes('previous step_done call belongs to the interrupted execution'),
+        )
+        if (reset) extra?.onToolExecuted?.({ name: 'step_done', arguments: {} }, { success: true, output: '' })
+        return { returnValueResult: 'completed', returnValueContent: '' }
+      },
+    )
+    const workflow = createWorkflow({
+      entryStep: 'finalize',
+      steps: [
+        {
+          id: 'finalize',
+          name: 'Finalize',
+          type: 'agent',
+          phase: 'verification',
+          agentId: 'builder',
+          prompt: 'Summarize the completed work and call step_done().',
+          transitions: [{ when: { type: 'always' }, goto: '$done' }],
+        },
+      ],
+    })
+
+    const result = await executeWorkflow(
+      workflow,
+      createMockOptions({ resumeFromStep: 'finalize', initialStepOutput: {} }),
+    )
+
+    expect(result.finalAction.type).toBe('DONE')
+    expect(mockRunAgentTurn).toHaveBeenCalledTimes(1)
+  })
 })
