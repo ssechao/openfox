@@ -108,4 +108,44 @@ describe('worker process diagnostics', () => {
       expect(aggregator.aggregate(makeData(100, 50))).toMatchObject({ staleSeries: [], workerProcesses: [] })
     },
   )
+
+  it('bounds stale snapshots without diagnostics reads between worker exits', () => {
+    let clock = 10_000
+    const aggregator = createHealthAggregator({ now: () => clock, maxStaleSeries: 3 })
+
+    for (let generation = 1; generation <= 5; generation++) {
+      const token = { workerId: 'worker-a', generation }
+      aggregator.recordSnapshot(token, makeData(300 + generation, 150 + generation), {
+        sessionId: `session-${generation}`,
+        pid: 100 + generation,
+      })
+      aggregator.expireWorker(token, 'exit')
+      clock += 1
+    }
+
+    expect(aggregator.retainedSnapshots()).toBe(3)
+    const result = aggregator.aggregate(makeData(100, 50))
+    expect(result.staleSeries).toEqual([
+      { workerId: 'worker-a', generation: 3, receivedAt: 10_002, reason: 'exit' },
+      { workerId: 'worker-a', generation: 4, receivedAt: 10_003, reason: 'exit' },
+      { workerId: 'worker-a', generation: 5, receivedAt: 10_004, reason: 'exit' },
+    ])
+    expect(result.workerProcesses).toHaveLength(3)
+  })
+
+  it('purges expired retention on the next write without a diagnostics read', () => {
+    let clock = 10_000
+    const aggregator = createHealthAggregator({ now: () => clock })
+    const expired = { workerId: 'worker-a', generation: 1 }
+    aggregator.recordSnapshot(expired, makeData(300, 150), { sessionId: 'session-a', pid: 101 })
+    aggregator.expireWorker(expired, 'exit')
+
+    clock += 600_001
+    aggregator.recordSnapshot({ workerId: 'worker-b', generation: 1 }, makeData(400, 200), {
+      sessionId: 'session-b',
+      pid: 202,
+    })
+
+    expect(aggregator.retainedSnapshots()).toBe(1)
+  })
 })
