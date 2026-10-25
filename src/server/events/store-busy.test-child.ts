@@ -44,4 +44,4 @@ process.on('message', (message) => {
   }
 })
 
-process.send?.('ready')
+process.send?.({ type: 'ready', busyTimeoutMs: db.pragma('busy_timeout', { simple: true }) })

@@ -8,7 +8,8 @@ import { ensureSearchSchema } from '../search/fts-index.js'
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
-const BUSY_TIMEOUT_MS = 10_000
+export const GATEWAY_DB_BUSY_TIMEOUT_MS = 5
+export const WORKER_DB_BUSY_TIMEOUT_MS = 10_000
 
 export function initDatabase(config: Config): Database.Database {
   if (db) {
@@ -28,7 +29,7 @@ export function initDatabase(config: Config): Database.Database {
 
   try {
     db = new Database(config.database.path)
-    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
+    db.pragma(`busy_timeout = ${GATEWAY_DB_BUSY_TIMEOUT_MS}`)
     db.pragma('journal_mode = WAL')
     db.pragma('foreign_keys = ON')
 
@@ -93,7 +94,7 @@ export function attachWorkerDatabase(dbPath: string): Database.Database {
   assertTestDatabasePath(dbPath)
   logger.info('Worker attaching to database', { path: dbPath, pid: process.pid })
   db = new Database(dbPath)
-  db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
+  db.pragma(`busy_timeout = ${WORKER_DB_BUSY_TIMEOUT_MS}`)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   return db

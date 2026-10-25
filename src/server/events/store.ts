@@ -56,7 +56,10 @@ const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 export const STREAM_FLUSH_INTERVAL_MS = 250
 export const STREAM_FLUSH_MAX_BYTES = 4096
 export const APPEND_BUSY_DEADLINE_MS = 30_000
+export const GATEWAY_APPEND_BUSY_DEADLINE_MS = 10
+export const GATEWAY_APPEND_RECOVERY_DEADLINE_MS = 10_000
 const APPEND_BUSY_INITIAL_BACKOFF_MS = 5
+const GATEWAY_APPEND_RECOVERY_DELAY_MS = 25
 const APPEND_BUSY_MAX_BACKOFF_MS = 250
 const appendBusySleep = new Int32Array(new SharedArrayBuffer(4))
 
@@ -87,7 +90,7 @@ function isUniqueConstraintError(error: unknown): boolean {
   return err?.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err?.message ?? '').includes('UNIQUE constraint failed')
 }
 
-function isBusyError(error: unknown): boolean {
+export function isBusyError(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
   return (
     typeof code === 'string' &&
@@ -321,6 +324,8 @@ export class EventStore {
   private readonly appendBusyDeadlineMs: number
   private readonly appendBusyInitialBackoffMs: number
   private readonly appendBusyMaxBackoffMs: number
+  private readonly appendRecoveryDeadlineMs: number
+  private recoverableAppendTail: Promise<void> = Promise.resolve()
 
   private checkExternalWrites(): void {
     if (!this.hotPath) return
@@ -465,6 +470,7 @@ export class EventStore {
       appendBusyDeadlineMs?: number
       appendBusyInitialBackoffMs?: number
       appendBusyMaxBackoffMs?: number
+      appendRecoveryDeadlineMs?: number
       /** Worker fencing (étape 6a): invoked inside every append transaction;
        *  must throw when this writer's token is stale. Gateway instances leave
        *  it unset. */
@@ -491,6 +497,10 @@ export class EventStore {
     this.appendBusyMaxBackoffMs = Math.max(
       this.appendBusyInitialBackoffMs,
       options.appendBusyMaxBackoffMs ?? APPEND_BUSY_MAX_BACKOFF_MS,
+    )
+    this.appendRecoveryDeadlineMs = Math.max(
+      this.appendBusyDeadlineMs,
+      options.appendRecoveryDeadlineMs ?? GATEWAY_APPEND_RECOVERY_DEADLINE_MS,
     )
     this.db = db
     this.writeFence = options.writeFence
@@ -636,6 +646,69 @@ export class EventStore {
       : this.appendEvent(sessionId, event, true, options)
   }
 
+  runRecoverable<T>(sessionId: string, operationType: string, operation: () => T): Promise<T> {
+    const run = async (): Promise<T> => {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      const startedAt = performance.now()
+      let attempts = 0
+      let lastError: unknown
+
+      while (true) {
+        attempts++
+        try {
+          return operation()
+        } catch (error) {
+          if (!isBusyError(error)) throw error
+          lastError = error
+          const elapsedMs = performance.now() - startedAt
+          if (elapsedMs >= this.appendRecoveryDeadlineMs) {
+            const timeout = new EventStoreBusyTimeoutError(
+              sessionId,
+              operationType,
+              attempts,
+              this.appendRecoveryDeadlineMs,
+              lastError,
+            )
+            logger.error('Recoverable database operation deadline exceeded', {
+              sessionId,
+              type: operationType,
+              attempts,
+              deadlineMs: this.appendRecoveryDeadlineMs,
+              elapsedMs: Math.round(elapsedMs),
+              error: error instanceof Error ? error.message : String(error),
+            })
+            throw timeout
+          }
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(GATEWAY_APPEND_RECOVERY_DELAY_MS, this.appendRecoveryDeadlineMs - elapsedMs)),
+          )
+        }
+      }
+    }
+
+    const pending = this.recoverableAppendTail.then(run)
+    this.recoverableAppendTail = pending.then(
+      () => undefined,
+      () => undefined,
+    )
+    return pending
+  }
+
+  appendRecoverable(
+    sessionId: string,
+    event: TurnEvent,
+    options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
+  ): Promise<StoredEvent> {
+    return this.runRecoverable(sessionId, event.type, () => {
+      const recoverableOptions = { ...options, reportBusyTimeout: false }
+      return event.type === 'turn.snapshot'
+        ? this.measureSnapshotOperation('snapshotAppend', () =>
+            this.appendEvent(sessionId, event, true, recoverableOptions),
+          )
+        : this.appendEvent(sessionId, event, true, recoverableOptions)
+    })
+  }
+
   appendStreaming(sessionId: string, event: TurnEvent): void {
     if (!isStreamFragment(event)) {
       this.append(sessionId, event)
@@ -739,7 +812,7 @@ export class EventStore {
     for (const ref of collectBlobRefs(data)) clear.call(this.blobStore, ref.hash)
   }
 
-  private retryBusy<T>(sessionId: string, eventType: string, operation: () => T): T {
+  private retryBusy<T>(sessionId: string, eventType: string, operation: () => T, reportTimeout = true): T {
     const startedAt = performance.now()
     let attempts = 0
 
@@ -758,14 +831,16 @@ export class EventStore {
             this.appendBusyDeadlineMs,
             error,
           )
-          logger.error('Event not persisted: database lock deadline exceeded', {
-            sessionId,
-            type: eventType,
-            attempts,
-            deadlineMs: this.appendBusyDeadlineMs,
-            elapsedMs: Math.round(elapsedMs),
-            error: error instanceof Error ? error.message : String(error),
-          })
+          if (reportTimeout) {
+            logger.error('Event not persisted: database lock deadline exceeded', {
+              sessionId,
+              type: eventType,
+              attempts,
+              deadlineMs: this.appendBusyDeadlineMs,
+              elapsedMs: Math.round(elapsedMs),
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }
           throw timeout
         }
         const exponentialMs = this.appendBusyInitialBackoffMs * 2 ** Math.min(attempts - 1, 16)
@@ -781,7 +856,7 @@ export class EventStore {
     sessionId: string,
     event: TurnEvent,
     notify = true,
-    options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
+    options: { indexSnapshot?: boolean; searchRemoveIds?: string[]; reportBusyTimeout?: boolean } = {},
   ): StoredEvent {
     this.assertValidEvent(sessionId, event)
     this.flushStreaming(sessionId)
@@ -811,8 +886,11 @@ export class EventStore {
       })
       try {
         this.timed('write', () =>
-          this.retryBusy(sessionId, event.type, () =>
-            this.searchIndex.withPendingRollback(() => runImmediateTransaction(transaction)),
+          this.retryBusy(
+            sessionId,
+            event.type,
+            () => this.searchIndex.withPendingRollback(() => runImmediateTransaction(transaction)),
+            options.reportBusyTimeout ?? true,
           ),
         )
         break
@@ -2142,7 +2220,12 @@ export function getStaleRunningSessionIds(): string[] {
 }
 
 export function initEventStore(db: Database.Database): EventStore {
-  eventStoreInstance = new EventStore(db)
+  eventStoreInstance = new EventStore(db, {
+    appendBusyDeadlineMs: GATEWAY_APPEND_BUSY_DEADLINE_MS,
+    appendBusyInitialBackoffMs: 1,
+    appendBusyMaxBackoffMs: 2,
+    appendRecoveryDeadlineMs: GATEWAY_APPEND_RECOVERY_DEADLINE_MS,
+  })
 
   // Reset stale running states from previous server runs.
   // Sessions cannot actually be running when server starts - any session

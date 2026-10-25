@@ -52,7 +52,7 @@ function readWorkerRow(db: Database.Database, sessionId: string): WorkerRow | un
  * worker's fence starts rejecting from this point on.
  */
 export function assignWorkerToken(db: Database.Database, sessionId: string): WorkerToken {
-  const token = db.transaction(() => {
+  const assign = db.transaction(() => {
     const row = readWorkerRow(db, sessionId)
     if (!row) throw new Error(`Cannot assign a worker token: unknown session ${sessionId}`)
     const token: WorkerToken = { workerId: randomUUID(), generation: row.worker_generation + 1 }
@@ -62,8 +62,8 @@ export function assignWorkerToken(db: Database.Database, sessionId: string): Wor
       sessionId,
     )
     return token
-  })()
-  return token
+  })
+  return assign.immediate()
 }
 
 /**

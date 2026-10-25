@@ -20,6 +20,11 @@ const BETTER_SQLITE3 = createRequire(import.meta.url).resolve('better-sqlite3')
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BUSY_WORKER = join(HERE, 'store-busy.test-child.ts')
 
+interface BusyWorkerReady {
+  type: 'ready'
+  busyTimeoutMs: number
+}
+
 interface BusyWorkerResult {
   ok: boolean
   durations: number[]
@@ -99,9 +104,9 @@ describe('database busy handling', () => {
     rmSync(directory, { recursive: true, force: true })
   })
 
-  it('opens the application database with a busy timeout of at least 10 s', () => {
+  it('keeps the gateway database busy timeout short', () => {
     const db = initDatabase({ ...loadConfig(), database: { path } })
-    expect(db.pragma('busy_timeout', { simple: true })).toBeGreaterThanOrEqual(10_000)
+    expect(db.pragma('busy_timeout', { simple: true })).toBe(5)
   })
 
   it('appends once another process releases the write lock it was holding', async () => {
@@ -124,7 +129,12 @@ describe('database busy handling', () => {
     const workerCount = 4
     const eventCount = 8
     const db = initDatabase({ ...loadConfig(), database: { path } })
-    const store = new EventStore(db)
+    const store = new EventStore(db, {
+      appendBusyDeadlineMs: 20,
+      appendBusyInitialBackoffMs: 1,
+      appendBusyMaxBackoffMs: 2,
+      appendRecoveryDeadlineMs: 5_000,
+    })
     const project = createProject('Concurrent busy', directory)
     const gatewaySession = createSession(project.id, directory).id
     const workerSessions = Array.from({ length: workerCount }, () => createSession(project.id, directory).id)
@@ -133,9 +143,16 @@ describe('database busy handling', () => {
       return spawnBusyWorker(path, sessionId, token, eventCount)
     })
 
-    await Promise.all(
-      workers.map((child) => waitForMessage(child, (message): message is 'ready' => message === 'ready')),
+    const ready = await Promise.all(
+      workers.map((child) =>
+        waitForMessage(
+          child,
+          (message): message is BusyWorkerReady =>
+            typeof message === 'object' && message !== null && 'type' in message && message.type === 'ready',
+        ),
+      ),
     )
+    expect(ready.every((message) => message.busyTimeoutMs >= 10_000)).toBe(true)
     const results = workers.map((child) =>
       waitForMessage(
         child,
@@ -146,17 +163,18 @@ describe('database busy handling', () => {
     for (const child of workers) child.send('start')
 
     const gatewayDurations: number[] = []
-    for (let index = 0; index < eventCount; index++) {
+    const gatewayWrites = Array.from({ length: eventCount }, async (_, index) => {
       const startedAt = performance.now()
-      store.append(gatewaySession, {
+      await store.appendRecoverable(gatewaySession, {
         type: 'message.start',
         data: { messageId: `gateway-${index}`, role: 'assistant', content: 'contention' },
       })
       gatewayDurations.push(performance.now() - startedAt)
-    }
+    })
 
     expect(await holder).toBe(0)
     const workerResults = await Promise.all(results)
+    await Promise.all(gatewayWrites)
     const failures = workerResults.filter((result) => !result.ok)
     const durations = [...gatewayDurations, ...workerResults.flatMap((result) => result.durations)].sort(
       (left, right) => left - right,
@@ -217,6 +235,34 @@ describe('database busy handling', () => {
         .map((event) => event.seq),
     ).toEqual([3, 4])
     expect(error).toHaveBeenCalledTimes(1)
+    db.close()
+  })
+
+  it('rejects a persistent recoverable timeout explicitly and accepts a later retry', async () => {
+    const db = new Database(path, { timeout: 1 })
+    db.pragma('journal_mode = WAL')
+    const store = new EventStore(db, {
+      appendBusyDeadlineMs: 5,
+      appendBusyInitialBackoffMs: 1,
+      appendBusyMaxBackoffMs: 2,
+      appendRecoveryDeadlineMs: 40,
+    })
+    store.append(SID, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    const holder = new Database(path)
+    holder.exec('BEGIN IMMEDIATE')
+
+    await expect(
+      store.appendRecoverable(SID, { type: 'message.done', data: { messageId: 'u1' } }),
+    ).rejects.toMatchObject({ code: 'EVENT_STORE_BUSY_TIMEOUT', deadlineMs: 40 })
+    expect(error).toHaveBeenCalledTimes(1)
+
+    holder.exec('ROLLBACK')
+    holder.close()
+    await expect(
+      store.appendRecoverable(SID, { type: 'message.done', data: { messageId: 'u1' } }),
+    ).resolves.toMatchObject({ seq: 2 })
+    expect(store.getEvents(SID)).toHaveLength(2)
     db.close()
   })
 

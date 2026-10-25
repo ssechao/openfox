@@ -804,16 +804,32 @@ export class SessionWorkerManager {
     const recoveryStartedAt = worker.stopRequestedAt ?? Date.now()
     const recoveryDeadlineAt = worker.recoveryDeadlineAt ?? recoveryStartedAt + WORKER_RECOVERY_TIMEOUT_MS
 
-    clearWorkerToken(db, sessionId, token)
+    const gatewayEventStore = this.deps.eventStore?.() ?? getEventStore()
+    let tokenClearError: string | undefined
+    try {
+      if (typeof gatewayEventStore.runRecoverable === 'function') {
+        await gatewayEventStore.runRecoverable(sessionId, 'worker.token.clear', () =>
+          clearWorkerToken(db, sessionId, token),
+        )
+      } else {
+        clearWorkerToken(db, sessionId, token)
+      }
+    } catch (error) {
+      tokenClearError = error instanceof Error ? error.message : String(error)
+      logger.error('Worker token recovery deadline exceeded', { sessionId, error: tokenClearError })
+    }
     this.deps.healthAggregator?.expireWorker(token)
 
     if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
       const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
       const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
       if (!isLatestWorkerGeneration(db, sessionId, token)) return
-      const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
-      const eventStore = this.deps.eventStore?.() ?? getEventStore()
-      eventStore.invalidateExternalSession(sessionId)
+      const recoveryErrors = [
+        ...inventory.errors,
+        ...(cleanup.cleanupError ? [cleanup.cleanupError] : []),
+        ...(tokenClearError ? [tokenClearError] : []),
+      ]
+      gatewayEventStore.invalidateExternalSession(sessionId)
       this.retire(worker, {
         crashed: false,
         ...(recoveryErrors.length > 0
