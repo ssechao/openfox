@@ -51,7 +51,7 @@ import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
 import { readProcessInventory } from './session/worker/children.js'
 import { markSessionInterrupted, prepareSessionInterruptionEvents } from './session/worker/crash.js'
-import { consumeAfterAdmission } from './session/worker/resume-admission.js'
+import { admitWithStartFailure, consumeAfterAdmission } from './session/worker/resume-admission.js'
 import {
   isSessionAlreadyRunningError,
   SessionRuntimeRegistry,
@@ -159,6 +159,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   let deferTasksLaunchWorkflow: (
     sessionId: string,
     launch: import('./runner/launch.js').WorkflowLaunchPayload,
+    onDeferredFailure?: (error: Error) => void,
   ) => import('./session/worker/scheduler.js').AdmissionResult = () => 'closed'
   let deferCanStartSession = (_sessionId: string): boolean => true
 
@@ -1899,30 +1900,66 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const db = getDatabase()
-    const { getSessionInterruptedAt, clearSessionInterrupted, planWorkerCrashRecovery } =
+    const { getSessionInterruptedAt, clearSessionInterrupted, markSessionInterrupted, planWorkerCrashRecovery } =
       await import('./session/worker/index.js')
-    if (!getSessionInterruptedAt(db, sessionId)) {
+    const interruptedAt = getSessionInterruptedAt(db, sessionId)
+    if (!interruptedAt) {
       return res.status(409).json({ error: 'Session is not interrupted' })
     }
 
     const eventStore = getEventStore()
     const activeWorkflow = sessionManager.getActiveWorkflowExecution(sessionId)
     if (activeWorkflow) {
-      const result = consumeAfterAdmission(
-        () =>
-          deferTasksLaunchWorkflow(sessionId, {
-            workflowId: activeWorkflow.workflowId,
-            ...(activeWorkflow.currentStepId ? { resumeFrom: activeWorkflow.currentStepId } : {}),
-            ...(Object.keys(activeWorkflow.params).length > 0 ? { params: activeWorkflow.params } : {}),
-            ...(Object.keys(activeWorkflow.stepOutput).length > 0 ? { stepOutput: activeWorkflow.stepOutput } : {}),
-            ...(activeWorkflow.subGroup ? { subGroup: activeWorkflow.subGroup } : {}),
-          }),
-        () => {
-          clearSessionInterrupted(db, sessionId)
-          runtimeRegistry.get(sessionId).recordCommand('resume')
-          broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
-        },
-      )
+      const restoreInterruption = (failure: Error): void => {
+        logger.error('Deferred workflow resume failed; restoring interruption', {
+          sessionId,
+          error: failure.message,
+        })
+        void eventStore
+          .runRecoverable(sessionId, 'session.interruption.restore', () =>
+            markSessionInterrupted(db, sessionId, interruptedAt),
+          )
+          .then(() => {
+            eventStore.invalidateExternalSession(sessionId)
+            broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(interruptedAt))
+          })
+          .catch((error) => {
+            logger.error('Deferred workflow interruption restoration failed', {
+              sessionId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          })
+      }
+
+      let result: ReturnType<typeof consumeAfterAdmission>
+      try {
+        result = consumeAfterAdmission(
+          () =>
+            deferTasksLaunchWorkflow(
+              sessionId,
+              {
+                workflowId: activeWorkflow.workflowId,
+                ...(activeWorkflow.currentStepId ? { resumeFrom: activeWorkflow.currentStepId } : {}),
+                ...(Object.keys(activeWorkflow.params).length > 0 ? { params: activeWorkflow.params } : {}),
+                ...(Object.keys(activeWorkflow.stepOutput).length > 0 ? { stepOutput: activeWorkflow.stepOutput } : {}),
+                ...(activeWorkflow.subGroup ? { subGroup: activeWorkflow.subGroup } : {}),
+              },
+              restoreInterruption,
+            ),
+          () => {
+            clearSessionInterrupted(db, sessionId)
+            runtimeRegistry.get(sessionId).recordCommand('resume')
+            broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
+          },
+        )
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error))
+        logger.error('Interrupted workflow failed to start', { sessionId, error: failure.message })
+        return res.status(503).json({
+          error: failure.message,
+          code: 'WORKER_LAUNCH_FAILED',
+        })
+      }
       if (!result.consumed) {
         const status = result.admission === 'full' ? 429 : 503
         return res.status(status).json({
@@ -3921,7 +3958,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Point the tasks service at the workflow launcher. Task-seeded workflows run
   // through the same shared launcher as runner.launch (src/server/runner/launch.ts).
   const { launchWorkflowRun } = await import('./runner/launch.js')
-  deferTasksLaunchWorkflow = (sessionId, launch) => {
+  deferTasksLaunchWorkflow = (sessionId, launch, onDeferredFailure) => {
     const workerPayload = {
       ...(launch.workflowId ? { workflowId: launch.workflowId } : {}),
       ...(launch.params && Object.keys(launch.params).length > 0 ? { params: launch.params } : {}),
@@ -3935,30 +3972,36 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
     const workerController = webSocketWorkerController.current
     if (workerController?.isEnabled()) {
-      const admission = workerController.requestTurn(sessionId, () => {
-        let handle: ExecutionHandle | undefined
-        try {
-          const acquired = runtimeRegistry.get(sessionId).acquire('workflow')
-          handle = acquired
-          workerController.launch(
-            sessionId,
-            (outcome) => {
-              const runtime = runtimeRegistry.peek(sessionId)
-              const stopped = runtime?.wasStopped(acquired) ?? false
-              const released = runtime?.release(acquired) ?? false
-              if (released && !stopped && !outcome.crashed) resumeQueuedSession(sessionId)
-            },
-            {
-              kind: 'workflow',
-              payload: workerPayload,
-            },
-          )
-        } catch (error) {
-          if (handle) runtimeRegistry.peek(sessionId)?.release(handle)
-          workerController.releaseTurn(sessionId)
-          logger.error('Task workflow worker launch failed', { sessionId, error })
-        }
-      })
+      const admission = admitWithStartFailure(
+        (start) => workerController.requestTurn(sessionId, start),
+        () => {
+          let handle: ExecutionHandle | undefined
+          try {
+            const acquired = runtimeRegistry.get(sessionId).acquire('workflow')
+            handle = acquired
+            workerController.launch(
+              sessionId,
+              (outcome) => {
+                const runtime = runtimeRegistry.peek(sessionId)
+                const stopped = runtime?.wasStopped(acquired) ?? false
+                const released = runtime?.release(acquired) ?? false
+                if (released && !stopped && !outcome.crashed) resumeQueuedSession(sessionId)
+              },
+              {
+                kind: 'workflow',
+                payload: workerPayload,
+              },
+            )
+          } catch (error) {
+            if (handle) runtimeRegistry.peek(sessionId)?.release(handle)
+            workerController.releaseTurn(sessionId)
+            const failure = error instanceof Error ? error : new Error(String(error))
+            logger.error('Task workflow worker launch failed', { sessionId, error })
+            throw failure
+          }
+        },
+        (failure) => onDeferredFailure?.(failure),
+      )
       if (admission !== 'started' && admission !== 'waiting') {
         logger.warn('Task workflow worker admission refused', { sessionId, admission })
       }

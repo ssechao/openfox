@@ -19,7 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const betterSqlite3 = createRequire(import.meta.url).resolve('better-sqlite3')
 
 interface SessionView {
-  session: { isRunning: boolean }
+  session: { isRunning: boolean; interruptedAt?: string | null }
   messages: unknown[]
   pendingQuestions: Array<{ callId: string }>
 }
@@ -222,6 +222,62 @@ describe('gateway IPC integration', () => {
 
     expect(target.signal.aborted).toBe(true)
   })
+  it('keeps workflow interruption when immediate token assignment fails and allows retry', async () => {
+    const sessionId = await createSession('resume-token-failure')
+    const ws = await connectWebSocket()
+    await rm(join(root, 'workflow-started'), { force: true })
+    await rm(join(root, 'late-effect'), { force: true })
+
+    try {
+      const launch = waitForWs(ws, (message) => message.id === 'resume-failure-launch')
+      ws.send(
+        JSON.stringify({
+          id: 'resume-failure-launch',
+          type: 'runner.launch',
+          payload: { sessionId, workflowId: 'slow-effect', scope: 'project' },
+        }),
+      )
+      await expect(launch).resolves.toMatchObject({ type: 'ack' })
+      const active = await waitFor(async () => {
+        const response = await fetch(`${base}/api/test/worker`)
+        const body = (await response.json()) as {
+          activeWorkers: Array<{ sessionId: string; pid?: number }>
+        }
+        return body.activeWorkers.find((worker) => worker.sessionId === sessionId) ?? null
+      }, 'workflow worker before token failure')
+      await waitFor(
+        async () =>
+          access(join(root, 'workflow-started'))
+            .then(() => true)
+            .catch(() => null),
+        'workflow side effect before token failure',
+      )
+      process.kill(active.pid!, 'SIGKILL')
+      const interruptedAt = await waitFor(async () => {
+        const view = await getSession(sessionId)
+        return view.session.interruptedAt && !view.session.isRunning ? view.session.interruptedAt : null
+      }, 'workflow interruption before token failure')
+
+      const { exited } = await holdDatabaseLock(join(root, 'sessions.db'), 500)
+      const failed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+      expect(failed.status).toBe(503)
+      await expect(failed.json()).resolves.toMatchObject({ code: 'WORKER_LAUNCH_FAILED' })
+      expect((await getSession(sessionId)).session.interruptedAt).toBe(interruptedAt)
+
+      expect(await exited).toBe(0)
+      const retried = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+      expect(retried.status).toBe(200)
+      await waitFor(async () => {
+        const view = await getSession(sessionId)
+        return !view.session.interruptedAt && !view.session.isRunning ? true : null
+      }, 'workflow retry after token failure')
+    } finally {
+      ws.close()
+      await rm(join(root, 'workflow-started'), { force: true })
+      await rm(join(root, 'late-effect'), { force: true })
+    }
+  }, 30_000)
+
   it('keeps HTTP, WebSocket and Stop responsive while gateway writes recover after a long lock', async () => {
     const stopSessionId = await createSession('busy-stop')
     const writeSessionId = await createSession('busy-write')

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { consumeAfterAdmission } from './resume-admission.js'
+import { admitWithStartFailure, consumeAfterAdmission } from './resume-admission.js'
 
 describe('interrupted workflow resume admission', () => {
   it('keeps the marker on saturation and consumes it only after a retry is queued', () => {
@@ -19,6 +19,43 @@ describe('interrupted workflow resume admission', () => {
     expect(accepted).toEqual({ admission: 'waiting', consumed: true })
     expect(interrupted).toBe(false)
     expect(consume).toHaveBeenCalledTimes(1)
+  })
+
+  it('throws an immediate start failure before admission can consume the marker', () => {
+    const deferredFailure = vi.fn()
+    expect(() =>
+      admitWithStartFailure(
+        (start) => {
+          start()
+          return 'started'
+        },
+        () => {
+          throw new Error('spawn failed')
+        },
+        deferredFailure,
+      ),
+    ).toThrow('spawn failed')
+    expect(deferredFailure).not.toHaveBeenCalled()
+  })
+
+  it('reports a start failure that occurs after a waiting admission returns', () => {
+    let start: (() => void) | undefined
+    const deferredFailure = vi.fn()
+    expect(
+      admitWithStartFailure(
+        (admittedStart) => {
+          start = admittedStart
+          return 'waiting'
+        },
+        () => {
+          throw new Error('token failed')
+        },
+        deferredFailure,
+      ),
+    ).toBe('waiting')
+
+    start?.()
+    expect(deferredFailure).toHaveBeenCalledWith(expect.objectContaining({ message: 'token failed' }))
   })
 
   it.each(['full', 'closed'] as const)('never consumes the marker for %s', (admission) => {
