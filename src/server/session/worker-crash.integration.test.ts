@@ -289,7 +289,6 @@ describe('session worker crash', () => {
     )
     await setWorkerMode(true)
     const sessionId = await createSession('persistent-lock-crash')
-    const witnessId = await createSession('persistent-lock-witness')
     const effectPath = join(workdir, 'persistent-lock-effect.txt')
     await sendMessage(sessionId, `Run the exact command: printf x >> ${JSON.stringify(effectPath)}; sleep 30`)
     const active = await waitFor(() => getActiveWorker(sessionId), 20_000, 'locked crash worker')
@@ -298,6 +297,37 @@ describe('session worker crash', () => {
       20_000,
       'locked crash side effect',
     )
+
+    const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve)
+      ws.once('error', reject)
+    })
+    const queuedResponses: Array<{ type?: string; payload?: { admission?: string; code?: string } }> = []
+    const queuedAck = new Promise<{ type?: string; payload?: { admission?: string } }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timed out waiting for queued compact admission')), 5_000)
+      ws.on('message', (raw) => {
+        const message = JSON.parse(String(raw)) as {
+          id?: string
+          type?: string
+          payload?: { admission?: string; code?: string }
+        }
+        if (message.id !== 'queued-before-crash') return
+        queuedResponses.push(message)
+        if (message.type === 'ack') {
+          clearTimeout(timer)
+          resolve(message)
+        }
+      })
+    })
+    ws.send(
+      JSON.stringify({
+        id: 'queued-before-crash',
+        type: 'context.compact',
+        payload: { sessionId },
+      }),
+    )
+    await expect(queuedAck).resolves.toMatchObject({ type: 'ack', payload: { admission: 'waiting' } })
 
     const { exited } = await holdDatabaseLock(config.database.path, 12_500)
     let lockReleased = false
@@ -311,7 +341,11 @@ describe('session worker crash', () => {
       5_000,
       'worker slot release while database remains locked',
     )
+    await new Promise((resolve) => setTimeout(resolve, 250))
     expect(lockReleased).toBe(false)
+    expect(queuedResponses).toHaveLength(1)
+    expect(queuedResponses[0]).toMatchObject({ type: 'ack', payload: { admission: 'waiting' } })
+    expect((await getWorkerIntrospection()).activeWorkers).toEqual([])
     const crash = await waitFor(async () => (await getWorkerIntrospection()).lastCrash, 5_000, 'early crash report')
     expect(crash.sessionId).toBe(sessionId)
     expect((await getSessionView(sessionId)).session.interruptedAt ?? null).toBeNull()
@@ -327,17 +361,17 @@ describe('session worker crash', () => {
     )
     expect(interrupted.session.interruptedAt).toBeTruthy()
 
-    await sendMessage(witnessId, 'prove released worker slot')
-    const witness = await waitFor(
-      async () => {
-        const view = await getSessionView(witnessId)
-        return !view.session.isRunning && view.messages.some((message) => message.role === 'assistant') ? view : null
-      },
+    expect(queuedResponses).toHaveLength(1)
+    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+    expect(resumed.status).toBe(200)
+    await waitFor(
+      async () => (!(await getSessionView(sessionId)).session.interruptedAt ? true : null),
       20_000,
-      'witness worker after deferred interruption',
+      'explicit resume after deferred interruption',
     )
-    expect(witness.messages.some((message) => message.role === 'assistant')).toBe(true)
+    expect(queuedResponses).toHaveLength(1)
     expect(await readFile(effectPath, 'utf-8')).toBe('x')
+    ws.close()
   }, 60_000)
 
   it('treats a forced Stop as interrupted and refuses to replay an unresolved shell effect', async () => {
