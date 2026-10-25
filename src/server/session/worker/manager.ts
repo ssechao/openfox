@@ -224,8 +224,9 @@ export class SessionWorkerManager {
   }
 
   requestStop(sessionId: string): boolean {
+    const cancellation = this.scheduler.cancel(sessionId)
     const worker = this.active.get(sessionId)
-    if (!worker) return this.scheduler.cancel(sessionId) === 'waiting'
+    if (!worker) return cancellation === 'waiting'
     this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
     this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session stopped by user')
     if (worker.stopRequestedAt === undefined) {
@@ -803,6 +804,7 @@ export class SessionWorkerManager {
     const { sessionId, token } = worker
     const db = this.deps.db()
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
+    if (!clean) this.scheduler.cancel(sessionId)
     const recoveryStartedAt = worker.stopRequestedAt ?? Date.now()
     const recoveryDeadlineAt = worker.recoveryDeadlineAt ?? recoveryStartedAt + WORKER_RECOVERY_TIMEOUT_MS
 

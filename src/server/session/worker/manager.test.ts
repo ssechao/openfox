@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import type { Config } from '../../../shared/types.js'
 import type { SessionManager } from '../manager.js'
+import { SessionRuntimeRegistry } from '../runtime.js'
 import { SessionWorkerManager } from './manager.js'
 import { assignWorkerToken } from './token.js'
 
@@ -195,6 +196,8 @@ describe('SessionWorkerManager', () => {
       kill,
     }) as unknown as ChildProcess
     const settled = vi.fn()
+    const queuedStart = vi.fn()
+    const runtime = new SessionRuntimeRegistry().get('sess-1')
     const appended: string[] = []
     const cleanupChildren = vi.fn(async () => [99])
     const manager = new SessionWorkerManager({
@@ -246,7 +249,21 @@ describe('SessionWorkerManager', () => {
     })
 
     try {
-      manager.launch('sess-1', settled)
+      expect(
+        manager.requestTurn('sess-1', () => {
+          const handle = runtime.acquire('chat')
+          manager.launch('sess-1', (outcome) => {
+            settled(outcome)
+            runtime.release(handle)
+          })
+        }),
+      ).toBe('started')
+      expect(
+        manager.requestTurn('sess-1', () => {
+          queuedStart()
+          runtime.acquire('compact')
+        }),
+      ).toBe('waiting')
       expect(manager.requestStop('sess-1')).toBe(true)
       expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'abort' }))
       expect(kill).not.toHaveBeenCalled()
@@ -263,6 +280,8 @@ describe('SessionWorkerManager', () => {
       expect(settled).toHaveBeenCalledWith({ crashed: true })
       expect(appended).toContain('tool.reconciliation_required')
       expect(manager.activeWorker('sess-1')).toBeNull()
+      expect(queuedStart).not.toHaveBeenCalled()
+      expect(runtime.state).toBe('idle')
       const interrupted = namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get() as {
         interrupted_at: string | null
       }
