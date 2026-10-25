@@ -2269,6 +2269,74 @@ describe('createWebSocketServer', () => {
     await harness.close()
   })
 
+  it('queues compact and runner commands for an active worker session until its runtime releases', async () => {
+    const sessionState: any = {
+      id: 'session-1',
+      projectId: 'project-1',
+      workdir: '/tmp/project',
+      mode: 'planner',
+      phase: 'build',
+      isRunning: true,
+      criteria: [],
+    }
+    const sessionManager = createSessionManager({
+      getSession: vi.fn(() => sessionState),
+      requireSession: vi.fn(() => sessionState),
+      getLatestWorkflowExecution: vi.fn(() => null),
+    })
+    const starts: Array<() => void> = []
+    const launch = vi.fn((_sessionId, settled: (outcome: { crashed: boolean }) => void) => {
+      settled({ crashed: false })
+    })
+    const workerController = {
+      isEnabled: () => true,
+      requestTurn: vi.fn((_sessionId: string, start: () => void) => {
+        starts.push(start)
+        return 'waiting' as const
+      }),
+      releaseTurn: vi.fn(() => true),
+      launch,
+    }
+    const harness = await createHarness({ sessionManager, workerController })
+    const runtime = getSessionRuntimeRegistry().get('session-1')
+
+    harness.send({ id: 'sl-active-worker', type: 'session.load', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'sl-active-worker')
+
+    const commands = [
+      ['compact-active-worker', 'context.compact', { sessionId: 'session-1' }, { kind: 'compact' }],
+      [
+        'runner-active-worker',
+        'runner.launch',
+        { sessionId: 'session-1', workflowId: 'default', resumeFrom: 'build' },
+        { kind: 'workflow' },
+      ],
+    ] as const
+
+    for (const [index, [id, type, payload, expectedCommand]] of commands.entries()) {
+      const active = runtime.acquire('chat')
+      harness.send({ id, type, payload })
+      expect(await harness.nextMessage((message) => message.id === id)).toMatchObject({
+        type: 'ack',
+        payload: { admission: 'waiting' },
+      })
+      expect(launch).toHaveBeenCalledTimes(index)
+      expect(sessionManager.setPhase).not.toHaveBeenCalled()
+      expect(harness.eventStore.append).not.toHaveBeenCalled()
+
+      expect(runtime.release(active)).toBe(true)
+      starts.shift()?.()
+      expect(launch).toHaveBeenLastCalledWith(
+        'session-1',
+        expect.any(Function),
+        expect.objectContaining(expectedCommand),
+      )
+      expect(runtime.state).toBe('idle')
+    }
+
+    await harness.close()
+  })
+
   it('reports an explicit worker queue saturation error', async () => {
     const sessionState: any = {
       id: 'session-1',

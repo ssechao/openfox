@@ -1122,7 +1122,18 @@ async function handleClientMessage(
 
       const session = sessionManager.requireSession(sessionId)
 
-      // Check if session is running
+      if (
+        runInWorkerIfEnabled(sessionId, 'compact', { kind: 'compact' }, () => {
+          try {
+            sendForSession(sessionId, createContextStateMessage(sessionManager.getContextState(sessionId)))
+          } catch {
+            return
+          }
+        })
+      ) {
+        return
+      }
+
       if (session.isRunning) {
         send(
           createErrorMessage(
@@ -1134,18 +1145,6 @@ async function handleClientMessage(
             message.id,
           ),
         )
-        return
-      }
-
-      if (
-        runInWorkerIfEnabled(sessionId, 'compact', { kind: 'compact' }, () => {
-          try {
-            sendForSession(sessionId, createContextStateMessage(sessionManager.getContextState(sessionId)))
-          } catch {
-            return
-          }
-        })
-      ) {
         return
       }
 
@@ -1403,21 +1402,6 @@ async function handleClientMessage(
 
       const session = sessionManager.requireSession(sessionId)
 
-      if (session.isRunning) {
-        sendForSession(
-          sessionId,
-          createErrorMessage(
-            'SESSION_RUNNING',
-            serverT({
-              en: 'Cannot launch a workflow while a turn is running',
-              fr: 'Impossible de lancer un workflow pendant un tour en cours',
-            }),
-            message.id,
-          ),
-        )
-        return
-      }
-
       // Skip criteria check when resuming from a user step
       if (!launchPayloadEarly?.resumeFrom) {
         const pendingCriteria = session.criteria.filter((c) => c.status.type !== 'passed')
@@ -1460,6 +1444,21 @@ async function handleClientMessage(
         ...(launchPayload?.userChoice ? { userChoice: launchPayload.userChoice } : {}),
       }
       if (runInWorkerIfEnabled(sessionId, 'workflow', { kind: 'workflow', payload: workerPayload })) return
+
+      if (session.isRunning) {
+        sendForSession(
+          sessionId,
+          createErrorMessage(
+            'SESSION_RUNNING',
+            serverT({
+              en: 'Cannot launch a workflow while a turn is running',
+              fr: 'Impossible de lancer un workflow pendant un tour en cours',
+            }),
+            message.id,
+          ),
+        )
+        return
+      }
 
       // Acquire before any side effect so a concurrent chat/compact/stop cannot race.
       const workflowHandle = acquireRuntime(sessionId, 'workflow', message.id, send)

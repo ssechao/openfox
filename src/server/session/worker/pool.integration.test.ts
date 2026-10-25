@@ -80,6 +80,7 @@ describe('SessionTurnScheduler', () => {
     expect(scheduler.admit('active', () => {})).toBe('started')
     expect(scheduler.admit('active', () => {})).toBe('waiting')
     expect(scheduler.admit('active', () => {})).toBe('waiting')
+    expect(scheduler.canAccept('active')).toBe(false)
     expect(scheduler.admit('active', () => {})).toBe('full')
   })
 

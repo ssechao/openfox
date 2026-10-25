@@ -77,7 +77,11 @@ export class SessionTurnScheduler {
 
   canAccept(sessionId: string): boolean {
     if (this.closed) return false
-    if (this.active.has(sessionId) || this.waiting.some((entry) => entry.sessionId === sessionId)) return true
+    const maxQueued = this.options.maxQueuedCommandsPerSession ?? MAX_QUEUED_COMMANDS_PER_SESSION
+    const activeQueue = this.active.get(sessionId)
+    if (activeQueue) return activeQueue.length < maxQueued
+    const waiting = this.waiting.find((entry) => entry.sessionId === sessionId)
+    if (waiting) return waiting.starts.length < maxQueued
     return this.active.size < this.options.maxConcurrent || this.waiting.length < this.options.maxWaitingSessions
   }
 
