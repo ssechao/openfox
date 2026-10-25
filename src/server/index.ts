@@ -49,6 +49,7 @@ import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
 import { readProcessInventory } from './session/worker/children.js'
 import { markSessionInterrupted, prepareSessionInterruptionEvents } from './session/worker/crash.js'
+import { consumeAfterAdmission } from './session/worker/resume-admission.js'
 import {
   isSessionAlreadyRunningError,
   SessionRuntimeRegistry,
@@ -156,7 +157,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   let deferTasksLaunchWorkflow: (
     sessionId: string,
     launch: import('./runner/launch.js').WorkflowLaunchPayload,
-  ) => void = () => {}
+  ) => import('./session/worker/scheduler.js').AdmissionResult = () => 'closed'
   let deferCanStartSession = (_sessionId: string): boolean => true
 
   // Get config directory for loading user items
@@ -1898,18 +1899,35 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const eventStore = getEventStore()
     const activeWorkflow = sessionManager.getActiveWorkflowExecution(sessionId)
     if (activeWorkflow) {
-      clearSessionInterrupted(db, sessionId)
-      runtimeRegistry.get(sessionId).recordCommand('resume')
-      broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
-      deferTasksLaunchWorkflow(sessionId, {
+      const result = consumeAfterAdmission(
+        () =>
+          deferTasksLaunchWorkflow(sessionId, {
+            workflowId: activeWorkflow.workflowId,
+            ...(activeWorkflow.currentStepId ? { resumeFrom: activeWorkflow.currentStepId } : {}),
+            ...(Object.keys(activeWorkflow.params).length > 0 ? { params: activeWorkflow.params } : {}),
+            ...(Object.keys(activeWorkflow.stepOutput).length > 0 ? { stepOutput: activeWorkflow.stepOutput } : {}),
+            ...(activeWorkflow.subGroup ? { subGroup: activeWorkflow.subGroup } : {}),
+          }),
+        () => {
+          clearSessionInterrupted(db, sessionId)
+          runtimeRegistry.get(sessionId).recordCommand('resume')
+          broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
+        },
+      )
+      if (!result.consumed) {
+        const status = result.admission === 'full' ? 429 : 503
+        return res.status(status).json({
+          error: `Session worker admission ${result.admission}; the interruption remains resumable`,
+          code: 'WORKER_ADMISSION_REFUSED',
+          admission: result.admission,
+        })
+      }
+      logger.info('Interrupted workflow resumed explicitly', {
+        sessionId,
         workflowId: activeWorkflow.workflowId,
-        ...(activeWorkflow.currentStepId ? { resumeFrom: activeWorkflow.currentStepId } : {}),
-        ...(Object.keys(activeWorkflow.params).length > 0 ? { params: activeWorkflow.params } : {}),
-        ...(Object.keys(activeWorkflow.stepOutput).length > 0 ? { stepOutput: activeWorkflow.stepOutput } : {}),
-        ...(activeWorkflow.subGroup ? { subGroup: activeWorkflow.subGroup } : {}),
+        admission: result.admission,
       })
-      logger.info('Interrupted workflow resumed explicitly', { sessionId, workflowId: activeWorkflow.workflowId })
-      return res.json({ success: true })
+      return res.json({ success: true, admission: result.admission })
     }
 
     const plan = planWorkerCrashRecovery(eventStore.getEvents(sessionId), false)
@@ -3935,7 +3953,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       if (admission !== 'started' && admission !== 'waiting') {
         logger.warn('Task workflow worker admission refused', { sessionId, admission })
       }
-      return
+      return admission
     }
 
     // Honor the session's effective provider/model (agent override > session
@@ -3957,7 +3975,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     } catch (error) {
       if (isSessionAlreadyRunningError(error)) {
         logger.warn('Cannot launch workflow: session already owned', { sessionId, error: error.message })
-        return
+        return 'full'
       }
       throw error
     }
@@ -3978,6 +3996,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       },
       workerPayload,
     )
+    return 'started'
   }
 
   // Wire MCP config tool to broadcast changes to all connected UIs
