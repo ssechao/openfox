@@ -552,6 +552,75 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it('blocks queued and direct launches while crash cleanup is suspended', async () => {
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-crash-barrier-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    let finishCleanup: (pids: number[]) => void = () => {}
+    const cleanup = new Promise<number[]>((resolve) => {
+      finishCleanup = resolve
+    })
+    const cleanupChildren = vi.fn(() => cleanup)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const spawnWorker = vi.fn(() => child)
+    const settled = vi.fn()
+    const queuedStart = vi.fn()
+    const directSettled = vi.fn()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        getActiveWorkflowExecution: () => null,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+      processSupervisor: { spawnWorker } as never,
+      captureInventory: (pid) => ({
+        capturedAt: Date.now(),
+        worker: { pid, startedAt: `linux:${pid}`, pgid: pid },
+        children: [],
+        groups: [],
+        reservations: [],
+        errors: [],
+      }),
+      cleanupChildren,
+      verifyInventory: async (inventory) => ({
+        checkedAt: inventory.capturedAt + 2_000,
+        clean: true,
+        survivingIdentities: [],
+        survivingGroups: [],
+        liveReservations: [],
+        errors: [],
+      }),
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+
+    expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+    child.emit('exit', null, 'SIGKILL')
+    await vi.waitFor(() => expect(cleanupChildren).toHaveBeenCalledOnce())
+
+    expect(manager.requestTurn('sess-1', queuedStart)).toBe('full')
+    expect(() => manager.launch('sess-1', directSettled)).toThrow(/interruption/i)
+
+    finishCleanup([])
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledWith({ crashed: true }))
+    expect(queuedStart).not.toHaveBeenCalled()
+    expect(directSettled).not.toHaveBeenCalled()
+  })
+
   it('keeps a successor generation admitted when stopped-worker cleanup finishes after T+2', async () => {
     vi.useFakeTimers()
     const { db, namedDb } = createDb(

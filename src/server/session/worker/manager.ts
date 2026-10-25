@@ -272,6 +272,9 @@ export class SessionWorkerManager {
     command: WorkerTurnCommand = { kind: 'chat' },
   ): void {
     if (this.admissionsClosed) throw new Error('Session worker admissions are closed during shutdown')
+    if (this.pendingInterruptions.has(sessionId)) {
+      throw new Error('Session interruption persistence is still pending')
+    }
     if (this.active.has(sessionId)) throw new Error('This session already has a worker')
 
     const db = this.deps.db()
@@ -899,7 +902,10 @@ export class SessionWorkerManager {
     const { sessionId, token } = worker
     const db = this.deps.db()
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
-    if (!clean) this.scheduler.cancel(sessionId)
+    if (!clean) {
+      if (worker.stopRequestedAt === undefined) this.pendingInterruptions.add(sessionId)
+      this.scheduler.cancel(sessionId)
+    }
     const recoveryStartedAt = worker.stopRequestedAt ?? Date.now()
     const recoveryDeadlineAt = worker.recoveryDeadlineAt ?? recoveryStartedAt + WORKER_RECOVERY_TIMEOUT_MS
 
@@ -969,7 +975,10 @@ export class SessionWorkerManager {
     // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
     // the gateway process and are not in that file — never touched.
     const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
-    if (!isLatestWorkerGeneration(db, sessionId, token)) return
+    if (!isLatestWorkerGeneration(db, sessionId, token)) {
+      this.pendingInterruptions.delete(sessionId)
+      return
+    }
 
     const report: WorkerCrashReport = {
       sessionId,
@@ -988,7 +997,6 @@ export class SessionWorkerManager {
     this.deps.broadcastForSession(sessionId, createSessionInterruptedMessage(interruptedAt))
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
     const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
-    this.pendingInterruptions.add(sessionId)
     this.retire(worker, {
       crashed: true,
       ...(worker.doneError || recoveryErrors.length > 0
