@@ -125,6 +125,30 @@ describe('runOrchestrator', () => {
     expect(result.iterations).toBe(1)
   })
 
+  it('rejects an explicit resume target that does not exist in the resolved workflow', async () => {
+    const mockWorkflow = {
+      metadata: { id: 'custom', name: 'Custom', description: '', version: '1' },
+      entryStep: 'build',
+      settings: { maxIterations: 50 },
+      steps: [
+        {
+          id: 'build',
+          name: 'Build',
+          type: 'agent' as const,
+          phase: 'build',
+          transitions: [],
+        },
+      ],
+    }
+    vi.mocked(loadAllWorkflows).mockResolvedValue([mockWorkflow])
+    vi.mocked(findWorkflowById).mockReturnValue(mockWorkflow)
+
+    await expect(runOrchestrator({ ...mockOptions, workflowId: 'custom', resumeFromStep: 'verify' })).rejects.toThrow(
+      'Resume target step "verify" not found in workflow "custom"',
+    )
+    expect(executeWorkflow).not.toHaveBeenCalled()
+  })
+
   it('should prefer options.workflowId over runtime config', async () => {
     vi.mocked(getRuntimeConfig).mockReturnValue({
       activeWorkflowId: 'config-wf',

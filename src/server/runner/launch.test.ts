@@ -256,8 +256,8 @@ describe('launchWorkflowRun', () => {
 
     const options = runOrchestratorMock.mock.calls[0]![0]
     expect(options.resumeFromStep).toBe('verify')
-    expect(options.params).toBeUndefined()
-    expect(options.initialStepOutput).toBeUndefined()
+    expect(options.params).toEqual({ feature: 'old' })
+    expect(options.initialStepOutput).toEqual({ content: 'old' })
     expect(sessionManager.resumeWorkflow).not.toHaveBeenCalled()
   })
 })

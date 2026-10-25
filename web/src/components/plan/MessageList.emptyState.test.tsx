@@ -28,6 +28,7 @@ vi.mock('../../hooks/useWorkflows', () => ({
     workflows: [{ id: 'default', name: 'Build & Verify', color: '#3b82f6' }],
     refresh: vi.fn(),
   }),
+  useWorkflow: () => ({ data: null }),
 }))
 
 vi.mock('../../hooks/useSessionWorkdir', () => ({
