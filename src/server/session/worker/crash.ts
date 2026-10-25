@@ -24,6 +24,23 @@ export function markSessionInterrupted(db: Database.Database, sessionId: string,
   ).run(interruptedAt, interruptedAt, sessionId)
 }
 
+export function markWorkerSessionInterrupted(
+  db: Database.Database,
+  sessionId: string,
+  workerId: string,
+  generation: number,
+  interruptedAt: string,
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE sessions
+       SET is_running = 0, interrupted_at = ?, worker_id = NULL, updated_at = ?
+       WHERE id = ? AND worker_id = ? AND worker_generation = ?`,
+    )
+    .run(interruptedAt, interruptedAt, sessionId, workerId, generation)
+  return result.changes === 1
+}
+
 export function clearSessionInterrupted(db: Database.Database, sessionId: string): void {
   db.prepare(`UPDATE sessions SET interrupted_at = NULL, updated_at = ? WHERE id = ?`).run(
     new Date().toISOString(),

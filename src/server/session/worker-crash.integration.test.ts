@@ -12,7 +12,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
+import { spawn } from 'node:child_process'
 import { mkdir, readFile, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -37,6 +39,22 @@ interface WorkerIntrospection {
     inventory: { capturedAt: number; worker?: { pid: number; startedAt: string; pgid: number } }
     orphanCheck?: { checkedAt: number; clean: boolean; errors: string[] }
   } | null
+}
+
+const betterSqlite3 = createRequire(import.meta.url).resolve('better-sqlite3')
+
+async function holdDatabaseLock(path: string, holdMs: number): Promise<{ exited: Promise<number | null> }> {
+  const source = [
+    `const Database = require(${JSON.stringify(betterSqlite3)})`,
+    `const db = new Database(${JSON.stringify(path)})`,
+    `db.exec('BEGIN IMMEDIATE')`,
+    `process.stdout.write('locked\\n')`,
+    `setTimeout(() => { db.exec('COMMIT'); db.close() }, ${holdMs})`,
+  ].join(';')
+  const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'pipe', 'inherit'] })
+  const exited = new Promise<number | null>((resolve) => child.once('exit', resolve))
+  await new Promise((resolve) => child.stdout.once('data', resolve))
+  return { exited }
 }
 
 interface SessionView {
@@ -262,6 +280,65 @@ describe('session worker crash', () => {
     expect(reconciled.status).toBe(200)
     expect((await getSessionView(sessionA)).pendingToolReconciliations).toEqual([])
   }, 120_000)
+
+  it('releases the slot before a lock longer than the recovery deadline and persists interruption afterward', async () => {
+    await waitFor(
+      async () => ((await getWorkerIntrospection()).active === null ? true : null),
+      40_000,
+      'previous worker to settle',
+    )
+    await setWorkerMode(true)
+    const sessionId = await createSession('persistent-lock-crash')
+    const witnessId = await createSession('persistent-lock-witness')
+    const effectPath = join(workdir, 'persistent-lock-effect.txt')
+    await sendMessage(sessionId, `Run the exact command: printf x >> ${JSON.stringify(effectPath)}; sleep 30`)
+    const active = await waitFor(() => getActiveWorker(sessionId), 20_000, 'locked crash worker')
+    await waitFor(
+      async () => ((await readFile(effectPath, 'utf-8').catch(() => '')) === 'x' ? true : null),
+      20_000,
+      'locked crash side effect',
+    )
+
+    const { exited } = await holdDatabaseLock(config.database.path, 12_500)
+    let lockReleased = false
+    void exited.then(() => {
+      lockReleased = true
+    })
+    process.kill(active.pid!, 'SIGKILL')
+
+    await waitFor(
+      async () => ((await getWorkerIntrospection()).activeWorkers.length === 0 ? true : null),
+      5_000,
+      'worker slot release while database remains locked',
+    )
+    expect(lockReleased).toBe(false)
+    const crash = await waitFor(async () => (await getWorkerIntrospection()).lastCrash, 5_000, 'early crash report')
+    expect(crash.sessionId).toBe(sessionId)
+    expect((await getSessionView(sessionId)).session.interruptedAt ?? null).toBeNull()
+
+    expect(await exited).toBe(0)
+    const interrupted = await waitFor(
+      async () => {
+        const view = await getSessionView(sessionId)
+        return view.session.interruptedAt && !view.session.isRunning ? view : null
+      },
+      10_000,
+      'deferred interruption marker',
+    )
+    expect(interrupted.session.interruptedAt).toBeTruthy()
+
+    await sendMessage(witnessId, 'prove released worker slot')
+    const witness = await waitFor(
+      async () => {
+        const view = await getSessionView(witnessId)
+        return !view.session.isRunning && view.messages.some((message) => message.role === 'assistant') ? view : null
+      },
+      20_000,
+      'witness worker after deferred interruption',
+    )
+    expect(witness.messages.some((message) => message.role === 'assistant')).toBe(true)
+    expect(await readFile(effectPath, 'utf-8')).toBe('x')
+  }, 60_000)
 
   it('treats a forced Stop as interrupted and refuses to replay an unresolved shell effect', async () => {
     await waitFor(
