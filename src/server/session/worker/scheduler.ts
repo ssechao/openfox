@@ -2,13 +2,14 @@ import { availableParallelism } from 'node:os'
 
 export const MAX_WORKER_PROCESSES = 32
 export const MAX_WAITING_SESSIONS = 64
+export const MAX_QUEUED_COMMANDS_PER_SESSION = 100
 
-export type AdmissionResult = 'started' | 'waiting' | 'already-active' | 'already-waiting' | 'full' | 'closed'
+export type AdmissionResult = 'started' | 'waiting' | 'full' | 'closed'
 export type CancellationResult = 'active' | 'waiting' | 'none'
 
 interface WaitingTurn {
   sessionId: string
-  start: () => void
+  starts: Array<() => void>
 }
 
 export function resolveSessionWorkerEnabled(
@@ -30,7 +31,7 @@ export function resolveWorkerPoolSize(raw: string | undefined, parallelism = ava
 }
 
 export class SessionTurnScheduler {
-  private readonly active = new Set<string>()
+  private readonly active = new Map<string, Array<() => void>>()
   private readonly waiting: WaitingTurn[] = []
   private closed = false
 
@@ -38,6 +39,7 @@ export class SessionTurnScheduler {
     private readonly options: {
       maxConcurrent: number
       maxWaitingSessions: number
+      maxQueuedCommandsPerSession?: number
     },
   ) {
     if (!Number.isInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
@@ -50,15 +52,26 @@ export class SessionTurnScheduler {
 
   admit(sessionId: string, start: () => void): AdmissionResult {
     if (this.closed) return 'closed'
-    if (this.active.has(sessionId)) return 'already-active'
-    if (this.waiting.some((entry) => entry.sessionId === sessionId)) return 'already-waiting'
+    const maxQueued = this.options.maxQueuedCommandsPerSession ?? MAX_QUEUED_COMMANDS_PER_SESSION
+    const activeQueue = this.active.get(sessionId)
+    if (activeQueue) {
+      if (activeQueue.length >= maxQueued) return 'full'
+      activeQueue.push(start)
+      return 'waiting'
+    }
+    const waiting = this.waiting.find((entry) => entry.sessionId === sessionId)
+    if (waiting) {
+      if (waiting.starts.length >= maxQueued) return 'full'
+      waiting.starts.push(start)
+      return 'waiting'
+    }
     if (this.active.size < this.options.maxConcurrent) {
-      this.active.add(sessionId)
+      this.active.set(sessionId, [])
       start()
       return 'started'
     }
     if (this.waiting.length >= this.options.maxWaitingSessions) return 'full'
-    this.waiting.push({ sessionId, start })
+    this.waiting.push({ sessionId, starts: [start] })
     return 'waiting'
   }
 
@@ -69,13 +82,20 @@ export class SessionTurnScheduler {
   }
 
   release(sessionId: string): boolean {
-    if (!this.active.delete(sessionId)) return false
+    const queued = this.active.get(sessionId)
+    if (!queued) return false
+    this.active.delete(sessionId)
+    if (queued.length > 0) this.waiting.push({ sessionId, starts: queued })
     this.startNext()
     return true
   }
 
   cancel(sessionId: string): CancellationResult {
-    if (this.active.has(sessionId)) return 'active'
+    const activeQueue = this.active.get(sessionId)
+    if (activeQueue) {
+      activeQueue.length = 0
+      return 'active'
+    }
     const index = this.waiting.findIndex((entry) => entry.sessionId === sessionId)
     if (index === -1) return 'none'
     this.waiting.splice(index, 1)
@@ -84,12 +104,17 @@ export class SessionTurnScheduler {
 
   closeAdmissions(): string[] {
     this.closed = true
-    return this.waiting.splice(0).map((entry) => entry.sessionId)
+    const cancelled = this.waiting.splice(0).map((entry) => entry.sessionId)
+    for (const [sessionId, queued] of this.active) {
+      if (queued.length > 0) cancelled.push(sessionId)
+      queued.length = 0
+    }
+    return [...new Set(cancelled)]
   }
 
   snapshot(): { active: string[]; waiting: string[]; closed: boolean } {
     return {
-      active: [...this.active],
+      active: [...this.active.keys()],
       waiting: this.waiting.map((entry) => entry.sessionId),
       closed: this.closed,
     }
@@ -99,7 +124,9 @@ export class SessionTurnScheduler {
     if (this.closed) return
     const next = this.waiting.shift()
     if (!next) return
-    this.active.add(next.sessionId)
-    next.start()
+    const [start, ...queued] = next.starts
+    if (!start) return
+    this.active.set(next.sessionId, queued)
+    start()
   }
 }

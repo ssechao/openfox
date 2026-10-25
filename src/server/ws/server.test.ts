@@ -2269,6 +2269,47 @@ describe('createWebSocketServer', () => {
     await harness.close()
   })
 
+  it('reports an explicit worker queue saturation error', async () => {
+    const sessionState: any = {
+      id: 'session-1',
+      projectId: 'project-1',
+      workdir: '/tmp/project',
+      mode: 'planner',
+      phase: 'build',
+      isRunning: false,
+      criteria: [],
+    }
+    const sessionManager = createSessionManager({
+      getSession: vi.fn(() => sessionState),
+      requireSession: vi.fn(() => sessionState),
+    })
+    const workerController = {
+      isEnabled: () => true,
+      requestTurn: vi.fn(() => 'full' as const),
+      releaseTurn: vi.fn(() => true),
+      launch: vi.fn(),
+    }
+    const harness = await createHarness({ sessionManager, workerController })
+
+    harness.send({ id: 'sl-worker-full', type: 'session.load', payload: { sessionId: 'session-1' } })
+    await harness.nextMessage((message) => message.id === 'sl-worker-full')
+    harness.send({
+      id: 'runner-worker-full',
+      type: 'runner.launch',
+      payload: { sessionId: 'session-1', workflowId: 'default', resumeFrom: 'build' },
+    })
+    expect(await harness.nextMessage((message) => message.id === 'runner-worker-full')).toMatchObject({
+      type: 'error',
+      payload: {
+        code: 'WORKER_ADMISSION_REFUSED',
+        message: expect.stringMatching(/64 waiting sessions|64 sessions en attente/),
+      },
+    })
+    expect(workerController.launch).not.toHaveBeenCalled()
+
+    await harness.close()
+  })
+
   it('guards chat.retry — session state, recorded failure, and active workflow', async () => {
     const sessionState: any = {
       id: 'session-1',

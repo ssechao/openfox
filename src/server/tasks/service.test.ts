@@ -237,6 +237,28 @@ describe('project tasks service', () => {
       expect(sm.queued[0]?.content).toBe('Do the thing')
     })
 
+    it('refuses a card before mutating it when the worker admission queue is full', async () => {
+      const blocked = createTasksService({
+        sessionManager: sm as unknown as import('../session/manager.js').SessionManager,
+        config: loadConfig(),
+        broadcast: (_pid, payload) => broadcasts.push(payload),
+        configDir: join(root, 'config'),
+        launchWorkflow: launchSpy as never,
+        canStartSession: () => false,
+      })
+      const task = blocked.create(projectId, { prompt: 'Blocked by worker queue' }, { actor: 'human' })
+
+      await expect(blocked.move(projectId, task.id, 'in_progress', { actor: 'human' })).rejects.toMatchObject({
+        code: 'SESSION_WORKER_QUEUE_FULL',
+      })
+      expect(blocked.get(projectId, task.id)).toMatchObject({ status: 'todo' })
+      expect(blocked.get(projectId, task.id)?.runState).toBeUndefined()
+      expect(sm.createdSessions).toHaveLength(0)
+      expect(sm.reminders).toHaveLength(0)
+      expect(sm.queued).toHaveLength(0)
+      expect(launchSpy).not.toHaveBeenCalled()
+    })
+
     it('seeds the session without a prompt-derived title so auto-naming applies', async () => {
       const task = create('Investigate and fix the flaky test in CI')
       await service.move(projectId, task.id, 'in_progress', { actor: 'human' })

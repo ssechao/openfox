@@ -34,22 +34,24 @@ describe('SessionTurnScheduler', () => {
     expect(starts).toEqual(['a', 'b', 'c'])
   })
 
-  it('admits FIFO by session, keeps one ticket per session, and rotates a busy session to the tail', () => {
+  it('queues repeated commands per session and rotates that session to the FIFO tail', () => {
     const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
     const starts: string[] = []
 
     expect(scheduler.admit('a', () => starts.push('a1'))).toBe('started')
+    expect(scheduler.admit('a', () => starts.push('a2'))).toBe('waiting')
     expect(scheduler.admit('b', () => starts.push('b1'))).toBe('waiting')
-    expect(scheduler.admit('b', () => starts.push('b-duplicate'))).toBe('already-waiting')
+    expect(scheduler.admit('b', () => starts.push('b2'))).toBe('waiting')
     expect(scheduler.admit('c', () => starts.push('c1'))).toBe('waiting')
 
     scheduler.release('a')
     expect(starts).toEqual(['a1', 'b1'])
-    expect(scheduler.admit('a', () => starts.push('a2'))).toBe('waiting')
     scheduler.release('b')
     expect(starts).toEqual(['a1', 'b1', 'c1'])
     scheduler.release('c')
     expect(starts).toEqual(['a1', 'b1', 'c1', 'a2'])
+    scheduler.release('a')
+    expect(starts).toEqual(['a1', 'b1', 'c1', 'a2', 'b2'])
   })
 
   it('rejects saturation before start and cancels a waiting session without allocating a slot', () => {
@@ -66,6 +68,19 @@ describe('SessionTurnScheduler', () => {
     scheduler.release('active')
     expect(scheduler.snapshot()).toEqual({ active: ['waiting-2'], waiting: [], closed: false })
     expect(start).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses only after a session command queue reaches its explicit limit', () => {
+    const scheduler = new SessionTurnScheduler({
+      maxConcurrent: 1,
+      maxWaitingSessions: 64,
+      maxQueuedCommandsPerSession: 2,
+    })
+
+    expect(scheduler.admit('active', () => {})).toBe('started')
+    expect(scheduler.admit('active', () => {})).toBe('waiting')
+    expect(scheduler.admit('active', () => {})).toBe('waiting')
+    expect(scheduler.admit('active', () => {})).toBe('full')
   })
 
   it('closes admissions atomically and removes all waiting tickets', () => {

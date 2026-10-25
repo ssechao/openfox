@@ -157,6 +157,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     sessionId: string,
     launch: import('./runner/launch.js').WorkflowLaunchPayload,
   ) => void = () => {}
+  let deferCanStartSession = (_sessionId: string): boolean => true
 
   // Get config directory for loading user items
   const configDir = getGlobalConfigDir(config.mode ?? 'production')
@@ -685,6 +686,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     broadcast: (projectId, payload) => deferTasksBroadcast(projectId, payload),
     configDir,
     launchWorkflow: (sessionId, launch) => deferTasksLaunchWorkflow(sessionId, launch),
+    canStartSession: (sessionId) => deferCanStartSession(sessionId),
   })
   setTasksService(tasksService)
   // Periodic tick for scheduled tasks: runs once at boot (catch-up for tasks
@@ -4035,6 +4037,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     },
   })
   webSocketWorkerController.current = workerManager
+  deferCanStartSession = (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId)
   sessionManager.setQueueAdmissionGuard(
     (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId),
   )

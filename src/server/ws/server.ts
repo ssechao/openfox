@@ -972,16 +972,17 @@ async function handleClientMessage(
     } else if (admission === 'started' || admission === 'waiting') {
       send({ type: 'ack', payload: { admission }, id: message.id })
     } else {
-      send(
-        createErrorMessage(
-          'WORKER_ADMISSION_REFUSED',
-          serverT({
-            en: 'The session worker pool cannot accept this turn',
-            fr: 'Le pool de workers de session ne peut pas accepter ce tour',
-          }),
-          message.id,
-        ),
-      )
+      const reason =
+        admission === 'full'
+          ? serverT({
+              en: 'The session worker queue is full (64 waiting sessions or 100 queued commands for this session)',
+              fr: 'La file des workers de session est pleine (64 sessions en attente ou 100 commandes en file pour cette session)',
+            })
+          : serverT({
+              en: 'Session worker admissions are closed during shutdown',
+              fr: 'Les admissions des workers de session sont fermées pendant l’arrêt',
+            })
+      send(createErrorMessage('WORKER_ADMISSION_REFUSED', reason, message.id))
     }
     return true
   }

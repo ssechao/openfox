@@ -58,6 +58,7 @@ import type { TaskGateConfig, TaskActor, TaskSchedule } from '../../shared/types
 import { serverT } from '../i18n.js'
 import { logger } from '../utils/logger.js'
 import { nextOccurrence } from './recurrence.js'
+import { SessionWorkerQueueFullError } from '../utils/errors.js'
 
 export type TaskDestination = 'todo' | 'in_progress' | 'done'
 
@@ -170,6 +171,7 @@ export interface TasksServiceDeps {
       attachments?: Attachment[]
     },
   ) => void
+  canStartSession?: (sessionId: string) => boolean
 }
 
 const REMINDER_COLOR = '#3b82f6'
@@ -198,7 +200,7 @@ function withLock<T>(projectId: string, fn: () => Promise<T> | T): Promise<T> {
 // ============================================================================
 
 export function createTasksService(deps: TasksServiceDeps): TasksService {
-  const { sessionManager, config, broadcast, configDir, launchWorkflow } = deps
+  const { sessionManager, config, broadcast, configDir, launchWorkflow, canStartSession } = deps
 
   function snapshot(projectId: string) {
     const tasks = dbListTasks(projectId)
@@ -368,8 +370,15 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         throw gateBlockedError(task, 'In Progress', missing)
       }
 
-      dbSetTaskStatus(taskId, 'in_progress')
       const settings = dbGetTaskSettings(projectId)
+      const humanLaunch = opts.actor !== 'agent' && activeCount(projectId) < settings.slotLimit && !settings.queuePaused
+      if (humanLaunch) {
+        const admissionSessionId = reusableTarget(projectId, opts.sessionId) ?? `task:${task.id}`
+        if (canStartSession && !canStartSession(admissionSessionId)) {
+          throw new SessionWorkerQueueFullError(admissionSessionId)
+        }
+      }
+      dbSetTaskStatus(taskId, 'in_progress')
 
       if (opts.actor === 'agent') {
         if (!opts.sessionId) {
@@ -388,8 +397,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         sessionId = opts.sessionId
       } else {
         // Human drag / Start task / system trigger: allocate a slot or queue.
-        const runningCount = activeCount(projectId)
-        const launched = runningCount < settings.slotLimit && !settings.queuePaused
+        const launched = humanLaunch
         dbSetTaskRunState(taskId, launched ? 'running' : 'queued')
         if (task.schedule) {
           // A planned task manually started (or system-triggered) is no longer
@@ -743,11 +751,11 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     const next = queued[0]
     if (!next) return undefined
 
-    dbSetTaskRunState(next.id, 'running')
-    // Honor the session a human earmarked at Start (Up-next) while it's still
-    // fresh; otherwise seed a new one.
     const earmarks = dbListTaskLinks(next.id)
     const target = reusableTarget(projectId, earmarks[0]?.session_id)
+    const admissionSessionId = target ?? `task:${next.id}`
+    if (canStartSession && !canStartSession(admissionSessionId)) return undefined
+    dbSetTaskRunState(next.id, 'running')
     const seeded = await seedSession(projectId, next, 'queued', target)
     dbAddTaskLink(next.id, seeded.session.id, true)
     dbAddAuditEntry(next.id, 'system', 'auto_launch', `Auto-launched into session ${seeded.session.id}`, 'system')

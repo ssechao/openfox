@@ -472,8 +472,7 @@ export class SessionWorkerManager {
     }
     const clean =
       worker.doneReceived && worker.doneOk && worker.exitCodeObserved === 0 && worker.exitSignalObserved === null
-    this.retire(worker)
-    this.notifyWorkerSettled(worker, {
+    this.retire(worker, {
       crashed: !clean,
       error: `${clean ? 'Session stopped' : 'Worker interruption'}; cleanup exceeded the Stop settlement deadline and continues in background${signalErrors}`,
     })
@@ -751,11 +750,12 @@ export class SessionWorkerManager {
     return bounded
   }
 
-  private retire(worker: ActiveWorker): boolean {
-    if (this.active.get(worker.sessionId) !== worker) return false
-    this.active.delete(worker.sessionId)
-    this.scheduler.release(worker.sessionId)
-    return true
+  private retire(worker: ActiveWorker, outcome: WorkerSettledOutcome): boolean {
+    const current = this.active.get(worker.sessionId) === worker
+    if (current) this.active.delete(worker.sessionId)
+    this.notifyWorkerSettled(worker, outcome)
+    if (current) this.scheduler.release(worker.sessionId)
+    return current
   }
 
   private isCurrentIdentity(identity: WorkerIpcIdentity): boolean {
@@ -814,8 +814,7 @@ export class SessionWorkerManager {
       const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
-      this.retire(worker)
-      this.notifyWorkerSettled(worker, {
+      this.retire(worker, {
         crashed: false,
         ...(recoveryErrors.length > 0
           ? { error: `Session stopped; cleanup proof failed: ${recoveryErrors.join('; ')}` }
@@ -829,8 +828,7 @@ export class SessionWorkerManager {
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
       logger.info('Session worker exited cleanly', { sessionId, workerId: token.workerId })
-      this.retire(worker)
-      this.notifyWorkerSettled(worker, { crashed: false })
+      this.retire(worker, { crashed: false })
       return
     }
 
@@ -922,9 +920,8 @@ export class SessionWorkerManager {
     this.lastCrash = report
     this.verifyWorkerInventory(report, verification)
     this.deps.broadcastForSession(sessionId, createSessionRunningMessage(false))
-    this.retire(worker)
     const recoveryErrors = [...inventory.errors, ...(cleanup.cleanupError ? [cleanup.cleanupError] : [])]
-    this.notifyWorkerSettled(worker, {
+    this.retire(worker, {
       crashed: true,
       ...(worker.doneError || recoveryErrors.length > 0
         ? { error: worker.doneError ?? `Worker interruption recovery failed: ${recoveryErrors.join('; ')}` }

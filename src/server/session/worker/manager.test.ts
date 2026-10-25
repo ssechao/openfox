@@ -94,6 +94,61 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it('settles the runtime before starting the next queued command for the same session', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-worker-serial-command-'))
+    const { db, namedDb } = createDb(join(root, 'sessions.db'))
+    openDbs.push(db)
+    const children = [42, 43].map(
+      (pid) =>
+        Object.assign(new EventEmitter(), {
+          pid,
+          exitCode: null,
+          signalCode: null,
+          stderr: new EventEmitter(),
+          send: vi.fn(() => true),
+          kill: () => true,
+        }) as unknown as ChildProcess,
+    )
+    const spawnWorker = vi.fn(() => children[spawnWorker.mock.calls.length - 1]!)
+    const order: string[] = []
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+      processSupervisor: { spawnWorker } as never,
+      eventStore: () => ({ invalidateExternalSession: () => {} }) as never,
+    })
+
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', () => order.push('settled-1')))).toBe(
+        'started',
+      )
+      expect(
+        manager.requestTurn('sess-1', () => {
+          order.push('start-2')
+          manager.launch('sess-1', () => order.push('settled-2'))
+        }),
+      ).toBe('waiting')
+
+      const first = manager.activeWorker('sess-1')!
+      children[0]!.emit('message', { ...first.token, type: 'done', ok: true })
+      children[0]!.emit('exit', 0, null)
+      await vi.waitFor(() => expect(manager.activeWorker('sess-1')?.pid).toBe(43))
+      expect(order).toEqual(['settled-1', 'start-2'])
+
+      const second = manager.activeWorker('sess-1')!
+      children[1]!.emit('message', { ...second.token, type: 'done', ok: true })
+      children[1]!.emit('exit', 0, null)
+      await vi.waitFor(() => expect(manager.activeWorker('sess-1')).toBeNull())
+      expect(order).toEqual(['settled-1', 'start-2', 'settled-2'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('cancels a waiting session without assigning a worker generation', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-waiting-stop.db')
     openDbs.push(db)
