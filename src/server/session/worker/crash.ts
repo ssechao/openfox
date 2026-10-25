@@ -14,6 +14,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import type { EventStore } from '../../events/store.js'
 import type { PendingToolReconciliation, SessionSnapshot, StoredEvent, TurnEvent } from '../../events/types.js'
 import { planBootContinuation, type BootContinuationPlan } from '../auto-continue.js'
 
@@ -79,6 +80,25 @@ export function findPendingToolReconciliations(events: StoredEvent[]): PendingTo
     }
   }
   return [...pending.values()]
+}
+
+export function prepareSessionInterruptionEvents(
+  eventStore: Pick<EventStore, 'invalidateExternalSession' | 'getEvents' | 'append'>,
+  sessionId: string,
+): StoredEvent[] {
+  eventStore.invalidateExternalSession(sessionId)
+  const events = eventStore.getEvents(sessionId)
+  const reconciled = new Set<string>()
+  for (const event of events) {
+    if (event.type === 'tool.reconciliation_required' || event.type === 'tool.reconciliation_resolved') {
+      reconciled.add((event.data as { toolCallId: string }).toolCallId)
+    }
+  }
+  for (const pending of findPendingToolReconciliations(events)) {
+    if (reconciled.has(pending.toolCallId)) continue
+    eventStore.append(sessionId, { type: 'tool.reconciliation_required', data: pending })
+  }
+  return events
 }
 
 /**

@@ -48,6 +48,7 @@ import { createContextStateMessage, createSessionInterruptedMessage } from './ws
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
 import { readProcessInventory } from './session/worker/children.js'
+import { markSessionInterrupted, prepareSessionInterruptionEvents } from './session/worker/crash.js'
 import {
   isSessionAlreadyRunningError,
   SessionRuntimeRegistry,
@@ -1894,8 +1895,23 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
 
     const eventStore = getEventStore()
-    const hasActiveWorkflow = sessionManager.getActiveWorkflowExecution(sessionId) != null
-    const plan = planWorkerCrashRecovery(eventStore.getEvents(sessionId), hasActiveWorkflow)
+    const activeWorkflow = sessionManager.getActiveWorkflowExecution(sessionId)
+    if (activeWorkflow) {
+      clearSessionInterrupted(db, sessionId)
+      runtimeRegistry.get(sessionId).recordCommand('resume')
+      broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
+      deferTasksLaunchWorkflow(sessionId, {
+        workflowId: activeWorkflow.workflowId,
+        ...(activeWorkflow.currentStepId ? { resumeFrom: activeWorkflow.currentStepId } : {}),
+        ...(Object.keys(activeWorkflow.params).length > 0 ? { params: activeWorkflow.params } : {}),
+        ...(Object.keys(activeWorkflow.stepOutput).length > 0 ? { stepOutput: activeWorkflow.stepOutput } : {}),
+        ...(activeWorkflow.subGroup ? { subGroup: activeWorkflow.subGroup } : {}),
+      })
+      logger.info('Interrupted workflow resumed explicitly', { sessionId, workflowId: activeWorkflow.workflowId })
+      return res.json({ success: true })
+    }
+
+    const plan = planWorkerCrashRecovery(eventStore.getEvents(sessionId), false)
     if (!plan) {
       return res.status(409).json({ error: 'Nothing to resume' })
     }
@@ -1903,8 +1919,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     clearSessionInterrupted(db, sessionId)
     sessionManager.queueMessage(sessionId, 'asap', plan.content, undefined, 'auto-prompt')
     runtimeRegistry.get(sessionId).recordCommand('resume')
-    // Sync the UI: the interruption marker is cleared, so the resume affordance
-    // disappears without a reload.
     broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
     logger.info('Interrupted session resumed explicitly', { sessionId })
     res.json({ success: true })
@@ -4209,6 +4223,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     close: () => {
       workerManager.closeAdmissions()
+      const interruptedAt = new Date().toISOString()
+      const eventStore = getEventStore()
+      for (const runtime of runtimeRegistry.list()) {
+        if (runtime.state === 'idle') continue
+        markSessionInterrupted(db, runtime.sessionId, interruptedAt)
+        prepareSessionInterruptionEvents(eventStore, runtime.sessionId)
+      }
       queueProcessor.stop()
       taskScheduler.stop()
       diagnosticsCollector.stop()

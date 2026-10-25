@@ -52,7 +52,7 @@ import {
   type OrphanInventoryCheck,
   type ProcessInventoryEntry,
 } from './children.js'
-import { findPendingToolReconciliations, markSessionInterrupted, planWorkerCrashRecovery } from './crash.js'
+import { markSessionInterrupted, planWorkerCrashRecovery, prepareSessionInterruptionEvents } from './crash.js'
 import type {
   GatewayToWorkerMessage,
   McpRequestMessage,
@@ -793,11 +793,7 @@ export class SessionWorkerManager {
 
   private prepareInterruptedEvents(sessionId: string) {
     const eventStore = this.deps.eventStore?.() ?? getEventStore()
-    eventStore.invalidateExternalSession(sessionId)
-    const events = eventStore.getEvents(sessionId)
-    for (const pending of findPendingToolReconciliations(events)) {
-      eventStore.append(sessionId, { type: 'tool.reconciliation_required', data: pending })
-    }
+    const events = prepareSessionInterruptionEvents(eventStore, sessionId)
     return { eventStore, events }
   }
 
