@@ -9,7 +9,7 @@
  * is handled by the shared runtime, not by a local controller registry.
  */
 
-import type { Attachment, StatsIdentity, WorkflowLaunchScope } from '../../shared/types.js'
+import type { Attachment, StatsIdentity, WorkflowExecution, WorkflowLaunchScope } from '../../shared/types.js'
 import type { ServerMessage } from '../../shared/protocol.js'
 import { createServerMessage } from '../../shared/protocol.js'
 import type { LLMClientWithModel } from '../llm/client.js'
@@ -77,6 +77,7 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
   const launchAttachments = payload.attachments
   const hasUserContent = payload.content && payload.content.trim().length > 0
   const hasUserAttachments = launchAttachments && launchAttachments.length > 0
+  let reactivatedExecution: WorkflowExecution | undefined
 
   return runOrchestrator({
     sessionManager,
@@ -95,6 +96,7 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
       ? (() => {
           const exec = sessionManager.getLatestWorkflowExecution(sessionId)
           if (!exec) return {}
+          const resumeFromStep = payload.resumeFrom ?? exec.currentStepId
 
           if (exec.status === 'waiting' || exec.status === 'blocked') {
             // Re-activate a paused (waiting) or failed-and-blocked execution so
@@ -108,10 +110,11 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
               exec.workflowColor,
             )
             if (resumed) {
+              reactivatedExecution = exec
               return {
                 params: resumed.params,
                 initialStepOutput: resumed.stepOutput,
-                ...(exec.currentStepId ? { resumeFromStep: exec.currentStepId } : {}),
+                ...(resumeFromStep ? { resumeFromStep } : {}),
                 ...(exec.subGroup ? { subGroup: exec.subGroup } : {}),
               }
             }
@@ -121,7 +124,7 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
             return {
               ...(Object.keys(exec.params).length > 0 ? { params: exec.params } : {}),
               ...(Object.keys(exec.stepOutput).length > 0 ? { initialStepOutput: exec.stepOutput } : {}),
-              ...(exec.currentStepId ? { resumeFromStep: exec.currentStepId } : {}),
+              ...(resumeFromStep ? { resumeFromStep } : {}),
               ...(exec.subGroup ? { subGroup: exec.subGroup } : {}),
             }
           }
@@ -146,6 +149,18 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
         return
       }
       const errorMessage = error instanceof Error ? error.message : String(error)
+      if (reactivatedExecution) {
+        const latest = sessionManager.getLatestWorkflowExecution(sessionId)
+        if (latest?.id === reactivatedExecution.id && latest.status === 'running') {
+          sessionManager.blockWorkflow(
+            sessionId,
+            reactivatedExecution.id,
+            reactivatedExecution.workflowId,
+            reactivatedExecution.workflowName,
+            reactivatedExecution.workflowColor,
+          )
+        }
+      }
       logger.error('Runner error', { error: errorMessage, sessionId })
       // Surface validation errors to the user (e.g. missing required params)
       broadcastForSession(sessionId, createServerMessage('chat.error', { error: errorMessage, recoverable: false }))
