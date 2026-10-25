@@ -13,7 +13,9 @@ import type { VisionBackend } from './llm/vision-fallback.js'
 import { initDatabase, getDatabase } from './db/index.js'
 
 import { getProject, deleteProject } from './db/projects.js'
+import { updateSessionRunning } from './db/sessions.js'
 import { initEventStore, getEventStore, combineEventsWithSnapshot } from './events/index.js'
+import { isBusyError } from './events/store.js'
 import { buildMessagesFromStoredEvents } from './events/folding.js'
 import { cancelQuestionsForSession, provideAnswer, getPendingQuestionsForSession } from './tools/ask.js'
 import {
@@ -1835,7 +1837,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     cancelQuestionsForSession(sessionId, 'Session stopped by user')
     cancelPathConfirmationsForSession(sessionId, 'Session stopped by user')
 
-    getEventStore().append(sessionId, { type: 'running.changed', data: { isRunning: false } })
+    void getEventStore()
+      .appendRecoverable(sessionId, { type: 'running.changed', data: { isRunning: false } })
+      .catch((error) => {
+        logger.error('Stop state persistence failed after recovery deadline', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
 
     res.json({ success: true, queuedMessages })
   })
@@ -4094,7 +4103,19 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const aborted = runtimeRegistry.get(sessionId).stop()
     if (aborted) {
       sessionManager.clearPauseState(sessionId)
-      sessionManager.setRunning(sessionId, false)
+      try {
+        sessionManager.setRunning(sessionId, false)
+      } catch (error) {
+        if (!isBusyError(error)) throw error
+        void getEventStore()
+          .runRecoverable(sessionId, 'session.running', () => updateSessionRunning(sessionId, false))
+          .catch((recoveryError) => {
+            logger.error('Stopped session state recovery failed', {
+              sessionId,
+              error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+            })
+          })
+      }
       wssExports.broadcastForSession(sessionId, { type: 'session.running', payload: { isRunning: false } })
     }
     return aborted

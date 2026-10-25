@@ -1,15 +1,22 @@
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { access, mkdir, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import type { Config } from '../../../shared/types.js'
 import type { ServerHandle } from '../../context.js'
+import { getDatabase } from '../../db/index.js'
+import { getEventStore } from '../../events/index.js'
+import { assignWorkerToken, createWorkerFence } from './token.js'
 import { linkAbortSignal } from './abort-link.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
+const betterSqlite3 = createRequire(import.meta.url).resolve('better-sqlite3')
 
 interface SessionView {
   session: { isRunning: boolean }
@@ -22,6 +29,25 @@ interface WsMessage {
   type?: string
   sessionId?: string
   payload?: { code?: string; content?: string; updates?: { isStreaming?: boolean } }
+}
+
+async function holdDatabaseLock(path: string, holdMs: number): Promise<{ exited: Promise<number | null> }> {
+  const source = [
+    `const Database = require(${JSON.stringify(betterSqlite3)})`,
+    `const db = new Database(${JSON.stringify(path)})`,
+    `db.exec('BEGIN IMMEDIATE')`,
+    `process.stdout.write('locked\\n')`,
+    `setTimeout(() => { db.exec('COMMIT'); db.close() }, ${holdMs})`,
+  ].join(';')
+  const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'pipe', 'inherit'] })
+  const exited = new Promise<number | null>((resolve) => child.once('exit', resolve))
+  await new Promise((resolve) => child.stdout.once('data', resolve))
+  return { exited }
+}
+
+function p99(values: number[]): number {
+  const sorted = [...values].sort((left, right) => left - right)
+  return sorted[Math.ceil(sorted.length * 0.99) - 1] ?? 0
 }
 
 describe('gateway IPC integration', () => {
@@ -196,6 +222,109 @@ describe('gateway IPC integration', () => {
 
     expect(target.signal.aborted).toBe(true)
   })
+  it('keeps HTTP, WebSocket and Stop responsive while gateway writes recover after a long lock', async () => {
+    const stopSessionId = await createSession('busy-stop')
+    const writeSessionId = await createSession('busy-write')
+    const tokenSessionId = await createSession('busy-token')
+    const oldToken = assignWorkerToken(getDatabase(), tokenSessionId)
+    const ws = await connectWebSocket()
+
+    try {
+      const load = waitForWs(ws, (message) => message.id === 'busy-load')
+      ws.send(JSON.stringify({ id: 'busy-load', type: 'session.load', payload: { sessionId: stopSessionId } }))
+      await expect(load).resolves.toMatchObject({ type: 'ack' })
+
+      const launch = waitForWs(ws, (message) => message.id === 'busy-launch')
+      ws.send(
+        JSON.stringify({
+          id: 'busy-launch',
+          type: 'runner.launch',
+          payload: { sessionId: stopSessionId, workflowId: 'slow-effect', scope: 'project' },
+        }),
+      )
+      await expect(launch).resolves.toMatchObject({ type: 'ack' })
+      await waitFor(async () => {
+        const response = await fetch(`${base}/api/test/worker`)
+        const body = (await response.json()) as { activeWorkers: Array<{ sessionId: string }> }
+        return body.activeWorkers.some((worker) => worker.sessionId === stopSessionId) ? true : null
+      }, 'busy worker allocation')
+      await waitFor(
+        async () =>
+          access(join(root, 'workflow-started'))
+            .then(() => true)
+            .catch(() => null),
+        'busy workflow start',
+      )
+
+      const { exited } = await holdDatabaseLock(join(root, 'sessions.db'), 3_000)
+      const latencies: number[] = []
+      const timedFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+        const startedAt = performance.now()
+        const response = await fetch(url, init)
+        latencies.push(performance.now() - startedAt)
+        return response
+      }
+      const healthRequests = Array.from({ length: 8 }, () => timedFetch(`${base}/api/health`))
+      const stopRequest = timedFetch(`${base}/api/sessions/${stopSessionId}/stop`, { method: 'POST' })
+      const wsStartedAt = performance.now()
+      const wsResponse = waitForWs(ws, (message) => message.id === 'busy-ws')
+      ws.send(JSON.stringify({ id: 'busy-ws', type: 'session.load', payload: { sessionId: stopSessionId } }))
+
+      let tokenError: unknown
+      const tokenStartedAt = performance.now()
+      try {
+        assignWorkerToken(getDatabase(), tokenSessionId)
+      } catch (error) {
+        tokenError = error
+      }
+      const tokenLatency = performance.now() - tokenStartedAt
+
+      const event = {
+        type: 'message.start' as const,
+        data: { messageId: 'busy-recovered', role: 'assistant' as const, content: 'persist once' },
+      }
+      const recovered = getEventStore().appendRecoverable(writeSessionId, event)
+      const [healthResponses, stopped, wsMessage] = await Promise.all([
+        Promise.all(healthRequests),
+        stopRequest,
+        wsResponse,
+      ])
+      latencies.push(performance.now() - wsStartedAt)
+
+      const responseP99 = p99(latencies)
+      process.stdout.write(
+        `SQLite gateway contention: HTTP/WS/Stop p99=${Math.round(responseP99)}ms token=${Math.round(tokenLatency)}ms\n`,
+      )
+      expect(healthResponses.every((response) => response.status === 200)).toBe(true)
+      expect(stopped.status).toBe(200)
+      expect(wsMessage).toMatchObject({ type: 'ack' })
+      expect(responseP99).toBeLessThan(100)
+      expect(tokenLatency).toBeLessThan(100)
+      expect((tokenError as { code?: unknown })?.code).toMatch(/^SQLITE_BUSY/)
+
+      expect(await exited).toBe(0)
+      await expect(recovered).resolves.toMatchObject({ sessionId: writeSessionId, type: 'message.start' })
+      expect(
+        getEventStore()
+          .getEvents(writeSessionId)
+          .filter(
+            (stored) =>
+              stored.type === 'message.start' && (stored.data as { messageId?: string }).messageId === 'busy-recovered',
+          ),
+      ).toHaveLength(1)
+
+      const newToken = assignWorkerToken(getDatabase(), tokenSessionId)
+      expect(newToken.generation).toBe(oldToken.generation + 1)
+      expect(() => createWorkerFence(getDatabase(), oldToken)(tokenSessionId)).toThrow(/no longer the owner/)
+      expect(() => createWorkerFence(getDatabase(), newToken)(tokenSessionId)).not.toThrow()
+      await waitFor(async () => (!(await getSession(stopSessionId)).session.isRunning ? true : null), 'busy stop')
+    } finally {
+      ws.close()
+      await rm(join(root, 'workflow-started'), { force: true })
+      await rm(join(root, 'late-effect'), { force: true })
+    }
+  }, 20_000)
+
   it('runs two normal messages in the same session with distinct worker generations', async () => {
     const sessionId = await createSession('sequential-generations')
     const generations: number[] = []

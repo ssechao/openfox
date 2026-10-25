@@ -76,6 +76,42 @@ describe('worker token fencing', () => {
     expect(isWorkerTokenCurrent(db, 'sess-1', first)).toBe(false)
   })
 
+  it('takes the immediate writer lock before reading and updating the token row', () => {
+    const calls: string[] = []
+    const db = {
+      transaction: (callback: () => unknown) =>
+        Object.assign(
+          () => {
+            calls.push('deferred')
+            return callback()
+          },
+          {
+            immediate: () => {
+              calls.push('immediate')
+              return callback()
+            },
+          },
+        ),
+      prepare: (sql: string) =>
+        sql.startsWith('SELECT')
+          ? {
+              get: () => {
+                calls.push('select')
+                return { worker_id: null, worker_generation: 0 }
+              },
+            }
+          : {
+              run: () => {
+                calls.push('update')
+                return { changes: 1 }
+              },
+            },
+    } as unknown as Database.Database
+
+    expect(assignWorkerToken(db, 'sess-1').generation).toBe(1)
+    expect(calls).toEqual(['immediate', 'select', 'update'])
+  })
+
   it('refuses to assign a token to an unknown session', () => {
     const db = trackedDb()
     expect(() => assignWorkerToken(db, 'nope')).toThrow(/unknown session/)
