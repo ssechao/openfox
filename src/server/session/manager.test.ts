@@ -136,6 +136,26 @@ describe('SessionManager', () => {
     expect(events).toEqual(['session_created', 'session_created', 'session_deleted'])
   })
 
+  it.each(['completed', 'cancelled'] as const)(
+    'surfaces the latest %s workflow execution for UI resume actions',
+    (status) => {
+      const session = manager.createSession(projectId)
+      manager.startWorkflow(session.id, 'exec-1', 'custom', 'Custom', '#8b5cf6', {})
+
+      if (status === 'completed') {
+        manager.completeWorkflow(session.id, 'exec-1', 'custom', 'Custom', '#8b5cf6')
+      } else {
+        manager.cancelWorkflow(session.id, 'exec-1', 'custom', 'Custom', '#8b5cf6')
+      }
+
+      expect(manager.getDisplayWorkflowExecution(session.id)).toMatchObject({
+        id: 'exec-1',
+        workflowId: 'custom',
+        status,
+      })
+    },
+  )
+
   it('throws when requiring a missing session and resolves lsp managers lazily', () => {
     const session = manager.createSession(projectId)
 

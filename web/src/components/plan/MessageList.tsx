@@ -5,7 +5,7 @@ import type { ScrollbarGestureKind } from '../shared/ScrollArea'
 import { useT } from '../../hooks/useT'
 import { useViewport } from '../../hooks/useViewport'
 import { useSessionStore, useIsRunning } from '../../stores/session'
-import { useWorkflows } from '../../hooks/useWorkflows'
+import { useWorkflow, useWorkflows } from '../../hooks/useWorkflows'
 import { useSessionWorkdir } from '../../hooks/useSessionWorkdir'
 import { SCOPE_LABELS } from '../../lib/workflow-scope'
 import { useDisplaySettings } from '../../hooks/useDisplaySettings'
@@ -175,19 +175,45 @@ export const MessageList = memo(function MessageList({
   const { showThinking, showVerboseToolOutput, showStats, showAgentDefinitions, showWorkflowBars } =
     useDisplaySettings()
 
-  const { workflows } = useWorkflows(useSessionWorkdir())
+  const workdir = useSessionWorkdir()
+  const { workflows } = useWorkflows(workdir)
 
   const hasNewCriteria = criteria.some((c) => c.status === 'pending')
   const isDone = sessionPhase === 'done'
   const hasAssistantResponse = displayItems.some((item) => item.type === 'message' && item.message.role === 'assistant')
   const hasActiveWorkflow =
     activeWorkflowExecution?.status === 'running' || activeWorkflowExecution?.status === 'waiting'
+  const hasTerminalWorkflow =
+    !!activeWorkflowExecution &&
+    (activeWorkflowExecution.status === 'completed' ||
+      activeWorkflowExecution.status === 'cancelled' ||
+      activeWorkflowExecution.status === 'blocked') &&
+    !isRunning
+  const workflowsByPrecedence = [...workflows].reverse()
+  const terminalWorkflowInfo = activeWorkflowExecution
+    ? (workflowsByPrecedence.find(
+        (workflow) =>
+          workflow.id === activeWorkflowExecution.workflowId && workflow.name === activeWorkflowExecution.workflowName,
+      ) ?? workflowsByPrecedence.find((workflow) => workflow.id === activeWorkflowExecution.workflowId))
+    : undefined
+  const { data: terminalWorkflow } = useWorkflow(
+    hasTerminalWorkflow ? activeWorkflowExecution.workflowId : undefined,
+    workdir,
+    terminalWorkflowInfo?.scope,
+  )
+  const verifyResumeStep = terminalWorkflow?.steps.find(
+    (step) => step.id === 'verify' || step.subAgentType === 'verifier',
+  )
+  const codeReviewResumeStep = terminalWorkflow?.steps.find(
+    (step) => step.id === 'code_review' || step.subAgentType === 'code_reviewer',
+  )
   const showStartBuilding = hasNewCriteria && !isRunning && hasAssistantResponse && !isDone && !hasActiveWorkflow
   const showVerify =
     criteria.length > 0 &&
     criteria.every((criterion) => criterion.status === 'completed' || criterion.status === 'passed') &&
     !isRunning &&
-    !hasActiveWorkflow
+    !hasActiveWorkflow &&
+    !hasTerminalWorkflow
   const showContinueWorkflow = activeWorkflowExecution?.status === 'waiting' && !isRunning
   // The blocked-step affordance only makes sense when the session is idle: while
   // a turn is running (e.g. a chat turn on a session with a stale blocked
@@ -431,6 +457,43 @@ export const MessageList = memo(function MessageList({
                         : choice.label}
                   </button>
                 ))}
+              </div>
+            )}
+
+            {hasTerminalWorkflow && sessionId && (verifyResumeStep || codeReviewResumeStep) && (
+              <div className="flex justify-center gap-2 feed-item flex-wrap">
+                {verifyResumeStep && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      launchWorkflowAtStep(
+                        sessionId,
+                        activeWorkflowExecution.workflowId,
+                        verifyResumeStep.id,
+                        terminalWorkflowInfo?.scope,
+                      )
+                    }
+                    className="px-4 py-1.5 text-sm font-medium rounded bg-accent-primary/15 text-accent-primary border border-accent-primary/25 hover:bg-accent-primary/25 transition-colors"
+                  >
+                    {t({ en: 'Resume at Verify', fr: 'Reprendre à Vérifier' })}
+                  </button>
+                )}
+                {codeReviewResumeStep && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      launchWorkflowAtStep(
+                        sessionId,
+                        activeWorkflowExecution.workflowId,
+                        codeReviewResumeStep.id,
+                        terminalWorkflowInfo?.scope,
+                      )
+                    }
+                    className="px-4 py-1.5 text-sm font-medium rounded bg-accent-primary/15 text-accent-primary border border-accent-primary/25 hover:bg-accent-primary/25 transition-colors"
+                  >
+                    {t({ en: 'Resume at Code Review', fr: 'Reprendre à Revue de code' })}
+                  </button>
+                )}
               </div>
             )}
 

@@ -11,7 +11,13 @@ const mockLaunchWorkflowAtStep = vi.fn()
 const mockState = {
   phase: 'waiting',
   hasWaitingWorkflow: true,
-  execStatus: 'waiting' as 'waiting' | 'blocked',
+  execStatus: 'waiting' as 'waiting' | 'blocked' | 'completed' | 'cancelled',
+  workflowId: 'pr-review',
+  workflowName: 'PR Review',
+  workflowSteps: [
+    { id: 'verify', name: 'Verifier', type: 'sub_agent', subAgentType: 'verifier' },
+    { id: 'code_review', name: 'Code Review', type: 'sub_agent', subAgentType: 'code_reviewer' },
+  ],
   isRunning: false,
   criteriaStatuses: [] as string[],
   displayItems: [] as Array<Record<string, unknown>>,
@@ -46,8 +52,8 @@ function buildSessionState() {
     focusedSessionId: null,
     waitingWorkflow: mockState.hasWaitingWorkflow
       ? {
-          workflowId: 'pr-review',
-          workflowName: 'PR Review',
+          workflowId: mockState.workflowId,
+          workflowName: mockState.workflowName,
           stepId: 'user_test',
           stepName: 'Manual Testing',
           stepOutput: {} as Record<string, string>,
@@ -58,8 +64,8 @@ function buildSessionState() {
       ? {
           id: 'exec-1',
           sessionId: 's1',
-          workflowId: 'pr-review',
-          workflowName: 'PR Review',
+          workflowId: mockState.workflowId,
+          workflowName: mockState.workflowName,
           status: mockState.execStatus,
           currentStepId: 'user_test',
           currentStepName: 'Manual Testing',
@@ -90,8 +96,19 @@ vi.mock('../../stores/session', () => ({
 
 vi.mock('../../hooks/useWorkflows', () => ({
   useWorkflows: () => ({
-    workflows: [{ id: 'default', name: 'Build & Verify', color: '#3b82f6' }],
+    workflows: [
+      { id: 'default', name: 'Build & Verify', color: '#3b82f6', scope: 'builtin' },
+      { id: mockState.workflowId, name: mockState.workflowName, color: '#8b5cf6', scope: 'project' },
+    ],
     refresh: vi.fn(),
+  }),
+  useWorkflow: () => ({
+    data: {
+      metadata: { id: mockState.workflowId, name: mockState.workflowName },
+      entryStep: 'build',
+      settings: { maxIterations: 12 },
+      steps: mockState.workflowSteps,
+    },
   }),
 }))
 
@@ -140,6 +157,13 @@ describe('MessageList continue workflow button', () => {
     mockLaunchWorkflowAtStep.mockClear()
     mockState.phase = 'waiting'
     mockState.hasWaitingWorkflow = true
+    mockState.execStatus = 'waiting'
+    mockState.workflowId = 'pr-review'
+    mockState.workflowName = 'PR Review'
+    mockState.workflowSteps = [
+      { id: 'verify', name: 'Verifier', type: 'sub_agent', subAgentType: 'verifier' },
+      { id: 'code_review', name: 'Code Review', type: 'sub_agent', subAgentType: 'code_reviewer' },
+    ]
     mockState.criteriaStatuses = []
     mockState.displayItems = []
     mockState.pendingChoices = undefined
@@ -239,6 +263,40 @@ describe('MessageList continue workflow button', () => {
     screen.getByRole('button', { name: 'Verify' }).click()
 
     expect(mockLaunchWorkflowAtStep).toHaveBeenCalledWith('s1', 'default', 'verify', 'builtin')
+  })
+
+  it.each(['completed', 'cancelled', 'blocked'] as const)(
+    'offers both end-step resumes for an idle %s custom workflow with intermediate criteria',
+    (status) => {
+      mockState.execStatus = status
+      mockState.workflowId = 'custom-delivery'
+      mockState.workflowName = 'Custom Delivery'
+      mockState.workflowSteps = [
+        { id: 'audit', name: 'Audit', type: 'sub_agent', subAgentType: 'verifier' },
+        { id: 'peer_review', name: 'Peer Review', type: 'sub_agent', subAgentType: 'code_reviewer' },
+      ]
+      mockState.criteriaStatuses = ['completed', 'failed']
+      mockState.isRunning = false
+      renderMessageList()
+
+      screen.getByRole('button', { name: 'Resume at Verify' }).click()
+      screen.getByRole('button', { name: 'Resume at Code Review' }).click()
+
+      expect(mockLaunchWorkflowAtStep).toHaveBeenNthCalledWith(1, 's1', 'custom-delivery', 'audit', 'project')
+      expect(mockLaunchWorkflowAtStep).toHaveBeenNthCalledWith(2, 's1', 'custom-delivery', 'peer_review', 'project')
+    },
+  )
+
+  it('only offers resume actions backed by a step in the completed workflow', () => {
+    mockState.execStatus = 'completed'
+    mockState.workflowSteps = [
+      { id: 'peer_review', name: 'Peer Review', type: 'sub_agent', subAgentType: 'code_reviewer' },
+    ]
+    mockState.criteriaStatuses = ['completed']
+    renderMessageList()
+
+    expect(screen.queryByRole('button', { name: 'Resume at Verify' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Resume at Code Review' })).toBeDefined()
   })
 
   it('hides Verify while a workflow is active', () => {

@@ -59,6 +59,10 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Orc
     throw new Error(`Workflow "${workflowId}" not found`)
   }
 
+  if (options.resumeFromStep && !workflow.steps.some((step) => step.id === options.resumeFromStep)) {
+    throw new Error(`Resume target step "${options.resumeFromStep}" not found in workflow "${workflow.metadata.id}"`)
+  }
+
   // Validate required params
   const requiredParams = (workflow.metadata.parameters ?? []).filter((p) => p.required)
   const suppliedParams = options.params ?? {}

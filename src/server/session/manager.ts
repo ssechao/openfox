@@ -1491,17 +1491,8 @@ export class SessionManager {
     }
   }
 
-  /**
-   * The execution a client should render: the active run, or a blocked one
-   * awaiting a user-triggered retry. Completed/cancelled runs are not
-   * surfaced — the UI only acts on running/waiting/blocked.
-   */
   getDisplayWorkflowExecution(sessionId: string): import('../../shared/types.js').WorkflowExecution | null {
-    const active = this.getActiveWorkflowExecution(sessionId)
-    if (active) return active
-    const latest = this.getLatestWorkflowExecution(sessionId)
-    if (latest && latest.status === 'blocked') return latest
-    return null
+    return this.getActiveWorkflowExecution(sessionId) ?? this.getLatestWorkflowExecution(sessionId)
   }
 
   // ============================================================================
