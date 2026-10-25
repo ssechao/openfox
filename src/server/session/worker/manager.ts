@@ -22,7 +22,7 @@ import type Database from 'better-sqlite3'
 import { resolveSessionProcessEntry } from '../process-entry.js'
 import type { SessionProcessSupervisor, SupervisorWorkerHandle } from '../process-supervisor/client.js'
 import type { Config, ToolResult } from '../../../shared/types.js'
-import type { ServerMessage } from '../../../shared/protocol.js'
+import type { ChatErrorPayload, ServerMessage } from '../../../shared/protocol.js'
 import { logger } from '../../utils/logger.js'
 import {
   createSessionRunningMessage,
@@ -365,6 +365,10 @@ export class SessionWorkerManager {
           command: worker.command,
         })
       } else if (msg.type === 'ws') {
+        if (msg.msg.type === 'chat.error') {
+          const payload = msg.msg.payload as ChatErrorPayload
+          logger.error('Worker turn error', { sessionId, error: payload.error })
+        }
         this.deps.broadcastForSession(sessionId, msg.msg)
       } else if (msg.type === 'health') {
         const pid = worker.child.pid

@@ -205,7 +205,8 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
     // Generic: use session mode as the agent ID. Workflow-specific callbacks
     // (kickoff injection, step_done tracking) are handled by the workflow executor
     // which calls runAgentTurn directly — not through runChatTurn.
-    await runAgentTurn(options, turnMetrics, mode, append)
+    const result = await runAgentTurn(options, turnMetrics, mode, append)
+    if (result.failed) throw new Error(result.failed.error)
 
     // Create end-of-turn snapshot
     const snapshot = buildSnapshot(sessionManager, sessionId, turnMetrics.buildStats(statsIdentity, mode))
