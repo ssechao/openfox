@@ -18,6 +18,7 @@ import {
   normalizeWorkflowScope,
 } from '../workflows/registry.js'
 import { executeWorkflow } from '../workflows/executor.js'
+import { serverT } from '../i18n.js'
 
 /**
  * Run the orchestrator loop until done, blocked, or aborted.
@@ -69,7 +70,23 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Orc
   const missing = requiredParams.filter((p) => !(p.id in suppliedParams))
   if (missing.length > 0) {
     const names = missing.map((p) => p.label || p.id).join(', ')
-    throw new Error(`Missing required parameter${missing.length > 1 ? 's' : ''}: ${names}`)
+    const message =
+      missing.length === 1
+        ? serverT(
+            {
+              en: 'Please provide the required workflow parameter before launching: {{names}}',
+              fr: 'Veuillez renseigner le paramètre requis du workflow avant le lancement : {{names}}',
+            },
+            { names },
+          )
+        : serverT(
+            {
+              en: 'Please provide the required workflow parameters before launching: {{names}}',
+              fr: 'Veuillez renseigner les paramètres requis du workflow avant le lancement : {{names}}',
+            },
+            { names },
+          )
+    throw new Error(message)
   }
 
   logger.debug('Using workflow executor', {

@@ -129,6 +129,18 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
             }
           }
 
+          if (
+            (exec.status === 'completed' || exec.status === 'cancelled') &&
+            (!payload.workflowId || payload.workflowId === exec.workflowId)
+          ) {
+            return {
+              params: { ...exec.params, ...payload.params },
+              initialStepOutput: payload.stepOutput ?? exec.stepOutput,
+              ...(resumeFromStep ? { resumeFromStep } : {}),
+              ...(exec.subGroup ? { subGroup: exec.subGroup } : {}),
+            }
+          }
+
           return {}
         })()
       : {}),
