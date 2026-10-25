@@ -17,6 +17,7 @@ export interface WorkerMcpTool {
   serverName: string
   toolName: string
   definition: LLMToolDefinition
+  sessionIdInjection?: Record<string, string>
 }
 
 export type McpRequestMessage = WorkerIpcIdentity & {

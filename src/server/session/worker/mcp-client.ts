@@ -1,5 +1,6 @@
 import type { ToolResult } from '../../../shared/types.js'
 import type { Tool, ToolContext } from '../../tools/types.js'
+import { applySessionIdInjection } from '../../mcp/session-id-injection.js'
 import {
   MAX_MCP_DEADLINE_MS,
   MAX_MCP_REQUEST_BYTES,
@@ -129,6 +130,8 @@ export class WorkerMcpClient {
     if (context.signal?.aborted) {
       return Promise.resolve(failure('MCP request cancelled before dispatch'))
     }
+    const injected = applySessionIdInjection(descriptor.sessionIdInjection, args, this.identity.sessionId)
+    if (!injected.ok) return Promise.resolve(failure(injected.error))
 
     const requestId = crypto.randomUUID()
     const deadlineMs = Math.min(
@@ -142,7 +145,7 @@ export class WorkerMcpClient {
       serverName: descriptor.serverName,
       toolName: descriptor.toolName,
       name: descriptor.name,
-      args,
+      args: injected.args,
       messageId: context.messageId,
       toolCallId: context.toolCallId,
       deadlineMs,

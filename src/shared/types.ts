@@ -1015,6 +1015,7 @@ export interface Config {
           url?: string
           headers?: Record<string, string>
           disabledTools?: string[]
+          sessionIdInjection?: Record<string, string>
         }
       >
     | undefined

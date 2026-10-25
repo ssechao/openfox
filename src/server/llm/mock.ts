@@ -222,6 +222,23 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
   // MCP tool exercise (worker crash/cleanup tests): the mock emits the shared
   // MCP tool call so the gateway-side registry executes it against the real
   // stdio server.
+  const proxiedMcpMatch = prompt.match(/Call the proxied MCP tool (\S+)/i)
+  if (proxiedMcpMatch) {
+    return {
+      tools: [
+        {
+          name: proxiedMcpMatch[1]!,
+          arguments: {
+            server_name: 'llm-aether',
+            tool_name: 'ht_get_contact_info',
+            arguments: { openfox_session_id: 'shared-fallback' },
+          },
+        },
+      ],
+      response: 'Called the proxied MCP tool.',
+    }
+  }
+
   const mcpMatch = prompt.match(/Call the MCP tool (\S+)/i)
   if (mcpMatch) {
     return {

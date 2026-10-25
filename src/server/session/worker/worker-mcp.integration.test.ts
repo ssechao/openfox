@@ -36,6 +36,12 @@ describe('worker MCP IPC', () => {
           command: 'npx',
           args: ['tsx', join(here, '..', '..', '..', '..', 'e2e', 'mock-mcp-server.ts')],
         },
+        'proxy-server': {
+          transport: 'stdio',
+          command: 'npx',
+          args: ['tsx', join(here, '..', '..', '..', '..', 'e2e', 'mock-mcp-proxy-server.ts')],
+          sessionIdInjection: { 'llm-aether': 'openfox_session_id' },
+        },
       },
     }
     const { createServerHandle } = await import('../../index.js')
@@ -102,5 +108,63 @@ describe('worker MCP IPC', () => {
 
     expect(messages).toContain('test-server_greet')
     expect(messages).not.toMatch(/Unknown tool|tool.*not.*found/i)
+  }, 60_000)
+
+  it('injects each external worker session id into proxied MCP calls', async () => {
+    await waitFor(async () => {
+      const response = await fetch(`${base}/api/mcp/servers`)
+      const body = (await response.json()) as { servers: Array<{ name: string; status: string }> }
+      return body.servers.some((item) => item.name === 'proxy-server' && item.status === 'connected') ? true : null
+    }, 30_000)
+
+    const projectDir = join(root, 'proxy-project')
+    await mkdir(projectDir, { recursive: true })
+    const projectResponse = await fetch(`${base}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'worker-mcp-proxy', workdir: projectDir }),
+    })
+    expect(projectResponse.status).toBe(201)
+    const { project } = (await projectResponse.json()) as { project: { id: string } }
+
+    const createSession = async (title: string): Promise<string> => {
+      const response = await fetch(`${base}/api/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId: project.id, title }),
+      })
+      expect(response.status).toBe(201)
+      const body = (await response.json()) as { session: { id: string } }
+      return body.session.id
+    }
+    const [sessionA, sessionB] = await Promise.all([createSession('proxy-a'), createSession('proxy-b')])
+
+    const callProxy = (sessionId: string) =>
+      fetch(`${base}/api/sessions/${sessionId}/message`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: 'Call the proxied MCP tool proxy-server_mcp_execute_tool' }),
+      })
+    const responses = await Promise.all([callProxy(sessionA), callProxy(sessionB)])
+    expect(responses.map((response) => response.status)).toEqual([200, 200])
+
+    const identityFor = (sessionId: string) =>
+      waitFor(async () => {
+        const response = await fetch(`${base}/api/sessions/${sessionId}`)
+        const body = (await response.json()) as {
+          session: { isRunning: boolean }
+          messages: Array<{ toolCalls?: Array<{ name: string; result?: { output?: string } }> }>
+        }
+        if (body.session.isRunning) return null
+        const output = body.messages
+          .flatMap((message) => message.toolCalls ?? [])
+          .find((call) => call.name === 'proxy-server_mcp_execute_tool')?.result?.output
+        return output ? ((JSON.parse(output) as { openfox_session_id?: string }).openfox_session_id ?? null) : null
+      }, 30_000)
+    const [identityA, identityB] = await Promise.all([identityFor(sessionA), identityFor(sessionB)])
+
+    expect(identityA).toBe(sessionA)
+    expect(identityB).toBe(sessionB)
+    expect(identityA).not.toBe(identityB)
   }, 60_000)
 })

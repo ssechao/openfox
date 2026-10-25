@@ -45,7 +45,7 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
 }))
 
 import { McpManager } from './manager.js'
-import { createMcpTools } from './tool-adapter.js'
+import { createMcpTools, createWorkerMcpTools } from './tool-adapter.js'
 import type { McpServerConfig } from './types.js'
 import type { ToolContext } from '../tools/types.js'
 
@@ -193,6 +193,13 @@ describe('session id injection through a proxy server', () => {
 
     expect(inner).toEqual({ peer_id: 'p', session_id: 'session-other' })
     expect(args.arguments).toBe(inner)
+  })
+
+  it('includes the injection policy in worker MCP descriptors', async () => {
+    const manager = await proxyManager()
+    const descriptor = createWorkerMcpTools(manager).find((tool) => tool.name === 'mcp-lazy_mcp_execute_tool')
+
+    expect(descriptor?.sessionIdInjection).toEqual({ 'llm-aether': 'session_id' })
   })
 
   it('attributes a model tool call to the session executing it, not to the id the model wrote', async () => {

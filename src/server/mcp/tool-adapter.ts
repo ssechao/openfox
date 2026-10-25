@@ -28,7 +28,13 @@ export function createWorkerMcpTools(mcpManager: McpManager): WorkerMcpTool[] {
           parameters: sanitizeToolSchema(mcpTool.inputSchema as Record<string, unknown>),
         },
       }
-      tools.push({ name, definition, serverName: server.name, toolName: mcpTool.name })
+      tools.push({
+        name,
+        definition,
+        serverName: server.name,
+        toolName: mcpTool.name,
+        ...(server.config.sessionIdInjection ? { sessionIdInjection: server.config.sessionIdInjection } : {}),
+      })
     }
   }
   return tools

@@ -68,6 +68,66 @@ describe('WorkerMcpClient', () => {
     await expect(pending).resolves.toMatchObject({ success: true, output: 'ok' })
   })
 
+  it('injects the worker session id before sending a proxied MCP request', async () => {
+    const sent: WorkerToGatewayMessage[] = []
+    const client = new WorkerMcpClient(identity, (message) => sent.push(message))
+    const proxy = {
+      ...descriptor,
+      sessionIdInjection: { 'llm-aether': 'openfox_session_id' },
+    }
+    const inner = { peer_id: 'peer', openfox_session_id: 'shared-fallback' }
+    const tool = client.createTools([proxy])[0]!
+    const pending = tool.execute(
+      { server_name: 'llm-aether', tool_name: 'ht_send_to_peer', arguments: inner },
+      {
+        sessionId: identity.sessionId,
+        workdir: '/tmp',
+        sessionManager: {} as never,
+        toolCallId: 'call-proxy',
+        messageId: 'message-proxy',
+      },
+    )
+
+    expect(sent[0]).toMatchObject({
+      type: 'mcp.request',
+      args: {
+        server_name: 'llm-aether',
+        tool_name: 'ht_send_to_peer',
+        arguments: { peer_id: 'peer', openfox_session_id: identity.sessionId },
+      },
+    })
+    expect(inner).toEqual({ peer_id: 'peer', openfox_session_id: 'shared-fallback' })
+    client.cancelAll()
+    await pending
+  })
+
+  it('refuses a proxied MCP request that cannot carry the worker session id', async () => {
+    const sent: WorkerToGatewayMessage[] = []
+    const client = new WorkerMcpClient(identity, (message) => sent.push(message))
+    const proxy = {
+      ...descriptor,
+      sessionIdInjection: { 'llm-aether': 'openfox_session_id' },
+    }
+    const pending = client.createTools([proxy])[0]!.execute(
+      { server_name: 'llm-aether', tool_name: 'ht_send_to_peer', arguments: 'invalid' },
+      {
+        sessionId: identity.sessionId,
+        workdir: '/tmp',
+        sessionManager: {} as never,
+        toolCallId: 'call-invalid-proxy',
+        messageId: 'message-invalid-proxy',
+      },
+    )
+
+    await Promise.resolve()
+    if (sent.length > 0) client.cancelAll()
+    await expect(pending).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('must be an object'),
+    })
+    expect(sent).toEqual([])
+  })
+
   it('rejects oversized requests before IPC emission', async () => {
     const sent: WorkerToGatewayMessage[] = []
     const client = new WorkerMcpClient(identity, (message) => sent.push(message))

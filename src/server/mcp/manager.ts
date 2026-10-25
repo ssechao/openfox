@@ -10,6 +10,7 @@ import { logger } from '../utils/logger.js'
 import { McpOAuthProvider } from './oauth-provider.js'
 import { readMcpOAuthEntry } from './oauth-store.js'
 import { sanitizeToolSchema } from '../llm/schema-sanitizer.js'
+import { applySessionIdInjection } from './session-id-injection.js'
 
 /**
  * The server may answer up to a polling interval after its own deadline, so the SDK request
@@ -52,30 +53,6 @@ function withoutAuthorizationHeader(headers: Record<string, string> | undefined)
   const kept = Object.entries(headers).filter(([key]) => key.trim().toLowerCase() !== 'authorization')
   if (kept.length === Object.keys(headers).length) return headers
   return Object.fromEntries(kept)
-}
-
-type SessionIdInjectionResult = { ok: true; args: Record<string, unknown> } | { ok: false; error: string }
-
-function applySessionIdInjection(
-  injection: Record<string, string> | undefined,
-  args: Record<string, unknown>,
-  sessionId: string | undefined,
-): SessionIdInjectionResult {
-  const target = args['server_name']
-  if (!injection || typeof target !== 'string') return { ok: true, args }
-  const paramName: unknown = injection[target]
-  if (typeof paramName !== 'string' || paramName.length === 0) return { ok: true, args }
-  if (!sessionId) {
-    return { ok: false, error: `a session id is required to call '${target}' through this proxy` }
-  }
-  const inner = args['arguments']
-  if (inner !== undefined && (typeof inner !== 'object' || inner === null || Array.isArray(inner))) {
-    return { ok: false, error: `arguments for '${target}' must be an object to carry '${paramName}'` }
-  }
-  return {
-    ok: true,
-    args: { ...args, arguments: { ...(inner as Record<string, unknown> | undefined), [paramName]: sessionId } },
-  }
 }
 
 /** Rough token estimate: ~4 chars per token for JSON-serialized tool definitions */
