@@ -41,6 +41,23 @@ export function markWorkerSessionInterrupted(
   return result.changes === 1
 }
 
+export function restoreSessionInterruptedForAttempt(
+  db: Database.Database,
+  sessionId: string,
+  interruptedAt: string,
+  initialGeneration: number,
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE sessions
+       SET is_running = 0, interrupted_at = ?, updated_at = ?
+       WHERE id = ? AND worker_id IS NULL
+         AND worker_generation BETWEEN ? AND ?`,
+    )
+    .run(interruptedAt, interruptedAt, sessionId, initialGeneration, initialGeneration + 1)
+  return result.changes === 1
+}
+
 export function clearSessionInterrupted(db: Database.Database, sessionId: string): void {
   db.prepare(`UPDATE sessions SET interrupted_at = NULL, updated_at = ? WHERE id = ?`).run(
     new Date().toISOString(),

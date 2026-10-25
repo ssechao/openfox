@@ -266,6 +266,15 @@ export class SessionWorkerManager {
     return this.scheduler.release(sessionId)
   }
 
+  holdInterruption(sessionId: string): void {
+    this.pendingInterruptions.add(sessionId)
+    this.scheduler.cancel(sessionId)
+  }
+
+  releaseInterruptionHold(sessionId: string): void {
+    this.pendingInterruptions.delete(sessionId)
+  }
+
   launch(
     sessionId: string,
     onSettled: (outcome: WorkerSettledOutcome) => void,

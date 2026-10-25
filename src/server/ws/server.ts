@@ -344,6 +344,8 @@ export interface WebSocketWorkerController {
   isEnabled(): boolean
   requestTurn(sessionId: string, start: () => void): AdmissionResult
   releaseTurn(sessionId: string): boolean
+  holdInterruption?(sessionId: string): void
+  releaseInterruptionHold?(sessionId: string): void
   launch(sessionId: string, onSettled: (outcome: WorkerSettledOutcome) => void, command?: WorkerTurnCommand): void
   answerQuestion?(callId: string, answer: string, skip: boolean): InteractiveAnswerResult
 }

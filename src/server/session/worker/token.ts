@@ -87,6 +87,10 @@ export function isLatestWorkerGeneration(db: Database.Database, sessionId: strin
   return readWorkerRow(db, sessionId)?.worker_generation === token.generation
 }
 
+export function getWorkerGeneration(db: Database.Database, sessionId: string): number | null {
+  return readWorkerRow(db, sessionId)?.worker_generation ?? null
+}
+
 /**
  * Build the write fence a worker-side EventStore invokes inside its append
  * transaction. Throws StaleWorkerGenerationError when this worker's token is

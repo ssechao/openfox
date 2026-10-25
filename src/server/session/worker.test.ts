@@ -22,6 +22,7 @@ import {
   planWorkerCrashRecovery,
   findPendingToolReconciliations,
   readTrackedChildren,
+  restoreSessionInterruptedForAttempt,
   initChildrenTracking,
   trackExclusiveChild,
   killTrackedChildren,
@@ -110,6 +111,30 @@ describe('worker token fencing', () => {
 
     expect(assignWorkerToken(db, 'sess-1').generation).toBe(1)
     expect(calls).toEqual(['immediate', 'select', 'update'])
+  })
+
+  it('restores interruption only while the failed attempt still owns the generation range', () => {
+    const db = trackedDb()
+    db.prepare(
+      `UPDATE sessions SET is_running = 1, worker_id = 'successor', worker_generation = 2 WHERE id = 'sess-1'`,
+    ).run()
+
+    expect(restoreSessionInterruptedForAttempt(db, 'sess-1', 'interrupted', 0)).toBe(false)
+    expect(db.prepare(`SELECT is_running, worker_id, interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+      is_running: 1,
+      worker_id: 'successor',
+      interrupted_at: null,
+    })
+
+    db.prepare(
+      `UPDATE sessions SET worker_id = NULL, worker_generation = 1, interrupted_at = NULL WHERE id = 'sess-1'`,
+    ).run()
+    expect(restoreSessionInterruptedForAttempt(db, 'sess-1', 'interrupted', 0)).toBe(true)
+    expect(db.prepare(`SELECT is_running, worker_id, interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+      is_running: 0,
+      worker_id: null,
+      interrupted_at: 'interrupted',
+    })
   })
 
   it('refuses to assign a token to an unknown session', () => {
