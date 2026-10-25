@@ -18,11 +18,9 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process'
-import type { SessionProcessSupervisor, SupervisorWorkerHandle } from '../process-supervisor/client.js'
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type Database from 'better-sqlite3'
+import { resolveSessionProcessEntry } from '../process-entry.js'
+import type { SessionProcessSupervisor, SupervisorWorkerHandle } from '../process-supervisor/client.js'
 import type { Config, ToolResult } from '../../../shared/types.js'
 import type { ServerMessage } from '../../../shared/protocol.js'
 import { logger } from '../../utils/logger.js'
@@ -140,18 +138,7 @@ export interface SessionWorkerManagerDeps {
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
-  const here = dirname(fileURLToPath(import.meta.url))
-  const tsEntry = join(here, 'child.ts')
-  if (existsSync(tsEntry)) {
-    return { path: tsEntry, execArgv: ['--import', 'tsx/esm'] }
-  }
-  // Bundled layout: this file is inlined into dist/server/index.js and the
-  // worker entry is emitted at dist/server/session/worker/child.js.
-  const jsEntry = join(here, 'session', 'worker', 'child.js')
-  if (existsSync(jsEntry)) {
-    return { path: jsEntry, execArgv: [] }
-  }
-  throw new Error(`Session worker entry not found (looked for ${tsEntry} and ${jsEntry})`)
+  return resolveSessionProcessEntry('worker', import.meta.url)
 }
 
 export class SessionWorkerManager {

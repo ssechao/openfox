@@ -1,5 +1,6 @@
 import { defineConfig } from 'tsup'
 import { readFileSync } from 'node:fs'
+import { SESSION_PROCESS_BUILD_ENTRIES } from './src/server/session/process-entry.js'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 
@@ -11,8 +12,7 @@ export default defineConfig({
     'cli/index': 'src/cli/index.ts',
     'cli/dev': 'src/cli/dev.ts',
     'server/index': 'src/server/index.ts',
-    'server/session/process-supervisor/child': 'src/server/session/process-supervisor/child.ts',
-    'server/session/worker/child': 'src/server/session/worker/child.ts',
+    ...SESSION_PROCESS_BUILD_ENTRIES,
     'shared/index': 'src/shared/index.ts',
     'provider/index': 'src/provider/index.ts',
     'plugin/index': 'src/plugin/index.ts',

@@ -1,8 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import {
   readProcessStartIdentityAsync,
   type ExclusiveProcessInventory,
@@ -10,6 +7,7 @@ import {
   type ProcessIdentityRead,
   type ProcessInventoryEntry,
 } from '../worker/children.js'
+import { resolveSessionProcessEntry } from '../process-entry.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
 import { linuxSubreaperSpawnFailure, resolveLinuxSubreaperInterpreter, spawnLinuxSubreaper } from './linux-subreaper.js'
 
@@ -66,12 +64,7 @@ export interface ProcessSupervisorIntrospection {
 }
 
 function resolveSupervisorEntry(): SupervisorEntry {
-  const here = dirname(fileURLToPath(import.meta.url))
-  const sourceEntry = join(here, 'child.ts')
-  if (existsSync(sourceEntry)) return { path: sourceEntry, execArgv: ['--import', 'tsx/esm'] }
-  const bundledEntry = join(here, 'session', 'process-supervisor', 'child.js')
-  if (existsSync(bundledEntry)) return { path: bundledEntry, execArgv: [] }
-  throw new Error(`Session process supervisor entry not found (looked for ${sourceEntry} and ${bundledEntry})`)
+  return resolveSessionProcessEntry('supervisor', import.meta.url)
 }
 
 class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle {

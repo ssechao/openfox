@@ -40,3 +40,22 @@ npm notice
 ```
 
 Code de sortie : `0`.
+
+## Smoke binaire
+
+Exécution le `2026-10-25` sur `.122` avec `docker --context pve8` et `node:24-bookworm`. Le checkout est construit par `npm run build`, empaqueté par `npm pack`, puis installé dans un répertoire séparé avec `npm install --omit=dev`. Le processus lancé est `node dist/cli/index.js --no-browser`, avec une base temporaire, un port libre, le mock LLM et les workers activés.
+
+Sortie exacte du smoke :
+
+```text
+PASS build entries supervisor=/tmp/runtime/node_modules/openfox/dist/server/session/process-supervisor/child.js worker=/tmp/runtime/node_modules/openfox/dist/server/session/worker/child.js
+PASS dist-only source_absent=true tsx_absent=true
+PASS processes gateway_pid=124 supervisor_pid=168 worker_pid=180 distinct=true
+PASS commands supervisor="/usr/local/bin/node /tmp/runtime/node_modules/openfox/dist/server/session/process-supervisor/child.js" worker="/usr/local/bin/node /tmp/runtime/node_modules/openfox/dist/server/session/worker/child.js"
+PASS websocket load_ack=true chat_delta=true events=22
+PASS stop success=true idle=true worker_gone=true
+PASS shutdown code=null signal=SIGTERM supervisor_gone=true
+VERDICT GLOBAL: PASS
+```
+
+Code de sortie : `0`.
