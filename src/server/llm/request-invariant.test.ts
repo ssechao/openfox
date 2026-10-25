@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { computeRequestInvariantHashes } from './request-invariant.js'
+import { computeRequestInvariantHashes, computeResponsesRequestInvariantHashes } from './request-invariant.js'
+import type { ResponsesRequestBody } from './responses-native.js'
 import type { ChatCompletionCreateParamsBase, ChatCompletionMessageParam, ChatCompletionTool } from './openai-types.js'
 
 describe('LLM request invariant hashes', () => {
@@ -32,6 +34,40 @@ describe('LLM request invariant hashes', () => {
     )
 
     expect(second).toEqual(first)
+  })
+
+  it('logs DIAG-INV digests from raw Responses fields without normalization', () => {
+    const body: ResponsesRequestBody = {
+      model: 'gpt-6-astra',
+      instructions: 'stable instructions',
+      tools: [{ type: 'function', name: 'read_file', parameters: { type: 'object', properties: {} } }],
+      text: { format: { type: 'text' } },
+      reasoning: { effort: 'high' },
+      input: [{ role: 'user', content: 'first request' }],
+    }
+    const sha8 = (value: string | undefined) =>
+      createHash('sha256')
+        .update(value ?? '')
+        .digest('hex')
+        .slice(0, 8)
+
+    expect(computeResponsesRequestInvariantHashes(body)).toMatchObject({
+      d_instr: sha8(body.instructions),
+      d_tools: sha8(JSON.stringify(body.tools)),
+      d_text: sha8(JSON.stringify(body['text'])),
+      d_model: sha8(body.model),
+      d_reasoning: sha8(JSON.stringify(body.reasoning)),
+      d_first: sha8(JSON.stringify(body.input[0])),
+    })
+
+    const reordered: ResponsesRequestBody = {
+      ...body,
+      tools: [{ name: 'read_file', type: 'function', parameters: { properties: {}, type: 'object' } }],
+    }
+    const first = computeResponsesRequestInvariantHashes(body)
+    const second = computeResponsesRequestInvariantHashes(reordered)
+    expect(second.invariantHash).toBe(first.invariantHash)
+    expect(second.d_tools).not.toBe(first.d_tools)
   })
 
   it('separates invariant drift from first-item drift', () => {

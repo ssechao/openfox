@@ -3,7 +3,16 @@ import type { ChatCompletionCreateParamsBase, ChatCompletionCreateParamsNonStrea
 import { buildResponsesRequest, type ResponsesRequestBody } from './responses-native.js'
 import { logger } from '../utils/logger.js'
 
-export interface RequestInvariantHashes {
+export interface ResponsesRawDigests {
+  d_instr: string
+  d_tools: string
+  d_text: string
+  d_model: string
+  d_reasoning: string
+  d_first: string
+}
+
+export interface RequestInvariantHashes extends Partial<ResponsesRawDigests> {
   invariantHash: string
   firstItemHash: string
 }
@@ -44,6 +53,13 @@ function sha256(value: unknown): string {
     .digest('hex')
 }
 
+function rawSha256(value: string | undefined): string {
+  return createHash('sha256')
+    .update(value ?? '')
+    .digest('hex')
+    .slice(0, 8)
+}
+
 export function computeResponsesRequestInvariantHashes(body: ResponsesRequestBody): RequestInvariantHashes {
   return {
     invariantHash: sha256({
@@ -54,6 +70,12 @@ export function computeResponsesRequestInvariantHashes(body: ResponsesRequestBod
       reasoning: body.reasoning ?? null,
     }),
     firstItemHash: sha256(body.input[0] ?? null),
+    d_instr: rawSha256(body.instructions ?? ''),
+    d_tools: rawSha256(JSON.stringify(body.tools)),
+    d_text: rawSha256(JSON.stringify(body['text'])),
+    d_model: rawSha256(body.model),
+    d_reasoning: rawSha256(JSON.stringify(body.reasoning)),
+    d_first: rawSha256(JSON.stringify(body.input[0])),
   }
 }
 

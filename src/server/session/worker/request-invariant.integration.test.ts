@@ -159,6 +159,8 @@ describe('request invariant stability across turns', () => {
       expect(result.hashes[1]).toEqual(result.hashes[0])
       expect(result.debug).toHaveLength(2)
       expect(result.debug.every((line) => !line.includes('first stable request'))).toBe(true)
+      expect(result.debug.every((line) => /"d_instr":"[0-9a-f]{8}"/.test(line))).toBe(true)
+      expect(result.debug.every((line) => /"d_first":"[0-9a-f]{8}"/.test(line))).toBe(true)
     },
     240_000,
   )
