@@ -153,7 +153,11 @@ describe('run_command output streaming into a locked database', () => {
     const path = join(directory, 'sessions.db')
     writer = new Database(path, { timeout: 20 })
     writer.pragma('journal_mode = WAL')
-    lockedStore = new EventStore(writer)
+    lockedStore = new EventStore(writer, {
+      appendBusyDeadlineMs: 50,
+      appendBusyInitialBackoffMs: 1,
+      appendBusyMaxBackoffMs: 2,
+    })
     holder = new Database(path)
     holder.exec('BEGIN IMMEDIATE')
   })

@@ -55,6 +55,28 @@ const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 
 export const STREAM_FLUSH_INTERVAL_MS = 250
 export const STREAM_FLUSH_MAX_BYTES = 4096
+export const APPEND_BUSY_DEADLINE_MS = 30_000
+const APPEND_BUSY_INITIAL_BACKOFF_MS = 5
+const APPEND_BUSY_MAX_BACKOFF_MS = 250
+const appendBusySleep = new Int32Array(new SharedArrayBuffer(4))
+
+export class EventStoreBusyTimeoutError extends Error {
+  readonly code = 'EVENT_STORE_BUSY_TIMEOUT'
+
+  constructor(
+    readonly sessionId: string,
+    readonly eventType: string,
+    readonly attempts: number,
+    readonly deadlineMs: number,
+    cause: unknown,
+  ) {
+    super(
+      `Event append busy deadline exceeded after ${deadlineMs} ms for ${eventType} in session ${sessionId} (${attempts} attempts)`,
+      { cause },
+    )
+    this.name = 'EventStoreBusyTimeoutError'
+  }
+}
 
 /**
  * Detect a UNIQUE constraint violation (e.g. another openfox instance writing
@@ -67,7 +89,15 @@ function isUniqueConstraintError(error: unknown): boolean {
 
 function isBusyError(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
-  return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'))
+  return (
+    typeof code === 'string' &&
+    (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED') || code === 'EVENT_STORE_BUSY_TIMEOUT')
+  )
+}
+
+function runImmediateTransaction(transaction: { (): void; immediate?: () => void }): void {
+  if (transaction.immediate) transaction.immediate()
+  else transaction()
 }
 
 function isUserStart(event: { type: string; data: unknown }): boolean {
@@ -266,7 +296,6 @@ export class EventStore {
   // limit the first caller happened to request.
   private static readonly PROMPTS_QUERY_LIMIT = 100
   private static readonly RECENT_PROMPTS_MAX_ENTRIES = 20
-  private static readonly APPEND_BUSY_RETRIES = 2
 
   private diagnostics: StoreDiagnostics | null
   private healthCollector: DiagnosticsCollector | null = null
@@ -289,6 +318,9 @@ export class EventStore {
   private eventsReferenceSessions: boolean | undefined
   private readonly streamFlushIntervalMs: number
   private readonly streamFlushMaxBytes: number
+  private readonly appendBusyDeadlineMs: number
+  private readonly appendBusyInitialBackoffMs: number
+  private readonly appendBusyMaxBackoffMs: number
 
   private checkExternalWrites(): void {
     if (!this.hotPath) return
@@ -430,6 +462,9 @@ export class EventStore {
       blobStore?: BlobStore
       snapshotCacheMaxBytes?: number
       snapshotCacheMaxEntries?: number
+      appendBusyDeadlineMs?: number
+      appendBusyInitialBackoffMs?: number
+      appendBusyMaxBackoffMs?: number
       /** Worker fencing (étape 6a): invoked inside every append transaction;
        *  must throw when this writer's token is stale. Gateway instances leave
        *  it unset. */
@@ -451,6 +486,12 @@ export class EventStore {
     )
     this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS
     this.streamFlushMaxBytes = options.streamFlushMaxBytes ?? STREAM_FLUSH_MAX_BYTES
+    this.appendBusyDeadlineMs = Math.max(1, options.appendBusyDeadlineMs ?? APPEND_BUSY_DEADLINE_MS)
+    this.appendBusyInitialBackoffMs = Math.max(1, options.appendBusyInitialBackoffMs ?? APPEND_BUSY_INITIAL_BACKOFF_MS)
+    this.appendBusyMaxBackoffMs = Math.max(
+      this.appendBusyInitialBackoffMs,
+      options.appendBusyMaxBackoffMs ?? APPEND_BUSY_MAX_BACKOFF_MS,
+    )
     this.db = db
     this.writeFence = options.writeFence
     this.blobStore = options.blobStore ?? blobStoreForDatabase(db.name)
@@ -698,6 +739,44 @@ export class EventStore {
     for (const ref of collectBlobRefs(data)) clear.call(this.blobStore, ref.hash)
   }
 
+  private retryBusy<T>(sessionId: string, eventType: string, operation: () => T): T {
+    const startedAt = performance.now()
+    let attempts = 0
+
+    while (true) {
+      attempts++
+      try {
+        return operation()
+      } catch (error) {
+        if (!isBusyError(error)) throw error
+        const elapsedMs = performance.now() - startedAt
+        if (elapsedMs >= this.appendBusyDeadlineMs) {
+          const timeout = new EventStoreBusyTimeoutError(
+            sessionId,
+            eventType,
+            attempts,
+            this.appendBusyDeadlineMs,
+            error,
+          )
+          logger.error('Event not persisted: database lock deadline exceeded', {
+            sessionId,
+            type: eventType,
+            attempts,
+            deadlineMs: this.appendBusyDeadlineMs,
+            elapsedMs: Math.round(elapsedMs),
+            error: error instanceof Error ? error.message : String(error),
+          })
+          throw timeout
+        }
+        const exponentialMs = this.appendBusyInitialBackoffMs * 2 ** Math.min(attempts - 1, 16)
+        const jitteredMs = exponentialMs * (0.75 + Math.random() * 0.5)
+        const remainingMs = this.appendBusyDeadlineMs - elapsedMs
+        const delayMs = Math.max(1, Math.floor(Math.min(jitteredMs, this.appendBusyMaxBackoffMs, remainingMs)))
+        Atomics.wait(appendBusySleep, 0, 0, delayMs)
+      }
+    }
+  }
+
   private appendEvent(
     sessionId: string,
     event: TurnEvent,
@@ -719,39 +798,25 @@ export class EventStore {
     )
 
     // Multi-process safety: another openfox instance may have taken our
-    // computed seq between the MAX read and the INSERT. Probe forward. A
-    // database another connection keeps locked is retried a bounded number of
-    // times (each attempt already waits busy_timeout), then reported.
+    // computed seq between the MAX read and the INSERT. Probe forward.
     let seq = this.getNextSeq(sessionId)
-    let busyRetries = 0
     for (let attempt = 0; attempt < 100; attempt++) {
+      const transaction = this.db.transaction(() => {
+        this.writeFence?.(sessionId)
+        insert.run(sessionId, seq, timestamp, event.type, payload)
+        this.searchIndex.apply(sessionId, toStore, timestamp, {
+          ...(options.indexSnapshot ? { allowSnapshot: true } : {}),
+          ...(options.searchRemoveIds ? { removeMessageIds: options.searchRemoveIds } : {}),
+        })
+      })
       try {
         this.timed('write', () =>
-          this.searchIndex.withPendingRollback(() =>
-            this.db.transaction(() => {
-              this.writeFence?.(sessionId)
-              insert.run(sessionId, seq, timestamp, event.type, payload)
-              this.searchIndex.apply(sessionId, toStore, timestamp, {
-                ...(options.indexSnapshot ? { allowSnapshot: true } : {}),
-                ...(options.searchRemoveIds ? { removeMessageIds: options.searchRemoveIds } : {}),
-              })
-            })(),
+          this.retryBusy(sessionId, event.type, () =>
+            this.searchIndex.withPendingRollback(() => runImmediateTransaction(transaction)),
           ),
         )
         break
       } catch (error) {
-        if (isBusyError(error) && busyRetries < EventStore.APPEND_BUSY_RETRIES) {
-          busyRetries++
-          continue
-        }
-        if (isBusyError(error)) {
-          logger.error('Event not persisted: the database stayed locked', {
-            sessionId,
-            type: event.type,
-            attempts: busyRetries + 1,
-            error: error instanceof Error ? error.message : String(error),
-          })
-        }
         if (!isUniqueConstraintError(error) || attempt === 99) throw error
         seq++
       }
@@ -820,7 +885,12 @@ export class EventStore {
             seq++
           }
         })
-        this.timed('write', () => this.searchIndex.withPendingRollback(transaction))
+        this.timed('write', () =>
+          this.retryBusy(sessionId, `batch:${toStore[0]!.type}`, () => {
+            results.length = 0
+            return this.searchIndex.withPendingRollback(() => runImmediateTransaction(transaction))
+          }),
+        )
 
         for (const stored of results) this.releaseBlobPending(stored.data)
 

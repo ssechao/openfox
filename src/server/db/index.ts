@@ -8,7 +8,7 @@ import { ensureSearchSchema } from '../search/fts-index.js'
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
-const BUSY_TIMEOUT_MS = 5000
+const BUSY_TIMEOUT_MS = 10_000
 
 export function initDatabase(config: Config): Database.Database {
   if (db) {

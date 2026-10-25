@@ -278,7 +278,11 @@ describe('EventStore stream batching while another connection holds the write lo
     directory = mkdtempSync(join(tmpdir(), 'openfox-stream-busy-'))
     db = new Database(join(directory, 'sessions.db'), { timeout: 20 })
     db.pragma('journal_mode = WAL')
-    store = new EventStore(db)
+    store = new EventStore(db, {
+      appendBusyDeadlineMs: 50,
+      appendBusyInitialBackoffMs: 1,
+      appendBusyMaxBackoffMs: 2,
+    })
     store.append(SID, { type: 'message.start', data: { messageId: 'a1', role: 'assistant' } })
     holder = new Database(join(directory, 'sessions.db'))
   })
