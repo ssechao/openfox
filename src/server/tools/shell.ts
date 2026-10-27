@@ -213,6 +213,10 @@ export const runCommandTool = createTool<RunCommandArgs>(
   },
 )
 
+interface OutputCaptureBudget {
+  remainingBytes: number
+}
+
 class BoundedOutputBuffer {
   private value = ''
   private capturedBytes = 0
@@ -221,10 +225,11 @@ class BoundedOutputBuffer {
   constructor(
     private readonly maxBytes: number,
     private readonly retainTail: boolean,
+    private readonly budget: OutputCaptureBudget,
   ) {}
 
   get full(): boolean {
-    return !this.retainTail && this.capturedBytes >= this.maxBytes
+    return !this.retainTail && this.budget.remainingBytes <= 0
   }
 
   append(text: string): void {
@@ -237,16 +242,16 @@ class BoundedOutputBuffer {
     }
 
     const visibleBytes = Buffer.byteLength(visible)
-    const remainingBytes = this.maxBytes - this.capturedBytes
-    if (remainingBytes <= 0) {
+    if (this.budget.remainingBytes <= 0) {
       this.skippedBytes += visibleBytes
       return
     }
 
-    const captured = takeUtf8Prefix(visible, remainingBytes)
+    const captured = takeUtf8Prefix(visible, this.budget.remainingBytes)
     const capturedBytes = Buffer.byteLength(captured)
     this.value += captured
     this.capturedBytes += capturedBytes
+    this.budget.remainingBytes -= capturedBytes
     this.skippedBytes += visibleBytes - capturedBytes
   }
 
@@ -306,8 +311,9 @@ function executeCommand(
     const proc = spawnShellProcess(command, cwd, signal, true)
     const stdoutDecoder = createUtf8StreamDecoder()
     const stderrDecoder = createUtf8StreamDecoder()
-    const stdout = new BoundedOutputBuffer(OUTPUT_LIMITS.run_command.maxBytes, retainTail)
-    const stderr = new BoundedOutputBuffer(OUTPUT_LIMITS.run_command.maxBytes, retainTail)
+    const outputBudget: OutputCaptureBudget = { remainingBytes: OUTPUT_LIMITS.run_command.maxBytes }
+    const stdout = new BoundedOutputBuffer(OUTPUT_LIMITS.run_command.maxBytes, retainTail, outputBudget)
+    const stderr = new BoundedOutputBuffer(OUTPUT_LIMITS.run_command.maxBytes, retainTail, outputBudget)
     let timedOut = false
     let aborted = false
     let exitCode: number | null = null
