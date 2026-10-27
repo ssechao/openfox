@@ -314,6 +314,67 @@ describe('formatDuration', () => {
   })
 })
 
+describe('run_command bounded output capture', () => {
+  let tempDir: string
+  let context: ToolContext
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'shell-output-cap-test-'))
+    context = baseContext(tempDir)
+  })
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true })
+  })
+
+  it.fails(
+    'run_command with output far above the cap keeps memory bounded',
+    async () => {
+      const baselineHeap = process.memoryUsage().heapUsed
+      let peakHeap = baselineHeap
+      const sampler = setInterval(() => {
+        peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed)
+      }, 1)
+
+      try {
+        const result = await runCommandTool.execute(
+          { command: `node -e "process.stdout.write('X'.repeat(24 * 1024 * 1024))"`, timeout: 10000 },
+          context,
+        )
+        peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed)
+
+        expect(result.success).toBe(true)
+        expect(result.truncated).toBe(true)
+        expect(result.output).toContain('[Output truncated; 25115824 bytes skipped]')
+        expect(peakHeap - baselineHeap).toBeLessThan(12 * 1024 * 1024)
+      } finally {
+        clearInterval(sampler)
+      }
+    },
+    15000,
+  )
+
+  it.fails(
+    'run_command truncated output reports skipped bytes and keeps exit code',
+    async () => {
+      const result = await runCommandTool.execute(
+        {
+          command: `node -e "process.stdout.write('X'.repeat(120000)); process.stderr.write('failure\\n')"; exit 7`,
+          timeout: 10000,
+        },
+        context,
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.truncated).toBe(true)
+      expect(result.output).toContain('[Output truncated; 70000 bytes skipped]')
+      expect(result.output).toContain('[Exit code: 7]')
+      expect(result.error).toBe('Command exited with code 7')
+    },
+    15000,
+  )
+})
+
 describe('run_command duration reporting', () => {
   let tempDir: string
   let context: ToolContext
