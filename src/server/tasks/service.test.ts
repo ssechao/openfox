@@ -277,6 +277,61 @@ describe('project tasks service', () => {
       expect(sm.createdSessions).toHaveLength(1) // no new session for queued
     })
 
+    it('a running task whose session was deleted frees its slot', async () => {
+      const first = create('First')
+      const second = create('Second')
+      const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
+      sm.sessions.delete(running.sessionId!)
+
+      const result = await service.move(projectId, second.id, 'in_progress', { actor: 'human' })
+
+      expect(service.get(projectId, first.id)).toMatchObject({ runState: 'idle' })
+      expect(service.get(projectId, first.id)?.activeSessionId).toBeUndefined()
+      expect(result.task.runState).toBe('running')
+      expect(result.sessionId).toBeTruthy()
+    })
+
+    it('deleting a session reconciles its running task and auto-launches the next', async () => {
+      const first = create('First')
+      const second = create('Second')
+      const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
+      await service.move(projectId, second.id, 'in_progress', { actor: 'human' })
+      sm.sessions.delete(running.sessionId!)
+
+      await (
+        service as TasksService & {
+          reconcileSessionDeleted: (projectId: string, sessionId: string) => Promise<void>
+        }
+      ).reconcileSessionDeleted(projectId, running.sessionId!)
+
+      expect(service.get(projectId, first.id)).toMatchObject({ runState: 'idle' })
+      expect(service.get(projectId, first.id)?.activeSessionId).toBeUndefined()
+      expect(service.get(projectId, first.id)?.auditTrail.at(-1)?.detail).toContain('session deleted')
+      expect(service.get(projectId, second.id)).toMatchObject({ runState: 'running' })
+      expect(sm.createdSessions).toHaveLength(2)
+    })
+
+    it('move to in_progress over the slot limit returns an explicit queued reason', async () => {
+      const first = create('First')
+      const second = create('Second')
+      await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
+
+      const result = await service.move(projectId, second.id, 'in_progress', { actor: 'human' })
+
+      expect(
+        (
+          result as typeof result & {
+            queued?: { reason: string; active: number; slotLimit: number; position: number }
+          }
+        ).queued,
+      ).toEqual({
+        reason: 'slot_limit',
+        active: 1,
+        slotLimit: 1,
+        position: 1,
+      })
+    })
+
     it('surfaces the FIFO queue position server-side (1-based)', async () => {
       const first = create('First')
       const second = create('Second')
