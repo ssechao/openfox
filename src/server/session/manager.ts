@@ -143,7 +143,7 @@ type SessionEvents = {
 // deterministic. After the work is merged back into the original repo the
 // workspace is deleted (it can be recreated at any time), then the remote is
 // reached from the original repo.
-const WORKSPACE_COMMIT_RECIPE = `
+export const WORKSPACE_COMMIT_RECIPE = `
 To land changes from this workspace when the user asks to commit and push:
 1. Commit your work.
 2. Push to the original repo on a temporary branch (its origin is the local repo itself): \`git push origin HEAD:<feature-slug>\`
