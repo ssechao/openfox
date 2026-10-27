@@ -305,7 +305,7 @@ describe('McpManager', () => {
   })
 
   describe('callTool', () => {
-    it.fails('stdio MCP server exit marks the server as errored and logs it', async () => {
+    it('stdio MCP server exit marks the server as errored and logs it', async () => {
       const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
       try {
         await manager.addServer('dead-server', { transport: 'stdio', command: 'node' })
@@ -322,7 +322,7 @@ describe('McpManager', () => {
       }
     })
 
-    it.fails('call to a disconnected MCP server fails explicitly without reconciliation', async () => {
+    it('call to a disconnected MCP server fails explicitly without reconciliation', async () => {
       await manager.addServer('offline-server', { transport: 'stdio', command: 'node' })
       mockTransportInstance.onclose?.()
       mockClientInstance.connect.mockRejectedValueOnce(new Error('still offline'))
@@ -333,7 +333,7 @@ describe('McpManager', () => {
       expect(mockClientInstance.callTool).not.toHaveBeenCalled()
     })
 
-    it.fails('disconnected MCP server reconnects on next call with a logged bounded retry', async () => {
+    it('disconnected MCP server reconnects on next call with a logged bounded retry', async () => {
       const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
       try {
         await manager.addServer('recovering-server', { transport: 'stdio', command: 'node' })
