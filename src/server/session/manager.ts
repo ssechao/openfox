@@ -139,19 +139,17 @@ type SessionEvents = {
 
 // A workspace's origin is the original local repo (a --shared clone). Pushing a
 // branch the original repo has checked out is refused (receive.denyCurrentBranch),
-// so the recipe always lands on a temporary branch — unconditional and
-// deterministic. After the work is merged back into the original repo the
-// workspace is deleted (it can be recreated at any time), then the remote is
-// reached from the original repo.
+// so the recipe always lands on a separate feature branch — unconditional and
+// deterministic. The original repo then pushes that branch to its remote without
+// changing or merging its current branch.
 export const WORKSPACE_COMMIT_RECIPE = `
 To land changes from this workspace when the user asks to commit and push:
 1. Commit your work.
-2. Push to the original repo on a temporary branch (its origin is the local repo itself): \`git push origin HEAD:<feature-slug>\`
+2. Push to the original repo on a feature branch (its origin is the local repo itself): \`git push origin HEAD:<feature-slug>\`
 3. Switch back to the original project: \`workspace switch original\`
-4. Merge the temporary branch and delete it: \`git merge --ff-only <feature-slug> && git branch -d <feature-slug>\`
-5. Verify the work is present in the original repo.
-6. Delete the workspace — it can be recreated at any time: \`workspace delete <name> force=true\`
-7. Push to the remote from the original repo: \`git push origin <branch>\``
+4. Verify the work is present on the feature branch: \`git log -1 <feature-slug>\`
+5. Delete the workspace — it can be recreated at any time: \`workspace delete <name> force=true\`
+6. Push the feature branch to the remote from the original repo: \`git push origin <feature-slug>\``
 
 // ============================================================================
 // Session Manager
