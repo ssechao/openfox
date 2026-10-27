@@ -37,6 +37,7 @@ export type SupervisorToGatewayMessage =
     }
   | { type: 'worker.spawn_error'; requestId: string; workerKey: string; error: string }
   | { type: 'worker.message'; workerKey: string; message: unknown }
+  | { type: 'worker.stdout'; workerKey: string; chunk: string }
   | { type: 'worker.stderr'; workerKey: string; chunk: string }
   | { type: 'worker.error'; workerKey: string; error: string }
   | { type: 'worker.exit'; workerKey: string; code: number | null; signal: NodeJS.Signals | null }

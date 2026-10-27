@@ -17,6 +17,7 @@ export interface SupervisorWorkerHandle {
   inventory: ProcessInventoryEntry | undefined
   exitCode: number | null
   signalCode: NodeJS.Signals | null
+  stdout: EventEmitter
   stderr: EventEmitter
   send(message: unknown): boolean
   kill(signal?: NodeJS.Signals): boolean
@@ -72,6 +73,7 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
   inventory: ProcessInventoryEntry | undefined
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
+  readonly stdout = new EventEmitter()
   readonly stderr = new EventEmitter()
 
   constructor(
@@ -407,6 +409,10 @@ export class SessionProcessSupervisor {
     }
     if (message.type === 'worker.message') {
       this.workers.get(message.workerKey)?.emit('message', message.message)
+      return
+    }
+    if (message.type === 'worker.stdout') {
+      this.workers.get(message.workerKey)?.stdout.emit('data', Buffer.from(message.chunk))
       return
     }
     if (message.type === 'worker.stderr') {

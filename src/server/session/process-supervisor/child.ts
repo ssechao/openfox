@@ -106,6 +106,9 @@ function spawnWorker(message: Extract<GatewayToSupervisorMessage, { type: 'worke
   worker.on('message', (payload) => {
     send({ type: 'worker.message', workerKey: message.workerKey, message: payload })
   })
+  worker.stdout?.on('data', (chunk: Buffer) => {
+    send({ type: 'worker.stdout', workerKey: message.workerKey, chunk: chunk.toString('utf8') })
+  })
   worker.stderr?.on('data', (chunk: Buffer) => {
     send({ type: 'worker.stderr', workerKey: message.workerKey, chunk: chunk.toString('utf8') })
   })
