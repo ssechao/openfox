@@ -361,9 +361,25 @@ describe('run_command bounded output capture', () => {
 
     expect(result.success).toBe(false)
     expect(result.truncated).toBe(true)
-    expect(result.output).toContain('[Output truncated; 70000 bytes skipped]')
+    expect(result.output).toContain('[Output truncated; 70008 bytes skipped]')
     expect(result.output).toContain('[Exit code: 7]')
     expect(result.error).toBe('Command exited with code 7')
+  }, 15000)
+
+  it('run_command shares its output cap across stdout and stderr', async () => {
+    const result = await runCommandTool.execute(
+      {
+        command: `node -e "process.stdout.write('X'.repeat(40000)); process.stderr.write('Y'.repeat(40000))"`,
+        timeout: 10000,
+      },
+      context,
+    )
+
+    expect(result.success).toBe(true)
+    expect(result.truncated).toBe(true)
+    expect(result.output).toContain('[Output truncated; 30000 bytes skipped]')
+    expect(result.output).toContain('[Exit code: 0]')
+    expect(Buffer.byteLength(result.output ?? '')).toBeLessThan(50200)
   }, 15000)
 })
 
