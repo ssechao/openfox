@@ -414,6 +414,11 @@ export class SessionProcessSupervisor {
       this.workers.delete(message.workerKey)
       return
     }
+    if (message.type === 'worker.inventory') {
+      const handle = this.workers.get(message.workerKey)
+      if (handle?.pid === message.inventory.pid) handle.inventory = message.inventory
+      return
+    }
     if (message.type === 'worker.message') {
       this.workers.get(message.workerKey)?.emit('message', message.message)
       return

@@ -43,7 +43,7 @@ afterEach(() => {
 })
 
 describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('worker zero-orphan supervision', () => {
-  it.fails('slow inventory capture is bounded and does not block supervisor signals', async () => {
+  it('slow inventory capture is bounded and does not block supervisor signals', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'openfox-supervision-slow-inventory-'))
     directories.push(directory)
     const childrenPath = join(directory, 'worker.children')

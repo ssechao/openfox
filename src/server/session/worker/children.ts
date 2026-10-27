@@ -90,11 +90,15 @@ export interface ProcessInventoryDependencies {
 
 export interface AsyncProcessInventoryDependencies extends Omit<
   ProcessInventoryDependencies,
-  'findReservationPids' | 'now'
+  'findReservationPids' | 'now' | 'readInventory'
 > {
+  readInventory?: (pid: number, command?: string) => ProcessInventoryRead | Promise<ProcessInventoryRead>
   findReservationPids?: (reservationId: string) => number[] | Promise<number[]>
   capturedAt?: number
+  inventoryTimeoutMs?: number
 }
+
+const PROCESS_INVENTORY_READ_TIMEOUT_MS = 250
 
 function processRootExists(pid: number): boolean {
   try {
@@ -119,12 +123,12 @@ function prefixedProcessStartIdentity(prefix: string, value: string): string | u
   return identity ? `${prefix}:${identity}` : undefined
 }
 
-function processIdentityFound(identity: string | undefined): ProcessIdentityRead {
+function processIdentityFound(identity: string | undefined): Extract<ProcessIdentityRead, { status: 'found' }> {
   if (!identity) throw new Error('process start identity was empty')
   return { status: 'found', identity }
 }
 
-function processIdentityFailure(pid: number, error: unknown): ProcessIdentityRead {
+function processIdentityFailure(pid: number, error: unknown): Exclude<ProcessIdentityRead, { status: 'found' }> {
   if (!processRootExists(pid)) return { status: 'absent' }
   return {
     status: 'unreadable',
@@ -152,12 +156,17 @@ function processStartIdentity(pid: number): ProcessIdentityRead {
   }
 }
 
-function execFileText(file: string, args: string[]): Promise<string> {
+function execFileText(file: string, args: string[], timeout?: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { encoding: 'utf-8', windowsHide: true }, (error, stdout) => {
-      if (error) reject(error)
-      else resolve(stdout)
-    })
+    execFile(
+      file,
+      args,
+      { encoding: 'utf-8', windowsHide: true, ...(timeout !== undefined ? { timeout } : {}) },
+      (error, stdout) => {
+        if (error) reject(error)
+        else resolve(stdout)
+      },
+    )
   })
 }
 
@@ -182,17 +191,18 @@ export async function readProcessStartIdentityAsync(pid: number): Promise<Proces
   }
 }
 
+function linuxProcessGroupId(stat: string): number {
+  const fields = stat
+    .slice(stat.lastIndexOf(') ') + 2)
+    .trim()
+    .split(/\s+/)
+  const pgid = Number(fields[2])
+  if (Number.isFinite(pgid) && pgid > 0) return pgid
+  throw new Error('process group identity was empty')
+}
+
 function processGroupId(pid: number): number {
-  if (process.platform === 'linux') {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
-    const fields = stat
-      .slice(stat.lastIndexOf(') ') + 2)
-      .trim()
-      .split(/\s+/)
-    const pgid = Number(fields[2])
-    if (Number.isFinite(pgid) && pgid > 0) return pgid
-    throw new Error('process group identity was empty')
-  }
+  if (process.platform === 'linux') return linuxProcessGroupId(readFileSync(`/proc/${pid}/stat`, 'utf-8'))
   if (process.platform === 'win32') return pid
   const pgid = Number(execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf-8' }).trim())
   if (Number.isFinite(pgid) && pgid > 0) return pgid
@@ -216,6 +226,96 @@ export function readProcessInventory(pid: number, command?: string): ProcessInve
     if (!processRootExists(pid)) return { status: 'absent' }
     return { status: 'unreadable', error: error instanceof Error ? error : new Error(String(error)) }
   }
+}
+
+async function readProcessInventoryUnboundedAsync(pid: number, command?: string): Promise<ProcessInventoryRead> {
+  try {
+    if (process.platform === 'linux') {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf-8')
+      return {
+        status: 'found',
+        process: {
+          pid,
+          startedAt: processIdentityFound(linuxProcessStartIdentity(stat)).identity,
+          pgid: linuxProcessGroupId(stat),
+          ...(command ? { command } : {}),
+        },
+      }
+    }
+    if (process.platform === 'win32') {
+      const ticks = await execFileText(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks`],
+        PROCESS_INVENTORY_READ_TIMEOUT_MS,
+      )
+      return {
+        status: 'found',
+        process: {
+          pid,
+          startedAt: processIdentityFound(prefixedProcessStartIdentity('win32', ticks)).identity,
+          pgid: pid,
+          ...(command ? { command } : {}),
+        },
+      }
+    }
+    const [startedAt, group] = await Promise.all([
+      execFileText('ps', ['-o', 'lstart=', '-p', String(pid)], PROCESS_INVENTORY_READ_TIMEOUT_MS),
+      execFileText('ps', ['-o', 'pgid=', '-p', String(pid)], PROCESS_INVENTORY_READ_TIMEOUT_MS),
+    ])
+    const pgid = Number(group.trim())
+    if (!Number.isFinite(pgid) || pgid <= 0) throw new Error('process group identity was empty')
+    return {
+      status: 'found',
+      process: {
+        pid,
+        startedAt: processIdentityFound(prefixedProcessStartIdentity(process.platform, startedAt)).identity,
+        pgid,
+        ...(command ? { command } : {}),
+      },
+    }
+  } catch (error) {
+    return processIdentityFailure(pid, error)
+  }
+}
+
+async function boundedOperation<T>(
+  operation: () => T | Promise<T>,
+  timeoutMs: number,
+  timeoutError: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(timeoutError)), timeoutMs)
+  })
+  try {
+    return await Promise.race([Promise.resolve().then(operation), timedOut])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+async function boundedInventoryRead(
+  readInventory: (pid: number, command?: string) => ProcessInventoryRead | Promise<ProcessInventoryRead>,
+  pid: number,
+  command: string | undefined,
+  timeoutMs: number,
+): Promise<ProcessInventoryRead> {
+  try {
+    return await boundedOperation(() => readInventory(pid, command), timeoutMs, 'process inventory read timed out')
+  } catch (error) {
+    return {
+      status: 'unreadable',
+      error: error instanceof Error ? error : new Error(String(error)),
+    }
+  }
+}
+
+export function readProcessInventoryAsync(
+  pid: number,
+  command?: string,
+  timeoutMs = PROCESS_INVENTORY_READ_TIMEOUT_MS,
+): Promise<ProcessInventoryRead> {
+  return boundedInventoryRead(readProcessInventoryUnboundedAsync, pid, command, timeoutMs)
 }
 
 export function childrenFilePath(dbPath: string, workerId: string): string {
@@ -400,16 +500,15 @@ function readProcessGroup(pgid: number): ProcessGroupRead {
   }
 }
 
-export function captureExclusiveProcessInventory(
+function captureExclusiveProcessInventoryFromState(
   workerPid: number,
-  path: string,
-  dependencies: ProcessInventoryDependencies = {},
+  state: ChildrenState,
+  dependencies: ProcessInventoryDependencies,
 ): ExclusiveProcessInventory {
   const readInventory = dependencies.readInventory ?? readProcessInventory
   const findReservationPids = dependencies.findReservationPids ?? findReservationProcesses
   const readGroup = dependencies.readGroup ?? readProcessGroup
   const now = dependencies.now ?? Date.now
-  const state = readChildrenState(path)
   const errors: string[] = []
   const workerRead = dependencies.recordedWorker
     ? ({ status: 'found', process: dependencies.recordedWorker } as const)
@@ -472,25 +571,65 @@ export function captureExclusiveProcessInventory(
   }
 }
 
+export function captureExclusiveProcessInventory(
+  workerPid: number,
+  path: string,
+  dependencies: ProcessInventoryDependencies = {},
+): ExclusiveProcessInventory {
+  return captureExclusiveProcessInventoryFromState(workerPid, readChildrenState(path), dependencies)
+}
+
 export async function captureExclusiveProcessInventoryAsync(
   workerPid: number,
   path: string,
   dependencies: AsyncProcessInventoryDependencies = {},
 ): Promise<ExclusiveProcessInventory> {
   const state = readChildrenState(path)
+  const timeoutMs = dependencies.inventoryTimeoutMs ?? PROCESS_INVENTORY_READ_TIMEOUT_MS
+  const readInventory = dependencies.readInventory ?? readProcessInventoryAsync
   const findReservationPids = dependencies.findReservationPids ?? findReservationProcessesAsync
   const reservationScans = new Map<string, number[] | Error>()
+  const inventoryReads = new Map<string, Promise<ProcessInventoryRead>>()
+  const inventoryResults = new Map<string, ProcessInventoryRead>()
+  const inventoryKey = (pid: number, command?: string) => `${pid}:\0${command ?? ''}`
+  const queueInventoryRead = (pid: number, command?: string) => {
+    const key = inventoryKey(pid, command)
+    if (!inventoryReads.has(key)) {
+      inventoryReads.set(
+        key,
+        boundedInventoryRead(readInventory, pid, command, timeoutMs).then((result) => {
+          inventoryResults.set(key, result)
+          return result
+        }),
+      )
+    }
+  }
+
+  if (!dependencies.recordedWorker) queueInventoryRead(workerPid)
+  for (const child of state.children) queueInventoryRead(child.pid, child.command)
   await Promise.all(
-    [...state.reservations.keys()].map(async (id) => {
+    [...state.reservations].map(async ([id, command]) => {
       try {
-        reservationScans.set(id, await findReservationPids(id))
+        const pids = await boundedOperation(
+          () => findReservationPids(id),
+          timeoutMs,
+          'reservation inventory scan timed out',
+        )
+        reservationScans.set(id, pids)
+        for (const pid of pids) queueInventoryRead(pid, command)
       } catch (error) {
         reservationScans.set(id, error instanceof Error ? error : new Error(String(error)))
       }
     }),
   )
-  return captureExclusiveProcessInventory(workerPid, path, {
-    ...(dependencies.readInventory ? { readInventory: dependencies.readInventory } : {}),
+  await Promise.all(inventoryReads.values())
+
+  return captureExclusiveProcessInventoryFromState(workerPid, state, {
+    readInventory: (pid, command) =>
+      inventoryResults.get(inventoryKey(pid, command)) ?? {
+        status: 'unreadable',
+        error: new Error('process inventory read result unavailable'),
+      },
     ...(dependencies.readGroup ? { readGroup: dependencies.readGroup } : {}),
     ...(dependencies.sleep ? { sleep: dependencies.sleep } : {}),
     ...(dependencies.recordedWorker ? { recordedWorker: dependencies.recordedWorker } : {}),
