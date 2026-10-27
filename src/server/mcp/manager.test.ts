@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { McpManager } from './manager.js'
 import { createMcpTools } from './tool-adapter.js'
+import { logger } from '../utils/logger.js'
 
 // Mock the MCP SDK Client
 const mockClientInstance = {
@@ -35,6 +36,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 const mockTransportInstance: {
   start: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
+  onclose?: (() => void) | undefined
   onmessage?: ((message: unknown) => void) | undefined
 } = {
   start: vi.fn().mockResolvedValue(undefined),
@@ -303,6 +305,54 @@ describe('McpManager', () => {
   })
 
   describe('callTool', () => {
+    it('stdio MCP server exit marks the server as errored and logs it', async () => {
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+      try {
+        await manager.addServer('dead-server', { transport: 'stdio', command: 'node' })
+
+        mockTransportInstance.onclose?.()
+
+        expect(manager.getServer('dead-server')).toMatchObject({
+          status: 'error',
+          error: 'MCP server disconnected unexpectedly',
+        })
+        expect(error).toHaveBeenCalledWith('MCP server disconnected unexpectedly', { name: 'dead-server' })
+      } finally {
+        error.mockRestore()
+      }
+    })
+
+    it('call to a disconnected MCP server fails explicitly without reconciliation', async () => {
+      await manager.addServer('offline-server', { transport: 'stdio', command: 'node' })
+      mockTransportInstance.onclose?.()
+      mockClientInstance.connect.mockRejectedValueOnce(new Error('still offline'))
+
+      const result = await manager.callTool('offline-server', 'get_weather', {})
+
+      expect(result).toEqual({ success: false, error: "MCP server 'offline-server' is not connected" })
+      expect(mockClientInstance.callTool).not.toHaveBeenCalled()
+    })
+
+    it('disconnected MCP server reconnects on next call with a logged bounded retry', async () => {
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+      try {
+        await manager.addServer('recovering-server', { transport: 'stdio', command: 'node' })
+        mockTransportInstance.onclose?.()
+
+        const result = await manager.callTool('recovering-server', 'get_weather', {})
+
+        expect(result).toEqual({ success: true, output: 'Sunny, 72°F' })
+        expect(mockClientInstance.connect).toHaveBeenCalledTimes(2)
+        expect(warn).toHaveBeenCalledWith('Reconnecting disconnected MCP server before tool call', {
+          name: 'recovering-server',
+          attempt: 1,
+          maxAttempts: 1,
+        })
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
     it('should call a tool and return the result', async () => {
       await manager.addServer('test', { transport: 'stdio', command: 'node' })
 

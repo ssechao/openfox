@@ -73,6 +73,8 @@ interface ServerEntry {
   client: Client | undefined
   transport: Transport | null
   state: McpServerState
+  closing: boolean
+  reconnectPromise: Promise<void> | null
 }
 
 export class McpManager {
@@ -90,7 +92,14 @@ export class McpManager {
       throw new Error(`MCP server '${name}' already exists`)
     }
     const state: McpServerState = { name, config, status: 'disconnected', tools: [], estimatedTokens: 0 }
-    this.servers.set(name, { config, client: undefined, transport: null, state })
+    this.servers.set(name, {
+      config,
+      client: undefined,
+      transport: null,
+      state,
+      closing: false,
+      reconnectPromise: null,
+    })
     await this.connectServer(name)
   }
 
@@ -149,6 +158,17 @@ export class McpManager {
 
       if (!transport) throw new Error('Failed to create transport')
 
+      const connectedTransport = transport
+      transport.onclose = () => {
+        if (entry.closing || entry.transport !== connectedTransport) return
+        const error = 'MCP server disconnected unexpectedly'
+        entry.client = undefined
+        entry.transport = null
+        entry.state = { ...entry.state, status: 'error', error }
+        logger.error(error, { name })
+        this.onServersChanged?.()
+      }
+
       // Intercept onmessage to remove outputSchema from tool definitions.
       // Some servers (like Stitch) include outputSchema with broken references (e.g. $defs/ScreenInstance),
       // which causes AJV validation in the MCP SDK to crash and fail to load any tools.
@@ -173,6 +193,8 @@ export class McpManager {
         configurable: true,
       })
 
+      entry.client = client
+      entry.transport = transport
       await client.connect(transport)
 
       const { tools: mcpTools } = await client.listTools()
@@ -190,8 +212,6 @@ export class McpManager {
       })
       const totalTokens = tools.filter((t) => t.enabled).reduce((sum, t) => sum + t.estimatedTokens, 0)
 
-      entry.client = client
-      entry.transport = transport
       entry.state = { name, config: entry.config, status: 'connected', tools, estimatedTokens: totalTokens }
 
       // Update cache with raw tool definitions (without enabled state)
@@ -208,6 +228,7 @@ export class McpManager {
       this.onServersChanged?.()
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
+      await this.disconnectServer(name)
       logger.error('Failed to connect MCP server', { name, error: msg })
 
       // Fall back to cached tools if available
@@ -233,14 +254,17 @@ export class McpManager {
   async disconnectServer(name: string): Promise<void> {
     const entry = this.servers.get(name)
     if (!entry) return
+    entry.closing = true
     try {
       await entry.client?.close()
     } catch {
       /* ignore close errors */
+    } finally {
+      entry.client = undefined
+      entry.transport = null
+      entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
+      entry.closing = false
     }
-    entry.client = undefined
-    entry.transport = null
-    entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
   }
 
   async disconnectAll(): Promise<void> {
@@ -302,6 +326,20 @@ export class McpManager {
     return defs
   }
 
+  private async reconnectBeforeCall(name: string, entry: ServerEntry): Promise<void> {
+    if (entry.client && entry.state.status === 'connected') return
+    if (!entry.reconnectPromise) {
+      logger.warn('Reconnecting disconnected MCP server before tool call', { name, attempt: 1, maxAttempts: 1 })
+      entry.reconnectPromise = this.connectServer(name)
+    }
+    const reconnectPromise = entry.reconnectPromise
+    try {
+      await reconnectPromise
+    } finally {
+      if (entry.reconnectPromise === reconnectPromise) entry.reconnectPromise = null
+    }
+  }
+
   async callTool(
     serverName: string,
     toolName: string,
@@ -316,7 +354,14 @@ export class McpManager {
     if (!injected.ok) return { success: false, error: injected.error }
     const forwardedArgs = injected.args
 
-    if (!entry.client) return { success: false, error: `MCP server '${serverName}' is not connected` }
+    if (options?.signal?.aborted) {
+      const reason =
+        options.signal.reason instanceof Error ? options.signal.reason : new Error('MCP tool call cancelled')
+      return { success: false, error: reason.message }
+    }
+    if (!entry.client || entry.state.status !== 'connected') await this.reconnectBeforeCall(serverName, entry)
+    const client = entry.client
+    if (!client) return { success: false, error: `MCP server '${serverName}' is not connected` }
     if (options?.signal?.aborted) {
       const reason =
         options.signal.reason instanceof Error ? options.signal.reason : new Error('MCP tool call cancelled')
@@ -350,7 +395,7 @@ export class McpManager {
       let result
       try {
         result = await Promise.race([
-          entry.client.callTool({ name: toolName, arguments: forwardedArgs }, undefined, {
+          client.callTool({ name: toolName, arguments: forwardedArgs }, undefined, {
             timeout: timeoutMs,
             signal: controller.signal,
           }),
