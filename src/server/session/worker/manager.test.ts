@@ -145,6 +145,50 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it.fails('worker log flood is rate limited without blocking control messages', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-rate-limit.db')
+    openDbs.push(db)
+    const initialActivity = '2024-01-01T00:00:00.000Z'
+    namedDb.prepare(`UPDATE sessions SET updated_at = ? WHERE id = 'sess-1'`).run(initialActivity)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      manager.launch('sess-1', () => {})
+      const token = manager.activeWorker('sess-1')!.token
+      child.stdout!.emit('data', Buffer.from(`${'line\n'.repeat(10_000)}tail`))
+      child.emit('message', { ...token, type: 'health', data: {} })
+
+      const outputCalls = info.mock.calls.filter(([message]) => message === 'Session worker output')
+      expect(outputCalls.length).toBeLessThanOrEqual(101)
+      expect(outputCalls.some(([, context]) => String((context as { line: string }).line).includes('rate limit'))).toBe(
+        true,
+      )
+      const row = namedDb.prepare(`SELECT updated_at FROM sessions WHERE id = 'sess-1'`).get() as {
+        updated_at: string
+      }
+      expect(new Date(row.updated_at).getTime()).toBeGreaterThan(new Date(initialActivity).getTime())
+    } finally {
+      info.mockRestore()
+    }
+  })
+
   it('lastActivityAt advances while a worker turn is running', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-activity.db')
     openDbs.push(db)
