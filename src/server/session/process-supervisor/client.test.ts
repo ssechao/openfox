@@ -75,8 +75,12 @@ describe('SessionProcessSupervisor', () => {
       env: { TEST: '1' },
     })
     const messages: unknown[] = []
+    const stdout: string[] = []
+    const stderr: string[] = []
     const exits: unknown[] = []
     handle.on('message', (message) => messages.push(message))
+    handle.stdout.on('data', (chunk: Buffer) => stdout.push(chunk.toString()))
+    handle.stderr.on('data', (chunk: Buffer) => stderr.push(chunk.toString()))
     handle.on('exit', (code, signal) => exits.push([code, signal]))
 
     const spawnRequest = child.send.mock.calls.find(([message]) => message.type === 'worker.spawn')![0]
@@ -88,12 +92,16 @@ describe('SessionProcessSupervisor', () => {
       inventory: { pid: 99, startedAt: 'linux:99', pgid: 99 },
     })
     child.emit('message', { type: 'worker.message', workerKey: 'worker-1', message: { type: 'ready' } })
+    child.emit('message', { type: 'worker.stdout', workerKey: 'worker-1', chunk: 'worker output\n' })
+    child.emit('message', { type: 'worker.stderr', workerKey: 'worker-1', chunk: 'worker error\n' })
     handle.send({ type: 'start' })
     await handle.killVerified('SIGTERM', Date.now() + 1_000)
     child.emit('message', { type: 'worker.exit', workerKey: 'worker-1', code: 0, signal: null })
 
     expect(handle.pid).toBe(99)
     expect(messages).toEqual([{ type: 'ready' }])
+    expect(stdout).toEqual(['worker output\n'])
+    expect(stderr).toEqual(['worker error\n'])
     expect(exits).toEqual([[0, null]])
     expect(child.send).toHaveBeenCalledWith({
       type: 'worker.send',

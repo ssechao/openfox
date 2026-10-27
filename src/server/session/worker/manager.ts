@@ -347,13 +347,29 @@ export class SessionWorkerManager {
     }
     this.active.set(sessionId, worker)
 
-    child.stderr?.on('data', (chunk: Buffer) => {
-      for (const line of chunk.toString('utf-8').split('\n')) {
+    const outputRemainders = { stdout: '', stderr: '' }
+    const relayOutput = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+      const lines = `${outputRemainders[stream]}${chunk.toString('utf-8')}`.split(/\r?\n/)
+      outputRemainders[stream] = lines.pop() ?? ''
+      for (const line of lines) {
         if (!line.trim()) continue
-        worker.stderrTail.push(line)
-        if (worker.stderrTail.length > 20) worker.stderrTail.shift()
+        if (stream === 'stderr') {
+          worker.stderrTail.push(line)
+          if (worker.stderrTail.length > 20) worker.stderrTail.shift()
+        }
+        const context = {
+          sessionId,
+          workerId: token.workerId,
+          generation: token.generation,
+          stream,
+          line,
+        }
+        if (stream === 'stdout') logger.info('Session worker output', context)
+        else logger.error('Session worker output', context)
       }
-    })
+    }
+    child.stdout?.on('data', (chunk: Buffer) => relayOutput('stdout', chunk))
+    child.stderr?.on('data', (chunk: Buffer) => relayOutput('stderr', chunk))
 
     child.on('message', (raw) => {
       if (this.active.get(sessionId) !== worker) return
@@ -390,6 +406,7 @@ export class SessionWorkerManager {
         }
         this.deps.broadcastForSession(sessionId, msg.msg)
       } else if (msg.type === 'health') {
+        this.touchActivity(worker)
         const pid = worker.child.pid
         this.deps.healthAggregator?.recordSnapshot(token, msg.data, pid === undefined ? undefined : { sessionId, pid })
       } else if (msg.type === 'request.invariant') {
@@ -427,6 +444,26 @@ export class SessionWorkerManager {
     })
 
     logger.info('Session worker launched', { sessionId, workerId: token.workerId, generation: token.generation })
+  }
+
+  private touchActivity(worker: ActiveWorker): void {
+    try {
+      this.deps
+        .db()
+        .prepare(
+          `UPDATE sessions
+           SET updated_at = ?
+           WHERE id = ? AND worker_id = ? AND worker_generation = ?`,
+        )
+        .run(new Date().toISOString(), worker.sessionId, worker.token.workerId, worker.token.generation)
+    } catch (error) {
+      logger.warn('Unable to update session worker activity', {
+        sessionId: worker.sessionId,
+        workerId: worker.token.workerId,
+        generation: worker.token.generation,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   private exitPromise(worker: ActiveWorker): Promise<void> {
