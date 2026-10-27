@@ -151,7 +151,14 @@ export const runCommandTool = createTool<RunCommandArgs>(
     const execCommand = tailInfo ? tailInfo.command : args.command
 
     const execStart = Date.now()
-    const result = await executeCommand(execCommand, workingDir, timeout, context.signal, context.onProgress)
+    const result = await executeCommand(
+      execCommand,
+      workingDir,
+      timeout,
+      context.signal,
+      context.onProgress,
+      tailInfo !== null,
+    )
 
     let output = ''
 
@@ -164,31 +171,29 @@ export const runCommandTool = createTool<RunCommandArgs>(
       output += `[stderr]\n${result.stderr}`
     }
 
-    output += `\n\n[Exit code: ${result.exitCode}]`
+    let truncated = false
 
     if (tailInfo) {
+      output += `\n\n[Exit code: ${result.exitCode}]`
       const lines = output.split('\n')
-      const tailed = lines.slice(-tailInfo.tailLines)
-      output = tailed.join('\n')
-    }
+      output = lines.slice(-tailInfo.tailLines).join('\n')
+    } else {
+      let skippedBytes = result.stdoutSkippedBytes + result.stderrSkippedBytes
+      const lines = output.split('\n')
+      if (lines.length > OUTPUT_LIMITS.run_command.maxLines) {
+        const limitedOutput = lines.slice(0, OUTPUT_LIMITS.run_command.maxLines).join('\n')
+        skippedBytes += Buffer.byteLength(output) - Buffer.byteLength(limitedOutput)
+        output = limitedOutput
+      }
 
-    // Strip ANSI escape sequences before measuring limits so colored output
-    // (e.g. from npm test) doesn't consume the byte/line budget invisibly.
-    const visible = stripAnsi(output)
+      if (skippedBytes > 0) {
+        if (output) output += '\n\n'
+        output += `[Output truncated; ${skippedBytes} bytes skipped]`
+        truncated = true
+      }
 
-    let truncated = false
-    if (visible.length > OUTPUT_LIMITS.run_command.maxBytes) {
-      output = output.slice(0, OUTPUT_LIMITS.run_command.maxBytes)
-      output += '\n\n[Output truncated due to size limit]'
-      truncated = true
-    }
-
-    const linesCount = visible.split('\n').length
-    if (linesCount > OUTPUT_LIMITS.run_command.maxLines) {
-      const limitedLines = output.split('\n').slice(0, OUTPUT_LIMITS.run_command.maxLines)
-      output = limitedLines.join('\n')
-      output += '\n\n[Output truncated due to line limit]'
-      truncated = true
+      if (output) output += '\n\n'
+      output += `[Exit code: ${result.exitCode}]`
     }
 
     output += `\n[Duration: ${formatDuration(Date.now() - execStart)}]`
@@ -208,9 +213,78 @@ export const runCommandTool = createTool<RunCommandArgs>(
   },
 )
 
+class BoundedOutputBuffer {
+  private value = ''
+  private capturedBytes = 0
+  private skippedBytes = 0
+
+  constructor(
+    private readonly maxBytes: number,
+    private readonly retainTail: boolean,
+  ) {}
+
+  get full(): boolean {
+    return !this.retainTail && this.capturedBytes >= this.maxBytes
+  }
+
+  append(text: string): void {
+    const visible = stripAnsi(text)
+
+    if (this.retainTail) {
+      this.value = takeUtf8Suffix(this.value + visible, this.maxBytes)
+      this.capturedBytes = Buffer.byteLength(this.value)
+      return
+    }
+
+    const visibleBytes = Buffer.byteLength(visible)
+    const remainingBytes = this.maxBytes - this.capturedBytes
+    if (remainingBytes <= 0) {
+      this.skippedBytes += visibleBytes
+      return
+    }
+
+    const captured = takeUtf8Prefix(visible, remainingBytes)
+    const capturedBytes = Buffer.byteLength(captured)
+    this.value += captured
+    this.capturedBytes += capturedBytes
+    this.skippedBytes += visibleBytes - capturedBytes
+  }
+
+  discard(byteCount: number): void {
+    this.skippedBytes += byteCount
+  }
+
+  result(): { output: string; skippedBytes: number } {
+    return {
+      output: this.value.trim(),
+      skippedBytes: this.skippedBytes,
+    }
+  }
+}
+
+function takeUtf8Prefix(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value)
+  if (bytes.length <= maxBytes) return value
+  return bytes
+    .subarray(0, maxBytes)
+    .toString('utf8')
+    .replace(/\uFFFD$/u, '')
+}
+
+function takeUtf8Suffix(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value)
+  if (bytes.length <= maxBytes) return value
+  return bytes
+    .subarray(bytes.length - maxBytes)
+    .toString('utf8')
+    .replace(/^\uFFFD/u, '')
+}
+
 interface CommandResult {
   stdout: string
   stderr: string
+  stdoutSkippedBytes: number
+  stderrSkippedBytes: number
   exitCode: number
   interrupted?: boolean
 }
@@ -221,6 +295,7 @@ function executeCommand(
   timeout: number,
   signal?: AbortSignal,
   onProgress?: (message: string) => void,
+  retainTail = false,
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     if (checkAborted(signal)) {
@@ -231,8 +306,8 @@ function executeCommand(
     const proc = spawnShellProcess(command, cwd, signal, true)
     const stdoutDecoder = createUtf8StreamDecoder()
     const stderrDecoder = createUtf8StreamDecoder()
-    let stdout = ''
-    let stderr = ''
+    const stdout = new BoundedOutputBuffer(OUTPUT_LIMITS.run_command.maxBytes, retainTail)
+    const stderr = new BoundedOutputBuffer(OUTPUT_LIMITS.run_command.maxBytes, retainTail)
     let timedOut = false
     let aborted = false
     let exitCode: number | null = null
@@ -254,10 +329,19 @@ function executeCommand(
       clearTimeout(timer)
       if (graceTimer !== undefined) clearTimeout(graceTimer)
       signal?.removeEventListener('abort', onAbort)
-      const out = (stdout + stdoutDecoder.end()).trim()
+      stdout.append(stdoutDecoder.end())
+      stderr.append(stderrDecoder.end())
+      const stdoutResult = stdout.result()
+      const stderrResult = stderr.result()
       resolve({
-        stdout: appendix ? (out ? `${out}\n\n${appendix}` : appendix) : out,
-        stderr: (stderr + stderrDecoder.end()).trim(),
+        stdout: appendix
+          ? stdoutResult.output
+            ? `${stdoutResult.output}\n\n${appendix}`
+            : appendix
+          : stdoutResult.output,
+        stderr: stderrResult.output,
+        stdoutSkippedBytes: stdoutResult.skippedBytes,
+        stderrSkippedBytes: stderrResult.skippedBytes,
         exitCode: code,
         ...(interrupted ? { interrupted: true } : {}),
       })
@@ -287,14 +371,22 @@ function executeCommand(
     signal?.addEventListener('abort', onAbort)
 
     proc.stdout?.on('data', (data: Buffer) => {
+      if (stdout.full && !onProgress) {
+        stdout.discard(data.length)
+        return
+      }
       const text = stdoutDecoder.write(data)
-      stdout += text
+      stdout.append(text)
       onProgress?.(`[stdout] ${text}`)
     })
 
     proc.stderr?.on('data', (data: Buffer) => {
+      if (stderr.full && !onProgress) {
+        stderr.discard(data.length)
+        return
+      }
       const text = stderrDecoder.write(data)
-      stderr += text
+      stderr.append(text)
       onProgress?.(`[stderr] ${text}`)
     })
 
