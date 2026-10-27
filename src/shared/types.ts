@@ -619,9 +619,16 @@ export type ToolName =
 // ============================================================================
 
 export type TaskStatus = 'todo' | 'in_progress' | 'done'
-/** Active state of an in-progress task: launched (occupies a slot) or queued (waiting for a slot). */
-export type TaskRunState = 'running' | 'queued'
+/** Active state of an in-progress task: launched, queued, or idle after its session was deleted. */
+export type TaskRunState = 'running' | 'queued' | 'idle'
 export type TaskActor = 'human' | 'agent' | 'system'
+
+export interface TaskQueuedInfo {
+  reason: 'slot_limit' | 'queue_paused' | 'admission_refused'
+  active: number
+  slotLimit: number
+  position: number
+}
 
 /** Google-Calendar-style schedule for a task. Present ⇒ the task auto-triggers. */
 export type TaskSchedule =

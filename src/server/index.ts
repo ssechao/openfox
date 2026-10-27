@@ -1182,6 +1182,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     runtimeRegistry.remove(sessionId)
     sessionManager.deleteSession(sessionId)
+    await tasksService.reconcileSessionDeleted(session.projectId, sessionId)
     wssExports.broadcastAll({
       type: 'session.deleted',
       sessionId,

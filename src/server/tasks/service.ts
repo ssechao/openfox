@@ -21,6 +21,7 @@ import type {
   ProjectTaskCounts,
   ProjectTaskSettings,
   TaskStatus,
+  TaskQueuedInfo,
   Session,
 } from '../../shared/types.js'
 import type { SessionManager } from '../session/manager.js'
@@ -117,8 +118,10 @@ export interface TasksService {
   ): Promise<{
     task: ProjectTask
     sessionId?: string
+    queued?: TaskQueuedInfo
     autoLaunched?: { taskId: string; taskTitle: string; sessionId: string; projectId: string }
   }>
+  reconcileSessionDeleted(projectId: string, sessionId: string): Promise<void>
   setGateValue(
     projectId: string,
     taskId: string,
@@ -361,6 +364,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     }
 
     let sessionId: string | undefined
+    let queued: TaskQueuedInfo | undefined
     const wasRunning = task.status === 'in_progress' && task.runState === 'running'
 
     if (to === 'in_progress') {
@@ -371,7 +375,8 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       }
 
       const settings = dbGetTaskSettings(projectId)
-      const humanLaunch = opts.actor !== 'agent' && activeCount(projectId) < settings.slotLimit && !settings.queuePaused
+      const active = activeCount(projectId)
+      const humanLaunch = opts.actor !== 'agent' && active < settings.slotLimit && !settings.queuePaused
       if (humanLaunch) {
         const admissionSessionId = reusableTarget(projectId, opts.sessionId) ?? `task:${task.id}`
         if (canStartSession && !canStartSession(admissionSessionId)) {
@@ -420,6 +425,12 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           const earmarked = reusableTarget(projectId, opts.sessionId)
           if (earmarked) dbAddTaskLink(taskId, earmarked, false)
           dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (queued)`, opts.actorName)
+          queued = {
+            reason: settings.queuePaused ? 'queue_paused' : 'slot_limit',
+            active,
+            slotLimit: settings.slotLimit,
+            position: dbGetTask(taskId)?.queuePosition ?? 1,
+          }
         }
       }
     } else if (to === 'done') {
@@ -456,8 +467,17 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     return {
       task: fresh,
       ...(sessionId ? { sessionId } : {}),
+      ...(queued ? { queued } : {}),
       ...(autoLaunched ? { autoLaunched } : {}),
     }
+  }
+
+  function reconcileSessionDeleted(projectId: string, sessionId: string) {
+    return withLock(projectId, async () => {
+      const { changed, freedSlot } = reconcileSessions(projectId, sessionId)
+      const autoLaunched = freedSlot ? await maybeAutoLaunch(projectId) : undefined
+      if (changed || autoLaunched) publish(projectId, undefined, autoLaunched)
+    })
   }
 
   /**
@@ -663,7 +683,35 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     return err
   }
 
+  function reconcileSessions(projectId: string, deletedSessionId?: string) {
+    let changed = false
+    let freedSlot = false
+
+    for (const task of dbListTasks(projectId)) {
+      if (deletedSessionId) {
+        if (!task.sessionIds.includes(deletedSessionId)) continue
+        dbRemoveTaskLinks(task.id, deletedSessionId)
+        changed = true
+        if (task.status !== 'in_progress' || task.runState !== 'running' || task.activeSessionId !== deletedSessionId) {
+          continue
+        }
+      } else {
+        if (task.status !== 'in_progress' || task.runState !== 'running') continue
+        if (task.activeSessionId && sessionManager.getSession(task.activeSessionId)) continue
+        if (task.activeSessionId) dbRemoveTaskLinks(task.id, task.activeSessionId)
+        changed = true
+      }
+
+      dbSetTaskRunState(task.id, 'idle')
+      dbAddAuditEntry(task.id, 'system', 'session_deleted', 'Task set idle: active session deleted', 'system')
+      freedSlot = true
+    }
+
+    return { changed, freedSlot }
+  }
+
   function activeCount(projectId: string): number {
+    reconcileSessions(projectId)
     return dbListTasks(projectId).filter((t) => t.status === 'in_progress' && t.runState === 'running').length
   }
 
@@ -845,6 +893,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     duplicate,
     remove,
     move,
+    reconcileSessionDeleted,
     setGateValue,
     setGateConfig,
     setSettings,
