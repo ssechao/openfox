@@ -15,10 +15,15 @@ installParentExitGuard()
 
 const workers = new Map<string, ChildProcess>()
 const gitProcesses = new Map<string, ChildProcess>()
+const WORKER_OUTPUT_MAX_BYTES_PER_WINDOW = 256 * 1024
+const WORKER_OUTPUT_MAX_MESSAGES_PER_WINDOW = 100
+const WORKER_OUTPUT_WINDOW_MS = 1_000
+const WORKER_OUTPUT_TAIL_BYTES = 64 * 1024
 let shuttingDown = false
 
-function send(message: SupervisorToGatewayMessage): void {
-  if (process.connected) process.send?.(message)
+function send(message: SupervisorToGatewayMessage): boolean {
+  if (!process.connected || !process.send) return false
+  return process.send(message)
 }
 
 function runGit(requestId: string, cwd: string, args: string[]): void {
@@ -106,12 +111,78 @@ function spawnWorker(message: Extract<GatewayToSupervisorMessage, { type: 'worke
   worker.on('message', (payload) => {
     send({ type: 'worker.message', workerKey: message.workerKey, message: payload })
   })
-  worker.stdout?.on('data', (chunk: Buffer) => {
-    send({ type: 'worker.stdout', workerKey: message.workerKey, chunk: chunk.toString('utf8') })
-  })
-  worker.stderr?.on('data', (chunk: Buffer) => {
-    send({ type: 'worker.stderr', workerKey: message.workerKey, chunk: chunk.toString('utf8') })
-  })
+  const outputStates = {
+    stdout: { tail: Buffer.alloc(0), droppedBytes: 0 },
+    stderr: { tail: Buffer.alloc(0), droppedBytes: 0 },
+  }
+  let outputWindowStartedAt = Date.now()
+  let outputBytesInWindow = 0
+  let outputMessagesInWindow = 0
+  let outputBackpressured = false
+  let outputClosed = false
+  const sendOutput = (stream: 'stdout' | 'stderr', chunk: string): void => {
+    const delivered = send({
+      type: stream === 'stdout' ? 'worker.stdout' : 'worker.stderr',
+      workerKey: message.workerKey,
+      chunk,
+    })
+    outputBytesInWindow += Buffer.byteLength(chunk)
+    outputMessagesInWindow++
+    if (!delivered) outputBackpressured = true
+  }
+  const appendDroppedOutput = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+    const state = outputStates[stream]
+    state.droppedBytes += chunk.length
+    if (chunk.length >= WORKER_OUTPUT_TAIL_BYTES) {
+      state.tail = Buffer.from(chunk.subarray(chunk.length - WORKER_OUTPUT_TAIL_BYTES))
+      return
+    }
+    const retainedBytes = Math.min(state.tail.length, WORKER_OUTPUT_TAIL_BYTES - chunk.length)
+    state.tail = Buffer.concat(
+      [state.tail.subarray(state.tail.length - retainedBytes), chunk],
+      retainedBytes + chunk.length,
+    )
+  }
+  const flushDroppedOutput = (stream: 'stdout' | 'stderr'): void => {
+    const state = outputStates[stream]
+    if (state.droppedBytes === 0) return
+    const omittedBytes = Math.max(0, state.droppedBytes - state.tail.length)
+    const marker = omittedBytes > 0 ? `[${omittedBytes} bytes omitted by supervisor]\n` : ''
+    sendOutput(stream, `${marker}${state.tail.toString('utf8')}`)
+    state.tail = Buffer.alloc(0)
+    state.droppedBytes = 0
+  }
+  const refreshOutputWindow = (): void => {
+    const now = Date.now()
+    if (now - outputWindowStartedAt < WORKER_OUTPUT_WINDOW_MS) return
+    outputWindowStartedAt = now
+    outputBytesInWindow = 0
+    outputMessagesInWindow = 0
+    outputBackpressured = false
+    flushDroppedOutput('stdout')
+    flushDroppedOutput('stderr')
+  }
+  const relayOutput = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+    if (outputClosed) return
+    refreshOutputWindow()
+    if (
+      outputBackpressured ||
+      outputMessagesInWindow >= WORKER_OUTPUT_MAX_MESSAGES_PER_WINDOW ||
+      outputBytesInWindow + chunk.length > WORKER_OUTPUT_MAX_BYTES_PER_WINDOW
+    ) {
+      appendDroppedOutput(stream, chunk)
+      return
+    }
+    sendOutput(stream, chunk.toString('utf8'))
+  }
+  const flushWorkerOutput = (): void => {
+    if (outputClosed) return
+    outputClosed = true
+    flushDroppedOutput('stdout')
+    flushDroppedOutput('stderr')
+  }
+  worker.stdout?.on('data', (chunk: Buffer) => relayOutput('stdout', chunk))
+  worker.stderr?.on('data', (chunk: Buffer) => relayOutput('stderr', chunk))
   worker.on('error', (error) => {
     send({ type: 'worker.error', workerKey: message.workerKey, error: error.message })
   })
@@ -122,6 +193,7 @@ function spawnWorker(message: Extract<GatewayToSupervisorMessage, { type: 'worke
   worker.on('close', (code, signal) => {
     if (workers.get(message.workerKey) !== worker) return
     workers.delete(message.workerKey)
+    flushWorkerOutput()
     send({ type: 'worker.close', workerKey: message.workerKey, code, signal })
   })
 }
