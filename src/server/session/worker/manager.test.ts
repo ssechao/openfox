@@ -189,6 +189,45 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it.fails('final unterminated worker log line is flushed on close', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-final-output.db')
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      manager.launch('sess-1', () => {})
+      child.stdout!.emit('data', Buffer.from('final line'))
+      child.emit('close', 0, null)
+
+      expect(info).toHaveBeenCalledWith('Session worker output', {
+        sessionId: 'sess-1',
+        workerId: manager.activeWorker('sess-1')!.token.workerId,
+        generation: manager.activeWorker('sess-1')!.token.generation,
+        stream: 'stdout',
+        line: 'final line',
+      })
+    } finally {
+      info.mockRestore()
+    }
+  })
+
   it('lastActivityAt advances while a worker turn is running', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-activity.db')
     openDbs.push(db)
