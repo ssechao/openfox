@@ -89,29 +89,34 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
     return this.dispatch({ type: 'worker.send', workerKey: this.workerKey, message })
   }
 
-  kill(_signal: NodeJS.Signals = 'SIGTERM'): boolean {
-    return false
+  kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    return this.dispatch({ type: 'worker.kill', workerKey: this.workerKey, signal })
   }
 
   async killVerified(signal: NodeJS.Signals, deadlineAt: number): Promise<void> {
     if (this.exitCode !== null || this.signalCode !== null) throw new Error('Worker already exited; signal refused')
     const pid = this.pid
     const inventory = this.inventory
-    if (pid === undefined || !inventory || inventory.pid !== pid) {
+    if (pid === undefined) {
+      if (this.kill(signal)) return
       throw new Error('Worker start identity is unavailable; signal refused')
     }
-    if (Date.now() >= deadlineAt)
-      throw new Error('Worker start identity check exceeded signal deadline; signal refused')
+    if (!inventory || inventory.pid !== pid) throw new Error('Worker start identity is unavailable; signal refused')
+    const deadlineError = new Error('Worker start identity check exceeded signal deadline; signal refused')
+    if (Date.now() >= deadlineAt) {
+      if (this.kill(signal)) return
+      throw deadlineError
+    }
     let timer: NodeJS.Timeout | undefined
     const timedOut = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(
-        () => reject(new Error('Worker start identity check exceeded signal deadline; signal refused')),
-        Math.max(0, deadlineAt - Date.now()),
-      )
+      timer = setTimeout(() => reject(deadlineError), Math.max(0, deadlineAt - Date.now()))
     })
     let current: ProcessIdentityRead
     try {
       current = await Promise.race([this.readProcessIdentity(pid), timedOut])
+    } catch (error) {
+      if (error === deadlineError && this.kill(signal)) return
+      throw error
     } finally {
       if (timer) clearTimeout(timer)
     }

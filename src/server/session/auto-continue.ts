@@ -41,6 +41,18 @@ export function planBootContinuation(events: StoredEvent[], hasActiveWorkflow: b
  * finalize the assistant bubble before executing tools, so an unfinalized one
  * means the LLM stream was cut off mid-response.
  */
+function hasPendingToolReconciliation(events: StoredEvent[]): boolean {
+  const pending = new Set<string>()
+  for (const event of events) {
+    if (event.type === 'tool.reconciliation_required') {
+      pending.add((event.data as { toolCallId: string }).toolCallId)
+    } else if (event.type === 'tool.reconciliation_resolved') {
+      pending.delete((event.data as { toolCallId: string }).toolCallId)
+    }
+  }
+  return pending.size > 0
+}
+
 function findUnfinalizedAssistantMessage(events: StoredEvent[]): string | undefined {
   let lastAssistantId: string | undefined
   const finalized = new Set<string>()
@@ -86,7 +98,10 @@ export function runBootAutoContinuations(sessionIds: string[], deps: BootAutoCon
   let continued = 0
 
   for (const sessionId of sessionIds) {
-    const plan = planBootContinuation(deps.getEvents(sessionId), deps.hasActiveWorkflow(sessionId))
+    const events = deps.getEvents(sessionId)
+    const plan = hasPendingToolReconciliation(events)
+      ? null
+      : planBootContinuation(events, deps.hasActiveWorkflow(sessionId))
     if (!plan) {
       logger.debug('Skipping boot auto-continuation', { sessionId })
       continue

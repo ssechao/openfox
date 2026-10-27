@@ -51,6 +51,29 @@ describe('planBootContinuation', () => {
 })
 
 describe('runBootAutoContinuations', () => {
+  it('turn requiring tool reconciliation is not auto-restarted', () => {
+    const queued: string[] = []
+    const deps: BootAutoContinueDeps = {
+      getEvents: () => [
+        userStart('u1', 1),
+        assistantStart('a1', 2),
+        stored(3, 'tool.reconciliation_required', {
+          messageId: 'a1',
+          toolCallId: 'tool-1',
+          name: 'run_command',
+          arguments: { command: 'side-effect' },
+        }),
+      ],
+      hasActiveWorkflow: () => false,
+      appendEvent: () => {},
+      queueMessage: (sessionId) => queued.push(sessionId),
+    }
+
+    const count = runBootAutoContinuations(['s-1'], deps)
+
+    expect(count).toBe(0)
+    expect(queued).toEqual([])
+  })
   it('queues the stream-error reminder and appends a partial-done finalize event for mid-generation sessions', () => {
     const appended: Array<{ sessionId: string; event: unknown }> = []
     const queued: Array<{ sessionId: string; content: string }> = []

@@ -112,6 +112,79 @@ describe('SessionProcessSupervisor', () => {
     expect(child.send).not.toHaveBeenCalledWith({ type: 'worker.kill', workerKey: 'worker-1', signal: 'SIGTERM' })
   })
 
+  it('stop before inventory capture still terminates the worker', async () => {
+    const child = fakeChild()
+    const supervisor = new SessionProcessSupervisor({
+      forkProcess: vi.fn(() => child),
+      entry: { path: '/supervisor.js', execArgv: [] },
+      startupTimeoutMs: 100,
+    })
+    const started = supervisor.start()
+    child.emit('message', { type: 'ready', pid: 41 })
+    await started
+
+    const handle = supervisor.spawnWorker({
+      workerKey: 'worker-stopping-before-inventory',
+      path: '/worker.js',
+      execArgv: [],
+      env: process.env,
+    })
+
+    await expect(handle.killVerified('SIGTERM', Date.now() + 1_000)).resolves.toBeUndefined()
+    expect(child.send).toHaveBeenCalledWith({
+      type: 'worker.kill',
+      workerKey: 'worker-stopping-before-inventory',
+      signal: 'SIGTERM',
+    })
+  })
+
+  it('slow identity read on SIGTERM leaves a SIGKILL budget', async () => {
+    vi.useFakeTimers()
+    const child = fakeChild()
+    const supervisor = new SessionProcessSupervisor({
+      forkProcess: vi.fn(() => child),
+      entry: { path: '/supervisor.js', execArgv: [] },
+      startupTimeoutMs: 100,
+      readProcessIdentity: () => new Promise(() => {}),
+    })
+    const started = supervisor.start()
+    child.emit('message', { type: 'ready', pid: 41 })
+    await started
+    const handle = supervisor.spawnWorker({
+      workerKey: 'slow-identity-worker',
+      path: '/worker.js',
+      execArgv: [],
+      env: process.env,
+    })
+    const spawnRequest = child.send.mock.calls.find(([message]) => message.type === 'worker.spawn')![0]
+    child.emit('message', {
+      type: 'worker.spawned',
+      requestId: spawnRequest.requestId,
+      workerKey: 'slow-identity-worker',
+      pid: 99,
+      inventory: { pid: 99, startedAt: 'linux:99', pgid: 99 },
+    })
+
+    try {
+      const stopStartedAt = Date.now()
+      const term = handle.killVerified('SIGTERM', stopStartedAt + 500)
+      await vi.advanceTimersByTimeAsync(500)
+      await expect(term).resolves.toBeUndefined()
+
+      const kill = handle.killVerified('SIGKILL', stopStartedAt + 1_000)
+      await vi.advanceTimersByTimeAsync(500)
+      await expect(kill).resolves.toBeUndefined()
+      expect(child.send).toHaveBeenCalledWith({
+        type: 'worker.kill',
+        workerKey: 'slow-identity-worker',
+        signal: 'SIGKILL',
+      })
+      expect(Date.now()).toBeLessThan(stopStartedAt + 2_000)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('refuses signaling when spawn identity is absent or the handle already exited', async () => {
     const child = fakeChild()
     const signalProcess = vi.fn((_pid: number, _signal?: string | number) => true as const)
