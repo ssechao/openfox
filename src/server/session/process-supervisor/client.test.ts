@@ -177,7 +177,7 @@ describe('SessionProcessSupervisor', () => {
     }
   })
 
-  it.fails('known pid without inventory still stops through the supervisor handle', async () => {
+  it('known pid without inventory still stops through the supervisor handle', async () => {
     const child = fakeChild()
     const supervisor = new SessionProcessSupervisor({
       forkProcess: vi.fn(() => child),
