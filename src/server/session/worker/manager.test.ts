@@ -10,6 +10,7 @@ import type { SessionManager } from '../manager.js'
 import { SessionRuntimeRegistry } from '../runtime.js'
 import { SessionWorkerManager } from './manager.js'
 import { assignWorkerToken } from './token.js'
+import { logger } from '../../utils/logger.js'
 
 function createDb(name: string): { db: Database.Database; namedDb: Database.Database } {
   const db = new Database(':memory:')
@@ -51,6 +52,95 @@ afterEach(() => {
 })
 
 describe('SessionWorkerManager', () => {
+  it('worker log lines are relayed to the gateway log with session and worker ids', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-log-relay.db')
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      manager.launch('sess-1', () => {})
+      const token = manager.activeWorker('sess-1')!.token
+      child.stdout!.emit('data', Buffer.from('first line\nsecond line\n'))
+      child.stderr!.emit('data', Buffer.from('failure line\n'))
+
+      expect(info).toHaveBeenCalledWith('Session worker output', {
+        sessionId: 'sess-1',
+        workerId: token.workerId,
+        generation: token.generation,
+        stream: 'stdout',
+        line: 'first line',
+      })
+      expect(info).toHaveBeenCalledWith('Session worker output', {
+        sessionId: 'sess-1',
+        workerId: token.workerId,
+        generation: token.generation,
+        stream: 'stdout',
+        line: 'second line',
+      })
+      expect(error).toHaveBeenCalledWith('Session worker output', {
+        sessionId: 'sess-1',
+        workerId: token.workerId,
+        generation: token.generation,
+        stream: 'stderr',
+        line: 'failure line',
+      })
+    } finally {
+      info.mockRestore()
+      error.mockRestore()
+    }
+  })
+
+  it('lastActivityAt advances while a worker turn is running', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-activity.db')
+    openDbs.push(db)
+    const initialActivity = '2024-01-01T00:00:00.000Z'
+    namedDb.prepare(`UPDATE sessions SET updated_at = ? WHERE id = 'sess-1'`).run(initialActivity)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    manager.launch('sess-1', () => {})
+    const token = manager.activeWorker('sess-1')!.token
+    child.emit('message', { ...token, type: 'health', data: {} })
+
+    const row = namedDb.prepare(`SELECT updated_at FROM sessions WHERE id = 'sess-1'`).get() as {
+      updated_at: string
+    }
+    expect(new Date(row.updated_at).getTime()).toBeGreaterThan(new Date(initialActivity).getTime())
+  })
+
   it('starts a saturated turn later and sends its command over worker IPC', () => {
     const root = mkdtempSync(join(tmpdir(), 'openfox-worker-command-'))
     const { db, namedDb } = createDb(join(root, 'sessions.db'))
