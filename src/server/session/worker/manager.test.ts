@@ -108,7 +108,7 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails('worker output without newline stays bounded and is relayed with an omission marker', () => {
+  it('worker output without newline stays bounded and is relayed with an omission marker', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-bounded-output.db')
     openDbs.push(db)
     const child = Object.assign(new EventEmitter(), {
@@ -145,7 +145,7 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails('worker log flood is rate limited without blocking control messages', () => {
+  it('worker log flood is rate limited without blocking control messages', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-rate-limit.db')
     openDbs.push(db)
     const initialActivity = '2024-01-01T00:00:00.000Z'
@@ -189,7 +189,7 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails('final unterminated worker log line is flushed on close', () => {
+  it('final unterminated worker log line is flushed on close', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-final-output.db')
     openDbs.push(db)
     const child = Object.assign(new EventEmitter(), {

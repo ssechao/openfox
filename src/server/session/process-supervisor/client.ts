@@ -26,6 +26,7 @@ export interface SupervisorWorkerHandle {
   on(event: 'error', listener: (error: Error) => void): this
   on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this
   once(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this
+  once(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this
 }
 
 interface SupervisorEntry {
@@ -132,6 +133,10 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
     this.exitCode = code
     this.signalCode = signal
     this.emit('exit', code, signal)
+  }
+
+  markClose(code: number | null, signal: NodeJS.Signals | null): void {
+    this.emit('close', code, signal)
   }
 }
 
@@ -404,6 +409,7 @@ export class SessionProcessSupervisor {
       if (!handle) return
       handle.emit('error', new Error(message.error))
       handle.markExit(1, null)
+      handle.markClose(1, null)
       this.workers.delete(message.workerKey)
       return
     }
@@ -426,8 +432,14 @@ export class SessionProcessSupervisor {
     if (message.type === 'worker.exit') {
       const handle = this.workers.get(message.workerKey)
       if (!handle) return
-      this.workers.delete(message.workerKey)
       handle.markExit(message.code, message.signal)
+      return
+    }
+    if (message.type === 'worker.close') {
+      const handle = this.workers.get(message.workerKey)
+      if (!handle) return
+      this.workers.delete(message.workerKey)
+      handle.markClose(message.code, message.signal)
       return
     }
     if (message.type === 'children.capture.result') {
@@ -491,7 +503,10 @@ export class SessionProcessSupervisor {
         ),
       )
     }
-    for (const handle of this.workers.values()) handle.markExit(code, signal)
+    for (const handle of this.workers.values()) {
+      if (handle.exitCode === null && handle.signalCode === null) handle.markExit(code, signal)
+      handle.markClose(code, signal)
+    }
     this.workers.clear()
     for (const pending of this.pendingGit.values()) pending.reject(new Error('Session process supervisor exited'))
     this.pendingGit.clear()

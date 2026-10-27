@@ -78,10 +78,12 @@ describe('SessionProcessSupervisor', () => {
     const stdout: string[] = []
     const stderr: string[] = []
     const exits: unknown[] = []
+    const closes: unknown[] = []
     handle.on('message', (message) => messages.push(message))
     handle.stdout.on('data', (chunk: Buffer) => stdout.push(chunk.toString()))
     handle.stderr.on('data', (chunk: Buffer) => stderr.push(chunk.toString()))
     handle.on('exit', (code, signal) => exits.push([code, signal]))
+    handle.once('close', (code, signal) => closes.push([code, signal]))
 
     const spawnRequest = child.send.mock.calls.find(([message]) => message.type === 'worker.spawn')![0]
     child.emit('message', {
@@ -97,12 +99,15 @@ describe('SessionProcessSupervisor', () => {
     handle.send({ type: 'start' })
     await handle.killVerified('SIGTERM', Date.now() + 1_000)
     child.emit('message', { type: 'worker.exit', workerKey: 'worker-1', code: 0, signal: null })
+    child.emit('message', { type: 'worker.stdout', workerKey: 'worker-1', chunk: 'final output' })
+    child.emit('message', { type: 'worker.close', workerKey: 'worker-1', code: 0, signal: null })
 
     expect(handle.pid).toBe(99)
     expect(messages).toEqual([{ type: 'ready' }])
-    expect(stdout).toEqual(['worker output\n'])
+    expect(stdout).toEqual(['worker output\n', 'final output'])
     expect(stderr).toEqual(['worker error\n'])
     expect(exits).toEqual([[0, null]])
+    expect(closes).toEqual([[0, null]])
     expect(child.send).toHaveBeenCalledWith({
       type: 'worker.send',
       workerKey: 'worker-1',

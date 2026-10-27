@@ -117,8 +117,12 @@ function spawnWorker(message: Extract<GatewayToSupervisorMessage, { type: 'worke
   })
   worker.on('exit', (code, signal) => {
     if (workers.get(message.workerKey) !== worker) return
-    workers.delete(message.workerKey)
     send({ type: 'worker.exit', workerKey: message.workerKey, code, signal })
+  })
+  worker.on('close', (code, signal) => {
+    if (workers.get(message.workerKey) !== worker) return
+    workers.delete(message.workerKey)
+    send({ type: 'worker.close', workerKey: message.workerKey, code, signal })
   })
 }
 

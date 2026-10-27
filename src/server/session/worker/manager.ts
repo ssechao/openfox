@@ -78,6 +78,10 @@ const WORKER_STOP_SETTLEMENT_TIMEOUT_MS = 2_000
 const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
 const WORKER_ORPHAN_PROOF_DELAY_MS = 2_000
 const WORKER_ORPHAN_PROOF_TOLERANCE_MS = 500
+const WORKER_LOG_MAX_LINE_BYTES = 64 * 1024
+const WORKER_LOG_REMAINDER_BYTES = WORKER_LOG_MAX_LINE_BYTES - 128
+const WORKER_LOG_RATE_LIMIT = 100
+const WORKER_LOG_RATE_WINDOW_MS = 1_000
 
 export interface WorkerSettledOutcome {
   crashed: boolean
@@ -347,29 +351,106 @@ export class SessionWorkerManager {
     }
     this.active.set(sessionId, worker)
 
-    const outputRemainders = { stdout: '', stderr: '' }
-    const relayOutput = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
-      const lines = `${outputRemainders[stream]}${chunk.toString('utf-8')}`.split(/\r?\n/)
-      outputRemainders[stream] = lines.pop() ?? ''
-      for (const line of lines) {
-        if (!line.trim()) continue
-        if (stream === 'stderr') {
-          worker.stderrTail.push(line)
-          if (worker.stderrTail.length > 20) worker.stderrTail.shift()
-        }
-        const context = {
-          sessionId,
-          workerId: token.workerId,
-          generation: token.generation,
-          stream,
-          line,
-        }
-        if (stream === 'stdout') logger.info('Session worker output', context)
-        else logger.error('Session worker output', context)
+    const outputStates = {
+      stdout: { remainder: Buffer.alloc(0), omittedBytes: 0 },
+      stderr: { remainder: Buffer.alloc(0), omittedBytes: 0 },
+    }
+    let outputWindowStartedAt = Date.now()
+    let outputLinesInWindow = 0
+    let outputRateMarkerEmitted = false
+    let outputClosed = false
+    const emitOutputLine = (stream: 'stdout' | 'stderr', line: string): void => {
+      if (!line.trim()) return
+      if (stream === 'stderr') {
+        worker.stderrTail.push(line)
+        if (worker.stderrTail.length > 20) worker.stderrTail.shift()
       }
+      const context = {
+        sessionId,
+        workerId: token.workerId,
+        generation: token.generation,
+        stream,
+        line,
+      }
+      if (stream === 'stdout') logger.info('Session worker output', context)
+      else logger.error('Session worker output', context)
+    }
+    const appendOutput = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+      if (chunk.length === 0) return
+      const state = outputStates[stream]
+      const combinedLength = state.remainder.length + chunk.length
+      if (combinedLength <= WORKER_LOG_REMAINDER_BYTES) {
+        state.remainder = Buffer.concat([state.remainder, chunk], combinedLength)
+        return
+      }
+      const omittedBytes = combinedLength - WORKER_LOG_REMAINDER_BYTES
+      state.omittedBytes += omittedBytes
+      if (chunk.length >= WORKER_LOG_REMAINDER_BYTES) {
+        state.remainder = Buffer.from(chunk.subarray(chunk.length - WORKER_LOG_REMAINDER_BYTES))
+        return
+      }
+      const retained = state.remainder.subarray(state.remainder.length - (WORKER_LOG_REMAINDER_BYTES - chunk.length))
+      state.remainder = Buffer.concat([retained, chunk], WORKER_LOG_REMAINDER_BYTES)
+    }
+    const flushOutputLine = (stream: 'stdout' | 'stderr'): void => {
+      const state = outputStates[stream]
+      const suffix =
+        state.remainder.at(-1) === 13 ? state.remainder.subarray(0, state.remainder.length - 1) : state.remainder
+      const marker = state.omittedBytes > 0 ? `[${state.omittedBytes} bytes omitted]` : ''
+      emitOutputLine(stream, `${marker}${suffix.toString('utf-8')}`)
+      state.remainder = Buffer.alloc(0)
+      state.omittedBytes = 0
+    }
+    const refreshOutputWindow = (): void => {
+      const now = Date.now()
+      if (now - outputWindowStartedAt < WORKER_LOG_RATE_WINDOW_MS) return
+      outputWindowStartedAt = now
+      outputLinesInWindow = 0
+      outputRateMarkerEmitted = false
+    }
+    const emitOutputRateMarker = (stream: 'stdout' | 'stderr'): void => {
+      if (outputRateMarkerEmitted) return
+      outputRateMarkerEmitted = true
+      emitOutputLine(stream, '[worker output omitted: rate limit exceeded]')
+    }
+    const relayOutput = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+      if (outputClosed) return
+      refreshOutputWindow()
+      let offset = 0
+      while (offset < chunk.length) {
+        if (outputLinesInWindow >= WORKER_LOG_RATE_LIMIT) {
+          const lastNewline = chunk.lastIndexOf(10)
+          if (lastNewline < offset) {
+            appendOutput(stream, chunk.subarray(offset))
+            return
+          }
+          outputStates[stream].remainder = Buffer.alloc(0)
+          outputStates[stream].omittedBytes = 0
+          emitOutputRateMarker(stream)
+          offset = lastNewline + 1
+          appendOutput(stream, chunk.subarray(offset))
+          return
+        }
+        const newline = chunk.indexOf(10, offset)
+        if (newline === -1) {
+          appendOutput(stream, chunk.subarray(offset))
+          return
+        }
+        appendOutput(stream, chunk.subarray(offset, newline))
+        outputLinesInWindow++
+        flushOutputLine(stream)
+        offset = newline + 1
+      }
+    }
+    const flushOutput = (): void => {
+      if (outputClosed) return
+      outputClosed = true
+      flushOutputLine('stdout')
+      flushOutputLine('stderr')
     }
     child.stdout?.on('data', (chunk: Buffer) => relayOutput('stdout', chunk))
     child.stderr?.on('data', (chunk: Buffer) => relayOutput('stderr', chunk))
+    child.once('close', flushOutput)
 
     child.on('message', (raw) => {
       if (this.active.get(sessionId) !== worker) return
