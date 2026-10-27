@@ -40,10 +40,17 @@ describe('project_tasks tool', () => {
     await mkdir(join(root, 'nested'), { recursive: true })
     projectId = createProject('Tool Tasks', root).id
 
+    const sessions = new Map([['sess-agent', { id: 'sess-agent', projectId, messages: [] }]])
+    let sessionCount = 0
     const svc = createTasksService({
       sessionManager: {
-        getSession: () => null,
-        createSession: () => ({ id: 'unused' }),
+        getSession: (id: string) => sessions.get(id) ?? null,
+        createSession: () => {
+          sessionCount += 1
+          const session = { id: `task-session-${sessionCount}`, projectId, messages: [] }
+          sessions.set(session.id, session)
+          return session
+        },
         addMessage: () => undefined,
         queueMessage: () => undefined,
       } as unknown as Parameters<typeof createTasksService>[0]['sessionManager'],
