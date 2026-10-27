@@ -379,14 +379,12 @@ describe('SessionManager.switchWorkspace – execution context integrity (issue 
 
   // ==========================================================================
   // Workspace commit guidance — a workspace's origin is the original local repo
-  // (a --shared clone). Pushing a branch the original has checked out is refused
-  // (receive.denyCurrentBranch); a branch the original is NOT on pushes directly.
-  // The switch reminder must carry the branch-aware recipe, but only when
-  // actually entering a workspace (in the original repo a normal push works).
+  // (a --shared clone). The switch reminder must carry the deterministic recipe,
+  // but only when actually entering a workspace.
   // ==========================================================================
 
   describe('workspace commit guidance in the switch reminder', () => {
-    it('appends the deterministic 7-step commit recipe to the reminder when switching into a workspace', async () => {
+    it('appends the deterministic commit recipe to the reminder when switching into a workspace', async () => {
       const session = manager.createSession(projectId, 'Ctx-ws-commit-1')
 
       await manager.switchWorkspace(session.id, 'feat-x')
@@ -395,18 +393,13 @@ describe('SessionManager.switchWorkspace – execution context integrity (issue 
       const reminders = messages.filter((m) => m.messageKind === 'auto-prompt')
       expect(reminders.length).toBeGreaterThan(0)
       const content = reminders[reminders.length - 1]!.content!
-      // The recipe is unconditional: always a temp branch, always land back in
-      // the original repo, always clean up the workspace. No branch-dependent
-      // "if checked out / else push directly" conditional.
       expect(content).not.toContain('checked out')
       const markers = [
-        'git push origin HEAD:', // 1) push to original on a temp branch
-        'workspace switch original', // 2) switch back to original
-        'git merge --ff-only', // 3) merge the temp branch
-        'git branch -d', // 4) delete the temp branch
-        'Verify the work is present', // 5) confirm the work is present
-        'workspace delete', // 6) delete the workspace
-        'git push origin <branch>', // 7) push to the remote from original
+        'git push origin HEAD:',
+        'workspace switch original',
+        'git log -1 <feature-slug>',
+        'workspace delete',
+        'git push origin <feature-slug>',
       ]
       const positions = markers.map((m) => {
         const idx = content.indexOf(m)
