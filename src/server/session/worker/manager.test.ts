@@ -108,6 +108,43 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it.fails('worker output without newline stays bounded and is relayed with an omission marker', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-bounded-output.db')
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      manager.launch('sess-1', () => {})
+      child.stdout!.emit('data', Buffer.from('x'.repeat(128 * 1024)))
+      child.stdout!.emit('data', Buffer.from('\n'))
+
+      const output = info.mock.calls.find(([message]) => message === 'Session worker output')
+      expect(output).toBeDefined()
+      const context = output![1] as { line: string }
+      expect(context.line).toMatch(/\[\d+ bytes omitted\]/)
+      expect(Buffer.byteLength(context.line)).toBeLessThanOrEqual(64 * 1024)
+    } finally {
+      info.mockRestore()
+    }
+  })
+
   it('lastActivityAt advances while a worker turn is running', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-activity.db')
     openDbs.push(db)
