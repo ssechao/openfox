@@ -36,6 +36,7 @@ export type SupervisorToGatewayMessage =
       inventory?: ProcessInventoryEntry
     }
   | { type: 'worker.spawn_error'; requestId: string; workerKey: string; error: string }
+  | { type: 'worker.inventory'; workerKey: string; inventory: ProcessInventoryEntry }
   | { type: 'worker.message'; workerKey: string; message: unknown }
   | { type: 'worker.stdout'; workerKey: string; chunk: string }
   | { type: 'worker.stderr'; workerKey: string; chunk: string }

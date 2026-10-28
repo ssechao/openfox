@@ -2,11 +2,12 @@ import { fork, type ChildProcess } from 'node:child_process'
 import { spawnGitProcess } from '../../git/spawn.js'
 import { GIT_QUERY_TIMEOUT_MS } from '../../utils/bounded-exec.js'
 import { installParentExitGuard } from '../../utils/parent-exit-guard.js'
+import { logger } from '../../utils/logger.js'
 import { terminateProcessTree } from '../../utils/process-tree.js'
 import {
   captureExclusiveProcessInventoryAsync,
   killTrackedChildren,
-  readProcessInventory,
+  readProcessInventoryAsync,
   verifyExclusiveProcessInventoryAfter,
 } from '../worker/children.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
@@ -14,11 +15,27 @@ import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './p
 installParentExitGuard()
 
 const workers = new Map<string, ChildProcess>()
+const pendingWorkerMessages = new Map<string, unknown[]>()
+const pendingWorkerOutputs = new Map<string, unknown[]>()
 const gitProcesses = new Map<string, ChildProcess>()
 let shuttingDown = false
 
 function send(message: SupervisorToGatewayMessage): void {
   if (process.connected) process.send?.(message)
+}
+
+function flushWorkerMessages(workerKey: string, worker: ChildProcess): void {
+  const messages = pendingWorkerMessages.get(workerKey)
+  pendingWorkerMessages.delete(workerKey)
+  if (!messages || workers.get(workerKey) !== worker || !worker.connected) return
+  for (const message of messages) worker.send(message as object)
+}
+
+function flushWorkerOutputs(workerKey: string, worker: ChildProcess): void {
+  const outputs = pendingWorkerOutputs.get(workerKey)
+  pendingWorkerOutputs.delete(workerKey)
+  if (!outputs || workers.get(workerKey) !== worker) return
+  for (const output of outputs) send({ type: 'worker.message', workerKey, message: output })
 }
 
 function runGit(requestId: string, cwd: string, args: string[]): void {
@@ -94,17 +111,13 @@ function spawnWorker(message: Extract<GatewayToSupervisorMessage, { type: 'worke
   }
 
   workers.set(message.workerKey, worker)
+  pendingWorkerMessages.set(message.workerKey, [])
+  pendingWorkerOutputs.set(message.workerKey, [])
   const pid = worker.pid ?? -1
-  const inventory = pid > 0 ? readProcessInventory(pid) : { status: 'absent' as const }
-  send({
-    type: 'worker.spawned',
-    requestId: message.requestId,
-    workerKey: message.workerKey,
-    pid,
-    ...(inventory.status === 'found' ? { inventory: inventory.process } : {}),
-  })
   worker.on('message', (payload) => {
-    send({ type: 'worker.message', workerKey: message.workerKey, message: payload })
+    const pending = pendingWorkerOutputs.get(message.workerKey)
+    if (pending) pending.push(payload)
+    else send({ type: 'worker.message', workerKey: message.workerKey, message: payload })
   })
   worker.stdout?.on('data', (chunk: Buffer) => {
     send({ type: 'worker.stdout', workerKey: message.workerKey, chunk: chunk.toString('utf8') })
@@ -118,7 +131,36 @@ function spawnWorker(message: Extract<GatewayToSupervisorMessage, { type: 'worke
   worker.on('exit', (code, signal) => {
     if (workers.get(message.workerKey) !== worker) return
     workers.delete(message.workerKey)
+    pendingWorkerMessages.delete(message.workerKey)
+    pendingWorkerOutputs.delete(message.workerKey)
     send({ type: 'worker.exit', workerKey: message.workerKey, code, signal })
+  })
+
+  send({
+    type: 'worker.spawned',
+    requestId: message.requestId,
+    workerKey: message.workerKey,
+    pid,
+  })
+  if (pid <= 0) {
+    flushWorkerMessages(message.workerKey, worker)
+    flushWorkerOutputs(message.workerKey, worker)
+    logger.warn('Session worker inventory unavailable at spawn', { workerKey: message.workerKey, pid })
+    return
+  }
+  void readProcessInventoryAsync(pid).then((inventory) => {
+    if (workers.get(message.workerKey) !== worker) return
+    if (inventory.status === 'found') {
+      send({ type: 'worker.inventory', workerKey: message.workerKey, inventory: inventory.process })
+    } else {
+      logger.warn('Session worker inventory unavailable at spawn', {
+        workerKey: message.workerKey,
+        pid,
+        ...(inventory.status === 'unreadable' ? { error: inventory.error.message } : {}),
+      })
+    }
+    flushWorkerMessages(message.workerKey, worker)
+    flushWorkerOutputs(message.workerKey, worker)
   })
 }
 
@@ -157,6 +199,11 @@ process.on('message', (raw) => {
     return
   }
   if (message.type === 'worker.send') {
+    const pending = pendingWorkerMessages.get(message.workerKey)
+    if (pending) {
+      pending.push(message.message)
+      return
+    }
     const worker = workers.get(message.workerKey)
     if (worker?.connected) worker.send(message.message as object)
     return

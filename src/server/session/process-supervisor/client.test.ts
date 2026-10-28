@@ -185,7 +185,39 @@ describe('SessionProcessSupervisor', () => {
     }
   })
 
-  it('refuses signaling when spawn identity is absent or the handle already exited', async () => {
+  it('known pid without inventory still stops through the supervisor handle', async () => {
+    const child = fakeChild()
+    const supervisor = new SessionProcessSupervisor({
+      forkProcess: vi.fn(() => child),
+      entry: { path: '/supervisor.js', execArgv: [] },
+      startupTimeoutMs: 100,
+    })
+    const started = supervisor.start()
+    child.emit('message', { type: 'ready', pid: 41 })
+    await started
+    const handle = supervisor.spawnWorker({
+      workerKey: 'worker-without-inventory',
+      path: '/worker.js',
+      execArgv: [],
+      env: process.env,
+    })
+    const request = child.send.mock.calls.find(([message]) => message.type === 'worker.spawn')![0]
+    child.emit('message', {
+      type: 'worker.spawned',
+      requestId: request.requestId,
+      workerKey: 'worker-without-inventory',
+      pid: 98,
+    })
+
+    await expect(handle.killVerified('SIGTERM', Date.now() + 1_000)).resolves.toBeUndefined()
+    expect(child.send).toHaveBeenCalledWith({
+      type: 'worker.kill',
+      workerKey: 'worker-without-inventory',
+      signal: 'SIGTERM',
+    })
+  })
+
+  it('refuses signaling when the handle already exited', async () => {
     const child = fakeChild()
     const signalProcess = vi.fn((_pid: number, _signal?: string | number) => true as const)
     const supervisor = new SessionProcessSupervisor({
@@ -198,23 +230,6 @@ describe('SessionProcessSupervisor', () => {
     const started = supervisor.start()
     child.emit('message', { type: 'ready', pid: 41 })
     await started
-    const missing = supervisor.spawnWorker({
-      workerKey: 'worker-missing',
-      path: '/worker.js',
-      execArgv: [],
-      env: process.env,
-    })
-    const missingRequest = child.send.mock.calls.find(
-      ([message]) => message.type === 'worker.spawn' && message.workerKey === 'worker-missing',
-    )![0]
-    child.emit('message', {
-      type: 'worker.spawned',
-      requestId: missingRequest.requestId,
-      workerKey: 'worker-missing',
-      pid: 98,
-    })
-    await expect(missing.killVerified('SIGTERM', Date.now() + 1_000)).rejects.toThrow(/identity.*unavailable/i)
-
     const exited = supervisor.spawnWorker({
       workerKey: 'worker-exited',
       path: '/worker.js',

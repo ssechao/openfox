@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   captureExclusiveProcessInventory,
+  captureExclusiveProcessInventoryAsync,
   exclusiveChildReservationEnv,
   finalizeExclusiveChild,
   initChildrenTracking,
@@ -42,6 +43,31 @@ afterEach(() => {
 })
 
 describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('worker zero-orphan supervision', () => {
+  it('slow inventory capture is bounded and does not block supervisor signals', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'openfox-supervision-slow-inventory-'))
+    directories.push(directory)
+    const childrenPath = join(directory, 'worker.children')
+    initChildrenTracking(childrenPath)
+    const startedAt = Date.now()
+    let signalHandledAt = 0
+    const signalHandled = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        signalHandledAt = Date.now()
+        resolve()
+      }, 10)
+    })
+
+    const capture = captureExclusiveProcessInventoryAsync(42, childrenPath, {
+      readInventory: (() => new Promise(() => {})) as never,
+    })
+    await signalHandled
+    const inventory = await capture
+
+    expect(signalHandledAt - startedAt).toBeLessThan(100)
+    expect(inventory.worker).toBeUndefined()
+    expect(inventory.errors).toEqual([expect.stringMatching(/inventory read timed out/i)])
+  })
+
   it('inventories identities, groups, and reservations before proving zero orphans at T+2s', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'openfox-supervision-'))
     directories.push(directory)

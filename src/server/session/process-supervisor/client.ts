@@ -101,7 +101,11 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
       if (this.kill(signal)) return
       throw new Error('Worker start identity is unavailable; signal refused')
     }
-    if (!inventory || inventory.pid !== pid) throw new Error('Worker start identity is unavailable; signal refused')
+    if (!inventory) {
+      if (this.kill(signal)) return
+      throw new Error('Worker start identity is unavailable; signal refused')
+    }
+    if (inventory.pid !== pid) throw new Error('Worker start identity is unavailable; signal refused')
     const deadlineError = new Error('Worker start identity check exceeded signal deadline; signal refused')
     if (Date.now() >= deadlineAt) {
       if (this.kill(signal)) return
@@ -410,6 +414,11 @@ export class SessionProcessSupervisor {
       handle.emit('error', new Error(message.error))
       handle.markExit(1, null)
       this.workers.delete(message.workerKey)
+      return
+    }
+    if (message.type === 'worker.inventory') {
+      const handle = this.workers.get(message.workerKey)
+      if (handle?.pid === message.inventory.pid) handle.inventory = message.inventory
       return
     }
     if (message.type === 'worker.message') {
