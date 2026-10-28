@@ -78,10 +78,12 @@ describe('SessionProcessSupervisor', () => {
     const stdout: string[] = []
     const stderr: string[] = []
     const exits: unknown[] = []
+    const closes: unknown[] = []
     handle.on('message', (message) => messages.push(message))
     handle.stdout.on('data', (chunk: Buffer) => stdout.push(chunk.toString()))
     handle.stderr.on('data', (chunk: Buffer) => stderr.push(chunk.toString()))
     handle.on('exit', (code, signal) => exits.push([code, signal]))
+    handle.once('close', (code, signal) => closes.push([code, signal]))
 
     const spawnRequest = child.send.mock.calls.find(([message]) => message.type === 'worker.spawn')![0]
     child.emit('message', {
@@ -97,12 +99,15 @@ describe('SessionProcessSupervisor', () => {
     handle.send({ type: 'start' })
     await handle.killVerified('SIGTERM', Date.now() + 1_000)
     child.emit('message', { type: 'worker.exit', workerKey: 'worker-1', code: 0, signal: null })
+    child.emit('message', { type: 'worker.stdout', workerKey: 'worker-1', chunk: 'final output' })
+    child.emit('message', { type: 'worker.close', workerKey: 'worker-1', code: 0, signal: null })
 
     expect(handle.pid).toBe(99)
     expect(messages).toEqual([{ type: 'ready' }])
-    expect(stdout).toEqual(['worker output\n'])
+    expect(stdout).toEqual(['worker output\n', 'final output'])
     expect(stderr).toEqual(['worker error\n'])
     expect(exits).toEqual([[0, null]])
+    expect(closes).toEqual([[0, null]])
     expect(child.send).toHaveBeenCalledWith({
       type: 'worker.send',
       workerKey: 'worker-1',
@@ -539,6 +544,48 @@ process.on('message', (message) => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('bounds worker output before relaying it through the real supervisor IPC channel', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-output-bound-'))
+    const workerEntry = join(root, 'worker.cjs')
+    writeFileSync(
+      workerEntry,
+      `process.stdout.write('line\\n'.repeat(400000))
+process.send({ type: 'control' })
+process.stdout.end(() => process.exit(0))
+`,
+    )
+    const supervisor = new SessionProcessSupervisor()
+
+    try {
+      await supervisor.start()
+      const handle = supervisor.spawnWorker({
+        workerKey: 'output-worker',
+        path: workerEntry,
+        execArgv: [],
+        env: process.env,
+      })
+      const output: Buffer[] = []
+      handle.stdout.on('data', (chunk: Buffer) => output.push(chunk))
+      const control = new Promise<void>((resolve) => {
+        handle.on('message', (value) => {
+          if ((value as { type?: string }).type === 'control') resolve()
+        })
+      })
+      const closed = new Promise<void>((resolve) => handle.once('close', () => resolve()))
+
+      await control
+      await closed
+
+      const relayed = Buffer.concat(output)
+      expect(relayed.length).toBeLessThanOrEqual(321 * 1024)
+      expect(relayed.toString()).toMatch(/\[\d+ bytes omitted by supervisor\]/)
+      expect(output.length).toBeLessThanOrEqual(101)
+    } finally {
+      await supervisor.shutdown()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 20_000)
 
   it('captures worker identity at spawn and anchors inventory through the real supervisor', async () => {
     const root = mkdtempSync(join(tmpdir(), 'openfox-supervisor-inventory-'))

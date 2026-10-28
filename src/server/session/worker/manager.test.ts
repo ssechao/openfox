@@ -108,6 +108,126 @@ describe('SessionWorkerManager', () => {
     }
   })
 
+  it('worker output without newline stays bounded and is relayed with an omission marker', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-bounded-output.db')
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      manager.launch('sess-1', () => {})
+      child.stdout!.emit('data', Buffer.from('x'.repeat(128 * 1024)))
+      child.stdout!.emit('data', Buffer.from('\n'))
+
+      const output = info.mock.calls.find(([message]) => message === 'Session worker output')
+      expect(output).toBeDefined()
+      const context = output![1] as { line: string }
+      expect(context.line).toMatch(/\[\d+ bytes omitted\]/)
+      expect(Buffer.byteLength(context.line)).toBeLessThanOrEqual(64 * 1024)
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('worker log flood is rate limited without blocking control messages', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-rate-limit.db')
+    openDbs.push(db)
+    const initialActivity = '2024-01-01T00:00:00.000Z'
+    namedDb.prepare(`UPDATE sessions SET updated_at = ? WHERE id = 'sess-1'`).run(initialActivity)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      manager.launch('sess-1', () => {})
+      const token = manager.activeWorker('sess-1')!.token
+      child.stdout!.emit('data', Buffer.from(`${'line\n'.repeat(10_000)}tail`))
+      child.emit('message', { ...token, type: 'health', data: {} })
+
+      const outputCalls = info.mock.calls.filter(([message]) => message === 'Session worker output')
+      expect(outputCalls.length).toBeLessThanOrEqual(101)
+      expect(outputCalls.some(([, context]) => String((context as { line: string }).line).includes('rate limit'))).toBe(
+        true,
+      )
+      const row = namedDb.prepare(`SELECT updated_at FROM sessions WHERE id = 'sess-1'`).get() as {
+        updated_at: string
+      }
+      expect(new Date(row.updated_at).getTime()).toBeGreaterThan(new Date(initialActivity).getTime())
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('final unterminated worker log line is flushed on close', () => {
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-final-output.db')
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    try {
+      manager.launch('sess-1', () => {})
+      child.stdout!.emit('data', Buffer.from('final line'))
+      child.emit('close', 0, null)
+
+      expect(info).toHaveBeenCalledWith('Session worker output', {
+        sessionId: 'sess-1',
+        workerId: manager.activeWorker('sess-1')!.token.workerId,
+        generation: manager.activeWorker('sess-1')!.token.generation,
+        stream: 'stdout',
+        line: 'final line',
+      })
+    } finally {
+      info.mockRestore()
+    }
+  })
+
   it('lastActivityAt advances while a worker turn is running', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-activity.db')
     openDbs.push(db)
