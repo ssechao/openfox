@@ -381,6 +381,38 @@ describe('run_command bounded output capture', () => {
     expect(result.output).toContain('[Exit code: 0]')
     expect(Buffer.byteLength(result.output ?? '')).toBeLessThan(50200)
   }, 15000)
+
+  it('tail mode respects the shared output cap and marks truncation', async () => {
+    const result = await runCommandTool.execute(
+      {
+        command: `node -e "process.stdout.write('X'.repeat(40000)); process.stderr.write('Y'.repeat(40000))" | tail -6`,
+        timeout: 10000,
+      },
+      context,
+    )
+
+    expect(result.success).toBe(true)
+    expect(result.truncated).toBe(true)
+    expect(result.output).toContain('[Output truncated;')
+    expect(result.output).toContain('[Exit code: 0]')
+    expect(Buffer.byteLength(result.output ?? '')).toBeLessThan(50200)
+  }, 15000)
+
+  it('tail mode reports a single oversized line as truncated', async () => {
+    const result = await runCommandTool.execute(
+      {
+        command: `node -e "process.stdout.write('X'.repeat(60000))" | tail -3`,
+        timeout: 10000,
+      },
+      context,
+    )
+
+    expect(result.success).toBe(true)
+    expect(result.truncated).toBe(true)
+    expect(result.output).toContain('[Output truncated;')
+    expect(result.output).toContain('[Exit code: 0]')
+    expect(Buffer.byteLength(result.output ?? '')).toBeLessThan(50200)
+  }, 15000)
 })
 
 describe('run_command duration reporting', () => {

@@ -177,6 +177,13 @@ export const runCommandTool = createTool<RunCommandArgs>(
       output += `\n\n[Exit code: ${result.exitCode}]`
       const lines = output.split('\n')
       output = lines.slice(-tailInfo.tailLines).join('\n')
+      const outputBytes = Buffer.byteLength(output)
+      if (outputBytes > OUTPUT_LIMITS.run_command.maxBytes) {
+        const limitedOutput = takeUtf8Suffix(output, OUTPUT_LIMITS.run_command.maxBytes)
+        const skippedBytes = outputBytes - Buffer.byteLength(limitedOutput)
+        output = `[Output truncated; ${skippedBytes} bytes skipped]\n\n${limitedOutput}`
+        truncated = true
+      }
     } else {
       let skippedBytes = result.stdoutSkippedBytes + result.stderrSkippedBytes
       const lines = output.split('\n')
