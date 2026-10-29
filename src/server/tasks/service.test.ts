@@ -399,6 +399,26 @@ describe('project tasks service', () => {
       expect(result.task.sessionIds).toEqual([seeded.id])
     })
 
+    it.fails('does not reuse an interrupted target session (seeds fresh instead)', async () => {
+      const task = create('Interrupted session')
+      sm.sessions.set('sess-int', {
+        id: 'sess-int',
+        projectId,
+        messages: [],
+        interruptedAt: '2026-10-29T14:50:21.285Z',
+      } as any)
+
+      const result = await service.move(projectId, task.id, 'in_progress', {
+        actor: 'human',
+        sessionId: 'sess-int',
+      })
+
+      expect(sm.createdSessions).toHaveLength(1)
+      const seeded = sm.createdSessions[0]!
+      expect(result.sessionId).toBe(seeded.id)
+      expect(result.task.sessionIds).toEqual([seeded.id])
+    })
+
     it('honors the earmarked session when a queued task auto-launches later', async () => {
       const first = create('Occupying the slot')
       const second = create('Queued with a home')

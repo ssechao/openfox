@@ -769,6 +769,23 @@ describe('openfx MCP tools', () => {
       expect(result.isError).toBe(true)
       expect(text(result)).toContain('not found')
     })
+
+    it.fails('refuses to queue a message for an interrupted session with SESSION_INTERRUPTED', async () => {
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: () => ({ ...makeSession(), interruptedAt: '2026-10-29T14:50:21.285Z' }),
+        } as any,
+      })
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_send_message', {
+        sessionId: 's-1',
+        content: 'Go',
+      })
+
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('SESSION_INTERRUPTED')
+      expect(deps.sessionManager.queueMessage).not.toHaveBeenCalled()
+    })
   })
 
   describe('openfox_continue', () => {
