@@ -12,6 +12,19 @@ import { SessionWorkerManager } from './manager.js'
 import { assignWorkerToken } from './token.js'
 import { logger } from '../../utils/logger.js'
 
+const readProcessInventorySpy = vi.hoisted(() => vi.fn())
+
+vi.mock('./children.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./children.js')>()
+  return {
+    ...actual,
+    readProcessInventory: (...args: Parameters<typeof actual.readProcessInventory>) => {
+      readProcessInventorySpy(...args)
+      return actual.readProcessInventory(...args)
+    },
+  }
+})
+
 function createDb(name: string): { db: Database.Database; namedDb: Database.Database } {
   const db = new Database(':memory:')
   db.exec(`
@@ -52,6 +65,36 @@ afterEach(() => {
 })
 
 describe('SessionWorkerManager', () => {
+  it('supervised worker never reads process inventory synchronously in the gateway', () => {
+    readProcessInventorySpy.mockClear()
+    const { db, namedDb } = createDb('/tmp/openfox-worker-manager-supervised-inventory.db')
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      inventory: undefined,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+
+    manager.launch('sess-1', () => {})
+    const token = manager.activeWorker('sess-1')!.token
+    child.emit('message', { ...token, type: 'ready', pid: 42 })
+
+    expect(readProcessInventorySpy).not.toHaveBeenCalled()
+  })
+
   it('worker log lines are relayed to the gateway log with session and worker ids', () => {
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-log-relay.db')
     openDbs.push(db)
