@@ -18,7 +18,7 @@ describe('enqueueOrderedSend', () => {
       lastSentSeq: 0,
     }
 
-    for (let seq = 1; seq <= MAX_SEND_QUEUE_SIZE + 1; seq += 1) {
+    for (let seq = 1; seq <= MAX_SEND_QUEUE_SIZE + 2; seq += 1) {
       enqueueOrderedSend(client, `message-${seq}`, seq)
     }
 
