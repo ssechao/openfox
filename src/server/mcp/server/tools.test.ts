@@ -1005,6 +1005,22 @@ describe('openfx MCP tools', () => {
       expect(json(result).launched).toBe(true)
     })
 
+    it.fails('refuses to launch on an interrupted session with SESSION_INTERRUPTED', async () => {
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: () => ({ ...makeSession(), interruptedAt: '2026-10-29T14:50:21.285Z' }),
+        } as any,
+      })
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_launch_workflow', {
+        sessionId: 's-1',
+        workflowId: 'default',
+      })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('SESSION_INTERRUPTED')
+      expect(deps.launchWorkflow).not.toHaveBeenCalled()
+    })
+
     it('rejects an unknown workflowId synchronously without launching', async () => {
       const deps = makeDeps()
       const result = await call(createOpenFoxMcpTools(deps), 'openfox_launch_workflow', {
@@ -1168,6 +1184,22 @@ describe('openfx MCP tools', () => {
       })
       const body = json(result)
       expect(body).toMatchObject({ resumed: true, choice: 'Work in current workspace', step: 'Where to work' })
+    })
+
+    it.fails('refuses to resume a user step on an interrupted session with SESSION_INTERRUPTED', async () => {
+      const deps = pausedDeps()
+      deps.sessionManager.getSession = () =>
+        ({
+          ...makeSession(),
+          interruptedAt: '2026-10-29T14:50:21.285Z',
+        }) as any
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_resume_workflow', {
+        sessionId: 's-1',
+        choice: 'Work in current workspace',
+      })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('SESSION_INTERRUPTED')
+      expect(deps.launchWorkflow).not.toHaveBeenCalled()
     })
 
     it('accepts the choice by label as well as id', async () => {

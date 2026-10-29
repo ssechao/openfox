@@ -151,6 +151,153 @@ describe('interrupted session gate', () => {
     }
   })
 
+  it.fails('refuses context.compact on an interrupted session with SESSION_INTERRUPTED', async () => {
+    const sessionId = await createSession('interrupted-compact')
+    await interruptSession(sessionId)
+    const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', resolve)
+        socket.once('error', reject)
+      })
+      const reply = new Promise<{
+        id?: string
+        type?: string
+        payload?: { code?: string }
+        sessionId?: string
+      }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('timed out waiting for context.compact response')), 10_000)
+        socket.on('message', (raw) => {
+          const message = JSON.parse(String(raw)) as {
+            id?: string
+            type?: string
+            payload?: { code?: string }
+            sessionId?: string
+          }
+          if (message.id !== 'compact-1') return
+          clearTimeout(timeout)
+          resolve(message)
+        })
+      })
+
+      socket.send(
+        JSON.stringify({
+          id: 'compact-1',
+          type: 'context.compact',
+          payload: { sessionId },
+        }),
+      )
+
+      const message = await reply
+      expect(message.type).toBe('error')
+      expect(message.payload?.code).toBe('SESSION_INTERRUPTED')
+      expect(message.sessionId).toBe(sessionId)
+      expect((await getSession(sessionId)).session.interruptedAt).toBeTruthy()
+      const { getSessionRuntimeRegistry } = await import('./runtime.js')
+      expect(getSessionRuntimeRegistry().countActive()).toBe(0)
+    } finally {
+      socket.close()
+    }
+  })
+
+  it.fails('refuses chat.retry on an interrupted session with SESSION_INTERRUPTED', async () => {
+    const sessionId = await createSession('interrupted-retry')
+    await interruptSession(sessionId)
+    const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', resolve)
+        socket.once('error', reject)
+      })
+      const reply = new Promise<{
+        id?: string
+        type?: string
+        payload?: { code?: string }
+        sessionId?: string
+      }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('timed out waiting for chat.retry response')), 10_000)
+        socket.on('message', (raw) => {
+          const message = JSON.parse(String(raw)) as {
+            id?: string
+            type?: string
+            payload?: { code?: string }
+            sessionId?: string
+          }
+          if (message.id !== 'retry-1') return
+          clearTimeout(timeout)
+          resolve(message)
+        })
+      })
+
+      socket.send(
+        JSON.stringify({
+          id: 'retry-1',
+          type: 'chat.retry',
+          payload: { sessionId },
+        }),
+      )
+
+      const message = await reply
+      expect(message.type).toBe('error')
+      expect(message.payload?.code).toBe('SESSION_INTERRUPTED')
+      expect(message.sessionId).toBe(sessionId)
+      expect((await getSession(sessionId)).session.interruptedAt).toBeTruthy()
+      const { getSessionRuntimeRegistry } = await import('./runtime.js')
+      expect(getSessionRuntimeRegistry().countActive()).toBe(0)
+    } finally {
+      socket.close()
+    }
+  })
+
+  it.fails('tags the runner.launch SESSION_INTERRUPTED error with the target sessionId', async () => {
+    const sessionId = await createSession('interrupted-runner-tag')
+    await interruptSession(sessionId)
+    const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', resolve)
+        socket.once('error', reject)
+      })
+      const reply = new Promise<{
+        id?: string
+        type?: string
+        payload?: { code?: string }
+        sessionId?: string
+      }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('timed out waiting for runner.launch response')), 10_000)
+        socket.on('message', (raw) => {
+          const message = JSON.parse(String(raw)) as {
+            id?: string
+            type?: string
+            payload?: { code?: string }
+            sessionId?: string
+          }
+          if (message.id !== 'launch-2') return
+          clearTimeout(timeout)
+          resolve(message)
+        })
+      })
+
+      socket.send(
+        JSON.stringify({
+          id: 'launch-2',
+          type: 'runner.launch',
+          payload: { sessionId, workflowId: 'default', content: 'go' },
+        }),
+      )
+
+      const message = await reply
+      expect(message.type).toBe('error')
+      expect(message.payload?.code).toBe('SESSION_INTERRUPTED')
+      expect(message.sessionId).toBe(sessionId)
+    } finally {
+      socket.close()
+    }
+  })
+
   it('refuses resume-interruption while the session runtime is busy and keeps the marker', async () => {
     const sessionId = await createSession('interrupted-resume')
     await interruptSession(sessionId)
