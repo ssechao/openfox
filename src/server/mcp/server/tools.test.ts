@@ -770,7 +770,7 @@ describe('openfx MCP tools', () => {
       expect(text(result)).toContain('not found')
     })
 
-    it.fails('refuses to queue a message for an interrupted session with SESSION_INTERRUPTED', async () => {
+    it('refuses to queue a message for an interrupted session with SESSION_INTERRUPTED', async () => {
       const deps = makeDeps({
         sessionManager: {
           ...makeDeps().sessionManager,

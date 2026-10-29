@@ -229,12 +229,14 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
   /**
    * A target session is reusable only when it belongs to this project AND is
    * still fresh (no messages) — reusing a session mid-conversation would
-   * inject task content into unrelated context.
+   * inject task content into unrelated context. An interrupted session is
+   * never reused either: it must go through the explicit resume (POST /resume-interruption).
    */
   function reusableTarget(projectId: string, sessionId: string | undefined): string | undefined {
     if (!sessionId) return undefined
     const session = sessionManager.getSession(sessionId)
-    if (!session || session.projectId !== projectId || session.messages.length > 0) return undefined
+    if (!session || session.projectId !== projectId || session.messages.length > 0 || session.interruptedAt)
+      return undefined
     return sessionId
   }
 

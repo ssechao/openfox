@@ -495,6 +495,7 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
       handler: async (args) => {
         const check = requireSession(args['sessionId'])
         if (!check.ok) return fail(check.error)
+        if (check.session.interruptedAt) return fail(SESSION_INTERRUPTED_ERROR)
         const content = typeof args['content'] === 'string' ? args['content'] : undefined
         const rawAttachments = args['attachments']
         const attachments = Array.isArray(rawAttachments) ? (rawAttachments as unknown as Attachment[]) : undefined

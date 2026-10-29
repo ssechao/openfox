@@ -399,7 +399,7 @@ describe('project tasks service', () => {
       expect(result.task.sessionIds).toEqual([seeded.id])
     })
 
-    it.fails('does not reuse an interrupted target session (seeds fresh instead)', async () => {
+    it('does not reuse an interrupted target session (seeds fresh instead)', async () => {
       const task = create('Interrupted session')
       sm.sessions.set('sess-int', {
         id: 'sess-int',
