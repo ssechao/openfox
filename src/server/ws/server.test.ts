@@ -689,6 +689,20 @@ describe('createWebSocketServer', () => {
     vi.restoreAllMocks()
   })
 
+  it.fails('answers an application ping with a pong carrying the request id', async () => {
+    const harness = await createHarness()
+
+    try {
+      harness.sendRaw(JSON.stringify({ id: 'ping-1', type: 'ping', payload: {} }))
+      expect(await harness.nextMessage((message) => message.type === 'pong')).toMatchObject({
+        type: 'pong',
+        id: 'ping-1',
+      })
+    } finally {
+      await harness.close()
+    }
+  })
+
   it('returns protocol errors for invalid raw input and unknown message types', async () => {
     const harness = await createHarness()
 

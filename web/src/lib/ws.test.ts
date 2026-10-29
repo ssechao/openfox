@@ -86,6 +86,79 @@ describe('WebSocketClient reconnect logic', () => {
     WebSocketClient = mod.WebSocketClient
   })
 
+  it.fails('sends an application ping every 25 s while connected', async () => {
+    vi.useFakeTimers()
+    try {
+      const client = new WebSocketClient('ws://localhost:9999/ws')
+      const statusHandler = vi.fn()
+      client.onStatusChange(statusHandler)
+      const connectPromise = client.connect()
+      await vi.advanceTimersByTimeAsync(0)
+      await connectPromise
+      const socket = wsInstances[0]
+      if (!socket) throw new Error('expected a connected socket')
+      const send = vi.spyOn(socket as unknown as { send(data: string): void }, 'send')
+
+      await vi.advanceTimersByTimeAsync(25_000)
+
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(send.mock.calls[0]?.[0] ?? '{}')).toMatchObject({ type: 'ping' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.fails('drops a silent socket and reconnects when no pong arrives within 10 s', async () => {
+    vi.useFakeTimers()
+    try {
+      const client = new WebSocketClient('ws://localhost:9999/ws')
+      const statusHandler = vi.fn()
+      client.onStatusChange(statusHandler)
+      const connectPromise = client.connect()
+      await vi.advanceTimersByTimeAsync(0)
+      await connectPromise
+      const socket = wsInstances[0]
+      if (!socket) throw new Error('expected a connected socket')
+
+      await vi.advanceTimersByTimeAsync(25_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(socket.close).toHaveBeenCalledWith(4002, 'heartbeat timeout')
+      expect(statusHandler).toHaveBeenCalledWith('disconnected')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(wsInstances).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.fails('consumes a pong without forwarding it and keeps the connection', async () => {
+    vi.useFakeTimers()
+    try {
+      const client = new WebSocketClient('ws://localhost:9999/ws')
+      const statusHandler = vi.fn()
+      const handler = vi.fn()
+      client.onStatusChange(statusHandler)
+      client.subscribe(handler)
+      const connectPromise = client.connect()
+      await vi.advanceTimersByTimeAsync(0)
+      await connectPromise
+      const socket = wsInstances[0]
+      if (!socket) throw new Error('expected a connected socket')
+      const send = vi.spyOn(socket as unknown as { send(data: string): void }, 'send')
+
+      await vi.advanceTimersByTimeAsync(25_000)
+      const ping = JSON.parse(send.mock.calls[0]?.[0] ?? '{}') as { id?: string }
+      socket.onmessage?.({ data: JSON.stringify({ type: 'pong', id: ping.id, payload: {} }) })
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(socket.close).not.toHaveBeenCalled()
+      expect(handler).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('triggers auto-reconnect on close code 1006 when token exists', async () => {
     localStorage.setItem('openfox_token', 'valid-token')
 
