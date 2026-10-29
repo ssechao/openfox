@@ -65,7 +65,7 @@ afterEach(() => {
 })
 
 describe('SessionWorkerManager', () => {
-  it.fails('supervised worker never reads process inventory synchronously in the gateway', () => {
+  it('supervised worker never reads process inventory synchronously in the gateway', () => {
     readProcessInventorySpy.mockClear()
     const { db, namedDb } = createDb('/tmp/openfox-worker-manager-supervised-inventory.db')
     openDbs.push(db)

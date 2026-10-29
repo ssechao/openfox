@@ -3,7 +3,7 @@ import type { SupervisorToGatewayMessage } from './protocol.js'
 import { createWorkerOutputRelay } from './output-relay.js'
 
 describe('createWorkerOutputRelay', () => {
-  it.fails('relay stays stopped under IPC backpressure until the pending send drains', () => {
+  it('relay stays stopped under IPC backpressure until the pending send drains', () => {
     let now = 0
     const drains: Array<() => void> = []
     const messages: SupervisorToGatewayMessage[] = []
@@ -22,5 +22,24 @@ describe('createWorkerOutputRelay', () => {
     drains[0]!()
     expect(messages).toHaveLength(2)
     expect(messages[1]).toMatchObject({ chunk: expect.stringContaining('second') })
+  })
+
+  it('completes close only after backpressured output drains', () => {
+    const drains: Array<() => void> = []
+    const send = vi.fn((_message: SupervisorToGatewayMessage, onDrain?: () => void) => {
+      if (onDrain) drains.push(onDrain)
+      return send.mock.calls.length > 1
+    })
+    const relay = createWorkerOutputRelay({ workerKey: 'worker-1', send })
+    const closed = vi.fn()
+
+    relay.write('stdout', Buffer.from('first'))
+    relay.write('stdout', Buffer.from('final'))
+    relay.close(closed)
+
+    expect(closed).not.toHaveBeenCalled()
+    drains[0]!()
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(closed).toHaveBeenCalledOnce()
   })
 })

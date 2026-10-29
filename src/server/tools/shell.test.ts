@@ -398,24 +398,20 @@ describe('run_command bounded output capture', () => {
     expect(Buffer.byteLength(result.output ?? '')).toBeLessThan(50200)
   }, 15000)
 
-  it.fails(
-    'tail mode marks truncation when capture dropped bytes before the tail',
-    async () => {
-      const result = await runCommandTool.execute(
-        {
-          command: `node -e "for (let i = 0; i < 10000; i++) console.log('line-' + i)" | tail -3`,
-          timeout: 10000,
-        },
-        context,
-      )
+  it('tail mode marks truncation when capture dropped bytes before the tail', async () => {
+    const result = await runCommandTool.execute(
+      {
+        command: `node -e "for (let i = 0; i < 10000; i++) console.log('line-' + i)" | tail -3`,
+        timeout: 10000,
+      },
+      context,
+    )
 
-      expect(result.success).toBe(true)
-      expect(result.truncated).toBe(true)
-      expect(result.output).toContain('[Output truncated;')
-      expect(result.output).toContain('[Exit code: 0]')
-    },
-    15000,
-  )
+    expect(result.success).toBe(true)
+    expect(result.truncated).toBe(true)
+    expect(result.output).toContain('[Output truncated;')
+    expect(result.output).toContain('[Exit code: 0]')
+  }, 15000)
 
   it('tail mode reports a single oversized line as truncated', async () => {
     const result = await runCommandTool.execute(

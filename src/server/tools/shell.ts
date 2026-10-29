@@ -177,11 +177,15 @@ export const runCommandTool = createTool<RunCommandArgs>(
       output += `\n\n[Exit code: ${result.exitCode}]`
       const lines = output.split('\n')
       output = lines.slice(-tailInfo.tailLines).join('\n')
+      let skippedBytes = result.stdoutSkippedBytes + result.stderrSkippedBytes
       const outputBytes = Buffer.byteLength(output)
       if (outputBytes > OUTPUT_LIMITS.run_command.maxBytes) {
         const limitedOutput = takeUtf8Suffix(output, OUTPUT_LIMITS.run_command.maxBytes)
-        const skippedBytes = outputBytes - Buffer.byteLength(limitedOutput)
-        output = `[Output truncated; ${skippedBytes} bytes skipped]\n\n${limitedOutput}`
+        skippedBytes += outputBytes - Buffer.byteLength(limitedOutput)
+        output = limitedOutput
+      }
+      if (skippedBytes > 0) {
+        output = `[Output truncated; ${skippedBytes} bytes skipped]\n\n${output}`
         truncated = true
       }
     } else {
@@ -243,8 +247,11 @@ class BoundedOutputBuffer {
     const visible = stripAnsi(text)
 
     if (this.retainTail) {
-      this.value = takeUtf8Suffix(this.value + visible, this.maxBytes)
-      this.capturedBytes = Buffer.byteLength(this.value)
+      const retained = takeUtf8Suffix(this.value + visible, this.maxBytes)
+      const retainedBytes = Buffer.byteLength(retained)
+      this.skippedBytes += this.capturedBytes + Buffer.byteLength(visible) - retainedBytes
+      this.value = retained
+      this.capturedBytes = retainedBytes
       return
     }
 

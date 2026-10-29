@@ -333,7 +333,9 @@ export class SessionWorkerManager {
     }
 
     const workerInventoryRead =
-      child.pid === undefined ? { status: 'absent' as const } : readProcessInventory(child.pid)
+      this.deps.processSupervisor || child.pid === undefined
+        ? { status: 'absent' as const }
+        : readProcessInventory(child.pid)
     const worker: ActiveWorker = {
       sessionId,
       token,
@@ -462,7 +464,7 @@ export class SessionWorkerManager {
       if (msg.type === 'ready') {
         if ('inventory' in worker.child && worker.child.inventory) {
           worker.workerInventory = worker.child.inventory
-        } else if (!worker.workerInventory) {
+        } else if (!this.deps.processSupervisor && !worker.workerInventory) {
           const inventory = readProcessInventory(msg.pid)
           if (inventory.status === 'found') worker.workerInventory = inventory.process
         }
