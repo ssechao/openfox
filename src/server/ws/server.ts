@@ -1377,6 +1377,20 @@ async function handleClientMessage(
 
       const session = sessionManager.requireSession(sessionId)
 
+      if (session.interruptedAt) {
+        send(
+          createErrorMessage(
+            'SESSION_INTERRUPTED',
+            serverT({
+              en: 'Session is interrupted; resume it with POST /api/sessions/:id/resume-interruption',
+              fr: 'Session interrompue : reprenez-la avec POST /api/sessions/:id/resume-interruption',
+            }),
+            message.id,
+          ),
+        )
+        return
+      }
+
       // Skip criteria check when resuming from a user step
       if (!launchPayloadEarly?.resumeFrom) {
         const pendingCriteria = session.criteria.filter((c) => c.status.type !== 'passed')

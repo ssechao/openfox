@@ -1707,6 +1707,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       return res.status(409).json({ error: 'Session is stopping', code: 'SESSION_ALREADY_RUNNING' })
     }
 
+    if (session.interruptedAt) {
+      return res.status(409).json({
+        error: 'Session is interrupted; resume it with POST /api/sessions/:id/resume-interruption',
+        code: 'SESSION_INTERRUPTED',
+      })
+    }
+
     try {
       sessionManager.queueMessage(sessionId, 'asap', content, attachments, messageKind)
     } catch (error) {
@@ -1893,6 +1900,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const session = sessionManager.getSession(sessionId)
     if (!session) {
       return res.status(404).json({ error: 'Session not found' })
+    }
+
+    const runtimeState = runtimeRegistry.peek(sessionId)?.state
+    if (runtimeState !== undefined && runtimeState !== 'idle') {
+      return res.status(409).json({ error: 'Session is already running', code: 'SESSION_ALREADY_RUNNING' })
     }
 
     const db = getDatabase()

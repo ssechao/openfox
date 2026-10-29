@@ -91,7 +91,7 @@ describe('interrupted session gate', () => {
     markSessionInterrupted(getDatabase(), sessionId, new Date().toISOString())
   }
 
-  it.fails('refuses a message to an interrupted session with 409 SESSION_INTERRUPTED and queues nothing', async () => {
+  it('refuses a message to an interrupted session with 409 SESSION_INTERRUPTED and queues nothing', async () => {
     const sessionId = await createSession('interrupted-message')
     await interruptSession(sessionId)
 
@@ -108,7 +108,7 @@ describe('interrupted session gate', () => {
     expect(view.queueState).toHaveLength(0)
   })
 
-  it.fails('refuses runner.launch on an interrupted session with SESSION_INTERRUPTED', async () => {
+  it('refuses runner.launch on an interrupted session with SESSION_INTERRUPTED', async () => {
     const sessionId = await createSession('interrupted-runner')
     await interruptSession(sessionId)
     const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
@@ -151,7 +151,7 @@ describe('interrupted session gate', () => {
     }
   })
 
-  it.fails('refuses resume-interruption while the session runtime is busy and keeps the marker', async () => {
+  it('refuses resume-interruption while the session runtime is busy and keeps the marker', async () => {
     const sessionId = await createSession('interrupted-resume')
     await interruptSession(sessionId)
     const { getSessionRuntimeRegistry } = await import('./runtime.js')
