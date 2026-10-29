@@ -28,6 +28,8 @@ import { appendCompactionPrompt } from '../context/compactor.js'
 import { computeSessionHash, applyDynamicContext, computeUnifiedDiff } from '../chat/dynamic-context.js'
 import { provideAnswer } from '../tools/index.js'
 import { logger } from '../utils/logger.js'
+import { startWebSocketHeartbeat } from './heartbeat.js'
+import { enqueueOrderedSend } from './send-queue.js'
 import { devServerManager } from '../dev-server/manager.js'
 import { onProcessEvent } from '../tools/background-process/manager.js'
 import {
@@ -309,8 +311,6 @@ interface ClientConnection {
   lastSentSeq: number
 }
 
-const MAX_SEND_QUEUE_SIZE = 1000 // Maximum messages to queue before dropping
-
 /**
  * WebSocket Message Ordering Implementation
  *
@@ -334,8 +334,8 @@ const MAX_SEND_QUEUE_SIZE = 1000 // Maximum messages to queue before dropping
  *    Sequence numbers may have gaps due to event deletion or multiple
  *    sessions, but are always monotonically increasing per client.
  *
- * 4. Queue Size Limit: MAX_SEND_QUEUE_SIZE prevents memory leaks on
- *    slow or disconnected clients. Messages are dropped if queue is full.
+ * 4. Queue Size Limit: Overflow closes the client so it can reconnect
+ *    and resynchronize instead of silently losing messages.
  *
  * @see https://github.com/conrad/openfox/issues/XXX
  */
@@ -362,6 +362,8 @@ export function createWebSocketServer(
   onCleanWorkerTurnSettled?: (sessionId: string) => void,
 ): WebSocketServerExports {
   const wss = new WebSocketServer({ server: httpServer })
+  const stopHeartbeat = startWebSocketHeartbeat(() => wss.clients)
+  wss.on('close', stopHeartbeat)
   const clients = new Map<WebSocket, ClientConnection>()
   moduleClients = clients
 
@@ -462,41 +464,9 @@ export function createWebSocketServer(
 
   // Ordered send queue implementation for FIFO message delivery
   function enqueueSend(client: ClientConnection, data: string, seq: number): void {
-    // Drop message if queue is too large (prevents memory leak on slow clients)
-    if (client.sendQueue.length >= MAX_SEND_QUEUE_SIZE) {
-      logger.warn('WebSocket send queue full, dropping message', {
-        queueSize: client.sendQueue.length,
-        sessionId: client.activeSessionId,
-      })
-      return
-    }
-    client.sendQueue.push({ data, seq })
-    processSendQueue(client)
+    enqueueOrderedSend(client, data, seq)
   }
   moduleEnqueueSend = enqueueSend
-
-  function processSendQueue(client: ClientConnection): void {
-    if (client.isSending || client.sendQueue.length === 0) {
-      return
-    }
-
-    client.isSending = true
-    const item = client.sendQueue.shift()!
-
-    if (client.ws.readyState === WebSocket.OPEN) {
-      client.ws.send(item.data, (err) => {
-        if (err) {
-          logger.debug('WebSocket send error', { error: err })
-        }
-        client.isSending = false
-        client.lastSentSeq = item.seq
-        processSendQueue(client)
-      })
-    } else {
-      client.isSending = false
-      processSendQueue(client)
-    }
-  }
 
   const llmForSession = (sessionId: string): LLMClientWithModel => getSessionLLMClient?.(sessionId) ?? getLLMClient()
 
@@ -867,7 +837,10 @@ export function createWebSocketServer(
       sessionManager.clearPauseState(sessionId)
       return getSessionRuntimeRegistry().get(sessionId).stop()
     },
-    close: (cb?: () => void) => wss.close(cb as (err?: Error) => void),
+    close: (cb?: () => void) => {
+      stopHeartbeat()
+      wss.close(cb as (err?: Error) => void)
+    },
     broadcastForSession,
     broadcastForProject,
     broadcastAll,
@@ -1770,6 +1743,11 @@ async function handleClientMessage(
       // already in history, untouched by the failed attempt.
       send({ type: 'ack', payload: {}, id: message.id })
       _startTurnWithCompletionChain(retrySessionId, retryHandle)
+      break
+    }
+
+    case 'ping': {
+      send({ type: 'pong', payload: {}, id: message.id })
       break
     }
 

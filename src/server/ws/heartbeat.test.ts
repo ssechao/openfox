@@ -12,7 +12,7 @@ describe('startWebSocketHeartbeat', () => {
     vi.useRealTimers()
   })
 
-  it.fails('terminates a socket that did not answer the previous heartbeat ping', async () => {
+  it('terminates a socket that did not answer the previous heartbeat ping', async () => {
     vi.useFakeTimers()
     const socket = new TestHeartbeatSocket()
     const stop = startWebSocketHeartbeat(() => [socket], { intervalMs: 1000 })
@@ -26,7 +26,7 @@ describe('startWebSocketHeartbeat', () => {
     stop()
   })
 
-  it.fails('keeps a socket that answered the heartbeat with pong', async () => {
+  it('keeps a socket that answered the heartbeat with pong', async () => {
     vi.useFakeTimers()
     const socket = new TestHeartbeatSocket()
     const stop = startWebSocketHeartbeat(() => [socket], { intervalMs: 1000 })

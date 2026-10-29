@@ -7,6 +7,10 @@ export type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting'
 type MessageHandler = (message: ServerMessage) => void
 type StatusHandler = (status: ConnectionStatus) => void
 
+export const WS_CLIENT_PING_INTERVAL_MS = 25_000
+export const WS_CLIENT_PONG_TIMEOUT_MS = 10_000
+export const WS_HEARTBEAT_TIMEOUT_CLOSE_CODE = 4002
+
 export class WebSocketClient {
   private ws: WebSocket | null = null
   private handlers = new Set<MessageHandler>()
@@ -19,6 +23,9 @@ export class WebSocketClient {
   private manualReconnectScheduled = false // User triggered reconnect pending
   private pwaRecoveryAttempted = false
   private intentionalClose = false
+  private pingTimer: ReturnType<typeof setInterval> | null = null
+  private pongTimer: ReturnType<typeof setTimeout> | null = null
+  private pendingPingId: string | null = null
 
   constructor(url: string) {
     this.baseUrl = url
@@ -93,10 +100,12 @@ export class WebSocketClient {
           this.connectingPromise = null
           this.statusHandler?.('connected')
           resolve()
+          this.startHeartbeat()
         }
 
         this.ws.onclose = (event) => {
           clearTimeout(timeout)
+          this.stopHeartbeat()
           this.lastCloseCode = event.code
           if (this.ws?.readyState === WebSocket.CONNECTING) {
             this.connectingPromise = null
@@ -120,6 +129,16 @@ export class WebSocketClient {
           try {
             const data = JSON.parse(event.data)
             if (isServerMessage(data)) {
+              if (data.type === 'pong') {
+                if (data.id === this.pendingPingId) {
+                  if (this.pongTimer !== null) {
+                    clearTimeout(this.pongTimer)
+                  }
+                  this.pongTimer = null
+                  this.pendingPingId = null
+                }
+                return
+              }
               this.handlers.forEach((handler) => handler(data))
             }
           } catch (error) {
@@ -133,6 +152,59 @@ export class WebSocketClient {
     })
 
     return this.connectingPromise
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat()
+    this.pingTimer = setInterval(() => {
+      if (this.pendingPingId !== null) {
+        return
+      }
+
+      const id = generateUUID()
+      this.pendingPingId = id
+      try {
+        this.ws?.send(JSON.stringify({ id, type: 'ping', payload: {} }))
+      } catch {
+        this.handleHeartbeatTimeout()
+        return
+      }
+      this.pongTimer = setTimeout(() => this.handleHeartbeatTimeout(), WS_CLIENT_PONG_TIMEOUT_MS)
+    }, WS_CLIENT_PING_INTERVAL_MS)
+  }
+
+  private stopHeartbeat(): void {
+    if (this.pingTimer !== null) {
+      clearInterval(this.pingTimer)
+    }
+    if (this.pongTimer !== null) {
+      clearTimeout(this.pongTimer)
+    }
+    this.pingTimer = null
+    this.pongTimer = null
+    this.pendingPingId = null
+  }
+
+  private handleHeartbeatTimeout(): void {
+    this.stopHeartbeat()
+    const socket = this.ws
+    this.ws = null
+    if (socket) {
+      socket.onopen = null
+      socket.onclose = null
+      socket.onerror = null
+      socket.onmessage = null
+    }
+    try {
+      socket?.close(WS_HEARTBEAT_TIMEOUT_CLOSE_CODE, 'heartbeat timeout')
+    } catch {
+      this.ws = null
+    }
+    this.lastCloseCode = WS_HEARTBEAT_TIMEOUT_CLOSE_CODE
+    this.connectingPromise = null
+    console.warn('[WS] No pong within timeout — reconnecting')
+    this.statusHandler?.('disconnected')
+    this.attemptReconnect()
   }
 
   private async recoverPwaStuckConnection(): Promise<void> {
@@ -191,6 +263,7 @@ export class WebSocketClient {
   }
 
   disconnect(): void {
+    this.stopHeartbeat()
     this.isReconnecting = false
     this.reconnectAttempts = 0
     this.intentionalClose = true

@@ -689,7 +689,7 @@ describe('createWebSocketServer', () => {
     vi.restoreAllMocks()
   })
 
-  it.fails('answers an application ping with a pong carrying the request id', async () => {
+  it('answers an application ping with a pong carrying the request id', async () => {
     const harness = await createHarness()
 
     try {

@@ -4,7 +4,7 @@ import { logger } from '../utils/logger.js'
 import { enqueueOrderedSend, MAX_SEND_QUEUE_SIZE, type SendQueueClient } from './send-queue.js'
 
 describe('enqueueOrderedSend', () => {
-  it.fails('closes the client instead of silently dropping when the send queue overflows', () => {
+  it('closes the client instead of silently dropping when the send queue overflows', () => {
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
     const client: SendQueueClient = {
       ws: {

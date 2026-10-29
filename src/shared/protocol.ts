@@ -23,6 +23,7 @@ import type { PluginNotification } from './plugin.js'
 // ============================================================================
 
 export type ClientMessageType =
+  | 'ping' // Application liveness probe from the web client
   // Session management
   | 'session.load' // Load session and subscribe to events (WS subscription mechanism)
   // Context management
@@ -78,6 +79,7 @@ export interface QueuedMessage {
 // ============================================================================
 
 export type ServerMessageType =
+  | 'pong' // Reply to an application ping
   // Project events
   | 'project.state'
   | 'project.list'

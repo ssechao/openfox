@@ -86,7 +86,7 @@ describe('WebSocketClient reconnect logic', () => {
     WebSocketClient = mod.WebSocketClient
   })
 
-  it.fails('sends an application ping every 25 s while connected', async () => {
+  it('sends an application ping every 25 s while connected', async () => {
     vi.useFakeTimers()
     try {
       const client = new WebSocketClient('ws://localhost:9999/ws')
@@ -108,7 +108,7 @@ describe('WebSocketClient reconnect logic', () => {
     }
   })
 
-  it.fails('drops a silent socket and reconnects when no pong arrives within 10 s', async () => {
+  it('drops a silent socket and reconnects when no pong arrives within 10 s', async () => {
     vi.useFakeTimers()
     try {
       const client = new WebSocketClient('ws://localhost:9999/ws')
@@ -132,7 +132,7 @@ describe('WebSocketClient reconnect logic', () => {
     }
   })
 
-  it.fails('consumes a pong without forwarding it and keeps the connection', async () => {
+  it('consumes a pong without forwarding it and keeps the connection', async () => {
     vi.useFakeTimers()
     try {
       const client = new WebSocketClient('ws://localhost:9999/ws')
