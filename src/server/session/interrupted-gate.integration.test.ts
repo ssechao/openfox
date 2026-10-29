@@ -151,7 +151,7 @@ describe('interrupted session gate', () => {
     }
   })
 
-  it.fails('refuses context.compact on an interrupted session with SESSION_INTERRUPTED', async () => {
+  it('refuses context.compact on an interrupted session with SESSION_INTERRUPTED', async () => {
     const sessionId = await createSession('interrupted-compact')
     await interruptSession(sessionId)
     const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
@@ -201,7 +201,7 @@ describe('interrupted session gate', () => {
     }
   })
 
-  it.fails('refuses chat.retry on an interrupted session with SESSION_INTERRUPTED', async () => {
+  it('refuses chat.retry on an interrupted session with SESSION_INTERRUPTED', async () => {
     const sessionId = await createSession('interrupted-retry')
     await interruptSession(sessionId)
     const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
@@ -251,7 +251,7 @@ describe('interrupted session gate', () => {
     }
   })
 
-  it.fails('tags the runner.launch SESSION_INTERRUPTED error with the target sessionId', async () => {
+  it('tags the runner.launch SESSION_INTERRUPTED error with the target sessionId', async () => {
     const sessionId = await createSession('interrupted-runner-tag')
     await interruptSession(sessionId)
     const socket = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)

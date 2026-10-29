@@ -55,7 +55,15 @@ const MSG_SESSION_IS_RUNNING: Translation = {
   en: 'Session is already running',
   fr: 'La session est déjà en cours d’exécution',
 }
+const MSG_SESSION_INTERRUPTED: Translation = {
+  en: 'Session interrupted by a restart: click Resume to continue it',
+  fr: 'Session interrompue par un redémarrage : cliquez sur « Reprendre » pour la poursuivre',
+}
 const MSG_UNKNOWN_ERROR: Translation = { en: 'Unknown error', fr: 'Erreur inconnue' }
+
+function createSessionInterruptedError(sessionId: string, correlationId?: string): ServerMessage {
+  return { ...createErrorMessage('SESSION_INTERRUPTED', serverT(MSG_SESSION_INTERRUPTED), correlationId), sessionId }
+}
 
 // Resolved once initial MCP connections settle — checkDynamic awaits this
 let resolveMcpReady: (() => void) | null = null
@@ -1097,6 +1105,11 @@ async function handleClientMessage(
 
       const session = sessionManager.requireSession(sessionId)
 
+      if (session.interruptedAt) {
+        send(createSessionInterruptedError(sessionId, message.id))
+        return
+      }
+
       if (
         runInWorkerIfEnabled(sessionId, 'compact', { kind: 'compact' }, () => {
           try {
@@ -1378,16 +1391,7 @@ async function handleClientMessage(
       const session = sessionManager.requireSession(sessionId)
 
       if (session.interruptedAt) {
-        send(
-          createErrorMessage(
-            'SESSION_INTERRUPTED',
-            serverT({
-              en: 'Session is interrupted; resume it with POST /api/sessions/:id/resume-interruption',
-              fr: 'Session interrompue : reprenez-la avec POST /api/sessions/:id/resume-interruption',
-            }),
-            message.id,
-          ),
-        )
+        send(createSessionInterruptedError(sessionId, message.id))
         return
       }
 
@@ -1712,6 +1716,10 @@ async function handleClientMessage(
       }
       if (retrySession.isRunning) {
         send(createErrorMessage('SESSION_RUNNING', serverT(MSG_SESSION_IS_RUNNING), message.id))
+        return
+      }
+      if (retrySession.interruptedAt) {
+        send(createSessionInterruptedError(retrySessionId, message.id))
         return
       }
       // Only allow a retry when the last turn actually failed (definitive LLM

@@ -1005,7 +1005,7 @@ describe('openfx MCP tools', () => {
       expect(json(result).launched).toBe(true)
     })
 
-    it.fails('refuses to launch on an interrupted session with SESSION_INTERRUPTED', async () => {
+    it('refuses to launch on an interrupted session with SESSION_INTERRUPTED', async () => {
       const deps = makeDeps({
         sessionManager: {
           ...makeDeps().sessionManager,
@@ -1186,7 +1186,7 @@ describe('openfx MCP tools', () => {
       expect(body).toMatchObject({ resumed: true, choice: 'Work in current workspace', step: 'Where to work' })
     })
 
-    it.fails('refuses to resume a user step on an interrupted session with SESSION_INTERRUPTED', async () => {
+    it('refuses to resume a user step on an interrupted session with SESSION_INTERRUPTED', async () => {
       const deps = pausedDeps()
       deps.sessionManager.getSession = () =>
         ({

@@ -114,6 +114,9 @@ function ok(payload: unknown): OpenFoxMcpToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(payload) }] }
 }
 
+const SESSION_INTERRUPTED_ERROR =
+  'SESSION_INTERRUPTED: session is interrupted; resume it with POST /api/sessions/:id/resume-interruption'
+
 function fail(message: string): OpenFoxMcpToolResult {
   return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], isError: true }
 }
@@ -633,6 +636,7 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
         const check = requireSessionAndId(args)
         if (!check.ok) return fail(check.error)
         const { session, sessionId } = check
+        if (session.interruptedAt) return fail(SESSION_INTERRUPTED_ERROR)
 
         const payload: WorkflowLaunchPayload = {
           ...(typeof args['workflowId'] === 'string' ? { workflowId: args['workflowId'] as string } : {}),
@@ -689,6 +693,7 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
         const check = requireSession(args['sessionId'])
         if (!check.ok) return fail(check.error)
         const sessionId = check.session.id
+        if (check.session.interruptedAt) return fail(SESSION_INTERRUPTED_ERROR)
         const choice = args['choice']
         if (typeof choice !== 'string' || choice.trim().length === 0) {
           return fail('choice is required — pick one of the pendingChoices surfaced by openfox_session_status')
