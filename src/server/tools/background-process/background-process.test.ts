@@ -78,6 +78,22 @@ describe('background-process store', () => {
       expect(updated?.exitCode).toBe(0)
       expect(updated?.endedAt).toBeDefined()
     })
+
+    it.fails('keeps only the most recent exited processes of a session', () => {
+      const sessionId = 'test-session-exited-cap'
+      const ids: string[] = []
+
+      for (let i = 0; i < 25; i++) {
+        const process = store.createProcess(sessionId, `process-${i}`, 'echo test', '/tmp')!
+        ids.push(process.id)
+        store.startProcess(process.id, sessionId, 1000 + i)
+        store.updateStatus(process.id, sessionId, 'exited', 0)
+      }
+
+      const retained = store.getSessionProcesses(sessionId)
+      expect(retained).toHaveLength(store.MAX_EXITED_PER_SESSION)
+      expect(retained.some((process) => process.id === ids[0])).toBe(false)
+    })
   })
 
   describe('removeProcess', () => {
@@ -115,6 +131,24 @@ describe('background-process store', () => {
       expect(logs[1]?.content).toBe('line 2\n')
       expect(logs[2]?.content).toBe('error\n')
       expect(logs[2]?.stream).toBe('stderr')
+    })
+
+    it.fails('caps retained logs per process and keeps offsets monotonic', () => {
+      const sessionId = 'test-session-log-cap'
+      const process = store.createProcess(sessionId, 'test', 'echo hello', '/tmp')!
+      const megabyte = 'x'.repeat(1024 * 1024)
+
+      for (let i = 0; i < 6; i++) {
+        store.appendLog(process.id, megabyte, 'stdout')
+      }
+
+      const retained = store.getLogs(process.id)
+      expect(retained.reduce((total, line) => total + Buffer.byteLength(line.content), 0)).toBeLessThanOrEqual(
+        store.MAX_LOG_BYTES_PER_PROCESS,
+      )
+      expect(retained[0]!.offset).toBeGreaterThan(0)
+      expect(store.getLogsPaginated(process.id, 0).totalLines).toBe(6)
+      expect(store.getLogsPaginated(process.id, 5).lines).toEqual([expect.objectContaining({ offset: 5 })])
     })
 
     it('should support pagination with since and maxLines', () => {

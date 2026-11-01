@@ -3,6 +3,9 @@ import { killProcessTree } from '../../utils/process-tree.js'
 
 const MAX_PER_SESSION = 5
 
+export const MAX_LOG_BYTES_PER_PROCESS = 4 * 1024 * 1024
+export const MAX_EXITED_PER_SESSION = 20
+
 const processesBySession = new Map<string, Map<string, BackgroundProcess>>()
 const logsByProcess = new Map<string, LogLine[]>()
 

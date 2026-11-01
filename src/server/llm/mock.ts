@@ -368,6 +368,39 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
     }
   }
 
+  const bgCommand = 'node -e "console.log(\'bg-ready\');setInterval(()=>{},1000)"'
+  if (/BG-IPC-START/.test(prompt)) {
+    return {
+      tools: [
+        {
+          name: 'background_process',
+          arguments: { action: 'start', name: 'ipc-bg', command: bgCommand, timeout: 120000 },
+        },
+      ],
+      response: 'Started.',
+    }
+  }
+  if (/BG-IPC-TIMEOUT/.test(prompt)) {
+    return {
+      tools: [
+        {
+          name: 'background_process',
+          arguments: { action: 'start', name: 'ipc-timeout', command: bgCommand, timeout: 1500 },
+        },
+      ],
+      response: 'Started.',
+    }
+  }
+  const bgAction = prompt.match(/BG-IPC-(LOGS|STOP) ([0-9a-f-]{36})/)
+  if (bgAction) {
+    return {
+      tools: [
+        { name: 'background_process', arguments: { action: bgAction[1]!.toLowerCase(), processId: bgAction[2]! } },
+      ],
+      response: 'Done.',
+    }
+  }
+
   if (/Read src\/math\.ts, then use edit_file/i.test(prompt) && quotedValues.length >= 2) {
     return {
       tools: [
