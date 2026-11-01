@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks'
 import { describe, it, expect, beforeEach } from 'vitest'
 import * as store from './store.js'
 
@@ -149,6 +150,26 @@ describe('background-process store', () => {
       expect(retained[0]!.offset).toBeGreaterThan(0)
       expect(store.getLogsPaginated(process.id, 0).totalLines).toBe(6)
       expect(store.getLogsPaginated(process.id, 5).lines).toEqual([expect.objectContaining({ offset: 5 })])
+    })
+
+    it.fails('appends logs without quadratic cost', () => {
+      const sessionId = 'test-session-log-performance'
+      const process = store.createProcess(sessionId, 'test', 'echo hello', '/tmp')!
+      const content = 'x'.repeat(64)
+      const deadline = performance.now() + 3_000
+      let count = 0
+
+      while (count < 200_000 && performance.now() <= deadline) {
+        store.appendLog(process.id, content, 'stdout')
+        count += 1
+      }
+
+      expect(count).toBe(200_000)
+      const page = store.getLogsPaginated(process.id, 199_999)
+      expect(page.lines).toHaveLength(1)
+      expect(page.lines[0]?.offset).toBe(199_999)
+      expect(page.totalLines).toBe(200_000)
+      expect(store.getLogs(process.id)[0]!.offset).toBeGreaterThan(0)
     })
 
     it('should support pagination with since and maxLines', () => {

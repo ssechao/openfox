@@ -10,6 +10,7 @@ describe('worker background processes', () => {
   let server: ServerHandle
   let base: string
   let root: string
+  let projectId: string
   let sessionId: string
   let closed = false
 
@@ -45,10 +46,11 @@ describe('worker background processes', () => {
     })
     expect(projectResponse.status).toBe(201)
     const { project } = (await projectResponse.json()) as { project: { id: string } }
+    projectId = project.id
     const sessionResponse = await fetch(`${base}/api/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ projectId: project.id, title: 'worker-background' }),
+      body: JSON.stringify({ projectId, title: 'worker-background' }),
     })
     expect(sessionResponse.status).toBe(201)
     const body = (await sessionResponse.json()) as { session: { id: string } }
@@ -73,32 +75,34 @@ describe('worker background processes', () => {
     }
   }
 
-  async function send(content: string): Promise<void> {
-    const response = await fetch(`${base}/api/sessions/${sessionId}/message`, {
+  async function send(content: string, targetSessionId = sessionId): Promise<void> {
+    const response = await fetch(`${base}/api/sessions/${targetSessionId}/message`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ content }),
     })
     expect(response.status).toBe(200)
     await waitFor(async () => {
-      const current = await fetch(`${base}/api/sessions/${sessionId}`)
+      const current = await fetch(`${base}/api/sessions/${targetSessionId}`)
       const body = (await current.json()) as { session: { isRunning: boolean } }
       return body.session.isRunning ? null : true
     }, 30_000)
   }
 
-  async function getProcesses(): Promise<Array<{ id: string; pid: number | null; status: string }>> {
-    const response = await fetch(`${base}/api/sessions/${sessionId}/background-processes`)
+  async function getProcesses(
+    targetSessionId = sessionId,
+  ): Promise<Array<{ id: string; pid: number | null; status: string }>> {
+    const response = await fetch(`${base}/api/sessions/${targetSessionId}/background-processes`)
     const body = (await response.json()) as {
       processes: Array<{ id: string; pid: number | null; status: string }>
     }
     return body.processes
   }
 
-  async function getLastBackgroundCall(): Promise<
-    { result?: { success: boolean; output?: string; error?: string } } | undefined
-  > {
-    const response = await fetch(`${base}/api/sessions/${sessionId}`)
+  async function getLastBackgroundCall(
+    targetSessionId = sessionId,
+  ): Promise<{ result?: { success: boolean; output?: string; error?: string } } | undefined> {
+    const response = await fetch(`${base}/api/sessions/${targetSessionId}`)
     const body = (await response.json()) as {
       messages: Array<{
         toolCalls?: Array<{ name: string; result?: { success: boolean; output?: string; error?: string } }>
@@ -110,12 +114,15 @@ describe('worker background processes', () => {
       .at(-1)
   }
 
-  async function startBackground(content: 'BG-IPC-START' | 'BG-IPC-TIMEOUT'): Promise<{
+  async function startBackground(
+    content: 'BG-IPC-START' | 'BG-IPC-TIMEOUT',
+    targetSessionId = sessionId,
+  ): Promise<{
     processId: string
     pid: number
   }> {
-    await send(content)
-    const call = await getLastBackgroundCall()
+    await send(content, targetSessionId)
+    const call = await getLastBackgroundCall(targetSessionId)
     expect(call?.result?.success).toBe(true)
     expect(call?.result?.output).toBeDefined()
     return JSON.parse(call!.result!.output!) as { processId: string; pid: number }
@@ -168,8 +175,31 @@ describe('worker background processes', () => {
     expect(await getProcesses()).toEqual([])
   }, 60_000)
 
+  it.fails(
+    'destroys the background processes of a deleted session',
+    async () => {
+      const sessionResponse = await fetch(`${base}/api/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectId, title: 'worker-background-deleted' }),
+      })
+      expect(sessionResponse.status).toBe(201)
+      const body = (await sessionResponse.json()) as { session: { id: string } }
+      const deletedSessionId = body.session.id
+      const started = await startBackground('BG-IPC-START', deletedSessionId)
+      expect(isAlive(started.pid)).toBe(true)
+
+      const deleteResponse = await fetch(`${base}/api/sessions/${deletedSessionId}`, { method: 'DELETE' })
+      expect(deleteResponse.status).toBe(200)
+      await waitFor(async () => (isAlive(started.pid) ? null : true), 5_000)
+      expect(await getProcesses(deletedSessionId)).toEqual([])
+    },
+    60_000,
+  )
+
   it('kills running background processes when the gateway closes', async () => {
     const started = await startBackground('BG-IPC-START')
+    expect(isAlive(started.pid)).toBe(true)
     await server.close()
     closed = true
     await waitFor(async () => (isAlive(started.pid) ? null : true), 10_000)
