@@ -134,6 +134,20 @@ describe('background-process store', () => {
       expect(logs[2]?.stream).toBe('stderr')
     })
 
+    it.fails('releases evicted log lines immediately', () => {
+      const sessionId = 'test-session-log-release'
+      const process = store.createProcess(sessionId, 'test', 'echo hello', '/tmp')!
+
+      for (let i = 0; i < 1_000; i++) {
+        store.appendLog(process.id, `${i}:${'x'.repeat(64 * 1024)}`, 'stdout')
+      }
+
+      const retained = store.getLogs(process.id)
+      expect(store.getRetainedLogLineCount(process.id)).toBeLessThanOrEqual(65)
+      expect(retained).toHaveLength(store.getRetainedLogLineCount(process.id))
+      expect(retained[0]!.offset).toBeGreaterThan(0)
+    })
+
     it('caps retained logs per process and keeps offsets monotonic', () => {
       const sessionId = 'test-session-log-cap'
       const process = store.createProcess(sessionId, 'test', 'echo hello', '/tmp')!

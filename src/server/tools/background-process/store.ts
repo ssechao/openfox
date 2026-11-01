@@ -17,6 +17,16 @@ interface ProcessLog {
 const processesBySession = new Map<string, Map<string, BackgroundProcess>>()
 const logsByProcess = new Map<string, ProcessLog>()
 
+export function closeBackgroundAdmission(): void {}
+
+export function reopenBackgroundAdmission(): void {}
+
+export function closeSessionAdmission(_sessionId: string): void {}
+
+export function isAdmissionClosed(_sessionId: string): boolean {
+  return false
+}
+
 function emptyProcessLog(): ProcessLog {
   return { lines: [], head: 0, bytes: 0, nextOffset: 0 }
 }
@@ -172,6 +182,10 @@ export function getLogsPaginated(processId: string, since = 0, maxLines = 500): 
     nextOffset,
     hasMore: start + lines.length < log.lines.length,
   }
+}
+
+export function getRetainedLogLineCount(processId: string): number {
+  return logsByProcess.get(processId)?.lines.length ?? 0
 }
 
 export function clearLogs(processId: string): void {
