@@ -82,6 +82,14 @@ export function updateStatus(
   if (status === 'exited' || status === 'stopping') {
     process.endedAt = Date.now()
   }
+  if (status === 'exited') {
+    const exited = getSessionProcesses(sessionId)
+      .filter((candidate) => candidate.status === 'exited')
+      .sort((left, right) => (left.endedAt ?? 0) - (right.endedAt ?? 0))
+    for (const candidate of exited.slice(0, -MAX_EXITED_PER_SESSION)) {
+      removeProcess(candidate.id, sessionId)
+    }
+  }
   return process
 }
 
@@ -98,20 +106,25 @@ export function appendLog(processId: string, content: string, stream: 'stdout' |
   const logs = logsByProcess.get(processId)
   if (!logs) return
 
-  const offset = logs.length
+  const offset = (logs.at(-1)?.offset ?? -1) + 1
   logs.push({
     offset,
     content,
     timestamp: Date.now(),
     stream,
   })
+
+  let retainedBytes = logs.reduce((total, line) => total + Buffer.byteLength(line.content), 0)
+  while (retainedBytes > MAX_LOG_BYTES_PER_PROCESS && logs.length > 1) {
+    const removed = logs.shift()
+    if (removed) retainedBytes -= Buffer.byteLength(removed.content)
+  }
 }
 
 export function getLogs(processId: string, offset = 0, limit?: number): LogLine[] {
   const logs = logsByProcess.get(processId) ?? []
-  const start = Math.min(offset, logs.length)
-  const end = limit !== undefined ? Math.min(start + limit, logs.length) : logs.length
-  return logs.slice(start, end)
+  const filteredLogs = logs.filter((line) => line.offset >= offset)
+  return limit === undefined ? filteredLogs : filteredLogs.slice(0, limit)
 }
 
 export interface PaginatedLogs {
@@ -123,9 +136,9 @@ export interface PaginatedLogs {
 
 export function getLogsPaginated(processId: string, since = 0, maxLines = 500): PaginatedLogs {
   const logs = logsByProcess.get(processId) ?? []
-  const totalLines = logs.length
+  const totalLines = logs.at(-1) ? logs.at(-1)!.offset + 1 : 0
 
-  const filteredLogs = logs.filter((_, index) => index >= since)
+  const filteredLogs = logs.filter((line) => line.offset >= since)
   const slicedLogs = filteredLogs.slice(0, maxLines)
 
   const lastLine = slicedLogs[slicedLogs.length - 1]

@@ -79,7 +79,7 @@ describe('background-process store', () => {
       expect(updated?.endedAt).toBeDefined()
     })
 
-    it.fails('keeps only the most recent exited processes of a session', () => {
+    it('keeps only the most recent exited processes of a session', () => {
       const sessionId = 'test-session-exited-cap'
       const ids: string[] = []
 
@@ -133,7 +133,7 @@ describe('background-process store', () => {
       expect(logs[2]?.stream).toBe('stderr')
     })
 
-    it.fails('caps retained logs per process and keeps offsets monotonic', () => {
+    it('caps retained logs per process and keeps offsets monotonic', () => {
       const sessionId = 'test-session-log-cap'
       const process = store.createProcess(sessionId, 'test', 'echo hello', '/tmp')!
       const megabyte = 'x'.repeat(1024 * 1024)

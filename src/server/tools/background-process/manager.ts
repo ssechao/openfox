@@ -36,7 +36,7 @@ export function createProcess(
       if (p && p.status === 'running') {
         stopProcess(process.id, sessionId)
       }
-    }, timeout)
+    }, timeout).unref()
   }
 
   return process

@@ -1,21 +1,8 @@
 import { createTool } from '../tool-helpers.js'
-import * as manager from './manager.js'
-import * as store from './store.js'
+import { runBackgroundAction } from './backend.js'
 
-export interface BackgroundProcessToolArgs {
-  action: 'start' | 'stop' | 'list' | 'status' | 'logs'
-  name?: string
-  command?: string
-  cwd?: string
-  timeout?: number
-  processId?: string
-  since?: number
-  maxLines?: number
-}
-
-function processNotFoundError(id: string | undefined): string {
-  return `Process not found: ${id ?? ''}`
-}
+export type { BackgroundProcessToolArgs } from './actions.js'
+import type { BackgroundProcessToolArgs } from './actions.js'
 
 export const backgroundProcessTool = createTool<BackgroundProcessToolArgs>(
   'background_process',
@@ -81,131 +68,7 @@ These processes run independently of agent turns and persist across session comp
     },
   },
   async (args, context, helpers) => {
-    const sessionId = context.sessionId
-    const cwd = args.cwd ?? context.workdir
-
-    switch (args.action) {
-      case 'start': {
-        const count = store.getSessionProcessCount(sessionId)
-        const maxPerSession = store.getMaxPerSession()
-
-        if (count >= maxPerSession) {
-          return helpers.error(
-            `Maximum number of background processes (${maxPerSession}) reached. Stop existing processes before starting new ones.`,
-          )
-        }
-
-        const name = args.name ?? args.command?.split(' ')[0] ?? 'process'
-        const process = manager.createProcess(sessionId, name, args.command!, cwd, args.timeout)
-
-        if (!process) {
-          return helpers.error('Failed to create process. Maximum limit may have been reached.')
-        }
-
-        const pid = manager.startProcessCommand(process.id, sessionId, args.command!, cwd)
-
-        if (!pid) {
-          return helpers.error('Failed to start process.')
-        }
-
-        return helpers.success(
-          JSON.stringify(
-            {
-              processId: process.id,
-              name: process.name,
-              pid,
-              status: 'running',
-              maxReached: count + 1 >= maxPerSession,
-            },
-            null,
-            2,
-          ),
-        )
-      }
-
-      case 'stop': {
-        const proc = manager.getProcessStatus(args.processId!, sessionId)
-        if (!proc) return helpers.error(processNotFoundError(args.processId))
-
-        if (proc.status !== 'running') {
-          return helpers.error(`Process is not running (status: ${proc.status}). Cannot stop.`)
-        }
-
-        await manager.stopProcess(args.processId!, sessionId)
-
-        return helpers.success(
-          JSON.stringify(
-            {
-              processId: args.processId,
-              status: 'removed',
-            },
-            null,
-            2,
-          ),
-        )
-      }
-
-      case 'list': {
-        const processes = manager.getSessionProcesses(sessionId)
-        const maxPerSession = store.getMaxPerSession()
-
-        return helpers.success(
-          JSON.stringify(
-            {
-              processes,
-              maxPerSession,
-              currentCount: processes.filter((p) => p.status !== 'exited').length,
-            },
-            null,
-            2,
-          ),
-        )
-      }
-
-      case 'status': {
-        const proc = manager.getProcessStatus(args.processId!, sessionId)
-        if (!proc) return helpers.error(processNotFoundError(args.processId))
-
-        const uptime = proc.startedAt ? Date.now() - proc.startedAt : null
-
-        return helpers.success(
-          JSON.stringify(
-            {
-              process: proc,
-              uptime,
-            },
-            null,
-            2,
-          ),
-        )
-      }
-
-      case 'logs': {
-        const proc = manager.getProcessStatus(args.processId!, sessionId)
-        if (!proc) return helpers.error(processNotFoundError(args.processId))
-
-        const since = args.since ?? 0
-        const maxLines = Math.min(args.maxLines ?? 500, 2000)
-        const { lines, totalLines, nextOffset, hasMore } = manager.getProcessLogs(args.processId!, since, maxLines)
-
-        return helpers.success(
-          JSON.stringify(
-            {
-              processId: args.processId,
-              lines,
-              totalLines,
-              nextOffset,
-              hasMore,
-              truncated: hasMore,
-            },
-            null,
-            2,
-          ),
-        )
-      }
-
-      default:
-        return helpers.error(`Unknown action: ${args.action}`)
-    }
+    const result = await runBackgroundAction(context.sessionId, args.cwd ?? context.workdir, args)
+    return result.ok ? helpers.success(result.output) : helpers.error(result.error)
   },
 )

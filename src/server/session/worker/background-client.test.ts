@@ -4,7 +4,7 @@ import { WorkerBackgroundClient } from './background-client.js'
 const identity = { sessionId: 's-1', workerId: 'w-1', generation: 1 }
 
 describe('WorkerBackgroundClient', () => {
-  it.fails('returns an explicit error when the gateway does not answer before the deadline', async () => {
+  it('returns an explicit error when the gateway does not answer before the deadline', async () => {
     const send = vi.fn()
     const client = new WorkerBackgroundClient(identity, send, 20)
 
@@ -14,7 +14,7 @@ describe('WorkerBackgroundClient', () => {
     })
   })
 
-  it.fails('ignores a response carrying another worker identity', async () => {
+  it('ignores a response carrying another worker identity', async () => {
     const send = vi.fn()
     const client = new WorkerBackgroundClient(identity, send, 50)
     const first = client.execute('/tmp', { action: 'list' })
@@ -47,7 +47,7 @@ describe('WorkerBackgroundClient', () => {
     await expect(second).resolves.toEqual(result)
   })
 
-  it.fails('fails pending requests when closed', async () => {
+  it('fails pending requests when closed', async () => {
     const send = vi.fn()
     const client = new WorkerBackgroundClient(identity, send)
     const pending = client.execute('/tmp', { action: 'list' })

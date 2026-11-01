@@ -130,55 +130,43 @@ describe('worker background processes', () => {
     }
   }
 
-  it.fails(
-    'keeps a background process listed and readable after its worker exited',
-    async () => {
-      const started = await startBackground('BG-IPC-START')
-      const processes = await getProcesses()
-      expect(processes).toHaveLength(1)
-      const background = processes[0]!
-      expect(background.id).toBe(started.processId)
-      expect(background.status).toBe('running')
-      expect(background.pid).toBe(started.pid)
-      expect(isAlive(started.pid)).toBe(true)
+  it('keeps a background process listed and readable after its worker exited', async () => {
+    const started = await startBackground('BG-IPC-START')
+    const processes = await getProcesses()
+    expect(processes).toHaveLength(1)
+    const background = processes[0]!
+    expect(background.id).toBe(started.processId)
+    expect(background.status).toBe('running')
+    expect(background.pid).toBe(started.pid)
+    expect(isAlive(started.pid)).toBe(true)
 
-      const call = await waitFor(async () => {
-        await send(`BG-IPC-LOGS ${started.processId}`)
-        const latest = await getLastBackgroundCall()
-        return latest?.result?.success === true && latest.result.output?.includes('bg-ready') ? latest : null
-      }, 10_000)
-      expect(call.result?.success).toBe(true)
-      expect(call.result?.output).toContain('bg-ready')
-    },
-    60_000,
-  )
+    const call = await waitFor(async () => {
+      await send(`BG-IPC-LOGS ${started.processId}`)
+      const latest = await getLastBackgroundCall()
+      return latest?.result?.success === true && latest.result.output?.includes('bg-ready') ? latest : null
+    }, 10_000)
+    expect(call.result?.success).toBe(true)
+    expect(call.result?.output).toContain('bg-ready')
+  }, 60_000)
 
-  it.fails(
-    'stops a background process started by an earlier worker',
-    async () => {
-      const existing = (await getProcesses())[0]
-      const started =
-        existing?.pid !== null && existing?.pid !== undefined
-          ? { processId: existing.id, pid: existing.pid }
-          : await startBackground('BG-IPC-START')
-      await send(`BG-IPC-STOP ${started.processId}`)
-      const call = await getLastBackgroundCall()
-      expect(call?.result?.success).toBe(true)
-      await waitFor(async () => (isAlive(started.pid) ? null : true), 5_000)
-      expect(await getProcesses()).toEqual([])
-    },
-    60_000,
-  )
+  it('stops a background process started by an earlier worker', async () => {
+    const existing = (await getProcesses())[0]
+    const started =
+      existing?.pid !== null && existing?.pid !== undefined
+        ? { processId: existing.id, pid: existing.pid }
+        : await startBackground('BG-IPC-START')
+    await send(`BG-IPC-STOP ${started.processId}`)
+    const call = await getLastBackgroundCall()
+    expect(call?.result?.success).toBe(true)
+    await waitFor(async () => (isAlive(started.pid) ? null : true), 5_000)
+    expect(await getProcesses()).toEqual([])
+  }, 60_000)
 
-  it.fails(
-    'enforces the timeout of a background process after its worker exited',
-    async () => {
-      const started = await startBackground('BG-IPC-TIMEOUT')
-      await waitFor(async () => (isAlive(started.pid) ? null : true), 10_000)
-      expect(await getProcesses()).toEqual([])
-    },
-    60_000,
-  )
+  it('enforces the timeout of a background process after its worker exited', async () => {
+    const started = await startBackground('BG-IPC-TIMEOUT')
+    await waitFor(async () => (isAlive(started.pid) ? null : true), 10_000)
+    expect(await getProcesses()).toEqual([])
+  }, 60_000)
 
   it('kills running background processes when the gateway closes', async () => {
     const started = await startBackground('BG-IPC-START')

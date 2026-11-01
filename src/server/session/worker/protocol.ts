@@ -5,6 +5,7 @@ import type { LLMToolDefinition } from '../../llm/types.js'
 import type { WorkerToken } from './token.js'
 import type { WorkflowLaunchPayload } from '../../runner/launch.js'
 import type { RequestInvariantLog } from '../../llm/request-invariant.js'
+import type { BackgroundActionResult, BackgroundProcessToolArgs } from '../../tools/background-process/actions.js'
 
 export type { WorkerToken }
 
@@ -35,6 +36,19 @@ export type McpRequestMessage = WorkerIpcIdentity & {
 export type McpCancelMessage = WorkerIpcIdentity & {
   type: 'mcp.cancel'
   requestId: string
+}
+
+export type BackgroundRequestMessage = WorkerToken & {
+  type: 'background.request'
+  requestId: string
+  cwd: string
+  args: BackgroundProcessToolArgs
+}
+
+export type BackgroundResponseMessage = WorkerIpcIdentity & {
+  type: 'background.response'
+  requestId: string
+  result: BackgroundActionResult
 }
 
 export type McpResponseChunkMessage = WorkerIpcIdentity & {
@@ -114,6 +128,7 @@ export type GatewayToWorkerMessage =
   | (WorkerToken & { type: 'abort' })
   | WorkerMcpResponseMessage
   | WorkerInteractiveResponseMessage
+  | BackgroundResponseMessage
 
 export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'ready'; pid: number })
@@ -123,4 +138,5 @@ export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'done'; ok: boolean; error?: string })
   | McpRequestMessage
   | McpCancelMessage
+  | BackgroundRequestMessage
   | InteractiveOpenMessage

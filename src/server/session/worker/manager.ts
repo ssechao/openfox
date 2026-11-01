@@ -59,6 +59,7 @@ import {
   prepareSessionInterruptionEvents,
 } from './crash.js'
 import type {
+  BackgroundRequestMessage,
   GatewayToWorkerMessage,
   McpRequestMessage,
   WorkerIpcIdentity,
@@ -72,6 +73,7 @@ import { cancelQuestion, registerPendingQuestion, provideAnswer } from '../../to
 import { cancelPathConfirmation, providePathConfirmation, registerPathConfirmation } from '../../tools/path-security.js'
 import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
+import { executeBackgroundAction, type BackgroundActionResult } from '../../tools/background-process/actions.js'
 
 const WORKER_RECOVERY_TIMEOUT_MS = 4_000
 const WORKER_STOP_SETTLEMENT_TIMEOUT_MS = 2_000
@@ -498,6 +500,8 @@ export class SessionWorkerManager {
         this.mcpBroker?.handleRequest(msg)
       } else if (msg.type === 'mcp.cancel') {
         this.mcpBroker?.handleCancel(msg)
+      } else if (msg.type === 'background.request') {
+        void this.handleBackgroundRequest(worker, msg)
       } else if (msg.type === 'interactive.question.open' || msg.type === 'interactive.path.open') {
         this.interactiveBroker.handleOpen(msg)
       } else if (msg.type === 'done') {
@@ -547,6 +551,23 @@ export class SessionWorkerManager {
         error: error instanceof Error ? error.message : String(error),
       })
     }
+  }
+
+  private async handleBackgroundRequest(worker: ActiveWorker, msg: BackgroundRequestMessage): Promise<void> {
+    let result: BackgroundActionResult
+    try {
+      result = await executeBackgroundAction(worker.sessionId, msg.cwd, msg.args)
+    } catch (error) {
+      result = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    if (this.active.get(worker.sessionId) !== worker) return
+    this.sendTo(worker, {
+      ...worker.token,
+      sessionId: worker.sessionId,
+      type: 'background.response',
+      requestId: msg.requestId,
+      result,
+    })
   }
 
   private exitPromise(worker: ActiveWorker): Promise<void> {
