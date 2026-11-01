@@ -8,7 +8,7 @@ export const MAX_EXITED_PER_SESSION = 20
 export const BACKGROUND_SHUTDOWN_BUDGET_MS = 2_000
 
 interface ProcessLog {
-  lines: LogLine[]
+  lines: Array<LogLine | null>
   head: number
   bytes: number
   nextOffset: number
@@ -16,15 +16,24 @@ interface ProcessLog {
 
 const processesBySession = new Map<string, Map<string, BackgroundProcess>>()
 const logsByProcess = new Map<string, ProcessLog>()
+let admissionClosed = false
+const closedSessionIds = new Set<string>()
 
-export function closeBackgroundAdmission(): void {}
+export function closeBackgroundAdmission(): void {
+  admissionClosed = true
+}
 
-export function reopenBackgroundAdmission(): void {}
+export function reopenBackgroundAdmission(): void {
+  admissionClosed = false
+  closedSessionIds.clear()
+}
 
-export function closeSessionAdmission(_sessionId: string): void {}
+export function closeSessionAdmission(sessionId: string): void {
+  closedSessionIds.add(sessionId)
+}
 
-export function isAdmissionClosed(_sessionId: string): boolean {
-  return false
+export function isAdmissionClosed(sessionId: string): boolean {
+  return admissionClosed || closedSessionIds.has(sessionId)
 }
 
 function emptyProcessLog(): ProcessLog {
@@ -50,6 +59,8 @@ export function getSessionProcessCount(sessionId: string): number {
 }
 
 export function createProcess(sessionId: string, name: string, command: string, cwd: string): BackgroundProcess | null {
+  if (isAdmissionClosed(sessionId)) return null
+
   const count = getSessionProcessCount(sessionId)
   if (count >= MAX_PER_SESSION) {
     return null
@@ -138,6 +149,7 @@ export function appendLog(processId: string, content: string, stream: 'stdout' |
 
   while (log.bytes > MAX_LOG_BYTES_PER_PROCESS && log.lines.length - log.head > 1) {
     log.bytes -= Buffer.byteLength(log.lines[log.head]!.content)
+    log.lines[log.head] = null
     log.head += 1
   }
 
@@ -153,7 +165,7 @@ export function getLogs(processId: string, offset = 0, limit?: number): LogLine[
 
   const first = log.lines[log.head]
   const start = first ? log.head + Math.max(0, offset - first.offset) : log.head
-  const retained = log.lines.slice(start)
+  const retained = log.lines.slice(start) as LogLine[]
   return limit === undefined ? retained : retained.slice(0, limit)
 }
 
@@ -172,7 +184,7 @@ export function getLogsPaginated(processId: string, since = 0, maxLines = 500): 
 
   const first = log.lines[log.head]
   const start = first ? log.head + Math.max(0, since - first.offset) : log.head
-  const lines = log.lines.slice(start, start + maxLines)
+  const lines = log.lines.slice(start, start + maxLines) as LogLine[]
   const lastLine = lines[lines.length - 1]
   const nextOffset = lastLine ? lastLine.offset + 1 : log.nextOffset
 
@@ -185,7 +197,7 @@ export function getLogsPaginated(processId: string, since = 0, maxLines = 500): 
 }
 
 export function getRetainedLogLineCount(processId: string): number {
-  return logsByProcess.get(processId)?.lines.length ?? 0
+  return logsByProcess.get(processId)?.lines.filter((line) => line !== null).length ?? 0
 }
 
 export function clearLogs(processId: string): void {
@@ -204,7 +216,7 @@ export async function cleanupAllProcesses(): Promise<void> {
   const pids: number[] = []
   for (const sessionProcesses of processesBySession.values()) {
     for (const proc of sessionProcesses.values()) {
-      if (proc.status === 'running' && proc.pid) {
+      if ((proc.status === 'running' || proc.status === 'stopping') && proc.pid) {
         pids.push(proc.pid)
       }
     }

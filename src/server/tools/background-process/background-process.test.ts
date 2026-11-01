@@ -134,7 +134,7 @@ describe('background-process store', () => {
       expect(logs[2]?.stream).toBe('stderr')
     })
 
-    it.fails('releases evicted log lines immediately', () => {
+    it('releases evicted log lines immediately', () => {
       const sessionId = 'test-session-log-release'
       const process = store.createProcess(sessionId, 'test', 'echo hello', '/tmp')!
 

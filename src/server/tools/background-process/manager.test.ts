@@ -37,7 +37,7 @@ describe('background process manager', () => {
     expect(() => process.kill(pid, 0)).toThrow()
   })
 
-  it.fails('waits for a process already stopping when cleanupAllProcesses runs', async () => {
+  it('waits for a process already stopping when cleanupAllProcesses runs', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'term-ignoring', "trap '' TERM; sleep 60", process.cwd())!
     const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
@@ -49,7 +49,7 @@ describe('background process manager', () => {
     await expect(stopping).resolves.toBeUndefined()
   })
 
-  it.fails('refuses a process started while its session is being destroyed', async () => {
+  it('refuses a process started while its session is being destroyed', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'sleep', 'sleep 60', process.cwd())!
     const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
@@ -62,7 +62,7 @@ describe('background process manager', () => {
     expect(() => process.kill(pid, 0)).toThrow()
   })
 
-  it.fails('reports an explicit error when starting a process in a destroyed session', async () => {
+  it('reports an explicit error when starting a process in a destroyed session', async () => {
     const sessionId = crypto.randomUUID()
 
     await destroySessionProcesses(sessionId)
@@ -74,7 +74,7 @@ describe('background process manager', () => {
     })
   })
 
-  it.fails('refuses a process started once background admission is closed', () => {
+  it('refuses a process started once background admission is closed', () => {
     closeBackgroundAdmission()
 
     expect(createProcess(crypto.randomUUID(), 'late', 'sleep 60', process.cwd())).toBeNull()

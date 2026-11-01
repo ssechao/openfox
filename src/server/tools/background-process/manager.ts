@@ -175,6 +175,7 @@ export async function stopProcess(processId: string, sessionId: string): Promise
 }
 
 export async function destroySessionProcesses(sessionId: string): Promise<void> {
+  store.closeSessionAdmission(sessionId)
   for (const proc of store.getSessionProcesses(sessionId)) {
     if (proc.status === 'running') {
       await stopProcess(proc.id, sessionId)

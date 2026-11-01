@@ -25,6 +25,13 @@ export async function executeBackgroundAction(
 ): Promise<BackgroundActionResult> {
   switch (args.action) {
     case 'start': {
+      if (store.isAdmissionClosed(sessionId)) {
+        return {
+          ok: false,
+          error: `Background process refused: session ${sessionId} is closed or the server is stopping`,
+        }
+      }
+
       const count = store.getSessionProcessCount(sessionId)
       const maxPerSession = store.getMaxPerSession()
 

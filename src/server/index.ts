@@ -4121,6 +4121,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // Wire up QueueProcessor - listens for queue events and starts turns
   const { QueueProcessor } = await import('./queue/processor.js')
 
+  const { reopenBackgroundAdmission } = await import('./tools/background-process/store.js')
+  reopenBackgroundAdmission()
+
   // Session workers: enabled by default with an explicit setting or environment
   // opt-out. The supervisor owns bounded admission, crash handling, cleanup,
   // and the explicit resume gate.
@@ -4413,7 +4416,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           const ancillaryCleanup = Promise.all([
             devServerManager.stopAll(),
             import('./dev-server/inspect-proxy.js').then(({ stopAllInspectProxies }) => stopAllInspectProxies()),
-            import('./tools/background-process/store.js').then(({ cleanupAllProcesses }) => cleanupAllProcesses()),
+            import('./tools/background-process/store.js').then(({ closeBackgroundAdmission, cleanupAllProcesses }) => {
+              closeBackgroundAdmission()
+              return cleanupAllProcesses()
+            }),
             Promise.resolve(viteServer?.close()),
             config.globalConfigPath
               ? import('node:fs/promises').then(({ unlink }) => unlink(config.globalConfigPath!).catch(() => {}))
