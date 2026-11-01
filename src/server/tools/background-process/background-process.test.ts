@@ -152,7 +152,7 @@ describe('background-process store', () => {
       expect(store.getLogsPaginated(process.id, 5).lines).toEqual([expect.objectContaining({ offset: 5 })])
     })
 
-    it.fails('appends logs without quadratic cost', () => {
+    it('appends logs without quadratic cost', () => {
       const sessionId = 'test-session-log-performance'
       const process = store.createProcess(sessionId, 'test', 'echo hello', '/tmp')!
       const content = 'x'.repeat(64)

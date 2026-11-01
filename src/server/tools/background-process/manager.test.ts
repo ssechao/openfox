@@ -7,7 +7,7 @@ describe('background process manager', () => {
     await cleanupAllProcesses()
   })
 
-  it.fails('destroys a running process before cleanupAllProcesses resolves', async () => {
+  it('destroys a running process before cleanupAllProcesses resolves', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'sleep', 'sleep 60', process.cwd())!
     const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
@@ -17,7 +17,7 @@ describe('background process manager', () => {
     expect(() => process.kill(pid, 0)).toThrow()
   })
 
-  it.fails('kills a TERM-ignoring process before cleanupAllProcesses resolves', async () => {
+  it('kills a TERM-ignoring process before cleanupAllProcesses resolves', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'term-ignoring', "trap '' TERM; sleep 60", process.cwd())!
     const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
@@ -28,7 +28,7 @@ describe('background process manager', () => {
     expect(() => process.kill(pid, 0)).toThrow()
   })
 
-  it.fails('coalesces output events and bounds the output rate of a chatty process', async () => {
+  it('coalesces output events and bounds the output rate of a chatty process', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'chatty', 'yes x', process.cwd())!
     let outputEvents = 0

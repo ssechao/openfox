@@ -5,9 +5,21 @@ const MAX_PER_SESSION = 5
 
 export const MAX_LOG_BYTES_PER_PROCESS = 4 * 1024 * 1024
 export const MAX_EXITED_PER_SESSION = 20
+export const BACKGROUND_SHUTDOWN_BUDGET_MS = 2_000
+
+interface ProcessLog {
+  lines: LogLine[]
+  head: number
+  bytes: number
+  nextOffset: number
+}
 
 const processesBySession = new Map<string, Map<string, BackgroundProcess>>()
-const logsByProcess = new Map<string, LogLine[]>()
+const logsByProcess = new Map<string, ProcessLog>()
+
+function emptyProcessLog(): ProcessLog {
+  return { lines: [], head: 0, bytes: 0, nextOffset: 0 }
+}
 
 export function getMaxPerSession(): number {
   return MAX_PER_SESSION
@@ -51,7 +63,7 @@ export function createProcess(sessionId: string, name: string, command: string, 
     processesBySession.set(sessionId, new Map())
   }
   processesBySession.get(sessionId)!.set(process.id, process)
-  logsByProcess.set(process.id, [])
+  logsByProcess.set(process.id, emptyProcessLog())
 
   return process
 }
@@ -103,28 +115,36 @@ export function removeProcess(processId: string, sessionId: string): boolean {
 }
 
 export function appendLog(processId: string, content: string, stream: 'stdout' | 'stderr' = 'stdout'): void {
-  const logs = logsByProcess.get(processId)
-  if (!logs) return
+  const log = logsByProcess.get(processId)
+  if (!log) return
 
-  const offset = (logs.at(-1)?.offset ?? -1) + 1
-  logs.push({
-    offset,
+  log.lines.push({
+    offset: log.nextOffset++,
     content,
     timestamp: Date.now(),
     stream,
   })
+  log.bytes += Buffer.byteLength(content)
 
-  let retainedBytes = logs.reduce((total, line) => total + Buffer.byteLength(line.content), 0)
-  while (retainedBytes > MAX_LOG_BYTES_PER_PROCESS && logs.length > 1) {
-    const removed = logs.shift()
-    if (removed) retainedBytes -= Buffer.byteLength(removed.content)
+  while (log.bytes > MAX_LOG_BYTES_PER_PROCESS && log.lines.length - log.head > 1) {
+    log.bytes -= Buffer.byteLength(log.lines[log.head]!.content)
+    log.head += 1
+  }
+
+  if (log.head >= 1024 && log.head * 2 >= log.lines.length) {
+    log.lines = log.lines.slice(log.head)
+    log.head = 0
   }
 }
 
 export function getLogs(processId: string, offset = 0, limit?: number): LogLine[] {
-  const logs = logsByProcess.get(processId) ?? []
-  const filteredLogs = logs.filter((line) => line.offset >= offset)
-  return limit === undefined ? filteredLogs : filteredLogs.slice(0, limit)
+  const log = logsByProcess.get(processId)
+  if (!log) return []
+
+  const first = log.lines[log.head]
+  const start = first ? log.head + Math.max(0, offset - first.offset) : log.head
+  const retained = log.lines.slice(start)
+  return limit === undefined ? retained : retained.slice(0, limit)
 }
 
 export interface PaginatedLogs {
@@ -135,27 +155,27 @@ export interface PaginatedLogs {
 }
 
 export function getLogsPaginated(processId: string, since = 0, maxLines = 500): PaginatedLogs {
-  const logs = logsByProcess.get(processId) ?? []
-  const totalLines = logs.at(-1) ? logs.at(-1)!.offset + 1 : 0
+  const log = logsByProcess.get(processId)
+  if (!log) {
+    return { lines: [], totalLines: 0, nextOffset: 0, hasMore: false }
+  }
 
-  const filteredLogs = logs.filter((line) => line.offset >= since)
-  const slicedLogs = filteredLogs.slice(0, maxLines)
-
-  const lastLine = slicedLogs[slicedLogs.length - 1]
-  const nextOffset = lastLine ? lastLine.offset + 1 : totalLines
-  const hasMore = slicedLogs.length < filteredLogs.length
+  const first = log.lines[log.head]
+  const start = first ? log.head + Math.max(0, since - first.offset) : log.head
+  const lines = log.lines.slice(start, start + maxLines)
+  const lastLine = lines[lines.length - 1]
+  const nextOffset = lastLine ? lastLine.offset + 1 : log.nextOffset
 
   return {
-    lines: slicedLogs,
-    totalLines,
+    lines,
+    totalLines: log.nextOffset,
     nextOffset,
-    hasMore,
+    hasMore: start + lines.length < log.lines.length,
   }
 }
 
 export function clearLogs(processId: string): void {
-  logsByProcess.delete(processId)
-  logsByProcess.set(processId, [])
+  logsByProcess.set(processId, emptyProcessLog())
 }
 
 export function getProcessById(processId: string): BackgroundProcess | undefined {
@@ -166,14 +186,30 @@ export function getProcessById(processId: string): BackgroundProcess | undefined
   return undefined
 }
 
-export function cleanupAllProcesses(): void {
+export async function cleanupAllProcesses(): Promise<void> {
+  const pids: number[] = []
   for (const sessionProcesses of processesBySession.values()) {
     for (const proc of sessionProcesses.values()) {
       if (proc.status === 'running' && proc.pid) {
-        killProcessTree(proc.pid)
+        pids.push(proc.pid)
       }
     }
   }
   processesBySession.clear()
   logsByProcess.clear()
+
+  const destroyed = Promise.all(pids.map((pid) => killProcessTree(pid).catch(() => undefined)))
+  let timer: NodeJS.Timeout | undefined
+  const budget = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, BACKGROUND_SHUTDOWN_BUDGET_MS)
+  })
+  await Promise.race([destroyed, budget])
+  clearTimeout(timer)
+  for (const pid of pids) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      continue
+    }
+  }
 }

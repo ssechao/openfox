@@ -105,6 +105,7 @@ import {
 import type { Message, CriterionStatus } from '../../shared/types.js'
 import { isInDangerZone, canCompact } from '../context/tokenizer.js'
 import { serverT } from '../i18n.js'
+import { destroySessionProcesses } from '../tools/background-process/manager.js'
 
 // ============================================================================
 // Event Types (for backward compatibility with existing subscribers)
@@ -854,6 +855,9 @@ export class SessionManager {
     // Shutdown LSP manager
     shutdownLspManager(id).catch((err) => {
       logger.error('Error shutting down LSP manager', { sessionId: id, error: err })
+    })
+    destroySessionProcesses(id).catch((err) => {
+      logger.error('Error destroying background processes', { sessionId: id, error: err })
     })
 
     // Delete events first

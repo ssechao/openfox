@@ -4,6 +4,9 @@ import { spawnShell } from '../../utils/shell.js'
 import { killProcessTree } from '../../utils/process-tree.js'
 import { createUtf8StreamDecoder } from '../../utils/utf8.js'
 
+export const OUTPUT_WINDOW_MS = 100
+export const MAX_OUTPUT_BYTES_PER_WINDOW = 128 * 1024
+
 type ProcessEventListener = (processId: string, msg: ServerMessage) => void
 const listeners = new Set<ProcessEventListener>()
 
@@ -67,54 +70,67 @@ export function startProcessCommand(processId: string, sessionId: string, comman
     sessionId,
   })
 
-  const stdoutDecoder = createUtf8StreamDecoder()
-  const stderrDecoder = createUtf8StreamDecoder()
+  const attachOutput = (stream: NodeJS.ReadableStream | null, name: 'stdout' | 'stderr'): (() => void) => {
+    const decoder = createUtf8StreamDecoder()
+    let pending = ''
+    let windowBytes = 0
+    let timer: NodeJS.Timeout | null = null
 
-  child.stdout?.on('data', (chunk: Buffer) => {
-    const text = stdoutDecoder.write(chunk)
-    store.appendLog(processId, text, 'stdout')
-    emitProcessEvent(processId, {
-      type: 'backgroundProcess.output',
-      payload: { processId, stream: 'stdout', content: text },
-      sessionId,
-    })
-  })
-
-  child.stderr?.on('data', (chunk: Buffer) => {
-    const text = stderrDecoder.write(chunk)
-    store.appendLog(processId, text, 'stderr')
-    emitProcessEvent(processId, {
-      type: 'backgroundProcess.output',
-      payload: { processId, stream: 'stderr', content: text },
-      sessionId,
-    })
-  })
-
-  child.stdout?.on('close', () => {
-    const rest = stdoutDecoder.end()
-    if (rest) {
-      store.appendLog(processId, rest, 'stdout')
+    const flush = () => {
+      if (!pending) return
       emitProcessEvent(processId, {
         type: 'backgroundProcess.output',
-        payload: { processId, stream: 'stdout', content: rest },
+        payload: { processId, stream: name, content: pending },
         sessionId,
       })
+      pending = ''
     }
-  })
 
-  child.stderr?.on('close', () => {
-    const rest = stderrDecoder.end()
-    if (rest) {
-      store.appendLog(processId, rest, 'stderr')
-      emitProcessEvent(processId, {
-        type: 'backgroundProcess.output',
-        payload: { processId, stream: 'stderr', content: rest },
-        sessionId,
-      })
+    const endWindow = () => {
+      timer = null
+      windowBytes = 0
+      flush()
+      stream?.resume()
     }
-  })
+
+    stream?.on('data', (chunk: Buffer) => {
+      const text = decoder.write(chunk)
+      store.appendLog(processId, text, name)
+      if (Buffer.byteLength(pending) < MAX_OUTPUT_BYTES_PER_WINDOW) {
+        pending += text
+      }
+      windowBytes += chunk.length
+      if (windowBytes >= MAX_OUTPUT_BYTES_PER_WINDOW) {
+        stream.pause()
+      }
+      if (timer === null) {
+        timer = setTimeout(endWindow, OUTPUT_WINDOW_MS)
+        timer.unref()
+      }
+    })
+
+    stream?.on('close', () => {
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+      const rest = decoder.end()
+      if (rest) {
+        store.appendLog(processId, rest, name)
+        pending += rest
+      }
+      flush()
+    })
+
+    return flush
+  }
+
+  const flushStdout = attachOutput(child.stdout, 'stdout')
+  const flushStderr = attachOutput(child.stderr, 'stderr')
 
   child.on('exit', (code, signal) => {
+    flushStdout()
+    flushStderr()
     store.updateStatus(processId, sessionId, 'exited', code ?? (signal ? 1 : null))
     emitProcessEvent(processId, {
       type: 'backgroundProcess.exited',
@@ -124,6 +140,8 @@ export function startProcessCommand(processId: string, sessionId: string, comman
   })
 
   child.on('error', (err) => {
+    flushStdout()
+    flushStderr()
     store.appendLog(processId, `Error: ${err.message}\n`, 'stderr')
     store.updateStatus(processId, sessionId, 'exited', 1)
     emitProcessEvent(processId, {
@@ -154,6 +172,16 @@ export async function stopProcess(processId: string, sessionId: string): Promise
     sessionId,
   })
   store.removeProcess(processId, sessionId)
+}
+
+export async function destroySessionProcesses(sessionId: string): Promise<void> {
+  for (const proc of store.getSessionProcesses(sessionId)) {
+    if (proc.status === 'running') {
+      await stopProcess(proc.id, sessionId)
+    } else {
+      store.removeProcess(proc.id, sessionId)
+    }
+  }
 }
 
 export function getProcessStatus(processId: string, sessionId: string): BackgroundProcess | undefined {

@@ -175,27 +175,23 @@ describe('worker background processes', () => {
     expect(await getProcesses()).toEqual([])
   }, 60_000)
 
-  it.fails(
-    'destroys the background processes of a deleted session',
-    async () => {
-      const sessionResponse = await fetch(`${base}/api/sessions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId, title: 'worker-background-deleted' }),
-      })
-      expect(sessionResponse.status).toBe(201)
-      const body = (await sessionResponse.json()) as { session: { id: string } }
-      const deletedSessionId = body.session.id
-      const started = await startBackground('BG-IPC-START', deletedSessionId)
-      expect(isAlive(started.pid)).toBe(true)
+  it('destroys the background processes of a deleted session', async () => {
+    const sessionResponse = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId, title: 'worker-background-deleted' }),
+    })
+    expect(sessionResponse.status).toBe(201)
+    const body = (await sessionResponse.json()) as { session: { id: string } }
+    const deletedSessionId = body.session.id
+    const started = await startBackground('BG-IPC-START', deletedSessionId)
+    expect(isAlive(started.pid)).toBe(true)
 
-      const deleteResponse = await fetch(`${base}/api/sessions/${deletedSessionId}`, { method: 'DELETE' })
-      expect(deleteResponse.status).toBe(200)
-      await waitFor(async () => (isAlive(started.pid) ? null : true), 5_000)
-      expect(await getProcesses(deletedSessionId)).toEqual([])
-    },
-    60_000,
-  )
+    const deleteResponse = await fetch(`${base}/api/sessions/${deletedSessionId}`, { method: 'DELETE' })
+    expect(deleteResponse.status).toBe(200)
+    await waitFor(async () => (isAlive(started.pid) ? null : true), 5_000)
+    expect(await getProcesses(deletedSessionId)).toEqual([])
+  }, 60_000)
 
   it('kills running background processes when the gateway closes', async () => {
     const started = await startBackground('BG-IPC-START')
