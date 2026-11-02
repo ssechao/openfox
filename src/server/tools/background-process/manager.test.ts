@@ -49,6 +49,35 @@ describe('background process manager', () => {
     await expect(stopping).resolves.toBeUndefined()
   })
 
+  it.fails('keeps a stopping process registered until it is dead when its session is destroyed', async () => {
+    const sessionId = crypto.randomUUID()
+    const backgroundProcess = createProcess(sessionId, 'term-ignoring', "trap '' TERM; sleep 60", process.cwd())!
+    const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const stopping = stopProcess(backgroundProcess.id, sessionId)
+    const destroying = destroySessionProcesses(sessionId)
+    expect(getSessionProcesses(sessionId).map((proc) => proc.status)).toEqual(['stopping'])
+    await destroying
+    expect(getSessionProcesses(sessionId)).toEqual([])
+    expect(() => process.kill(pid, 0)).toThrow()
+    await expect(stopping).resolves.toBeUndefined()
+  })
+
+  it.fails('kills a stopping process when shutdown follows the deletion of its session', async () => {
+    const sessionId = crypto.randomUUID()
+    const backgroundProcess = createProcess(sessionId, 'term-ignoring', "trap '' TERM; sleep 60", process.cwd())!
+    const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const stopping = stopProcess(backgroundProcess.id, sessionId)
+    const destroying = destroySessionProcesses(sessionId)
+    await cleanupAllProcesses()
+    expect(() => process.kill(pid, 0)).toThrow()
+    await stopping
+    await destroying
+  })
+
   it('refuses a process started while its session is being destroyed', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'sleep', 'sleep 60', process.cwd())!

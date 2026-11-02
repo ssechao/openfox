@@ -166,12 +166,14 @@ describe('worker background processes', () => {
     const call = await getLastBackgroundCall()
     expect(call?.result?.success).toBe(true)
     await waitFor(async () => (isAlive(started.pid) ? null : true), 5_000)
+    await waitFor(async () => ((await getProcesses()).length === 0 ? true : null), 5_000)
     expect(await getProcesses()).toEqual([])
   }, 60_000)
 
   it('enforces the timeout of a background process after its worker exited', async () => {
     const started = await startBackground('BG-IPC-TIMEOUT')
     await waitFor(async () => (isAlive(started.pid) ? null : true), 10_000)
+    await waitFor(async () => ((await getProcesses()).length === 0 ? true : null), 5_000)
     expect(await getProcesses()).toEqual([])
   }, 60_000)
 
@@ -190,6 +192,7 @@ describe('worker background processes', () => {
     const deleteResponse = await fetch(`${base}/api/sessions/${deletedSessionId}`, { method: 'DELETE' })
     expect(deleteResponse.status).toBe(200)
     await waitFor(async () => (isAlive(started.pid) ? null : true), 5_000)
+    await waitFor(async () => ((await getProcesses(deletedSessionId)).length === 0 ? true : null), 5_000)
     expect(await getProcesses(deletedSessionId)).toEqual([])
   }, 60_000)
 
