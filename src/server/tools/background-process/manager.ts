@@ -179,6 +179,11 @@ export async function destroySessionProcesses(sessionId: string): Promise<void> 
   for (const proc of store.getSessionProcesses(sessionId)) {
     if (proc.status === 'running') {
       await stopProcess(proc.id, sessionId)
+    } else if (proc.status === 'stopping' && proc.pid) {
+      // A stop already in flight: keep the entry until the tree is dead so a
+      // shutdown racing this deletion still finds and kills it.
+      await killProcessTree(proc.pid)
+      store.removeProcess(proc.id, sessionId)
     } else {
       store.removeProcess(proc.id, sessionId)
     }

@@ -49,7 +49,7 @@ describe('background process manager', () => {
     await expect(stopping).resolves.toBeUndefined()
   })
 
-  it.fails('keeps a stopping process registered until it is dead when its session is destroyed', async () => {
+  it('keeps a stopping process registered until it is dead when its session is destroyed', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'term-ignoring', "trap '' TERM; sleep 60", process.cwd())!
     const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
@@ -64,7 +64,7 @@ describe('background process manager', () => {
     await expect(stopping).resolves.toBeUndefined()
   })
 
-  it.fails('kills a stopping process when shutdown follows the deletion of its session', async () => {
+  it('kills a stopping process when shutdown follows the deletion of its session', async () => {
     const sessionId = crypto.randomUUID()
     const backgroundProcess = createProcess(sessionId, 'term-ignoring', "trap '' TERM; sleep 60", process.cwd())!
     const pid = startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)!
