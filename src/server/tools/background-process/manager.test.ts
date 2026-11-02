@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process'
+import { readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { executeBackgroundAction } from './actions.js'
 import {
@@ -9,6 +13,26 @@ import {
   stopProcess,
 } from './manager.js'
 import { cleanupAllProcesses, closeBackgroundAdmission, reopenBackgroundAdmission } from './store.js'
+
+function isLiveProcess(pid: number): boolean {
+  try {
+    const state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)])
+      .toString()
+      .trim()
+    return state !== '' && !state.startsWith('Z')
+  } catch {
+    return false
+  }
+}
+
+async function readPid(file: string): Promise<number> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const pid = Number((await readFile(file, 'utf8').catch(() => '')).trim())
+    if (pid > 0) return pid
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(`no pid in ${file}`)
+}
 
 describe('background process manager', () => {
   afterEach(async () => {
@@ -76,6 +100,37 @@ describe('background process manager', () => {
     expect(() => process.kill(pid, 0)).toThrow()
     await stopping
     await destroying
+  })
+
+  it.fails('keeps a process stopping until its whole tree is dead when its leader exits first', async () => {
+    const sessionId = crypto.randomUUID()
+    const pidFile = join(tmpdir(), `openfox-bg-${sessionId}.pid`)
+    const backgroundProcess = createProcess(
+      sessionId,
+      'term-resistant-child',
+      `sh -c 'trap "" TERM; echo $$ > ${pidFile}; exec sleep 60' & wait`,
+      process.cwd(),
+    )!
+    startProcessCommand(backgroundProcess.id, sessionId, backgroundProcess.command, backgroundProcess.cwd)
+    const childPid = await readPid(pidFile)
+    const exited = new Promise<void>((resolve) => {
+      const off = onProcessEvent((processId, msg) => {
+        if (processId === backgroundProcess.id && msg.type === 'backgroundProcess.exited') {
+          off()
+          resolve()
+        }
+      })
+    })
+
+    const stopping = stopProcess(backgroundProcess.id, sessionId)
+    await exited
+    expect(getSessionProcesses(sessionId).map((proc) => proc.status)).toEqual(['stopping'])
+    const destroying = destroySessionProcesses(sessionId)
+    await cleanupAllProcesses()
+    expect(isLiveProcess(childPid)).toBe(false)
+    await stopping
+    await destroying
+    await rm(pidFile, { force: true })
   })
 
   it('refuses a process started while its session is being destroyed', async () => {
