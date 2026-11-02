@@ -8,7 +8,7 @@ import { freePort, isolatedEnv, killProcessTree, track } from './utils/isolated-
 import { createProject, createSession, sendMessage } from './utils/rest-client.js'
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../..')
-const MIN_PORT = 10800
+const MIN_PORT = 11000
 
 interface Instance {
   url: string
