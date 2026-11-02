@@ -45,6 +45,13 @@ export function createProcess(
   return process
 }
 
+// A stop in flight owns the entry until killProcessTree is done: the leader
+// exiting first must not hide a TERM-resistant descendant from cleanup.
+function markExited(processId: string, sessionId: string, exitCode: number | null): void {
+  if (store.getProcess(processId, sessionId)?.status === 'stopping') return
+  store.updateStatus(processId, sessionId, 'exited', exitCode)
+}
+
 export function startProcessCommand(processId: string, sessionId: string, command: string, cwd: string): number | null {
   const proc = store.startProcess(processId, sessionId, 0)
   if (!proc) return null
@@ -131,7 +138,7 @@ export function startProcessCommand(processId: string, sessionId: string, comman
   child.on('exit', (code, signal) => {
     flushStdout()
     flushStderr()
-    store.updateStatus(processId, sessionId, 'exited', code ?? (signal ? 1 : null))
+    markExited(processId, sessionId, code ?? (signal ? 1 : null))
     emitProcessEvent(processId, {
       type: 'backgroundProcess.exited',
       payload: { processId, exitCode: code ?? (signal ? 1 : null) },
@@ -143,7 +150,7 @@ export function startProcessCommand(processId: string, sessionId: string, comman
     flushStdout()
     flushStderr()
     store.appendLog(processId, `Error: ${err.message}\n`, 'stderr')
-    store.updateStatus(processId, sessionId, 'exited', 1)
+    markExited(processId, sessionId, 1)
     emitProcessEvent(processId, {
       type: 'backgroundProcess.exited',
       payload: { processId, exitCode: 1 },

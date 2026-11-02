@@ -102,7 +102,7 @@ describe('background process manager', () => {
     await destroying
   })
 
-  it.fails('keeps a process stopping until its whole tree is dead when its leader exits first', async () => {
+  it('keeps a process stopping until its whole tree is dead when its leader exits first', async () => {
     const sessionId = crypto.randomUUID()
     const pidFile = join(tmpdir(), `openfox-bg-${sessionId}.pid`)
     const backgroundProcess = createProcess(
