@@ -102,51 +102,46 @@ describe('workflow background wait', () => {
     }
   }
 
-  it.fails(
-    'pauses on a notifyOnExit process and resumes the step with its exit notice',
-    async () => {
-      const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
-      await new Promise<void>((resolve, reject) => {
-        ws.once('open', () => resolve())
-        ws.once('error', reject)
-      })
-      try {
-        ws.send(
-          JSON.stringify({
-            id: 'launch-wait',
-            type: 'runner.launch',
-            payload: { sessionId, workflowId: 'background-wait', scope: 'project' },
-          }),
-        )
-        const status = async () =>
-          (await (await fetch(`${base}/api/sessions/${sessionId}/status`)).json()) as {
-            phase: string
-            workflowStep: string | null
+  it('pauses on a notifyOnExit process and resumes the step with its exit notice', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    try {
+      ws.send(
+        JSON.stringify({
+          id: 'launch-wait',
+          type: 'runner.launch',
+          payload: { sessionId, workflowId: 'background-wait', scope: 'project' },
+        }),
+      )
+      const status = async () =>
+        (await (await fetch(`${base}/api/sessions/${sessionId}/status`)).json()) as {
+          phase: string
+          workflowStep: string | null
+        }
+      const messages = async () =>
+        (
+          (await (await fetch(`${base}/api/sessions/${sessionId}`)).json()) as {
+            messages: Array<{ role: string; content: string; isSystemGenerated?: boolean; messageKind?: string }>
           }
-        const messages = async () =>
-          (
-            (await (await fetch(`${base}/api/sessions/${sessionId}`)).json()) as {
-              messages: Array<{ role: string; content: string; isSystemGenerated?: boolean; messageKind?: string }>
-            }
-          ).messages
-        await waitFor(async () => ((await status()).phase === 'waiting' ? true : null), 15_000)
-        expect(
-          (await messages()).filter(
-            (message) =>
-              message.content.includes("You haven't called step_done()") ||
-              message.content.includes('Continue working'),
-          ),
-        ).toEqual([])
-        await waitFor(async () => ((await status()).phase === 'done' ? true : null), 30_000)
-        const notice = (await messages()).find(
-          (message) => message.role === 'user' && message.content.startsWith('Background process "wait-job"'),
-        )
-        expect(notice?.isSystemGenerated).toBe(true)
-        expect(notice?.messageKind).toBe('auto-prompt')
-      } finally {
-        ws.close()
-      }
-    },
-    60_000,
-  )
+        ).messages
+      await waitFor(async () => ((await status()).phase === 'waiting' ? true : null), 15_000)
+      expect(
+        (await messages()).filter(
+          (message) =>
+            message.content.includes("You haven't called step_done()") || message.content.includes('Continue working'),
+        ),
+      ).toEqual([])
+      await waitFor(async () => ((await status()).phase === 'done' ? true : null), 30_000)
+      const notice = (await messages()).find(
+        (message) => message.role === 'user' && message.content.startsWith('Background process "wait-job"'),
+      )
+      expect(notice?.isSystemGenerated).toBe(true)
+      expect(notice?.messageKind).toBe('auto-prompt')
+    } finally {
+      ws.close()
+    }
+  }, 60_000)
 })

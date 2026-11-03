@@ -590,6 +590,7 @@ export interface BackgroundProcess {
   createdAt: number
   startedAt: number | null
   endedAt: number | null
+  notifyOnExit?: boolean
 }
 
 export interface LogLine {

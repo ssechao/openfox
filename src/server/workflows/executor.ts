@@ -33,6 +33,7 @@ import { resolveTemplate, type TemplateContext } from './template.js'
 import { resolveLLMClientForAgent, buildAgentOverrideStatsIdentity } from '../agents/model-overrides.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
+import { runBackgroundAction } from '../tools/background-process/backend.js'
 
 // ============================================================================
 // Template Variables
@@ -169,6 +170,19 @@ export function evaluateTransitions(
 const STEP_DONE_NUDGE =
   "You haven't called step_done(). If you haven't finished the task, continue and when you're finished call step_done()"
 const STEP_DONE_REMINDER = 'If you have finished the task, call step_done()'
+
+/** Step-output marker of a workflow paused until a notifyOnExit process ends. */
+export const BACKGROUND_WAIT_KEY = 'backgroundWait'
+const BACKGROUND_WAIT_NOTICE =
+  'Waiting for a background process started with notifyOnExit: this step resumes when it ends.'
+
+/** True when a background process of the session will send an exit notice. */
+async function waitsForExitNotice(sessionId: string, cwd: string): Promise<boolean> {
+  const listed = await runBackgroundAction(sessionId, cwd, { action: 'list' })
+  if (!listed.ok) return false
+  const { processes } = JSON.parse(listed.output) as { processes: Array<{ status: string; notifyOnExit?: boolean }> }
+  return processes.some((proc) => proc.status === 'running' && proc.notifyOnExit === true)
+}
 
 /**
  * True when a step's transition condition is already satisfied — the first
@@ -469,6 +483,9 @@ export async function executeWorkflow(
       role: 'user',
       content: options.userMessage.content,
       ...(options.userMessage.attachments ? { attachments: options.userMessage.attachments } : {}),
+      ...(options.userMessage.isSystemGenerated
+        ? { isSystemGenerated: true, messageKind: 'auto-prompt' as const }
+        : {}),
     })
   }
 
@@ -734,6 +751,46 @@ export async function executeWorkflow(
 
         // If step_done was not called, loop back to continue the agent step
         if (!stepDoneCalled) {
+          const cwd = sessionManager.getEffectiveWorkdir(sessionId)
+          if (executionId && (await waitsForExitNotice(sessionId, cwd))) {
+            // A notifyOnExit background process will wake the session: pause here
+            // instead of nudging, so the wait consumes no iteration. Its exit
+            // notice resumes this step (src/server/index.ts, setExitNotifier).
+            emitWorkflowMessage(eventStore, sessionId, BACKGROUND_WAIT_NOTICE, currentWindowMessageOptions, onMessage)
+            sessionManager.waitAtStep(
+              sessionId,
+              executionId,
+              step.id,
+              step.name,
+              { ...lastStepOutput, [BACKGROUND_WAIT_KEY]: 'true' },
+              workflow.metadata.id,
+              workflow.metadata.name,
+              workflow.metadata.color,
+              [],
+            )
+            // The process may have ended between the check and the pause: its
+            // notice then found no paused workflow and was queued instead.
+            if (await waitsForExitNotice(sessionId, cwd)) {
+              return {
+                finalAction: {
+                  type: 'WAITING',
+                  reason: `Waiting for a background process at step: ${step.name}`,
+                  workflowId: workflow.metadata.id,
+                  stepId: step.id,
+                  stepOutput: lastStepOutput,
+                },
+                iterations,
+                totalTime: (performance.now() - startTime) / 1000,
+              }
+            }
+            sessionManager.resumeWorkflow(
+              sessionId,
+              executionId,
+              workflow.metadata.id,
+              workflow.metadata.name,
+              workflow.metadata.color,
+            )
+          }
           logger.debug('step_done not called, looping agent step', {
             sessionId,
             stepId: step.id,

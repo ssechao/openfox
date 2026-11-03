@@ -403,7 +403,7 @@ describe('background process exit notices', () => {
     expect(notices).toEqual([])
   })
 
-  it.fails('lists notifyOnExit on a process started with it', () => {
+  it('lists notifyOnExit on a process started with it', () => {
     const sessionId = crypto.randomUUID()
     createNotifyingProcess(sessionId, 'flagged', 'sleep 60', process.cwd(), undefined, true)
     createNotifyingProcess(sessionId, 'plain', 'sleep 60', process.cwd(), undefined, false)

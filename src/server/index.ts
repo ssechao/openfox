@@ -4005,6 +4005,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       ...(launch.userChoice ? { userChoice: launch.userChoice } : {}),
       ...(launch.content ? { content: launch.content } : {}),
       ...(launch.attachments && launch.attachments.length > 0 ? { attachments: launch.attachments } : {}),
+      ...(launch.systemGenerated ? { systemGenerated: true } : {}),
     }
     const workerController = webSocketWorkerController.current
     if (workerController?.isEnabled()) {
@@ -4193,11 +4194,33 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   // A background process started with notifyOnExit wakes its session when it
   // ends on its own or by its timeout; an explicit stop or a shutdown stays silent.
+  // A workflow paused for such a process resumes its step with the notice.
   const { setExitNotifier, formatExitNotice } = await import('./tools/background-process/manager.js')
+  const { BACKGROUND_WAIT_KEY } = await import('./workflows/executor.js')
   setExitNotifier((notice) => {
     if (!sessionManager.getSession(notice.sessionId)) return
+    const content = formatExitNotice(notice)
+    const execution = sessionManager.getActiveWorkflowExecution(notice.sessionId)
+    if (
+      execution?.status === 'waiting' &&
+      execution.stepOutput[BACKGROUND_WAIT_KEY] === 'true' &&
+      execution.currentStepId
+    ) {
+      const admission = deferTasksLaunchWorkflow(notice.sessionId, {
+        workflowId: execution.workflowId,
+        resumeFrom: execution.currentStepId,
+        content,
+        systemGenerated: true,
+      })
+      if (admission === 'started' || admission === 'waiting') return
+      logger.warn('Background wait resume refused; exit notice queued instead', {
+        sessionId: notice.sessionId,
+        processId: notice.processId,
+        admission,
+      })
+    }
     try {
-      sessionManager.queueMessage(notice.sessionId, 'asap', formatExitNotice(notice), undefined, 'background-exit')
+      sessionManager.queueMessage(notice.sessionId, 'asap', content, undefined, 'background-exit')
     } catch (error) {
       logger.warn('Background process exit notice not queued', {
         sessionId: notice.sessionId,

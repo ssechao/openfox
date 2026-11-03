@@ -33,6 +33,8 @@ export interface WorkflowLaunchPayload {
   userChoice?: string
   content?: string
   attachments?: Attachment[]
+  /** The content is a background process exit notice, not the user's words. */
+  systemGenerated?: boolean
 }
 
 /**
@@ -149,6 +151,7 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
           userMessage: {
             content: payload.content ?? '',
             ...(hasUserAttachments ? { attachments: launchAttachments! } : {}),
+            ...(payload.systemGenerated ? { isSystemGenerated: true } : {}),
           },
         }
       : {}),

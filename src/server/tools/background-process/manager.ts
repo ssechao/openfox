@@ -122,7 +122,10 @@ export function createProcess(
 ): BackgroundProcess | null {
   const process = store.createProcess(sessionId, name, command, cwd)
   if (!process) return null
-  if (notifyOnExit) pendingExitNotices.set(process.id, { sessionId, name: process.name })
+  if (notifyOnExit) {
+    process.notifyOnExit = true
+    pendingExitNotices.set(process.id, { sessionId, name: process.name })
+  }
 
   if (timeout && timeout > 0) {
     setTimeout(() => {
