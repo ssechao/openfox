@@ -194,6 +194,11 @@ export class QueueProcessor {
           role: 'user',
           content: nextAsap.content,
           ...(nextAsap.attachments ? { attachments: nextAsap.attachments } : {}),
+          // A background process's exit notice carries its output: keep it marked
+          // as system-generated so it never reads as the user's own words.
+          ...(nextAsap.messageKind === 'background-exit'
+            ? { isSystemGenerated: true, messageKind: 'auto-prompt' as const }
+            : {}),
         })
         broadcastForSession(sessionId, createChatMessageMessage(userMessage))
         logger.debug('Added queued message to session', {

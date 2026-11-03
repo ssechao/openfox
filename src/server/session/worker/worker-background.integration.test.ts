@@ -225,39 +225,35 @@ describe('worker background processes', () => {
     }, 30_000)
   }, 60_000)
 
-  it.fails(
-    'marks the exit notice as system-generated',
-    async () => {
-      const created = await fetch(`${base}/api/sessions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId, title: 'worker-background-notify-kind' }),
-      })
-      expect(created.status).toBe(201)
-      const notifySessionId = ((await created.json()) as { session: { id: string } }).session.id
-      await send('BG-IPC-NOTIFY', notifySessionId)
-      const notice = await waitFor(async () => {
-        const response = await fetch(`${base}/api/sessions/${notifySessionId}`)
-        const body = (await response.json()) as {
-          messages: Array<{ role: string; content: string; isSystemGenerated?: boolean; messageKind?: string }>
-        }
-        return (
-          body.messages.find(
-            (message) => message.role === 'user' && message.content.startsWith('Background process "ipc-notify"'),
-          ) ?? null
-        )
-      }, 20_000)
-      expect(notice.isSystemGenerated).toBe(true)
-      expect(notice.messageKind).toBe('auto-prompt')
-      expect(notice.content).toContain('<process-output>')
-      await waitFor(async () => {
-        const response = await fetch(`${base}/api/sessions/${notifySessionId}`)
-        const body = (await response.json()) as { session: { isRunning: boolean } }
-        return body.session.isRunning ? null : true
-      }, 30_000)
-    },
-    60_000,
-  )
+  it('marks the exit notice as system-generated', async () => {
+    const created = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId, title: 'worker-background-notify-kind' }),
+    })
+    expect(created.status).toBe(201)
+    const notifySessionId = ((await created.json()) as { session: { id: string } }).session.id
+    await send('BG-IPC-NOTIFY', notifySessionId)
+    const notice = await waitFor(async () => {
+      const response = await fetch(`${base}/api/sessions/${notifySessionId}`)
+      const body = (await response.json()) as {
+        messages: Array<{ role: string; content: string; isSystemGenerated?: boolean; messageKind?: string }>
+      }
+      return (
+        body.messages.find(
+          (message) => message.role === 'user' && message.content.startsWith('Background process "ipc-notify"'),
+        ) ?? null
+      )
+    }, 20_000)
+    expect(notice.isSystemGenerated).toBe(true)
+    expect(notice.messageKind).toBe('auto-prompt')
+    expect(notice.content).toContain('<process-output>')
+    await waitFor(async () => {
+      const response = await fetch(`${base}/api/sessions/${notifySessionId}`)
+      const body = (await response.json()) as { session: { isRunning: boolean } }
+      return body.session.isRunning ? null : true
+    }, 30_000)
+  }, 60_000)
 
   it('kills running background processes when the gateway closes', async () => {
     const started = await startBackground('BG-IPC-START')

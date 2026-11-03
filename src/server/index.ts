@@ -4197,7 +4197,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   setExitNotifier((notice) => {
     if (!sessionManager.getSession(notice.sessionId)) return
     try {
-      sessionManager.queueMessage(notice.sessionId, 'asap', formatExitNotice(notice), undefined, 'auto-prompt')
+      sessionManager.queueMessage(notice.sessionId, 'asap', formatExitNotice(notice), undefined, 'background-exit')
     } catch (error) {
       logger.warn('Background process exit notice not queued', {
         sessionId: notice.sessionId,
@@ -4434,6 +4434,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           } catch {
             void 0
           }
+          // A shutdown is not a process ending on its own: no exit notice from here.
+          setExitNotifier(null)
           const ancillaryCleanup = Promise.all([
             devServerManager.stopAll(),
             import('./dev-server/inspect-proxy.js').then(({ stopAllInspectProxies }) => stopAllInspectProxies()),

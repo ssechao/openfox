@@ -311,7 +311,7 @@ describe('background process exit notices', () => {
     expect(notices).toEqual([])
   })
 
-  it.fails('formats the exit notice queued to the session', () => {
+  it('formats the exit notice queued to the session', () => {
     const format = exitNoticeApi.formatExitNotice!
     expect(
       format({ sessionId: 's', processId: 'p', name: 'build', exitCode: 2, timedOut: false, output: 'a\nb' }),
@@ -333,7 +333,7 @@ describe('background process exit notices', () => {
     ).toBe(true)
   })
 
-  it.fails('includes the final output of a fast writer in its exit notice', async () => {
+  it('includes the final output of a fast writer in its exit notice', async () => {
     const sessionId = crypto.randomUUID()
     const command = `node -e "process.stdout.write('x'.repeat(300000) + '\\nFINAL_SENTINEL\\n'); process.exitCode = 3"`
     const proc = createNotifyingProcess(sessionId, 'fast', command, process.cwd(), undefined, true)!
@@ -355,7 +355,7 @@ describe('background process exit notices', () => {
     expect(Date.now() - started).toBeLessThan(6000)
   })
 
-  it.fails('does not notify the processes of a destroyed session stopped by their timeout', async () => {
+  it('does not notify the processes of a destroyed session stopped by their timeout', async () => {
     const sessionId = crypto.randomUUID()
     const proc = createNotifyingProcess(
       sessionId,
