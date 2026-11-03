@@ -4,6 +4,7 @@ import * as store from './store.js'
 import { spawnShell } from '../../utils/shell.js'
 import { killProcessTree } from '../../utils/process-tree.js'
 import { createUtf8StreamDecoder } from '../../utils/utf8.js'
+import { logger } from '../../utils/logger.js'
 
 export const OUTPUT_WINDOW_MS = 100
 export const MAX_OUTPUT_BYTES_PER_WINDOW = 128 * 1024
@@ -86,14 +87,23 @@ function notifyExit(processId: string, exitCode: number | null, timedOut: boolea
   const pending = pendingExitNotices.get(processId)
   if (!pending) return
   pendingExitNotices.delete(processId)
-  exitNotifier?.({
-    sessionId: pending.sessionId,
-    processId,
-    name: pending.name,
-    exitCode,
-    timedOut,
-    output: output ?? lastOutput(processId),
-  })
+  try {
+    exitNotifier?.({
+      sessionId: pending.sessionId,
+      processId,
+      name: pending.name,
+      exitCode,
+      timedOut,
+      output: output ?? lastOutput(processId),
+    })
+  } catch (error) {
+    // Runs from a child process event: a throwing notifier would crash the server.
+    logger.error('Background process exit notice failed', {
+      sessionId: pending.sessionId,
+      processId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 // A fast writer's last output may still be paused by the rate limit when it

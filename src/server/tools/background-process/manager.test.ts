@@ -418,24 +418,20 @@ describe('background process exit notices', () => {
     ])
   })
 
-  it.fails(
-    'survives an exit notifier that throws',
-    () => {
-      const managerUrl = new URL('./manager.ts', import.meta.url).href
-      const script = [
-        `const m = await import(${JSON.stringify(managerUrl)})`,
-        "m.setExitNotifier(() => { throw new Error('notifier failure') })",
-        "const proc = m.createProcess('s', 'throwing', 'exit 0', process.cwd(), undefined, true)",
-        "m.startProcessCommand(proc.id, 's', proc.command, proc.cwd)",
-        "setTimeout(() => { console.log('alive'); process.exit(0) }, 2500)",
-      ].join('\n')
-      const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
-        encoding: 'utf8',
-        timeout: 20_000,
-      })
-      expect(result.stdout).toContain('alive')
-      expect(result.status).toBe(0)
-    },
-    30_000,
-  )
+  it('survives an exit notifier that throws', () => {
+    const managerUrl = new URL('./manager.ts', import.meta.url).href
+    const script = [
+      `const m = await import(${JSON.stringify(managerUrl)})`,
+      "m.setExitNotifier(() => { throw new Error('notifier failure') })",
+      "const proc = m.createProcess('s', 'throwing', 'exit 0', process.cwd(), undefined, true)",
+      "m.startProcessCommand(proc.id, 's', proc.command, proc.cwd)",
+      "setTimeout(() => { console.log('alive'); process.exit(0) }, 2500)",
+    ].join('\n')
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+      encoding: 'utf8',
+      timeout: 20_000,
+    })
+    expect(result.stdout).toContain('alive')
+    expect(result.status).toBe(0)
+  }, 30_000)
 })

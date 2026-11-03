@@ -17,6 +17,7 @@ import type { SessionManager } from '../session/index.js'
 import { getSessionRuntimeRegistry, type ExecutionHandle } from '../session/index.js'
 import { runOrchestrator } from './index.js'
 import { normalizeWorkflowScope } from '../workflows/registry.js'
+import { BACKGROUND_WAIT_KEY } from '../workflows/types.js'
 import { logger } from '../utils/logger.js'
 import { createSessionRunningMessage } from '../ws/protocol.js'
 
@@ -148,6 +149,8 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
           }
 
           if (exec.status === 'running') {
+            // A claimed background wait is this run's own: block it if the run fails to start.
+            if (exec.stepOutput[BACKGROUND_WAIT_KEY] === 'claimed') reactivatedExecution = exec
             return {
               ...(Object.keys(exec.params).length > 0 ? { params: exec.params } : {}),
               ...(Object.keys(exec.stepOutput).length > 0 ? { initialStepOutput: exec.stepOutput } : {}),
@@ -199,6 +202,9 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
             reactivatedExecution.workflowName,
             reactivatedExecution.workflowColor,
           )
+          if (reactivatedExecution.stepOutput[BACKGROUND_WAIT_KEY] !== undefined) {
+            sessionManager.clearBackgroundWait(reactivatedExecution.id)
+          }
         }
       }
       logger.error('Runner error', { error: errorMessage, sessionId })

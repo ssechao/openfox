@@ -4236,16 +4236,24 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       })
       queueNotice()
     }
-    const admission = deferTasksLaunchWorkflow(
-      notice.sessionId,
-      {
-        workflowId: execution.workflowId,
-        ...(execution.currentStepId ? { resumeFrom: execution.currentStepId } : {}),
-        content,
-        systemGenerated: true,
-      },
-      (error) => failResume(error.message),
-    )
+    let admission: ReturnType<typeof deferTasksLaunchWorkflow>
+    try {
+      admission = deferTasksLaunchWorkflow(
+        notice.sessionId,
+        {
+          workflowId: execution.workflowId,
+          ...(execution.currentStepId ? { resumeFrom: execution.currentStepId } : {}),
+          content,
+          systemGenerated: true,
+        },
+        (error) => failResume(error.message),
+      )
+    } catch (error) {
+      // A launch that fails at once (worker spawn, runtime) must not escape the
+      // process exit handler: it would take the whole server down.
+      failResume(error instanceof Error ? error.message : String(error))
+      return
+    }
     if (admission !== 'started' && admission !== 'waiting') failResume(admission)
   })
 
