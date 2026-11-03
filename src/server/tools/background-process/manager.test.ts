@@ -2,8 +2,10 @@ import { execFileSync } from 'node:child_process'
 import { readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { executeBackgroundAction } from './actions.js'
+import * as manager from './manager.js'
+import type { BackgroundProcess } from '../../../shared/protocol.js'
 import {
   createProcess,
   destroySessionProcesses,
@@ -13,6 +15,28 @@ import {
   stopProcess,
 } from './manager.js'
 import { cleanupAllProcesses, closeBackgroundAdmission, reopenBackgroundAdmission } from './store.js'
+
+// Exit-notice API of lot 10f, typed here so the RED commit compiles.
+type ExitNoticeShape = {
+  sessionId: string
+  processId: string
+  name: string
+  exitCode: number | null
+  timedOut: boolean
+  output: string
+}
+const exitNoticeApi = manager as unknown as {
+  setExitNotifier?: (notifier: ((notice: ExitNoticeShape) => void) | null) => void
+  formatExitNotice?: (notice: ExitNoticeShape) => string
+}
+const createNotifyingProcess = manager.createProcess as unknown as (
+  sessionId: string,
+  name: string,
+  command: string,
+  cwd: string,
+  timeout: number | undefined,
+  notifyOnExit: boolean,
+) => BackgroundProcess | null
 
 function isLiveProcess(pid: number): boolean {
   try {
@@ -184,5 +208,130 @@ describe('background process manager', () => {
 
     expect(outputEvents).toBeLessThanOrEqual(15)
     expect(outputBytes).toBeLessThanOrEqual(2 * 1024 * 1024)
+  })
+})
+
+describe('background process exit notices', () => {
+  const notices: ExitNoticeShape[] = []
+
+  async function settle(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  async function waitForNotices(count: number): Promise<void> {
+    for (let attempt = 0; attempt < 250 && notices.length < count; attempt++) await settle(20)
+  }
+
+  beforeEach(() => {
+    notices.length = 0
+    exitNoticeApi.setExitNotifier?.((notice) => notices.push(notice))
+  })
+
+  afterEach(async () => {
+    exitNoticeApi.setExitNotifier?.(null)
+    await cleanupAllProcesses()
+    reopenBackgroundAdmission()
+  })
+
+  it.fails('notifies once with the exit code and last output lines when a notifyOnExit process exits', async () => {
+    const sessionId = crypto.randomUUID()
+    const proc = createNotifyingProcess(
+      sessionId,
+      'notify',
+      "printf 'line1\nline2\n'; exit 3",
+      process.cwd(),
+      undefined,
+      true,
+    )!
+    startProcessCommand(proc.id, sessionId, proc.command, proc.cwd)
+    await waitForNotices(1)
+    await settle(200)
+    expect(notices).toEqual([
+      {
+        sessionId,
+        processId: proc.id,
+        name: 'notify',
+        exitCode: 3,
+        timedOut: false,
+        output: 'line1\nline2',
+      },
+    ])
+  })
+
+  it('does not notify a process started without notifyOnExit', async () => {
+    const sessionId = crypto.randomUUID()
+    const proc = createNotifyingProcess(sessionId, 'quiet', 'exit 0', process.cwd(), undefined, false)!
+    const exited = new Promise<void>((resolve) => {
+      const off = onProcessEvent((processId, msg) => {
+        if (processId === proc.id && msg.type === 'backgroundProcess.exited') {
+          off()
+          resolve()
+        }
+      })
+    })
+    startProcessCommand(proc.id, sessionId, proc.command, proc.cwd)
+    await exited
+    await settle(200)
+    expect(notices).toEqual([])
+  })
+
+  it('does not notify a notifyOnExit process stopped explicitly', async () => {
+    const sessionId = crypto.randomUUID()
+    const proc = createNotifyingProcess(sessionId, 'stopped', 'sleep 60', process.cwd(), undefined, true)!
+    startProcessCommand(proc.id, sessionId, proc.command, proc.cwd)
+    await stopProcess(proc.id, sessionId)
+    await settle(200)
+    expect(notices).toEqual([])
+  })
+
+  it.fails('notifies a notifyOnExit process stopped by its timeout', async () => {
+    const sessionId = crypto.randomUUID()
+    const proc = createNotifyingProcess(sessionId, 'slow', 'sleep 60', process.cwd(), 300, true)!
+    startProcessCommand(proc.id, sessionId, proc.command, proc.cwd)
+    await waitForNotices(1)
+    await settle(200)
+    expect(notices).toEqual([
+      {
+        sessionId,
+        processId: proc.id,
+        name: 'slow',
+        exitCode: null,
+        timedOut: true,
+        output: '',
+      },
+    ])
+  })
+
+  it('does not notify the processes stopped by a server shutdown', async () => {
+    const sessionId = crypto.randomUUID()
+    const proc = createNotifyingProcess(sessionId, 'shutdown', 'sleep 60', process.cwd(), undefined, true)!
+    startProcessCommand(proc.id, sessionId, proc.command, proc.cwd)
+    await cleanupAllProcesses()
+    await settle(200)
+    expect(notices).toEqual([])
+  })
+
+  it.fails('formats the exit notice queued to the session', () => {
+    const format = exitNoticeApi.formatExitNotice!
+    expect(
+      format({
+        sessionId: 's',
+        processId: 'p',
+        name: 'build',
+        exitCode: 2,
+        timedOut: false,
+        output: 'a\nb',
+      }),
+    ).toBe('Background process "build" (p) exited with code 2.\nLast output lines:\na\nb')
+    expect(
+      format({
+        sessionId: 's',
+        processId: 'p',
+        name: 'build',
+        exitCode: null,
+        timedOut: true,
+        output: '',
+      }),
+    ).toBe('Background process "build" (p) was stopped by its timeout.\nLast output lines:\n(no output)')
   })
 })

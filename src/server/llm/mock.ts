@@ -380,6 +380,22 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
       response: 'Started.',
     }
   }
+  if (/BG-IPC-NOTIFY/.test(prompt)) {
+    return {
+      tools: [
+        {
+          name: 'background_process',
+          arguments: {
+            action: 'start',
+            name: 'ipc-notify',
+            command: 'node -e "console.log(\'bg-notify-done\');setTimeout(()=>process.exit(4),1500)"',
+            notifyOnExit: true,
+          },
+        },
+      ],
+      response: 'Started.',
+    }
+  }
   if (/BG-IPC-TIMEOUT/.test(prompt)) {
     return {
       tools: [

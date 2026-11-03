@@ -13,7 +13,7 @@ import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../..')
-const MIN_PORT = 10800
+const MIN_PORT = 11200
 const N = 100
 const REAL_HOME = userInfo().homedir
 const PRODUCTION_PREFIXES = [

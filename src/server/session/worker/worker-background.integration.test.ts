@@ -196,6 +196,30 @@ describe('worker background processes', () => {
     expect(await getProcesses(deletedSessionId)).toEqual([])
   }, 60_000)
 
+  it.fails(
+    'wakes the session when a notifyOnExit background process exits',
+    async () => {
+      await send('BG-IPC-NOTIFY')
+      const notice = await waitFor(async () => {
+        const response = await fetch(`${base}/api/sessions/${sessionId}`)
+        const body = (await response.json()) as { messages: Array<{ role: string; content: string }> }
+        return (
+          body.messages.find(
+            (message) => message.role === 'user' && message.content.startsWith('Background process "ipc-notify"'),
+          ) ?? null
+        )
+      }, 20_000)
+      expect(notice.content).toContain('exited with code 4')
+      expect(notice.content).toContain('bg-notify-done')
+      await waitFor(async () => {
+        const response = await fetch(`${base}/api/sessions/${sessionId}`)
+        const body = (await response.json()) as { session: { isRunning: boolean } }
+        return body.session.isRunning ? null : true
+      }, 30_000)
+    },
+    60_000,
+  )
+
   it('kills running background processes when the gateway closes', async () => {
     const started = await startBackground('BG-IPC-START')
     expect(isAlive(started.pid)).toBe(true)
