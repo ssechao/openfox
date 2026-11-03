@@ -365,7 +365,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         const bpRes = await bpFetch
         if (bpRes.ok) {
           const bpData = await bpRes.json()
-          useBackgroundProcessesStore.getState().setProcesses(bpData.processes ?? [])
+          useBackgroundProcessesStore.getState().setProcesses(sessionId, bpData.processes ?? [])
         }
       } catch {
         /* empty */

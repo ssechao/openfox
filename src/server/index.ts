@@ -3761,12 +3761,17 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
 
   app.post('/api/sessions/:id/background-process/:processId/stop', async (req, res) => {
-    const { stopProcess } = await import('./tools/background-process/manager.js')
+    const { getSessionProcesses, stopProcess } = await import('./tools/background-process/manager.js')
     const sessionId = req.params.id
     const processId = req.params.processId
     const session = sessionManager.getSession(sessionId)
     if (!session) {
       return res.status(404).json({ error: 'Session not found' })
+    }
+    // A process this session does not own must not be reported as stopped: the
+    // client would drop it from its list while it keeps running.
+    if (!getSessionProcesses(sessionId).some((proc) => proc.id === processId)) {
+      return res.status(404).json({ error: 'Process not found' })
     }
     try {
       await stopProcess(processId, sessionId)

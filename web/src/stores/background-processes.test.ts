@@ -60,7 +60,7 @@ describe('useBackgroundProcessesStore', () => {
   })
 
   describe('session scoping', () => {
-    it.fails('keeps the session of a started process', () => {
+    it('keeps the session of a started process', () => {
       scoped().handleMessage(
         'backgroundProcess.started',
         {
@@ -76,7 +76,7 @@ describe('useBackgroundProcessesStore', () => {
       expect(useBackgroundProcessesStore.getState().processes.map((p) => p.sessionId)).toEqual(['sess-a'])
     })
 
-    it.fails('replaces only the processes of the reloaded session', () => {
+    it('replaces only the processes of the reloaded session', () => {
       useBackgroundProcessesStore.setState({
         processes: [processOf('proc-a', 'sess-a'), processOf('proc-b1', 'sess-b')],
       })

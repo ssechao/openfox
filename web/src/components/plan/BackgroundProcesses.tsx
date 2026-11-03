@@ -19,7 +19,9 @@ const STATUS_LABELS: Record<string, { en: string; fr: string }> = {
 
 export const BackgroundProcesses = memo(function BackgroundProcesses({ sessionId }: BackgroundProcessesProps) {
   const t = useT()
-  const processes = useBackgroundProcessesStore((s) => s.processes)
+  const allProcesses = useBackgroundProcessesStore((s) => s.processes)
+  // The store holds the processes of every session this tab has loaded.
+  const processes = allProcesses.filter((p) => p.sessionId === sessionId)
   const stopProcess = useBackgroundProcessesStore((s) => s.stopProcess)
   const [expandedProcessId, setExpandedProcessId] = useState<string | null>(null)
   const expandedLogs =

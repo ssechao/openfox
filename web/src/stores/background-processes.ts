@@ -9,7 +9,7 @@ interface BackgroundProcessStore {
   logs: Record<string, LogLine[]>
   loading: boolean
 
-  setProcesses: (processes: BackgroundProcess[]) => void
+  setProcesses: (sessionId: string, processes: BackgroundProcess[]) => void
   addProcess: (process: BackgroundProcess) => void
   updateProcess: (processId: string, updates: Partial<BackgroundProcess>) => void
   removeProcess: (processId: string) => void
@@ -17,7 +17,7 @@ interface BackgroundProcessStore {
   appendLog: (processId: string, stream: 'stdout' | 'stderr', content: string) => void
   setLogs: (processId: string, logs: LogLine[]) => void
   clearLogs: (processId: string) => void
-  handleMessage: (type: string, payload: Record<string, unknown>) => void
+  handleMessage: (type: string, payload: Record<string, unknown>, sessionId?: string) => void
 }
 
 let logBuffer: { processId: string; stream: 'stdout' | 'stderr'; content: string }[] = []
@@ -47,7 +47,15 @@ export const useBackgroundProcessesStore = create<BackgroundProcessStore>()((set
     logs: {},
     loading: false,
 
-    setProcesses: (processes) => set({ processes }),
+    // Replaces one session's processes only: a connection receives the events of
+    // every session it has loaded, so the other sessions' entries must survive.
+    setProcesses: (sessionId, processes) =>
+      set((state) => ({
+        processes: [
+          ...state.processes.filter((p) => p.sessionId !== sessionId),
+          ...processes.map((p) => ({ ...p, sessionId })),
+        ],
+      })),
 
     addProcess: (process) =>
       set((state) => ({
@@ -93,7 +101,7 @@ export const useBackgroundProcessesStore = create<BackgroundProcessStore>()((set
         logs: { ...state.logs, [processId]: [] },
       })),
 
-    handleMessage: (type, payload) => {
+    handleMessage: (type, payload, sessionId) => {
       switch (type) {
         case 'backgroundProcess.started': {
           const { processId, name, command, cwd, pid, status } = payload as {
@@ -109,7 +117,7 @@ export const useBackgroundProcessesStore = create<BackgroundProcessStore>()((set
               ...state.processes,
               {
                 id: processId,
-                sessionId: '',
+                sessionId: sessionId ?? '',
                 name,
                 command,
                 cwd,

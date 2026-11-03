@@ -1232,7 +1232,9 @@ export function handleServerMessage(
     case 'backgroundProcess.output':
     case 'backgroundProcess.exited':
     case 'backgroundProcess.removed': {
-      useBackgroundProcessesStore.getState().handleMessage(message.type, message.payload as Record<string, unknown>)
+      useBackgroundProcessesStore
+        .getState()
+        .handleMessage(message.type, message.payload as Record<string, unknown>, message.sessionId)
       break
     }
 
