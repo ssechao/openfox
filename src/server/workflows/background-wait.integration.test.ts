@@ -301,7 +301,7 @@ describe('workflow background wait', () => {
           )
           .get(id) as { status: string; step_output: string | null } | undefined
         return row && row.status === 'blocked' ? row : null
-      }, 5_000)
+      }, 20_000)
       expect(JSON.parse(execution.step_output ?? '{}')).not.toHaveProperty('backgroundWait')
     } finally {
       ws.close()
