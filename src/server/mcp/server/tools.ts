@@ -654,6 +654,14 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
           ...(typeof args['content'] === 'string' ? { content: args['content'] as string } : {}),
         }
 
+        if (payload.resumeFrom && sessionManager.isBackgroundWaitClaimed(sessionId)) {
+          return fail('This workflow is already resuming after its background process.')
+        }
+        const backgroundWaitExecutionId = payload.resumeFrom
+          ? sessionManager.pendingBackgroundWait(sessionId)
+          : undefined
+        if (backgroundWaitExecutionId) payload.backgroundWaitExecutionId = backgroundWaitExecutionId
+
         if (payload.workflowId && !payload.resumeFrom) {
           const workflows = await deps.listWorkflows(session.workdir)
           const known = workflows.some((w) => w.id === payload.workflowId)

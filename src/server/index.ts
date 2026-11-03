@@ -4006,6 +4006,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       ...(launch.content ? { content: launch.content } : {}),
       ...(launch.attachments && launch.attachments.length > 0 ? { attachments: launch.attachments } : {}),
       ...(launch.systemGenerated ? { systemGenerated: true } : {}),
+      ...(launch.backgroundWaitExecutionId ? { backgroundWaitExecutionId: launch.backgroundWaitExecutionId } : {}),
     }
     const workerController = webSocketWorkerController.current
     if (workerController?.isEnabled()) {
@@ -4196,47 +4197,56 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // ends on its own or by its timeout; an explicit stop or a shutdown stays silent.
   // A workflow paused for such a process resumes its step with the notice.
   const { setExitNotifier, formatExitNotice } = await import('./tools/background-process/manager.js')
-  const { BACKGROUND_WAIT_KEY } = await import('./workflows/executor.js')
   setExitNotifier((notice) => {
-    if (!sessionManager.getSession(notice.sessionId)) return
+    const session = sessionManager.getSession(notice.sessionId)
+    if (!session) return
     const content = formatExitNotice(notice)
-    const execution = sessionManager.getActiveWorkflowExecution(notice.sessionId)
-    if (
-      execution?.status === 'waiting' &&
-      execution.stepOutput[BACKGROUND_WAIT_KEY] === 'true' &&
-      execution.currentStepId
-    ) {
-      const admission = deferTasksLaunchWorkflow(notice.sessionId, {
+    const queueNotice = (): void => {
+      try {
+        sessionManager.queueMessage(notice.sessionId, 'asap', content, undefined, 'background-exit')
+      } catch (error) {
+        logger.warn('Background process exit notice not queued', {
+          sessionId: notice.sessionId,
+          processId: notice.processId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    // An interrupted session waits for its explicit resume: never relaunch it here.
+    const waitingId = session.interruptedAt ? undefined : sessionManager.pendingBackgroundWait(notice.sessionId)
+    const execution = waitingId ? sessionManager.getLatestWorkflowExecution(notice.sessionId) : null
+    if (!waitingId || !execution || !sessionManager.claimBackgroundWait(notice.sessionId, waitingId)) {
+      queueNotice()
+      return
+    }
+    // The resume this notice claimed could not start: block the workflow visibly
+    // instead of leaving it marked running with nothing executing.
+    const failResume = (reason: string): void => {
+      sessionManager.blockWorkflow(
+        notice.sessionId,
+        execution.id,
+        execution.workflowId,
+        execution.workflowName,
+        execution.workflowColor,
+      )
+      logger.warn('Background wait resume failed; workflow blocked', {
+        sessionId: notice.sessionId,
+        processId: notice.processId,
+        reason,
+      })
+      queueNotice()
+    }
+    const admission = deferTasksLaunchWorkflow(
+      notice.sessionId,
+      {
         workflowId: execution.workflowId,
-        resumeFrom: execution.currentStepId,
+        ...(execution.currentStepId ? { resumeFrom: execution.currentStepId } : {}),
         content,
         systemGenerated: true,
-      })
-      if (admission === 'started' || admission === 'waiting') {
-        sessionManager.resumeWorkflow(
-          notice.sessionId,
-          execution.id,
-          execution.workflowId,
-          execution.workflowName,
-          execution.workflowColor,
-        )
-        return
-      }
-      logger.warn('Background wait resume refused; exit notice queued instead', {
-        sessionId: notice.sessionId,
-        processId: notice.processId,
-        admission,
-      })
-    }
-    try {
-      sessionManager.queueMessage(notice.sessionId, 'asap', content, undefined, 'background-exit')
-    } catch (error) {
-      logger.warn('Background process exit notice not queued', {
-        sessionId: notice.sessionId,
-        processId: notice.processId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    }
+      },
+      (error) => failResume(error.message),
+    )
+    if (admission !== 'started' && admission !== 'waiting') failResume(admission)
   })
 
   const { getSetting, SETTINGS_KEYS } = await import('./db/settings.js')

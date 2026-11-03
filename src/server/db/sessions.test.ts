@@ -605,7 +605,7 @@ describe('db sessions', () => {
   })
 
   describe('background wait claim', () => {
-    it.fails('claims a paused background wait only once', () => {
+    it('claims a paused background wait only once', () => {
       const session = createSession(projectAId, rootA, 'Wait')
       createWorkflowExecution('exec-wait', session.id, 'wf', 'Wf', undefined, {})
       updateWorkflowExecutionStatus('exec-wait', 'waiting', 'run', 'Run', { backgroundWait: 'true' }, [])
@@ -615,7 +615,7 @@ describe('db sessions', () => {
       expect(JSON.parse(row.step_output ?? '{}')).toEqual({ backgroundWait: 'claimed' })
     })
 
-    it.fails('does not claim a paused step that is not a background wait', () => {
+    it('does not claim a paused step that is not a background wait', () => {
       const session = createSession(projectAId, rootA, 'Ask')
       createWorkflowExecution('exec-ask', session.id, 'wf', 'Wf', undefined, {})
       updateWorkflowExecutionStatus('exec-ask', 'waiting', 'ask', 'Ask', {}, [])

@@ -21,7 +21,7 @@ import type {
 } from './types.js'
 import { runPluginTransitionHandler } from '../plugins/transition-handlers.js'
 import type { PluginTransitionContext } from '../../plugin/index.js'
-import { TERMINAL_DONE, TERMINAL_BLOCKED } from './types.js'
+import { TERMINAL_DONE, TERMINAL_BLOCKED, BACKGROUND_WAIT_KEY } from './types.js'
 import { getEventStore, getCurrentContextWindowId } from '../events/index.js'
 import { createChatMessageMessage } from '../ws/protocol.js'
 import { runAgentTurn, TurnMetrics, createMessageStartEvent } from '../chat/orchestrator.js'
@@ -34,6 +34,8 @@ import { resolveLLMClientForAgent, buildAgentOverrideStatsIdentity } from '../ag
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
 import { runBackgroundAction } from '../tools/background-process/backend.js'
+
+export { BACKGROUND_WAIT_KEY }
 
 // ============================================================================
 // Template Variables
@@ -171,8 +173,6 @@ const STEP_DONE_NUDGE =
   "You haven't called step_done(). If you haven't finished the task, continue and when you're finished call step_done()"
 const STEP_DONE_REMINDER = 'If you have finished the task, call step_done()'
 
-/** Step-output marker of a workflow paused until a notifyOnExit process ends. */
-export const BACKGROUND_WAIT_KEY = 'backgroundWait'
 const BACKGROUND_WAIT_NOTICE =
   'Waiting for a background process started with notifyOnExit: this step resumes when it ends.'
 
@@ -372,7 +372,9 @@ export async function executeWorkflow(
     : subGroup
       ? (activeSteps[0]?.id ?? workflow.entryStep)
       : workflow.entryStep
-  let lastStepOutput: Record<string, string> = options.initialStepOutput ?? {}
+  // A resumed background wait starts here: its marker must not survive the run.
+  let lastStepOutput: Record<string, string> = { ...(options.initialStepOutput ?? {}) }
+  delete lastStepOutput[BACKGROUND_WAIT_KEY]
   const firstEntryForStep = new Set<string>()
 
   // Snapshot message count so we can compute workflow-scoped stats (not session-wide)
@@ -418,6 +420,7 @@ export async function executeWorkflow(
     const activeExec = sessionManager.getActiveWorkflowExecution(sessionId)
     if (activeExec) {
       executionId = activeExec.id
+      if (activeExec.stepOutput[BACKGROUND_WAIT_KEY] !== undefined) sessionManager.clearBackgroundWait(activeExec.id)
     }
   }
 
@@ -788,13 +791,8 @@ export async function executeWorkflow(
                 totalTime: (performance.now() - startTime) / 1000,
               }
             }
-            const resumed = sessionManager.resumeWorkflow(
-              sessionId,
-              executionId,
-              workflow.metadata.id,
-              workflow.metadata.name,
-              workflow.metadata.color,
-            )
+            const resumed = sessionManager.claimBackgroundWait(sessionId, executionId)
+            if (resumed) sessionManager.clearBackgroundWait(executionId)
             if (!resumed) {
               return {
                 finalAction: {

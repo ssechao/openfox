@@ -43,12 +43,15 @@ import {
   getSessionCachedPrompt,
   createWorkflowExecution,
   updateWorkflowExecutionStatus,
+  claimBackgroundWaitExecution as dbClaimBackgroundWaitExecution,
+  clearBackgroundWaitMarker as dbClearBackgroundWaitMarker,
   getActiveWorkflowExecution as dbGetActiveWorkflowExecution,
   getLatestWorkflowExecution as dbGetLatestWorkflowExecution,
   clearWorkflowExecution,
   type DangerLevel,
 } from '../db/sessions.js'
 import { getProject } from '../db/projects.js'
+import { BACKGROUND_WAIT_KEY } from '../workflows/types.js'
 import { getDatabase } from '../db/index.js'
 import { isSearchIndexReady, searchSessionIds, SEARCH_INDEX_UNAVAILABLE } from '../search/fts-index.js'
 import {
@@ -1353,6 +1356,43 @@ export class SessionManager {
       params: JSON.parse(row.params ?? '{}') as Record<string, string>,
       stepOutput: JSON.parse(row.step_output ?? '{}') as Record<string, string>,
     }
+  }
+
+  /** Latest execution paused on a background wait, still unclaimed. */
+  pendingBackgroundWait(sessionId: string): string | undefined {
+    const exec = this.getLatestWorkflowExecution(sessionId)
+    return exec?.status === 'waiting' && exec.stepOutput[BACKGROUND_WAIT_KEY] === 'true' ? exec.id : undefined
+  }
+
+  /** True once a resume holds the latest execution's background wait. */
+  isBackgroundWaitClaimed(sessionId: string): boolean {
+    const exec = this.getLatestWorkflowExecution(sessionId)
+    return exec?.status === 'running' && exec.stepOutput[BACKGROUND_WAIT_KEY] === 'claimed'
+  }
+
+  /** Atomic claim of a background wait; true for the single winner. */
+  claimBackgroundWait(sessionId: string, executionId: string): boolean {
+    if (!dbClaimBackgroundWaitExecution(executionId)) return false
+    const exec = this.getLatestWorkflowExecution(sessionId)
+    if (exec?.id === executionId) {
+      emitWorkflowExecutionChanged(
+        sessionId,
+        executionId,
+        exec.workflowId,
+        exec.workflowName,
+        exec.workflowColor,
+        'running',
+        exec.currentStepId,
+        exec.currentStepName,
+        [],
+      )
+    }
+    this.emit({ type: 'session_updated', session: this.requireSession(sessionId) })
+    return true
+  }
+
+  clearBackgroundWait(executionId: string): void {
+    dbClearBackgroundWaitMarker(executionId)
   }
 
   /**

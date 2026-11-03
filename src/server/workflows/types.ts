@@ -172,3 +172,9 @@ export type TransitionCondition =
 
 export const TERMINAL_DONE = '$done'
 export const TERMINAL_BLOCKED = '$blocked'
+
+/**
+ * Step-output marker of a workflow paused until a notifyOnExit process ends:
+ * 'true' while it waits, 'claimed' once the single resume allowed holds it.
+ */
+export const BACKGROUND_WAIT_KEY = 'backgroundWait'

@@ -35,6 +35,8 @@ export interface WorkflowLaunchPayload {
   attachments?: Attachment[]
   /** The content is a background process exit notice, not the user's words. */
   systemGenerated?: boolean
+  /** Resume issued while this execution waited for a background process: it may run only if it claims that wait when it starts. */
+  backgroundWaitExecutionId?: string
 }
 
 /**
@@ -75,6 +77,29 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
   // Mark session as running (emits running.changed event)
   sessionManager.setRunning(sessionId, true)
   broadcastForSession(sessionId, createSessionRunningMessage(true))
+
+  // Only one resume of a background wait may run: a duplicate admitted while
+  // both were pending (exit notice and manual resume) stops before the step.
+  if (
+    payload.backgroundWaitExecutionId !== undefined &&
+    !sessionManager.claimBackgroundWait(sessionId, payload.backgroundWaitExecutionId)
+  ) {
+    logger.warn('Duplicate background-wait resume skipped', { sessionId })
+    broadcastForSession(
+      sessionId,
+      createServerMessage('chat.error', {
+        error: 'Resume skipped: this workflow already resumed after its background process.',
+        recoverable: true,
+      }),
+    )
+    const runtime = getSessionRuntimeRegistry().peek(sessionId)
+    const outcome = onFinished ? onFinished() : 'settled'
+    if (runtime?.release(runtimeHandle) && outcome === 'settled') {
+      sessionManager.setRunning(sessionId, false)
+      broadcastForSession(sessionId, createSessionRunningMessage(false))
+    }
+    return Promise.resolve()
+  }
 
   const launchAttachments = payload.attachments
   const hasUserContent = payload.content && payload.content.trim().length > 0

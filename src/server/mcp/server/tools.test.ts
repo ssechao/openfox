@@ -83,6 +83,8 @@ function makeDeps(overrides: Partial<OpenFoxMcpToolDeps> = {}): OpenFoxMcpToolDe
       queueMessage: vi.fn(() => ({ queueId: 'q-1', mode: 'asap', content: 'hello' })),
       getQueueState: vi.fn(() => []),
       getActiveWorkflowExecution: vi.fn(() => null),
+      isBackgroundWaitClaimed: vi.fn(() => false),
+      pendingBackgroundWait: vi.fn(() => undefined),
       setPhase: vi.fn(),
       setMode: vi.fn((id: string, mode: string) => ({ ...session, id, mode })),
     } as any,

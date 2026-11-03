@@ -1401,6 +1401,26 @@ async function handleClientMessage(
         return
       }
 
+      // A background wait admits a single resume: refuse a second one while the
+      // first (exit notice or another manual resume) holds it; otherwise mark this
+      // one so it claims the wait when it starts.
+      if (launchPayloadEarly?.resumeFrom && sessionManager.isBackgroundWaitClaimed(sessionId)) {
+        send(
+          createErrorMessage(
+            'WORKFLOW_RESUMING',
+            serverT({
+              en: 'This workflow is already resuming after its background process',
+              fr: 'Ce workflow reprend déjà après son processus de fond',
+            }),
+            message.id,
+          ),
+        )
+        return
+      }
+      const backgroundWaitExecutionId = launchPayloadEarly?.resumeFrom
+        ? sessionManager.pendingBackgroundWait(sessionId)
+        : undefined
+
       // Skip criteria check when resuming from a user step
       if (!launchPayloadEarly?.resumeFrom) {
         const pendingCriteria = session.criteria.filter((c) => c.status.type !== 'passed')
@@ -1441,6 +1461,7 @@ async function handleClientMessage(
         ...(launchPayload?.stepOutput ? { stepOutput: launchPayload.stepOutput } : {}),
         ...(launchPayload?.params ? { params: launchPayload.params } : {}),
         ...(launchPayload?.userChoice ? { userChoice: launchPayload.userChoice } : {}),
+        ...(backgroundWaitExecutionId ? { backgroundWaitExecutionId } : {}),
       }
       if (runInWorkerIfEnabled(sessionId, 'workflow', { kind: 'workflow', payload: workerPayload })) return
 
@@ -1541,6 +1562,7 @@ async function handleClientMessage(
                 ...(hasUserAttachments ? { attachments: launchAttachments! } : {}),
               }
             : {}),
+          ...(backgroundWaitExecutionId ? { backgroundWaitExecutionId } : {}),
         },
       )
 

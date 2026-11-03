@@ -6,6 +6,8 @@ import { randomUUID } from 'node:crypto'
 import { WebSocket } from 'ws'
 import type { Config } from '../../shared/types.js'
 import type { ServerHandle } from '../context.js'
+import { getDatabase } from '../db/index.js'
+import { markSessionInterrupted } from '../session/worker/crash.js'
 
 describe('workflow background wait', () => {
   let server: ServerHandle
@@ -195,51 +197,70 @@ describe('workflow background wait', () => {
     }
   }, 60_000)
 
-  it.fails(
-    'runs a background-wait step once when a manual resume overlaps the exit notice',
-    async () => {
-      const id = await createSession('background-wait-overlap')
-      const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
-      await new Promise<void>((resolve, reject) => {
-        ws.once('open', () => resolve())
-        ws.once('error', reject)
-      })
-      try {
-        ws.send(
-          JSON.stringify({
-            id: 'launch-overlap',
-            type: 'runner.launch',
-            payload: { sessionId: id, workflowId: 'background-wait', scope: 'project' },
-          }),
-        )
-        const status = async () =>
-          (await (await fetch(`${base}/api/sessions/${id}/status`)).json()) as { phase: string }
-        await waitFor(async () => ((await status()).phase === 'waiting' ? true : null), 15_000)
-        ws.send(
-          JSON.stringify({
-            id: 'resume-overlap',
-            type: 'runner.launch',
-            payload: { sessionId: id, workflowId: 'background-wait', scope: 'project', resumeFrom: 'run' },
-          }),
-        )
-        let idleSince: number | null = null
-        const messages = await waitFor(async () => {
-          const body = (await (await fetch(`${base}/api/sessions/${id}`)).json()) as {
-            session: { isRunning: boolean }
-            messages: Array<{ messageKind?: string }>
-          }
-          if (body.session.isRunning) {
-            idleSince = null
-            return null
-          }
-          idleSince ??= Date.now()
-          return Date.now() - idleSince >= 1_000 ? body.messages : null
-        }, 30_000)
-        expect(messages.filter((message) => message.messageKind === 'task-completed')).toHaveLength(1)
-      } finally {
-        ws.close()
+  it('runs a background-wait step once when a manual resume overlaps the exit notice', async () => {
+    const id = await createSession('background-wait-overlap')
+    const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    try {
+      ws.send(
+        JSON.stringify({
+          id: 'launch-overlap',
+          type: 'runner.launch',
+          payload: { sessionId: id, workflowId: 'background-wait', scope: 'project' },
+        }),
+      )
+      const status = async () => (await (await fetch(`${base}/api/sessions/${id}/status`)).json()) as { phase: string }
+      await waitFor(async () => ((await status()).phase === 'waiting' ? true : null), 15_000)
+      ws.send(
+        JSON.stringify({
+          id: 'resume-overlap',
+          type: 'runner.launch',
+          payload: { sessionId: id, workflowId: 'background-wait', scope: 'project', resumeFrom: 'run' },
+        }),
+      )
+      await waitFor(async () => ((await status()).phase === 'done' ? true : null), 30_000)
+      // A duplicate resume would run after the winner: give it time to show up.
+      await new Promise((resolve) => setTimeout(resolve, 5_000))
+      const messages = (
+        (await (await fetch(`${base}/api/sessions/${id}`)).json()) as {
+          messages: Array<{ messageKind?: string }>
+        }
+      ).messages
+      expect(messages.filter((message) => message.messageKind === 'task-completed')).toHaveLength(1)
+    } finally {
+      ws.close()
+    }
+  }, 60_000)
+
+  it('does not relaunch the workflow of an interrupted session on the exit notice', async () => {
+    const id = await createSession('background-wait-interrupted')
+    const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    try {
+      ws.send(
+        JSON.stringify({
+          id: 'launch-interrupted',
+          type: 'runner.launch',
+          payload: { sessionId: id, workflowId: 'background-wait-long', scope: 'project' },
+        }),
+      )
+      const status = async () => (await (await fetch(`${base}/api/sessions/${id}/status`)).json()) as { phase: string }
+      await waitFor(async () => ((await status()).phase === 'waiting' ? true : null), 15_000)
+      markSessionInterrupted(getDatabase(), id, new Date().toISOString())
+      await new Promise((resolve) => setTimeout(resolve, 9_000))
+      expect((await status()).phase).toBe('waiting')
+      const body = (await (await fetch(`${base}/api/sessions/${id}`)).json()) as {
+        messages: Array<{ messageKind?: string }>
       }
-    },
-    60_000,
-  )
+      expect(body.messages.filter((message) => message.messageKind === 'task-completed')).toHaveLength(0)
+    } finally {
+      ws.close()
+    }
+  }, 60_000)
 })

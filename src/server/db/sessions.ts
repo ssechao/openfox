@@ -9,6 +9,7 @@ import type { Session, SessionSummary, SessionMode, SessionPhase, DangerLevel } 
 import { getDatabase } from './index.js'
 import { resolveDefaultAgentId } from '../agents/registry.js'
 import { SearchIndexer } from '../search/fts-index.js'
+import { BACKGROUND_WAIT_KEY } from '../workflows/types.js'
 export type { DangerLevel } from '../../shared/types.js'
 
 function getProjectDangerLevel(projectId: string): DangerLevel {
@@ -792,6 +793,27 @@ export function updateWorkflowExecutionStatus(
   db.prepare(
     `UPDATE workflow_executions SET status = ?, current_step_id = COALESCE(?, current_step_id), current_step_name = COALESCE(?, current_step_name), step_output = COALESCE(?, step_output), pending_choices = COALESCE(?, pending_choices), updated_at = ? WHERE id = ?`,
   ).run(status, stepId ?? null, stepName ?? null, stepOutputJson ?? null, pendingChoicesJson ?? null, now, executionId)
+}
+
+/**
+ * Atomically claim a paused background wait for the single resume allowed: the
+ * exit notice, the executor's recheck and a manual resume race here.
+ */
+export function claimBackgroundWaitExecution(executionId: string): boolean {
+  const path = `$.${BACKGROUND_WAIT_KEY}`
+  const result = getDatabase()
+    .prepare(
+      `UPDATE workflow_executions SET status = 'running', pending_choices = '[]', step_output = json_set(step_output, ?, 'claimed'), updated_at = ? WHERE id = ? AND status = 'waiting' AND json_extract(step_output, ?) = 'true'`,
+    )
+    .run(path, Date.now(), executionId, path)
+  return result.changes === 1
+}
+
+/** The resumed run has started: its background-wait marker no longer applies. */
+export function clearBackgroundWaitMarker(executionId: string): void {
+  getDatabase()
+    .prepare(`UPDATE workflow_executions SET step_output = json_remove(step_output, ?) WHERE id = ?`)
+    .run(`$.${BACKGROUND_WAIT_KEY}`, executionId)
 }
 
 export function getActiveWorkflowExecution(sessionId: string): WorkflowExecutionRow | undefined {
