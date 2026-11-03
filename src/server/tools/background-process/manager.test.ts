@@ -233,7 +233,7 @@ describe('background process exit notices', () => {
     reopenBackgroundAdmission()
   })
 
-  it.fails('notifies once with the exit code and last output lines when a notifyOnExit process exits', async () => {
+  it('notifies once with the exit code and last output lines when a notifyOnExit process exits', async () => {
     const sessionId = crypto.randomUUID()
     const proc = createNotifyingProcess(
       sessionId,
@@ -284,7 +284,7 @@ describe('background process exit notices', () => {
     expect(notices).toEqual([])
   })
 
-  it.fails('notifies a notifyOnExit process stopped by its timeout', async () => {
+  it('notifies a notifyOnExit process stopped by its timeout', async () => {
     const sessionId = crypto.randomUUID()
     const proc = createNotifyingProcess(sessionId, 'slow', 'sleep 60', process.cwd(), 300, true)!
     startProcessCommand(proc.id, sessionId, proc.command, proc.cwd)
@@ -311,7 +311,7 @@ describe('background process exit notices', () => {
     expect(notices).toEqual([])
   })
 
-  it.fails('formats the exit notice queued to the session', () => {
+  it('formats the exit notice queued to the session', () => {
     const format = exitNoticeApi.formatExitNotice!
     expect(
       format({

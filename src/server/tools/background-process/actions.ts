@@ -7,6 +7,7 @@ export interface BackgroundProcessToolArgs {
   command?: string
   cwd?: string
   timeout?: number
+  notifyOnExit?: boolean
   processId?: string
   since?: number
   maxLines?: number
@@ -43,7 +44,14 @@ export async function executeBackgroundAction(
       }
 
       const name = args.name ?? args.command?.split(' ')[0] ?? 'process'
-      const process = manager.createProcess(sessionId, name, args.command!, defaultCwd, args.timeout)
+      const process = manager.createProcess(
+        sessionId,
+        name,
+        args.command!,
+        defaultCwd,
+        args.timeout,
+        args.notifyOnExit === true,
+      )
 
       if (!process) {
         return { ok: false, error: 'Failed to create process. Maximum limit may have been reached.' }

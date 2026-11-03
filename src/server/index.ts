@@ -4191,6 +4191,22 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
   resumeQueuedSession = (sessionId) => queueProcessor.resumeQueuedSession(sessionId)
 
+  // A background process started with notifyOnExit wakes its session when it
+  // ends on its own or by its timeout; an explicit stop or a shutdown stays silent.
+  const { setExitNotifier, formatExitNotice } = await import('./tools/background-process/manager.js')
+  setExitNotifier((notice) => {
+    if (!sessionManager.getSession(notice.sessionId)) return
+    try {
+      sessionManager.queueMessage(notice.sessionId, 'asap', formatExitNotice(notice), undefined, 'auto-prompt')
+    } catch (error) {
+      logger.warn('Background process exit notice not queued', {
+        sessionId: notice.sessionId,
+        processId: notice.processId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
+
   const { getSetting, SETTINGS_KEYS } = await import('./db/settings.js')
   const { getStaleRunningSessionIds } = await import('./events/store.js')
   const { runBootAutoContinuations } = await import('./session/auto-continue.js')

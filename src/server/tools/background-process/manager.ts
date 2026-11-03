@@ -23,21 +23,71 @@ function emitProcessEvent(processId: string, msg: ServerMessage): void {
   }
 }
 
+export interface ExitNotice {
+  sessionId: string
+  processId: string
+  name: string
+  exitCode: number | null
+  timedOut: boolean
+  output: string
+}
+
+type ExitNotifier = (notice: ExitNotice) => void
+let exitNotifier: ExitNotifier | null = null
+// Processes started with notifyOnExit, until their single notice is sent or an
+// explicit stop cancels it.
+const pendingExitNotices = new Map<string, { sessionId: string; name: string }>()
+const EXIT_NOTICE_MAX_LINES = 20
+const EXIT_NOTICE_MAX_CHARS = 4000
+
+export function setExitNotifier(notifier: ExitNotifier | null): void {
+  exitNotifier = notifier
+}
+
+export function formatExitNotice(notice: ExitNotice): string {
+  const outcome = notice.timedOut
+    ? 'was stopped by its timeout'
+    : `exited with code ${notice.exitCode === null ? 'unknown' : String(notice.exitCode)}`
+  const output = notice.output === '' ? '(no output)' : notice.output
+  return `Background process "${notice.name}" (${notice.processId}) ${outcome}.\nLast output lines:\n${output}`
+}
+
+function lastOutput(processId: string): string {
+  const lines = store
+    .getLogs(processId)
+    .map((line) => line.content)
+    .join('')
+    .split('\n')
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  const tail = lines.slice(-EXIT_NOTICE_MAX_LINES).join('\n')
+  return tail.length > EXIT_NOTICE_MAX_CHARS ? tail.slice(-EXIT_NOTICE_MAX_CHARS) : tail
+}
+
+function notifyExit(processId: string, exitCode: number | null, timedOut: boolean, output: string): void {
+  const pending = pendingExitNotices.get(processId)
+  if (!pending) return
+  pendingExitNotices.delete(processId)
+  exitNotifier?.({ sessionId: pending.sessionId, processId, name: pending.name, exitCode, timedOut, output })
+}
+
 export function createProcess(
   sessionId: string,
   name: string,
   command: string,
   cwd: string,
   timeout?: number,
+  notifyOnExit = false,
 ): BackgroundProcess | null {
   const process = store.createProcess(sessionId, name, command, cwd)
   if (!process) return null
+  if (notifyOnExit) pendingExitNotices.set(process.id, { sessionId, name: process.name })
 
   if (timeout && timeout > 0) {
     setTimeout(() => {
       const p = store.getProcess(process.id, sessionId)
       if (p && p.status === 'running') {
-        stopProcess(process.id, sessionId)
+        const output = lastOutput(process.id)
+        void terminateProcess(process.id, sessionId).then(() => notifyExit(process.id, null, true, output))
       }
     }, timeout).unref()
   }
@@ -138,30 +188,43 @@ export function startProcessCommand(processId: string, sessionId: string, comman
   child.on('exit', (code, signal) => {
     flushStdout()
     flushStderr()
-    markExited(processId, sessionId, code ?? (signal ? 1 : null))
+    const exitCode = code ?? (signal ? 1 : null)
+    // Only a process ending on its own notifies here: a stop in flight (explicit
+    // or by timeout) and a shutdown (entry already cleared) are handled elsewhere.
+    const endedOnItsOwn = store.getProcess(processId, sessionId)?.status === 'running'
+    markExited(processId, sessionId, exitCode)
     emitProcessEvent(processId, {
       type: 'backgroundProcess.exited',
-      payload: { processId, exitCode: code ?? (signal ? 1 : null) },
+      payload: { processId, exitCode },
       sessionId,
     })
+    if (endedOnItsOwn) notifyExit(processId, exitCode, false, lastOutput(processId))
   })
 
   child.on('error', (err) => {
     flushStdout()
     flushStderr()
     store.appendLog(processId, `Error: ${err.message}\n`, 'stderr')
+    const endedOnItsOwn = store.getProcess(processId, sessionId)?.status === 'running'
     markExited(processId, sessionId, 1)
     emitProcessEvent(processId, {
       type: 'backgroundProcess.exited',
       payload: { processId, exitCode: 1 },
       sessionId,
     })
+    if (endedOnItsOwn) notifyExit(processId, 1, false, lastOutput(processId))
   })
 
   return child.pid ?? null
 }
 
 export async function stopProcess(processId: string, sessionId: string): Promise<void> {
+  // An explicit stop is the caller's own decision: no exit notice.
+  pendingExitNotices.delete(processId)
+  await terminateProcess(processId, sessionId)
+}
+
+async function terminateProcess(processId: string, sessionId: string): Promise<void> {
   const proc = store.getProcess(processId, sessionId)
 
   if (!proc || proc.status !== 'running' || !proc.pid) {

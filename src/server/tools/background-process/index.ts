@@ -15,11 +15,13 @@ export const backgroundProcessTool = createTool<BackgroundProcessToolArgs>(
 These processes run independently of agent turns and persist across session compaction. Processes are displayed in the right sidebar where you can view their logs and status.
 
 **Actions:**
-- start: Launch a new background process (provide: name, command, cwd, timeout)
+- start: Launch a new background process (provide: name, command, cwd, timeout, notifyOnExit)
 - stop: Stop a running process and remove it from the sidebar
 - list: Show all processes for this session
 - status: Get detailed status of a specific process
-- logs: Retrieve process output with optional pagination`,
+- logs: Retrieve process output with optional pagination
+
+For a long job whose result you need, set notifyOnExit: true and end your turn: when the process ends on its own or by its timeout, a message with its exit code and last output lines is queued to this session and starts a new turn. An explicit stop sends no message.`,
       parameters: {
         type: 'object',
         properties: {
@@ -43,6 +45,11 @@ These processes run independently of agent turns and persist across session comp
           timeout: {
             type: 'number',
             description: 'Maximum runtime in milliseconds. Process will be terminated after this duration.',
+          },
+          notifyOnExit: {
+            type: 'boolean',
+            description:
+              'Queue a message to this session when the process ends on its own or by its timeout (exit code and last output lines). Default: false.',
           },
           processId: {
             type: 'string',
