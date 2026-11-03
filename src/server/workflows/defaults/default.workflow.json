@@ -3,7 +3,7 @@
     "id": "default",
     "name": "Build & Verify",
     "description": "Standard build-verify loop. Builder implements criteria, verifier checks them.",
-    "version": "1.3.3",
+    "version": "1.3.4",
     "color": "#3b82f6"
   },
   "entryStep": "work_location",
@@ -59,7 +59,7 @@
       "agentId": "builder",
       "subGroup": "build",
       "prompt": "Implement the task and make sure you fulfil the {{criteriaCount}} criteria. Mark each criterion as complete using session_metadata with action update and status completed.\n\nNote: **Do not** call the `code_reviewer` or `verifier` sub-agents yourself via `call_sub_agent` — both run automatically later in this workflow (verify → code review) with the full diff in context; doing it here duplicates work.",
-      "nudgePrompt": "Continue working on the acceptance criteria. {{reason}}.\n\n{{verifierFindings}}\nFix the issues above, then mark each failed criterion as **completed** using session_metadata with action update and status completed. Do not use \"verified\" — that status is set by the verifier, not by you.\n\nReminder: don't self-invoke `code_reviewer`/`verifier` — the workflow runs them later.",
+      "nudgePrompt": "Continue working on the acceptance criteria. {{reason}}.\n\n{{verifierFindings}}\nWhen a criterion is done, mark it as **completed** using session_metadata with action update and status completed; if the verifier reported failures above, fix them first. Do not use \"verified\" — that status is set by the verifier, not by you.\n\nReminder: don't self-invoke `code_reviewer`/`verifier` — the workflow runs them later.",
       "transitions": [
         {
           "when": {

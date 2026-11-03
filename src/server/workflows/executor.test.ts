@@ -499,7 +499,7 @@ describe('buildReason', () => {
     expect(buildReason(undefined)).toBe('0 criteria remaining')
   })
 
-  it.fails('does not count completed criteria awaiting verification as remaining', () => {
+  it('does not count completed criteria awaiting verification as remaining', () => {
     const entries = {
       criteria: [
         makeMetadataEntry({ id: 'c1', status: 'passed' }),

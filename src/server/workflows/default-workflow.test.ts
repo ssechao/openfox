@@ -21,13 +21,13 @@ const ctx: TemplateContext = {
 }
 
 describe('default workflow build nudge', () => {
-  it.fails('does not ask to fix issues when the verifier reported none', () => {
+  it('does not ask to fix issues when the verifier reported none', () => {
     const nudge = resolveTemplate(nudgePrompt, ctx)
     expect(nudge).not.toContain('Fix the issues above')
     expect(nudge).toContain('Continue working on the acceptance criteria. 2 criteria remaining.')
   })
 
-  it.fails('keeps the verifier findings in the build nudge', () => {
+  it('keeps the verifier findings in the build nudge', () => {
     const nudge = resolveTemplate(nudgePrompt, {
       ...ctx,
       stepOutput: { content: 'c2 failed: test missing' },

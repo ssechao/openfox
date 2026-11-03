@@ -182,6 +182,15 @@ export class QueueProcessor {
           latestExec.workflowName,
           latestExec.workflowColor,
         )
+        // Say so in the conversation: otherwise the workflow just disappears.
+        const cancelNotice = sessionManager.addMessage(sessionId, {
+          role: 'user',
+          content: `Workflow "${latestExec.workflowName}" was cancelled at step "${latestExec.currentStepName ?? latestExec.currentStepId ?? 'unknown'}": it was blocked when a new message started this turn. Launch it again to continue.`,
+          isSystemGenerated: true,
+          messageKind: 'correction',
+          metadata: { type: 'workflow', name: 'Workflow', color: '#f59e0b' },
+        })
+        broadcastForSession(sessionId, createChatMessageMessage(cancelNotice))
       }
 
       sessionManager.setRunning(sessionId, true)

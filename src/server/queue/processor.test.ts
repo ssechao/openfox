@@ -524,7 +524,7 @@ describe('QueueProcessor', () => {
       expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
     })
 
-    it.fails('announces a cancelled blocked workflow before the queued message', () => {
+    it('announces a cancelled blocked workflow before the queued message', () => {
       queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
       latestExecution = {
         id: 'exec-1',
