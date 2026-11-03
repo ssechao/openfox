@@ -324,7 +324,9 @@ describe('workflow background wait', () => {
             'SELECT status, step_output FROM workflow_executions WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1',
           )
           .get(id) as { status: string; step_output: string | null } | undefined
-        return row && row.status === 'blocked' ? row : null
+        return row && row.status === 'blocked' && JSON.parse(row.step_output ?? '{}').backgroundWait === undefined
+          ? row
+          : null
       }, 20_000)
       expect(JSON.parse(execution.step_output ?? '{}')).not.toHaveProperty('backgroundWait')
     } finally {
