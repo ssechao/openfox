@@ -74,6 +74,7 @@ describe('QueueProcessor', () => {
     workflowName: string
     status: string
     currentStepId?: string
+    currentStepName?: string
     stepOutput: Record<string, string>
     params: Record<string, string>
   } | null
@@ -521,6 +522,59 @@ describe('QueueProcessor', () => {
 
       expect(mockSessionManager.cancelWorkflow).not.toHaveBeenCalled()
       expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
+    })
+
+    it('announces a cancelled blocked workflow before the queued message', () => {
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+      latestExecution = {
+        id: 'exec-1',
+        sessionId: 'sess-1',
+        workflowId: 'default',
+        workflowName: 'Build & Verify',
+        status: 'blocked',
+        currentStepId: 'build',
+        currentStepName: 'Implement',
+        stepOutput: {},
+        params: {},
+      }
+
+      queueProcessor.start()
+
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+
+      const calls = vi.mocked(mockSessionManager.addMessage).mock.calls
+      expect(calls).toHaveLength(2)
+      expect(calls[0][1]).toEqual({
+        role: 'user',
+        content:
+          'Workflow "Build & Verify" was cancelled at step "Implement": it was blocked when a new message started this turn. Launch it again to continue.',
+        isSystemGenerated: true,
+        messageKind: 'correction',
+        metadata: { type: 'workflow', name: 'Workflow', color: '#f59e0b' },
+      })
+      expect(calls[1][1].content).toBe('hello')
+    })
+
+    it('adds only the queued message when no workflow is blocked', () => {
+      queueItems = [{ queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }]
+      latestExecution = {
+        id: 'exec-1',
+        sessionId: 'sess-1',
+        workflowId: 'default',
+        workflowName: 'Build & Verify',
+        status: 'running',
+        currentStepId: 'build',
+        stepOutput: {},
+        params: {},
+      }
+
+      queueProcessor.start()
+
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'hello' })
+
+      expect(vi.mocked(mockSessionManager.addMessage).mock.calls).toHaveLength(1)
     })
   })
 

@@ -498,6 +498,19 @@ describe('buildReason', () => {
   it('handles undefined metadata entries', () => {
     expect(buildReason(undefined)).toBe('0 criteria remaining')
   })
+
+  it('does not count completed criteria awaiting verification as remaining', () => {
+    const entries = {
+      criteria: [
+        makeMetadataEntry({ id: 'c1', status: 'passed' }),
+        makeMetadataEntry({ id: 'c2', status: 'completed' }),
+        makeMetadataEntry({ id: 'c3', status: 'completed' }),
+        makeMetadataEntry({ id: 'c4', status: 'pending' }),
+        makeMetadataEntry({ id: 'c5', status: 'failed' }),
+      ],
+    }
+    expect(buildReason(entries)).toBe('2 criteria remaining')
+  })
 })
 
 // ============================================================================

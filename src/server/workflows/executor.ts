@@ -318,7 +318,8 @@ function getCurrentWindowMessageOptions(sessionId: string): { contextWindowId: s
 
 export function buildReason(metadataEntries?: Record<string, import('../../shared/types.js').MetadataEntry[]>): string {
   const entries = metadataEntries?.['criteria'] ?? []
-  const remaining = entries.filter((e) => e.status !== 'passed')
+  // Completed criteria await the verifier: they are not left to the builder.
+  const remaining = entries.filter((e) => e.status !== 'passed' && e.status !== 'completed')
   return `${remaining.length} criteria remaining`
 }
 
