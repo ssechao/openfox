@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { QueueProcessor } from './processor.js'
 import { SessionRuntimeRegistry } from '../session/index.js'
+import { generateSessionNameForSession } from '../session/name-generator.js'
 import { initDatabase, closeDatabase } from '../db/index.js'
 import type { Config } from '../config.js'
 
@@ -34,6 +35,11 @@ vi.mock('../events/store.js', () => ({
   initEventStore: vi.fn(),
 }))
 
+vi.mock('../session/name-generator.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../session/name-generator.js')>()
+  return { ...actual, generateSessionNameForSession: vi.fn(actual.generateSessionNameForSession) }
+})
+
 describe('QueueProcessor', () => {
   let mockSessionManager: any
   let mockProviderManager: any
@@ -53,7 +59,14 @@ describe('QueueProcessor', () => {
     providerReasoningEffort?: string
     mode?: string
   }
-  let queueItems: Array<{ queueId: string; mode: string; content: string; queuedAt: string; attachments?: any[] }>
+  let queueItems: Array<{
+    queueId: string
+    mode: string
+    content: string
+    queuedAt: string
+    attachments?: any[]
+    messageKind?: 'background-exit'
+  }>
   let latestExecution: {
     id: string
     sessionId: string
@@ -169,6 +182,40 @@ describe('QueueProcessor', () => {
 
       expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
       expect(mockSessionManager.addMessage).toHaveBeenCalled()
+    })
+
+    it.fails('does not name a session from a background process exit notice', () => {
+      vi.mocked(generateSessionNameForSession).mockClear()
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      const notice = {
+        queueId: 'q-1',
+        mode: 'asap',
+        content: 'Background process "x" (p) exited with code 0.',
+        queuedAt: '2024-01-01',
+        messageKind: 'background-exit' as const,
+      }
+      queueItems = [notice]
+
+      queueProcessor.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: notice.content })
+
+      expect(mockSessionManager.addMessage).toHaveBeenCalled()
+      expect(generateSessionNameForSession).not.toHaveBeenCalled()
+    })
+
+    it('still names a session from a regular queued message', () => {
+      vi.mocked(generateSessionNameForSession).mockClear()
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      const message = { queueId: 'q-1', mode: 'asap', content: 'hello', queuedAt: '2024-01-01' }
+      queueItems = [message]
+
+      queueProcessor.start()
+      const callback = mockSessionManager.subscribe.mock.calls[0][0]
+      callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: message.content })
+
+      expect(mockSessionManager.addMessage).toHaveBeenCalled()
+      expect(generateSessionNameForSession).toHaveBeenCalledTimes(1)
     })
 
     it('does not start a turn while the runtime is stopping', () => {
