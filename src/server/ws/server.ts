@@ -312,6 +312,7 @@ function processQueueAndRestartTurn(
 interface ClientConnection {
   ws: WebSocket
   activeSessionId: string | null
+  loadedSessionIds: Set<string>
   activeWorkdir: string | null
   globalSubscription: (() => void) | null
   sendQueue: Array<{ data: string; seq: number }>
@@ -466,8 +467,11 @@ export function createWebSocketServer(
     }
   }
 
+  // Every session this connection has loaded, not only the last one: worker
+  // events reach the gateway only through broadcastForSession, so a split pane
+  // or a session left mid-turn would otherwise stop updating.
   const isSubscribedToSession = (client: ClientConnection, sessionId: string) => {
-    return client.activeSessionId === sessionId
+    return client.loadedSessionIds.has(sessionId)
   }
 
   // Ordered send queue implementation for FIFO message delivery
@@ -701,7 +705,7 @@ export function createWebSocketServer(
     if (!sessionId) return
     // Route to clients subscribed to this session
     for (const [clientWs, client] of clients) {
-      if (client.activeSessionId === sessionId) {
+      if (isSubscribedToSession(client, sessionId)) {
         if (clientWs.readyState === WebSocket.OPEN) {
           const seq = client.lastSentSeq + 1
           enqueueSend(client, serializeServerMessage(msg), seq)
@@ -728,6 +732,7 @@ export function createWebSocketServer(
     clients.set(ws, {
       ws,
       activeSessionId: null,
+      loadedSessionIds: new Set(),
       activeWorkdir: null,
       globalSubscription: null,
       sendQueue: [],
@@ -1030,6 +1035,7 @@ async function handleClientMessage(
 
       // Tab model: set active session for event routing
       client.activeSessionId = session.id
+      client.loadedSessionIds.add(session.id)
       const effectiveWorkdir = sessionManager.getEffectiveWorkdir(session.id)
       client.activeWorkdir = effectiveWorkdir
       moduleStopUnwatchedGitPolling()

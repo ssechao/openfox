@@ -154,33 +154,29 @@ describe('worker event routing', () => {
     return received.some((message) => message.sessionId === targetSessionId && message.type === type)
   }
 
-  it.fails(
-    'relays the end of a worker turn to a connection that loaded another session since',
-    async () => {
-      const a = await createSession('worker-turn-a')
-      const b = await createSession('worker-turn-b')
-      const { ws, received } = await connect()
-      try {
-        await load(ws, received, 'load-a', a)
-        await load(ws, received, 'load-b', b)
-        await send('hello', a)
-        await waitFor(async () => (seen(received, a, 'chat.done') ? true : null), 5_000)
-        await waitFor(
-          async () =>
-            received.some(
-              (message) =>
-                message.sessionId === a && message.type === 'session.running' && message.payload?.isRunning === false,
-            )
-              ? true
-              : null,
-          5_000,
-        )
-      } finally {
-        ws.close()
-      }
-    },
-    60_000,
-  )
+  it('relays the end of a worker turn to a connection that loaded another session since', async () => {
+    const a = await createSession('worker-turn-a')
+    const b = await createSession('worker-turn-b')
+    const { ws, received } = await connect()
+    try {
+      await load(ws, received, 'load-a', a)
+      await load(ws, received, 'load-b', b)
+      await send('hello', a)
+      await waitFor(async () => (seen(received, a, 'chat.done') ? true : null), 5_000)
+      await waitFor(
+        async () =>
+          received.some(
+            (message) =>
+              message.sessionId === a && message.type === 'session.running' && message.payload?.isRunning === false,
+          )
+            ? true
+            : null,
+        5_000,
+      )
+    } finally {
+      ws.close()
+    }
+  }, 60_000)
 
   it('still relays a worker turn to the session loaded last', async () => {
     const a = await createSession('last-loaded-a')
@@ -214,22 +210,18 @@ describe('worker event routing', () => {
     }
   }, 60_000)
 
-  it.fails(
-    'relays background process events of a session loaded before another',
-    async () => {
-      const a = await createSession('background-a')
-      const b = await createSession('background-b')
-      const { ws, received } = await connect()
-      try {
-        await load(ws, received, 'load-a', a)
-        const started = await startBackground('BG-IPC-START', a)
-        await load(ws, received, 'load-b', b)
-        await send(`BG-IPC-STOP ${started.processId}`, a)
-        await waitFor(async () => (seen(received, a, 'backgroundProcess.removed') ? true : null), 5_000)
-      } finally {
-        ws.close()
-      }
-    },
-    60_000,
-  )
+  it('relays background process events of a session loaded before another', async () => {
+    const a = await createSession('background-a')
+    const b = await createSession('background-b')
+    const { ws, received } = await connect()
+    try {
+      await load(ws, received, 'load-a', a)
+      const started = await startBackground('BG-IPC-START', a)
+      await load(ws, received, 'load-b', b)
+      await send(`BG-IPC-STOP ${started.processId}`, a)
+      await waitFor(async () => (seen(received, a, 'backgroundProcess.removed') ? true : null), 5_000)
+    } finally {
+      ws.close()
+    }
+  }, 60_000)
 })
