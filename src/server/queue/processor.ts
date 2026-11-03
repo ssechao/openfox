@@ -207,21 +207,24 @@ export class QueueProcessor {
           messageId: userMessage.id,
         })
 
-        generateSessionNameForSession(
-          sessionId,
-          nextAsap.content,
-          {
-            sessionManager,
-            providerManager: this.deps.providerManager,
-            broadcastForSession,
-            eventStore: getEventStore(),
-            getLLMClient: this.deps.getLLMClient,
-            ...(this.deps.getLLMClientForProvider
-              ? { getLLMClientForProvider: this.deps.getLLMClientForProvider }
-              : {}),
-          },
-          handle.signal,
-        )
+        // An exit notice carries a process's output: never name the session from it.
+        if (nextAsap.messageKind !== 'background-exit') {
+          generateSessionNameForSession(
+            sessionId,
+            nextAsap.content,
+            {
+              sessionManager,
+              providerManager: this.deps.providerManager,
+              broadcastForSession,
+              eventStore: getEventStore(),
+              getLLMClient: this.deps.getLLMClient,
+              ...(this.deps.getLLMClientForProvider
+                ? { getLLMClientForProvider: this.deps.getLLMClientForProvider }
+                : {}),
+            },
+            handle.signal,
+          )
+        }
       }
     } catch (error) {
       logger.error('QueueProcessor turn start failed, releasing runtime', { sessionId, error })

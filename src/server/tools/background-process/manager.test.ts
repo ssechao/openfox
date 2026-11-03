@@ -374,7 +374,7 @@ describe('background process exit notices', () => {
     expect(notices).toEqual([])
   })
 
-  it.fails('neutralises tags written by the process in the exit notice', () => {
+  it('neutralises tags written by the process in the exit notice', () => {
     const format = exitNoticeApi.formatExitNotice!
     const text = format({
       sessionId: 's',
@@ -393,7 +393,7 @@ describe('background process exit notices', () => {
     expect(text.startsWith('Background process "x&lt;y&gt;" (p) exited with code 0.')).toBe(true)
   })
 
-  it.fails('drops pending exit notices when the notifier is removed', async () => {
+  it('drops pending exit notices when the notifier is removed', async () => {
     const sessionId = crypto.randomUUID()
     const proc = createNotifyingProcess(sessionId, 'short', 'sleep 0.3', process.cwd(), undefined, true)!
     startProcessCommand(proc.id, sessionId, proc.command, proc.cwd)

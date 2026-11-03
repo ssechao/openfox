@@ -184,7 +184,7 @@ describe('QueueProcessor', () => {
       expect(mockSessionManager.addMessage).toHaveBeenCalled()
     })
 
-    it.fails('does not name a session from a background process exit notice', () => {
+    it('does not name a session from a background process exit notice', () => {
       vi.mocked(generateSessionNameForSession).mockClear()
       sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
       const notice = {
