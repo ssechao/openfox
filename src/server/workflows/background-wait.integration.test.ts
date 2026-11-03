@@ -263,4 +263,52 @@ describe('workflow background wait', () => {
       ws.close()
     }
   }, 60_000)
+
+  it.fails(
+    'blocks a claimed background-wait resume that cannot start',
+    async () => {
+      const id = await createSession('background-wait-missing-step')
+      const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve())
+        ws.once('error', reject)
+      })
+      try {
+        ws.send(
+          JSON.stringify({
+            id: 'launch-missing',
+            type: 'runner.launch',
+            payload: { sessionId: id, workflowId: 'background-wait-long', scope: 'project' },
+          }),
+        )
+        const status = async () =>
+          (await (await fetch(`${base}/api/sessions/${id}/status`)).json()) as { phase: string }
+        await waitFor(async () => ((await status()).phase === 'waiting' ? true : null), 15_000)
+        ws.send(
+          JSON.stringify({
+            id: 'resume-missing',
+            type: 'runner.launch',
+            payload: {
+              sessionId: id,
+              workflowId: 'background-wait-long',
+              scope: 'project',
+              resumeFrom: 'missing-step',
+            },
+          }),
+        )
+        const execution = await waitFor(async () => {
+          const row = getDatabase()
+            .prepare(
+              'SELECT status, step_output FROM workflow_executions WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1',
+            )
+            .get(id) as { status: string; step_output: string | null } | undefined
+          return row && row.status === 'blocked' ? row : null
+        }, 5_000)
+        expect(JSON.parse(execution.step_output ?? '{}')).not.toHaveProperty('backgroundWait')
+      } finally {
+        ws.close()
+      }
+    },
+    60_000,
+  )
 })
