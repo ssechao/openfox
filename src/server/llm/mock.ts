@@ -380,6 +380,25 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
       response: 'Started.',
     }
   }
+  if (/BG-WAIT-START/.test(prompt)) {
+    return {
+      tools: [
+        {
+          name: 'background_process',
+          arguments: {
+            action: 'start',
+            name: 'wait-job',
+            command: 'node -e "console.log(\'wait-job-done\');setTimeout(()=>process.exit(0),2000)"',
+            notifyOnExit: true,
+          },
+        },
+      ],
+      response: 'Started; waiting for wait-job.',
+    }
+  }
+  if (/^Background process "wait-job"/.test(prompt)) {
+    return { tools: [{ name: 'step_done', arguments: {} }], response: 'wait-job finished.' }
+  }
   if (/BG-IPC-NOTIFY/.test(prompt)) {
     return {
       tools: [

@@ -402,4 +402,19 @@ describe('background process exit notices', () => {
     await settle(1500)
     expect(notices).toEqual([])
   })
+
+  it.fails('lists notifyOnExit on a process started with it', () => {
+    const sessionId = crypto.randomUUID()
+    createNotifyingProcess(sessionId, 'flagged', 'sleep 60', process.cwd(), undefined, true)
+    createNotifyingProcess(sessionId, 'plain', 'sleep 60', process.cwd(), undefined, false)
+    expect(
+      (getSessionProcesses(sessionId) as Array<BackgroundProcess & { notifyOnExit?: boolean }>).map((proc) => [
+        proc.name,
+        proc.notifyOnExit === true,
+      ]),
+    ).toEqual([
+      ['flagged', true],
+      ['plain', false],
+    ])
+  })
 })
