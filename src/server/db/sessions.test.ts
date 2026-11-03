@@ -16,7 +16,9 @@ import { SETTINGS_KEYS, deleteSetting, setSetting } from './settings.js'
 import { resolveDefaultAgentId } from '../agents/registry.js'
 import {
   createSession,
+  createWorkflowExecution,
   deleteSession,
+  getLatestWorkflowExecution,
   getSession,
   listSessions,
   listSessionsByProject,
@@ -28,12 +30,17 @@ import {
   updateSessionMode,
   updateSessionPhase,
   updateSessionRunning,
+  updateWorkflowExecutionStatus,
   updateSessionMessageCount,
   updateSessionCachedPrompt,
   getSessionCachedPrompt,
   updateSessionNightMode,
 } from './sessions.js'
 import { getDatabase } from './index.js'
+import * as sessionsDb from './sessions.js'
+
+const claimWait = (sessionsDb as unknown as { claimBackgroundWaitExecution?: (id: string) => boolean })
+  .claimBackgroundWaitExecution
 
 describe('db sessions', () => {
   let rootA: string
@@ -594,6 +601,26 @@ describe('db sessions', () => {
       expect(getSession(session.id)?.nightMode).toBe(true)
       updateSessionNightMode(session.id, false)
       expect(getSession(session.id)?.nightMode).toBe(false)
+    })
+  })
+
+  describe('background wait claim', () => {
+    it.fails('claims a paused background wait only once', () => {
+      const session = createSession(projectAId, rootA, 'Wait')
+      createWorkflowExecution('exec-wait', session.id, 'wf', 'Wf', undefined, {})
+      updateWorkflowExecutionStatus('exec-wait', 'waiting', 'run', 'Run', { backgroundWait: 'true' }, [])
+      expect([claimWait!('exec-wait'), claimWait!('exec-wait')]).toEqual([true, false])
+      const row = getLatestWorkflowExecution(session.id)!
+      expect(row.status).toBe('running')
+      expect(JSON.parse(row.step_output ?? '{}')).toEqual({ backgroundWait: 'claimed' })
+    })
+
+    it.fails('does not claim a paused step that is not a background wait', () => {
+      const session = createSession(projectAId, rootA, 'Ask')
+      createWorkflowExecution('exec-ask', session.id, 'wf', 'Wf', undefined, {})
+      updateWorkflowExecutionStatus('exec-ask', 'waiting', 'ask', 'Ask', {}, [])
+      expect(claimWait!('exec-ask')).toBe(false)
+      expect(getLatestWorkflowExecution(session.id)!.status).toBe('waiting')
     })
   })
 })

@@ -67,6 +67,30 @@ describe('workflow background wait', () => {
         ],
       }),
     )
+    await writeFile(
+      join(workflowDir, 'background-wait-long.workflow.json'),
+      JSON.stringify({
+        metadata: {
+          id: 'background-wait-long',
+          name: 'Background wait long',
+          description: 'Waits for a notifyOnExit job',
+          version: '1.0.0',
+        },
+        entryStep: 'run',
+        settings: { maxIterations: 3 },
+        steps: [
+          {
+            id: 'run',
+            name: 'Run',
+            type: 'agent',
+            phase: 'build',
+            agentId: 'builder',
+            prompt: 'BG-WAIT-LONG',
+            transitions: [{ when: { type: 'always' }, goto: '$done' }],
+          },
+        ],
+      }),
+    )
     const projectResponse = await fetch(`${base}/api/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -93,6 +117,16 @@ describe('workflow background wait', () => {
     delete process.env['OPENFOX_TEST_BACKGROUND_WAIT_RECHECK_DELAY_MS']
     await rm(root, { recursive: true, force: true })
   }, 20_000)
+
+  async function createSession(title: string): Promise<string> {
+    const response = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId, title }),
+    })
+    expect(response.status).toBe(201)
+    return ((await response.json()) as { session: { id: string } }).session.id
+  }
 
   async function waitFor<T>(probe: () => Promise<T | null>, timeoutMs: number): Promise<T> {
     const deadline = Date.now() + timeoutMs
@@ -160,4 +194,52 @@ describe('workflow background wait', () => {
       ws.close()
     }
   }, 60_000)
+
+  it.fails(
+    'runs a background-wait step once when a manual resume overlaps the exit notice',
+    async () => {
+      const id = await createSession('background-wait-overlap')
+      const ws = new WebSocket(`ws://127.0.0.1:${new URL(base).port}/ws`)
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve())
+        ws.once('error', reject)
+      })
+      try {
+        ws.send(
+          JSON.stringify({
+            id: 'launch-overlap',
+            type: 'runner.launch',
+            payload: { sessionId: id, workflowId: 'background-wait', scope: 'project' },
+          }),
+        )
+        const status = async () =>
+          (await (await fetch(`${base}/api/sessions/${id}/status`)).json()) as { phase: string }
+        await waitFor(async () => ((await status()).phase === 'waiting' ? true : null), 15_000)
+        ws.send(
+          JSON.stringify({
+            id: 'resume-overlap',
+            type: 'runner.launch',
+            payload: { sessionId: id, workflowId: 'background-wait', scope: 'project', resumeFrom: 'run' },
+          }),
+        )
+        let idleSince: number | null = null
+        const messages = await waitFor(async () => {
+          const body = (await (await fetch(`${base}/api/sessions/${id}`)).json()) as {
+            session: { isRunning: boolean }
+            messages: Array<{ messageKind?: string }>
+          }
+          if (body.session.isRunning) {
+            idleSince = null
+            return null
+          }
+          idleSince ??= Date.now()
+          return Date.now() - idleSince >= 1_000 ? body.messages : null
+        }, 30_000)
+        expect(messages.filter((message) => message.messageKind === 'task-completed')).toHaveLength(1)
+      } finally {
+        ws.close()
+      }
+    },
+    60_000,
+  )
 })
