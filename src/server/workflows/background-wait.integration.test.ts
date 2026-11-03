@@ -19,6 +19,7 @@ describe('workflow background wait', () => {
     process.env['OPENFOX_MOCK_LLM'] = 'true'
     process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR'] = 'true'
     process.env['OPENFOX_SESSION_WORKER'] = 'true'
+    process.env['OPENFOX_TEST_BACKGROUND_WAIT_RECHECK_DELAY_MS'] = '2500'
     root = join(tmpdir(), `openfox-background-wait-${randomUUID()}`)
     await mkdir(root, { recursive: true })
     const config: Config = {
@@ -89,6 +90,7 @@ describe('workflow background wait', () => {
     delete process.env['OPENFOX_MOCK_LLM']
     delete process.env['OPENFOX_SESSION_PROCESS_SUPERVISOR']
     delete process.env['OPENFOX_SESSION_WORKER']
+    delete process.env['OPENFOX_TEST_BACKGROUND_WAIT_RECHECK_DELAY_MS']
     await rm(root, { recursive: true, force: true })
   }, 20_000)
 
@@ -140,6 +142,20 @@ describe('workflow background wait', () => {
       )
       expect(notice?.isSystemGenerated).toBe(true)
       expect(notice?.messageKind).toBe('auto-prompt')
+      let idleSince: number | null = null
+      const settledMessages = await waitFor(async () => {
+        const body = (await (await fetch(`${base}/api/sessions/${sessionId}`)).json()) as {
+          session: { isRunning: boolean }
+          messages: Array<{ messageKind?: string }>
+        }
+        if (body.session.isRunning) {
+          idleSince = null
+          return null
+        }
+        idleSince ??= Date.now()
+        return Date.now() - idleSince >= 1_000 ? body.messages : null
+      }, 30_000)
+      expect(settledMessages.filter((message) => message.messageKind === 'task-completed')).toHaveLength(1)
     } finally {
       ws.close()
     }

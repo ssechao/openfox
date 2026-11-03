@@ -768,8 +768,13 @@ export async function executeWorkflow(
               workflow.metadata.color,
               [],
             )
-            // The process may have ended between the check and the pause: its
-            // notice then found no paused workflow and was queued instead.
+            const recheckDelay = Number(process.env['OPENFOX_TEST_BACKGROUND_WAIT_RECHECK_DELAY_MS'] ?? 0)
+            if (Number.isSafeInteger(recheckDelay) && recheckDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, Math.min(recheckDelay, 10_000)))
+            }
+            // If the process ended before the pause, its notice was queued and
+            // this run claims the execution. If it ended after the pause, the
+            // admitted wake already claimed it and this run must settle.
             if (await waitsForExitNotice(sessionId, cwd)) {
               return {
                 finalAction: {
@@ -783,13 +788,26 @@ export async function executeWorkflow(
                 totalTime: (performance.now() - startTime) / 1000,
               }
             }
-            sessionManager.resumeWorkflow(
+            const resumed = sessionManager.resumeWorkflow(
               sessionId,
               executionId,
               workflow.metadata.id,
               workflow.metadata.name,
               workflow.metadata.color,
             )
+            if (!resumed) {
+              return {
+                finalAction: {
+                  type: 'WAITING',
+                  reason: `Waiting for a background process at step: ${step.name}`,
+                  workflowId: workflow.metadata.id,
+                  stepId: step.id,
+                  stepOutput: lastStepOutput,
+                },
+                iterations,
+                totalTime: (performance.now() - startTime) / 1000,
+              }
+            }
           }
           logger.debug('step_done not called, looping agent step', {
             sessionId,

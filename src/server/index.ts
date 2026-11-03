@@ -4212,7 +4212,16 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         content,
         systemGenerated: true,
       })
-      if (admission === 'started' || admission === 'waiting') return
+      if (admission === 'started' || admission === 'waiting') {
+        sessionManager.resumeWorkflow(
+          notice.sessionId,
+          execution.id,
+          execution.workflowId,
+          execution.workflowName,
+          execution.workflowColor,
+        )
+        return
+      }
       logger.warn('Background wait resume refused; exit notice queued instead', {
         sessionId: notice.sessionId,
         processId: notice.processId,
