@@ -86,4 +86,15 @@ describe('BackgroundProcesses', () => {
 
     expect(document.body.textContent).toContain('world')
   })
+
+  it.fails('shows only the processes of its session', () => {
+    act(() =>
+      useBackgroundProcessesStore.setState({
+        processes: [PROCESS, { ...PROCESS, id: 'proc-2', sessionId: 'sess-2', name: 'other-server' }],
+      }),
+    )
+    render(<BackgroundProcesses sessionId="sess-1" />)
+    expect(document.body.textContent).toContain('dev-server')
+    expect(document.body.textContent).not.toContain('other-server')
+  })
 })

@@ -224,4 +224,26 @@ describe('worker event routing', () => {
       ws.close()
     }
   }, 60_000)
+
+  it.fails(
+    'refuses to stop a background process from another session',
+    async () => {
+      const a = await createSession('stop-a')
+      const b = await createSession('stop-b')
+      const started = await startBackground('BG-IPC-START', a)
+      const refused = await fetch(`${base}/api/sessions/${b}/background-process/${started.processId}/stop`, {
+        method: 'POST',
+      })
+      expect(refused.status).toBe(404)
+      const listed = (await (await fetch(`${base}/api/sessions/${a}/background-processes`)).json()) as {
+        processes: Array<{ id: string; status: string }>
+      }
+      expect(listed.processes.find((proc) => proc.id === started.processId)?.status).toBe('running')
+      const stopped = await fetch(`${base}/api/sessions/${a}/background-process/${started.processId}/stop`, {
+        method: 'POST',
+      })
+      expect(stopped.status).toBe(200)
+    },
+    60_000,
+  )
 })
