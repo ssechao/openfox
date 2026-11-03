@@ -94,6 +94,30 @@ describe('workflow background wait', () => {
         ],
       }),
     )
+    await writeFile(
+      join(workflowDir, 'background-wait-hold.workflow.json'),
+      JSON.stringify({
+        metadata: {
+          id: 'background-wait-hold',
+          name: 'Background wait hold',
+          description: 'Waits for a notifyOnExit job',
+          version: '1.0.0',
+        },
+        entryStep: 'run',
+        settings: { maxIterations: 3 },
+        steps: [
+          {
+            id: 'run',
+            name: 'Run',
+            type: 'agent',
+            phase: 'build',
+            agentId: 'builder',
+            prompt: 'BG-WAIT-HOLD',
+            transitions: [{ when: { type: 'always' }, goto: '$done' }],
+          },
+        ],
+      }),
+    )
     const projectResponse = await fetch(`${base}/api/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -277,7 +301,7 @@ describe('workflow background wait', () => {
         JSON.stringify({
           id: 'launch-missing',
           type: 'runner.launch',
-          payload: { sessionId: id, workflowId: 'background-wait-long', scope: 'project' },
+          payload: { sessionId: id, workflowId: 'background-wait-hold', scope: 'project' },
         }),
       )
       const status = async () => (await (await fetch(`${base}/api/sessions/${id}/status`)).json()) as { phase: string }
@@ -288,7 +312,7 @@ describe('workflow background wait', () => {
           type: 'runner.launch',
           payload: {
             sessionId: id,
-            workflowId: 'background-wait-long',
+            workflowId: 'background-wait-hold',
             scope: 'project',
             resumeFrom: 'missing-step',
           },
