@@ -140,12 +140,12 @@ describe('extractPdfContent', () => {
     expect(result.blocks).toEqual([{ type: 'text', content: '[Page 1/1: 1 image(s) could not be extracted]' }])
   })
 
-  it.fails('does not report a stencil mask as a missing image', async () => {
+  it('does not report a stencil mask as a missing image', async () => {
     const result = await extractPdfContent(makeStencilMaskPdf())
     expect(result.blocks).toEqual([])
   })
 
-  it.fails('reads the text of a scan without decoding its images', async () => {
+  it('reads the text of a scan without decoding its images', async () => {
     const result = await extractPdfText(makeScannedPdf(Buffer.from('not a jpeg at all'), '/Filter/DCTDecode'))
     expect(result.text).toBe('')
     expect(processPdfContent(result.text, 1_000_000).isScanned).toBe(true)

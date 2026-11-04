@@ -19,6 +19,8 @@ export function formatVisionFallbackDescription(filename: string | undefined, de
 }
 
 const pdfBlockCache = new Map<string, ContentPart[]>()
+// Cached for a PDF that could not be read, so a later turn still says so instead of an empty header.
+const EXTRACTION_FAILED: ContentPart[] = [{ type: 'text', text: '(could not extract content)' }]
 
 export function clearPdfBlockCache(): void {
   pdfBlockCache.clear()
@@ -52,7 +54,7 @@ export async function extractPdfBlocksFromDataUrl(data: string, filename: string
 
   const base64Match = data.match(/^data:.*?;base64,(.+)$/)
   if (!base64Match?.[1]) {
-    cacheSet(pdfBlockCache, cacheKey, [])
+    cacheSet(pdfBlockCache, cacheKey, EXTRACTION_FAILED)
     return [{ type: 'text', text: `[PDF: ${filename}] (could not extract content)` }]
   }
   try {
@@ -77,7 +79,7 @@ export async function extractPdfBlocksFromDataUrl(data: string, filename: string
     parts.push(...body)
     return parts
   } catch {
-    cacheSet(pdfBlockCache, cacheKey, [])
+    cacheSet(pdfBlockCache, cacheKey, EXTRACTION_FAILED)
     return [{ type: 'text', text: `[PDF: ${filename}] (could not extract content)` }]
   }
 }

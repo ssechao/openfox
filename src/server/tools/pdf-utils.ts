@@ -191,8 +191,13 @@ async function extractPageBlocks(
   pageCount: number,
   imageCounter: { count: number; limitReached: boolean },
   maxImages: number,
+  withImages: boolean,
 ): Promise<PdfBlock[]> {
-  const [textContent, opList] = await Promise.all([page.getTextContent(), page.getOperatorList()])
+  const [textContent, opList] = await Promise.all([
+    page.getTextContent(),
+    // The operator list decodes every image: skip it when only the text is wanted.
+    withImages ? page.getOperatorList() : Promise.resolve({ fnArray: [] as number[], argsArray: [] as unknown[] }),
+  ])
 
   const textItems = textContent.items.filter(
     (item): item is Extract<(typeof textContent.items)[number], { str: string }> => 'str' in item,
@@ -238,7 +243,7 @@ async function extractPageBlocks(
     if (imgBlock) {
       blocks.push(imgBlock)
       imageCounter.count++
-    } else if (opList.fnArray[opIdx] !== OPS.paintSolidColorImageMask) {
+    } else if (!STENCIL_MASK_OPS.has(opList.fnArray[opIdx] ?? -1)) {
       failedImages++
     }
   }
@@ -269,6 +274,14 @@ function isValidPixelData(data: unknown): data is Uint8Array | Uint8ClampedArray
 }
 
 const IMAGE_RESOLVE_TIMEOUT_MS = 5000
+
+// Stencil masks carry no pixels of their own and were never extracted: a missing one is not reported.
+const STENCIL_MASK_OPS = new Set<number>([
+  OPS.paintImageMaskXObject,
+  OPS.paintImageMaskXObjectGroup,
+  OPS.paintImageMaskXObjectRepeat,
+  OPS.paintSolidColorImageMask,
+])
 
 async function getObjectWithFallback(objs: PdfObjects & Partial<PdfObjectsAsync>, objId: string): Promise<unknown> {
   try {
@@ -334,7 +347,7 @@ async function extractImageBlock(
   return null
 }
 
-export async function extractPdfContent(buffer: Buffer): Promise<PdfResult> {
+export async function extractPdfContent(buffer: Buffer, options: { images?: boolean } = {}): Promise<PdfResult> {
   const doc = await getDocument({ data: Uint8Array.from(buffer) }).promise
   const pageCount = doc.numPages
 
@@ -359,7 +372,7 @@ export async function extractPdfContent(buffer: Buffer): Promise<PdfResult> {
     for (let i = 1; i <= limitedPageCount; i++) {
       const page = await doc.getPage(i)
       try {
-        const blocks = await extractPageBlocks(page, i, pageCount, imageCounter, maxImages)
+        const blocks = await extractPageBlocks(page, i, pageCount, imageCounter, maxImages, options.images ?? true)
         allBlocks.push(...blocks)
       } finally {
         page.cleanup()
@@ -398,7 +411,7 @@ export async function extractPdfContent(buffer: Buffer): Promise<PdfResult> {
 export async function extractPdfText(
   buffer: Buffer,
 ): Promise<{ text: string; pageCount: number; title: string | null; author: string | null }> {
-  const result = await extractPdfContent(buffer)
+  const result = await extractPdfContent(buffer, { images: false })
   const text = result.blocks
     .filter((b) => b.type === 'text')
     .map((b) => b.content ?? '')

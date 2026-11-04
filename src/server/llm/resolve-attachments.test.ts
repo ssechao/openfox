@@ -308,7 +308,7 @@ describe('empty PDF content', () => {
     )
   })
 
-  it.fails('keeps saying a PDF could not be read on a cached second call', async () => {
+  it('keeps saying a PDF could not be read on a cached second call', async () => {
     const data = `[PDF attachment removed — 0 KB]${Buffer.from('not a pdf').toString('base64')}`
     expect(await extractPdfBlocksFromDataUrl(data, 'bad.pdf')).toEqual([
       { type: 'text', text: '[PDF: bad.pdf] (could not extract content)' },
