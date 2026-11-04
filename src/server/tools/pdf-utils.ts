@@ -135,7 +135,6 @@ export function encodeImageToDataUrl(imgData: RawImageData, maxDimension = 1024)
     }
 
     if (!data) return null
-    if (width * height * 4 > 20_971_520) return null
 
     if (maxDimension > 0 && (width > maxDimension || height > maxDimension)) {
       const scale = maxDimension / Math.max(width, height)
@@ -164,6 +163,9 @@ export function encodeImageToDataUrl(imgData: RawImageData, maxDimension = 1024)
       const pngBuffer = PNG.sync.write(png)
       return `data:image/png;base64,${pngBuffer.toString('base64')}`
     }
+
+    // Only an image kept at full size is limited: a downscaled one is at most maxDimension².
+    if (width * height * 4 > 20_971_520) return null
 
     let rgba: Uint8Array
     if (kind === IMAGE_KIND_RGBA_32BPP) {
@@ -219,6 +221,7 @@ async function extractPageBlocks(
   }
 
   const blocks: PdfBlock[] = []
+  let failedImages = 0
 
   if (textStr) {
     blocks.push({ type: 'text', content: `[Page ${pageIndex}/${pageCount}]\n${textStr}` })
@@ -235,7 +238,16 @@ async function extractPageBlocks(
     if (imgBlock) {
       blocks.push(imgBlock)
       imageCounter.count++
+    } else if (opList.fnArray[opIdx] !== OPS.paintSolidColorImageMask) {
+      failedImages++
     }
+  }
+
+  if (failedImages > 0) {
+    blocks.push({
+      type: 'text',
+      content: `[Page ${pageIndex}/${pageCount}: ${failedImages} image(s) could not be extracted]`,
+    })
   }
 
   return blocks

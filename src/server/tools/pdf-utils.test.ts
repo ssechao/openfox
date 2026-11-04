@@ -58,7 +58,7 @@ describe('encodeImageToDataUrl', () => {
     expect(result).toBeNull()
   })
 
-  it.fails('downscales a 300 dpi scan page instead of dropping it', () => {
+  it('downscales a 300 dpi scan page instead of dropping it', () => {
     const img: RawImageData = { width: 2496, height: 3488, data: new Uint8Array(2496 * 3488 * 3), kind: 2 }
     const result = encodeImageToDataUrl(img)
     expect(result).toMatch(/^data:image\/png;base64,/)
@@ -121,7 +121,7 @@ describe('encodeImageToDataUrl', () => {
 })
 
 describe('extractPdfContent', () => {
-  it.fails('returns a scanned page without text as an image block', async () => {
+  it('returns a scanned page without text as an image block', async () => {
     const result = await extractPdfContent(makeScannedPdf(Buffer.alloc(2496 * 3488, 0xcc)))
     expect(result.pageCount).toBe(1)
     expect(result.blocks).toHaveLength(1)
@@ -129,7 +129,7 @@ describe('extractPdfContent', () => {
     expect(result.blocks[0]?.dataUrl).toMatch(/^data:image\/png;base64,/)
   })
 
-  it.fails('reports a page image that cannot be decoded', async () => {
+  it('reports a page image that cannot be decoded', async () => {
     const result = await extractPdfContent(makeScannedPdf(Buffer.from('not a jpeg at all'), '/Filter/DCTDecode'))
     expect(result.blocks).toEqual([{ type: 'text', content: '[Page 1/1: 1 image(s) could not be extracted]' }])
   })

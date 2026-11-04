@@ -967,7 +967,7 @@ describe('processContextImages', () => {
     expect(att.data).toBe(imagePdfAttachment.data)
   })
 
-  it.fails('announces a PDF with nothing extractable in pdfContent', async () => {
+  it('announces a PDF with nothing extractable in pdfContent', async () => {
     const emptyPdfAttachment: Attachment = {
       id: 'pdf-empty-1',
       filename: 'empty.pdf',

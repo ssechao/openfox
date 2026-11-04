@@ -30,6 +30,9 @@ export async function extractPdfFromDataUrl(data: string, filename: string): Pro
     try {
       const buffer = Buffer.from(base64Match[1], 'base64')
       const result = await extractPdfText(buffer)
+      if (!result.text.trim()) {
+        return `[PDF: ${filename}] (no text could be extracted, ${result.pageCount} page(s); it may be a scanned document)`
+      }
       return `[PDF: ${filename}]\n${result.text}`
     } catch {
       return `[PDF: ${filename}] (could not extract text)`
@@ -62,6 +65,12 @@ export async function extractPdfBlocksFromDataUrl(data: string, filename: string
       } else if (block.type === 'image' && block.dataUrl) {
         body.push({ type: 'image_url', image_url: { url: block.dataUrl } })
       }
+    }
+    if (body.length === 0) {
+      body.push({
+        type: 'text',
+        text: `(no text or images could be extracted from this PDF, ${result.pageCount} page(s))`,
+      })
     }
     cacheSet(pdfBlockCache, cacheKey, body)
     const parts: ContentPart[] = [{ type: 'text', text: `[PDF: ${filename}]` }]

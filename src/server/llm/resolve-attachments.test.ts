@@ -293,7 +293,7 @@ describe('resolveAttachmentsInMessages', () => {
 })
 
 describe('empty PDF content', () => {
-  it.fails('announces a PDF with nothing extractable to a vision model', async () => {
+  it('announces a PDF with nothing extractable to a vision model', async () => {
     const data = `data:application/pdf;base64,${makeBlankPdf().toString('base64')}`
     expect(await extractPdfBlocksFromDataUrl(data, 'blank.pdf')).toEqual([
       { type: 'text', text: '[PDF: blank.pdf]' },
@@ -301,7 +301,7 @@ describe('empty PDF content', () => {
     ])
   })
 
-  it.fails('announces a PDF without text to a text-only model', async () => {
+  it('announces a PDF without text to a text-only model', async () => {
     const data = `data:application/pdf;base64,${makeBlankPdf().toString('base64')}`
     expect(await extractPdfFromDataUrl(data, 'blank.pdf')).toBe(
       '[PDF: blank.pdf] (no text could be extracted, 1 page(s); it may be a scanned document)',
