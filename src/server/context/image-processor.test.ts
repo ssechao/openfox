@@ -48,9 +48,19 @@ vi.mock('../tools/pdf-utils.js', () => {
     imageLimitReached: false,
   }
 
+  const emptyResult = {
+    blocks: [],
+    pageCount: 3,
+    title: null,
+    author: null,
+    imageCount: 0,
+    imageLimitReached: false,
+  }
+
   return {
     extractPdfContent: vi.fn().mockImplementation((buffer: Buffer) => {
       const dataStr = Buffer.isBuffer(buffer) ? buffer.toString('latin1') : String(buffer)
+      if (dataStr.includes('empty-pdf')) return emptyResult
       if (dataStr.includes('image-pdf')) return imagePdfResult
       if (dataStr.includes('multi-page')) return multiPageResult
       return textOnlyResult
@@ -955,6 +965,41 @@ describe('processContextImages', () => {
     expect(att.pdfContent).toContain('A screenshot showing a terminal with error messages')
     // Original data preserved
     expect(att.data).toBe(imagePdfAttachment.data)
+  })
+
+  it.fails('announces a PDF with nothing extractable in pdfContent', async () => {
+    const emptyPdfAttachment: Attachment = {
+      id: 'pdf-empty-1',
+      filename: 'empty.pdf',
+      mimeType: 'application/pdf',
+      size: 100,
+      data: makePdfDataUrl('an empty-pdf document'),
+    }
+
+    const events: StoredEvent[] = [
+      makeEvent({
+        seq: 1,
+        type: 'message.start',
+        data: {
+          messageId: 'msg-pdf-empty-1',
+          role: 'user',
+          content: 'Describe this PDF',
+          attachments: [emptyPdfAttachment],
+          contextWindowId: 'window-1',
+        },
+      }),
+      makeEvent({ seq: 2, type: 'message.done', data: { messageId: 'msg-pdf-empty-1' } }),
+    ]
+
+    const result = await processContextImages(events, {
+      modelSupportsVision: false,
+      visionModel: { baseUrl: 'http://localhost:11434', model: 'llava', timeout: 30000, backend: 'ollama' },
+    })
+
+    const msgStart = result.events[0]!
+    const data = msgStart.data as Extract<TurnEvent, { type: 'message.start' }>['data']
+    const att = data.attachments![0]!
+    expect(att.pdfContent).toBe('[PDF: empty.pdf]\n\n(no text or images could be extracted from this PDF, 3 page(s))')
   })
 
   it('preserves text/image ordering in pdfContent', async () => {

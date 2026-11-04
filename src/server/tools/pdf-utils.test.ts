@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { encodeImageToDataUrl, type RawImageData } from './pdf-utils.js'
+import { PNG } from 'pngjs'
+import { encodeImageToDataUrl, extractPdfContent, type RawImageData } from './pdf-utils.js'
+import { makeScannedPdf } from './pdf-test-fixtures.js'
 
 const hasOffscreenCanvas = typeof (globalThis as Record<string, unknown>)['OffscreenCanvas'] !== 'undefined'
 
@@ -48,12 +50,20 @@ describe('encodeImageToDataUrl', () => {
     expect(result).toBeNull()
   })
 
-  it('should return null for oversized images', () => {
+  it('should return null for oversized images kept at full size', () => {
     const size = Math.ceil(Math.sqrt(20_971_521 / 4))
     const data = new Uint8Array(size * size * 4)
     const img: RawImageData = { width: size, height: size, data, kind: 3 }
-    const result = encodeImageToDataUrl(img)
+    const result = encodeImageToDataUrl(img, 0)
     expect(result).toBeNull()
+  })
+
+  it.fails('downscales a 300 dpi scan page instead of dropping it', () => {
+    const img: RawImageData = { width: 2496, height: 3488, data: new Uint8Array(2496 * 3488 * 3), kind: 2 }
+    const result = encodeImageToDataUrl(img)
+    expect(result).toMatch(/^data:image\/png;base64,/)
+    const png = PNG.sync.read(Buffer.from(result!.split(',')[1]!, 'base64'))
+    expect([png.width, png.height]).toEqual([733, 1024])
   })
 
   it('should downscale oversized dimensions', () => {
@@ -108,4 +118,19 @@ describe('encodeImageToDataUrl', () => {
       bitmap.close()
     })
   }
+})
+
+describe('extractPdfContent', () => {
+  it.fails('returns a scanned page without text as an image block', async () => {
+    const result = await extractPdfContent(makeScannedPdf(Buffer.alloc(2496 * 3488, 0xcc)))
+    expect(result.pageCount).toBe(1)
+    expect(result.blocks).toHaveLength(1)
+    expect(result.blocks[0]?.type).toBe('image')
+    expect(result.blocks[0]?.dataUrl).toMatch(/^data:image\/png;base64,/)
+  })
+
+  it.fails('reports a page image that cannot be decoded', async () => {
+    const result = await extractPdfContent(makeScannedPdf(Buffer.from('not a jpeg at all'), '/Filter/DCTDecode'))
+    expect(result.blocks).toEqual([{ type: 'text', content: '[Page 1/1: 1 image(s) could not be extracted]' }])
+  })
 })
