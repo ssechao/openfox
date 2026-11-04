@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { PNG } from 'pngjs'
-import { encodeImageToDataUrl, extractPdfContent, type RawImageData } from './pdf-utils.js'
-import { makeScannedPdf } from './pdf-test-fixtures.js'
+import {
+  encodeImageToDataUrl,
+  extractPdfContent,
+  extractPdfText,
+  processPdfContent,
+  type RawImageData,
+} from './pdf-utils.js'
+import { makeScannedPdf, makeStencilMaskPdf } from './pdf-test-fixtures.js'
 
 const hasOffscreenCanvas = typeof (globalThis as Record<string, unknown>)['OffscreenCanvas'] !== 'undefined'
 
@@ -132,5 +138,16 @@ describe('extractPdfContent', () => {
   it('reports a page image that cannot be decoded', async () => {
     const result = await extractPdfContent(makeScannedPdf(Buffer.from('not a jpeg at all'), '/Filter/DCTDecode'))
     expect(result.blocks).toEqual([{ type: 'text', content: '[Page 1/1: 1 image(s) could not be extracted]' }])
+  })
+
+  it.fails('does not report a stencil mask as a missing image', async () => {
+    const result = await extractPdfContent(makeStencilMaskPdf())
+    expect(result.blocks).toEqual([])
+  })
+
+  it.fails('reads the text of a scan without decoding its images', async () => {
+    const result = await extractPdfText(makeScannedPdf(Buffer.from('not a jpeg at all'), '/Filter/DCTDecode'))
+    expect(result.text).toBe('')
+    expect(processPdfContent(result.text, 1_000_000).isScanned).toBe(true)
   })
 })

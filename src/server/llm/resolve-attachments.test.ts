@@ -307,4 +307,15 @@ describe('empty PDF content', () => {
       '[PDF: blank.pdf] (no text could be extracted, 1 page(s); it may be a scanned document)',
     )
   })
+
+  it.fails('keeps saying a PDF could not be read on a cached second call', async () => {
+    const data = `[PDF attachment removed — 0 KB]${Buffer.from('not a pdf').toString('base64')}`
+    expect(await extractPdfBlocksFromDataUrl(data, 'bad.pdf')).toEqual([
+      { type: 'text', text: '[PDF: bad.pdf] (could not extract content)' },
+    ])
+    expect(await extractPdfBlocksFromDataUrl(data, 'bad.pdf')).toEqual([
+      { type: 'text', text: '[PDF: bad.pdf]' },
+      { type: 'text', text: '(could not extract content)' },
+    ])
+  })
 })

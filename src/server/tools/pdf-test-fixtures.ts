@@ -52,3 +52,18 @@ export function makeBlankPdf(): Buffer {
     Buffer.from('<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>', 'latin1'),
   ])
 }
+
+/** One A4 page painting an 8×8 stencil mask (/ImageMask true), as logos and icons often are. */
+export function makeStencilMaskPdf(): Buffer {
+  const mask = Buffer.from([0xff, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0xff])
+  return makePdf([
+    Buffer.from('<</Type/Catalog/Pages 2 0 R>>', 'latin1'),
+    Buffer.from('<</Type/Pages/Kids[3 0 R]/Count 1>>', 'latin1'),
+    Buffer.from(
+      '<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Resources<</XObject<</Im1 4 0 R>>>>/Contents 5 0 R>>',
+      'latin1',
+    ),
+    pdfStream('/Type/XObject/Subtype/Image/Width 8/Height 8/ImageMask true/BitsPerComponent 1', mask),
+    pdfStream('', Buffer.from('q 0 0 1 rg 100 0 0 100 50 50 cm /Im1 Do Q', 'latin1')),
+  ])
+}
