@@ -1379,4 +1379,88 @@ describe('SessionWorkerManager', () => {
     }
     expect(row.worker_id).toBeNull()
   })
+  function createSlotManager(namedDb: Database.Database): SessionWorkerManager {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn((message: { type?: string; workerId?: string; generation?: number }) => {
+        if (message.type === 'abort') {
+          queueMicrotask(() => {
+            child.emit('message', {
+              workerId: message.workerId,
+              generation: message.generation,
+              type: 'done',
+              ok: true,
+            })
+            child.emit('exit', 0, null)
+          })
+        }
+        return true
+      }),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    return new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      maxProcesses: 1,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+      captureInventory: (pid) => ({
+        capturedAt: Date.now(),
+        worker: { pid, startedAt: 'linux:42', pgid: 42 },
+        children: [],
+        groups: [],
+        reservations: [],
+        errors: [],
+      }),
+      cleanupChildren: () => Promise.resolve([]),
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+  }
+
+  it.fails('frees the worker slot when the session is deleted during Stop', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-slot-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const manager = createSlotManager(namedDb)
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', () => {}))).toBe('started')
+      manager.requestStop('sess-1')
+      namedDb.prepare(`DELETE FROM sessions WHERE id = 'sess-1'`).run()
+      await vi.advanceTimersByTimeAsync(10_000)
+      const next = vi.fn()
+      expect(manager.requestTurn('sess-2', next)).toBe('started')
+      expect(next).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.fails('logs a turn that waits for a worker slot', () => {
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-slot-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const manager = createSlotManager(namedDb)
+    const info = vi.spyOn(logger, 'info')
+    try {
+      expect(manager.requestTurn('sess-1', () => {})).toBe('started')
+      expect(manager.requestTurn('sess-2', () => {})).toBe('waiting')
+      expect(info).toHaveBeenCalledWith('Session worker turn waiting for a slot', {
+        sessionId: 'sess-2',
+        activeSlots: 1,
+        waitingSessions: 1,
+      })
+    } finally {
+      info.mockRestore()
+    }
+  })
 })
