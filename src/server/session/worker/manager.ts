@@ -103,6 +103,8 @@ interface ActiveWorker {
   doneOk: boolean
   doneError?: string
   stopRequestedAt?: number
+  /** Set once this worker has given its scheduler slot back (exactly once, whatever the exit path). */
+  slotReleased?: boolean
   stopEscalatedAt?: number
   recoveryDeadlineAt?: number
   exitObserved: boolean
@@ -203,7 +205,16 @@ export class SessionWorkerManager {
 
   requestTurn(sessionId: string, start: () => void): AdmissionResult {
     if (!this.shouldUseWorker(sessionId)) return this.admissionsClosed ? 'closed' : 'full'
-    return this.scheduler.admit(sessionId, start)
+    const admission = this.scheduler.admit(sessionId, start)
+    if (admission === 'waiting') {
+      const slots = this.scheduler.snapshot()
+      logger.info('Session worker turn waiting for a slot', {
+        sessionId,
+        activeSlots: slots.active.length,
+        waitingSessions: slots.waiting.length,
+      })
+    }
+    return admission
   }
 
   canAcceptTurn(sessionId: string): boolean {
@@ -527,6 +538,9 @@ export class SessionWorkerManager {
       void this.beginWorkerInventoryCapture(worker, capturedAt, worker.recoveryDeadlineAt)
       void this.settle(worker, code, signal).finally(() => {
         if (this.active.get(sessionId) === worker) this.active.delete(sessionId)
+        // Every exit path ends here, including those that return early because
+        // the session was deleted: the slot must never outlive the process.
+        this.releaseSlot(worker)
       })
     })
 
@@ -916,8 +930,16 @@ export class SessionWorkerManager {
     const current = this.active.get(worker.sessionId) === worker
     if (current) this.active.delete(worker.sessionId)
     this.notifyWorkerSettled(worker, outcome)
-    if (current) this.scheduler.release(worker.sessionId)
+    if (current) this.releaseSlot(worker)
     return current
+  }
+
+  private releaseSlot(worker: ActiveWorker): void {
+    if (worker.slotReleased) return
+    worker.slotReleased = true
+    if (this.scheduler.release(worker.sessionId)) {
+      logger.info('Session worker slot released', { sessionId: worker.sessionId, workerId: worker.token.workerId })
+    }
   }
 
   private isCurrentIdentity(identity: WorkerIpcIdentity): boolean {
