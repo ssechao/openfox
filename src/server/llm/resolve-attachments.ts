@@ -19,6 +19,8 @@ export function formatVisionFallbackDescription(filename: string | undefined, de
 }
 
 const pdfBlockCache = new Map<string, ContentPart[]>()
+// Cached for a PDF that could not be read, so a later turn still says so instead of an empty header.
+const EXTRACTION_FAILED: ContentPart[] = [{ type: 'text', text: '(could not extract content)' }]
 
 export function clearPdfBlockCache(): void {
   pdfBlockCache.clear()
@@ -30,6 +32,9 @@ export async function extractPdfFromDataUrl(data: string, filename: string): Pro
     try {
       const buffer = Buffer.from(base64Match[1], 'base64')
       const result = await extractPdfText(buffer)
+      if (!result.text.trim()) {
+        return `[PDF: ${filename}] (no text could be extracted, ${result.pageCount} page(s); it may be a scanned document)`
+      }
       return `[PDF: ${filename}]\n${result.text}`
     } catch {
       return `[PDF: ${filename}] (could not extract text)`
@@ -49,7 +54,7 @@ export async function extractPdfBlocksFromDataUrl(data: string, filename: string
 
   const base64Match = data.match(/^data:.*?;base64,(.+)$/)
   if (!base64Match?.[1]) {
-    cacheSet(pdfBlockCache, cacheKey, [])
+    cacheSet(pdfBlockCache, cacheKey, EXTRACTION_FAILED)
     return [{ type: 'text', text: `[PDF: ${filename}] (could not extract content)` }]
   }
   try {
@@ -63,12 +68,18 @@ export async function extractPdfBlocksFromDataUrl(data: string, filename: string
         body.push({ type: 'image_url', image_url: { url: block.dataUrl } })
       }
     }
+    if (body.length === 0) {
+      body.push({
+        type: 'text',
+        text: `(no text or images could be extracted from this PDF, ${result.pageCount} page(s))`,
+      })
+    }
     cacheSet(pdfBlockCache, cacheKey, body)
     const parts: ContentPart[] = [{ type: 'text', text: `[PDF: ${filename}]` }]
     parts.push(...body)
     return parts
   } catch {
-    cacheSet(pdfBlockCache, cacheKey, [])
+    cacheSet(pdfBlockCache, cacheKey, EXTRACTION_FAILED)
     return [{ type: 'text', text: `[PDF: ${filename}] (could not extract content)` }]
   }
 }

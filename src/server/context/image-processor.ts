@@ -241,9 +241,11 @@ async function describePdfAttachment(
   }
 
   let blocks: PdfBlock[]
+  let pageCount: number
   try {
     const result = await extractPdfContent(buffer)
     blocks = result.blocks
+    pageCount = result.pageCount
   } catch {
     const errorText = `[PDF: ${filenameLabel}] (could not extract content)`
     descriptions.set(att.id, errorText)
@@ -262,6 +264,10 @@ async function describePdfAttachment(
       body += '\n\n' + description
       imageIndex++
     }
+  }
+
+  if (!body) {
+    body = `\n\n(no text or images could be extracted from this PDF, ${pageCount} page(s))`
   }
 
   const output = `[PDF: ${filenameLabel}]${body}`

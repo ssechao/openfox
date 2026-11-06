@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { resolveAttachmentsInMessages } from './client-pure.js'
 import type { LLMMessage } from './types.js'
+import { extractPdfBlocksFromDataUrl, extractPdfFromDataUrl } from './resolve-attachments.js'
+import { makeBlankPdf } from '../tools/pdf-test-fixtures.js'
 
 function makeSimplePdfBuffer(): Buffer {
   const stream = 'BT /F1 12 Tf 100 700 Td (Hello PDF) Tj ET'
@@ -287,5 +289,33 @@ describe('resolveAttachmentsInMessages', () => {
     expect(result[0]?.content).toContain('output.txt')
     expect(result[0]?.content).toContain('some output')
     expect(result[0]?.attachments).toEqual([])
+  })
+})
+
+describe('empty PDF content', () => {
+  it('announces a PDF with nothing extractable to a vision model', async () => {
+    const data = `data:application/pdf;base64,${makeBlankPdf().toString('base64')}`
+    expect(await extractPdfBlocksFromDataUrl(data, 'blank.pdf')).toEqual([
+      { type: 'text', text: '[PDF: blank.pdf]' },
+      { type: 'text', text: '(no text or images could be extracted from this PDF, 1 page(s))' },
+    ])
+  })
+
+  it('announces a PDF without text to a text-only model', async () => {
+    const data = `data:application/pdf;base64,${makeBlankPdf().toString('base64')}`
+    expect(await extractPdfFromDataUrl(data, 'blank.pdf')).toBe(
+      '[PDF: blank.pdf] (no text could be extracted, 1 page(s); it may be a scanned document)',
+    )
+  })
+
+  it('keeps saying a PDF could not be read on a cached second call', async () => {
+    const data = `[PDF attachment removed — 0 KB]${Buffer.from('not a pdf').toString('base64')}`
+    expect(await extractPdfBlocksFromDataUrl(data, 'bad.pdf')).toEqual([
+      { type: 'text', text: '[PDF: bad.pdf] (could not extract content)' },
+    ])
+    expect(await extractPdfBlocksFromDataUrl(data, 'bad.pdf')).toEqual([
+      { type: 'text', text: '[PDF: bad.pdf]' },
+      { type: 'text', text: '(could not extract content)' },
+    ])
   })
 })
