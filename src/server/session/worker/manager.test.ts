@@ -1427,7 +1427,7 @@ describe('SessionWorkerManager', () => {
     })
   }
 
-  it.fails('frees the worker slot when the session is deleted during Stop', async () => {
+  it('frees the worker slot when the session is deleted during Stop', async () => {
     vi.useFakeTimers()
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-slot-${crypto.randomUUID()}.db`))
     openDbs.push(db)
@@ -1446,7 +1446,7 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails('logs a turn that waits for a worker slot', () => {
+  it('logs a turn that waits for a worker slot', () => {
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-slot-${crypto.randomUUID()}.db`))
     openDbs.push(db)
     const manager = createSlotManager(namedDb)
