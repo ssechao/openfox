@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { createServer, type Server, type ServerResponse } from 'node:http'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +14,7 @@ interface SessionView {
   messages: Array<{
     toolCalls?: Array<{
       name?: string
+      arguments?: Record<string, unknown>
       result?: { success?: boolean; error?: string }
     }>
   }>
@@ -30,9 +31,12 @@ describe('worker preflight provider settlement', () => {
   let llm: Server
   let base: string
   let root: string
+  let projectDir: string
   let projectId: string
-  let responseCount = 0
+  let scenario: 'settle' | 'error' | 'abort' = 'settle'
+  let scenarioResponseCount = 0
   let nativeTurnActive = false
+  let providerStreamOpen = false
 
   beforeAll(async () => {
     delete process.env['OPENFOX_MOCK_LLM']
@@ -48,11 +52,12 @@ describe('worker preflight provider settlement', () => {
 
       request.resume()
       request.on('end', () => {
-        responseCount += 1
+        scenarioResponseCount += 1
         response.writeHead(200, { 'content-type': 'text/event-stream' })
 
-        if (responseCount === 1) {
+        if (scenarioResponseCount === 1) {
           nativeTurnActive = true
+          providerStreamOpen = true
           let terminalSent = false
           sendEvent(response, { type: 'response.created', response_id: 'resp-preflight' })
           sendEvent(response, {
@@ -73,23 +78,34 @@ describe('worker preflight provider settlement', () => {
             output_index: 0,
             delta: '{"path":"target.txt","old_string":"before","new_string":"after"}',
           })
-          const terminal = setTimeout(() => {
-            if (response.destroyed) return
-            terminalSent = true
-            nativeTurnActive = false
-            sendEvent(response, {
-              type: 'response.completed',
-              response_id: 'resp-preflight',
-              response: {
-                id: 'resp-preflight',
-                status: 'completed',
-                output: [],
-                usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
-              },
-            })
-            response.end()
-          }, 250)
+          const terminal = setTimeout(
+            () => {
+              if (response.destroyed) return
+              if (scenario === 'error') {
+                terminalSent = true
+                nativeTurnActive = false
+                sendEvent(response, { type: 'error', message: 'HTTP 400: drain failed' })
+                response.end()
+                return
+              }
+              terminalSent = true
+              nativeTurnActive = false
+              sendEvent(response, {
+                type: 'response.completed',
+                response_id: 'resp-preflight',
+                response: {
+                  id: 'resp-preflight',
+                  status: 'completed',
+                  output: [],
+                  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+                },
+              })
+              response.end()
+            },
+            scenario === 'abort' ? 10_000 : 250,
+          )
           response.once('close', () => {
+            providerStreamOpen = false
             if (terminalSent) return
             clearTimeout(terminal)
           })
@@ -117,7 +133,7 @@ describe('worker preflight provider settlement', () => {
     const llmPort = (llm.address() as AddressInfo).port
 
     root = join(tmpdir(), `openfox-preflight-worker-${randomUUID()}`)
-    const projectDir = join(root, 'project')
+    projectDir = join(root, 'project')
     await mkdir(projectDir, { recursive: true })
     await writeFile(join(projectDir, 'target.txt'), 'before')
     const config: Config = {
@@ -177,58 +193,112 @@ describe('worker preflight provider settlement', () => {
     }
   }
 
-  it.fails(
-    'settles the worker after a preflight-rejected tool result',
-    async () => {
-      const sessionResponse = await fetch(`${base}/api/sessions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId, title: 'preflight-worker' }),
-      })
-      expect(sessionResponse.status).toBe(201)
-      const sessionId = ((await sessionResponse.json()) as { session: { id: string } }).session.id
+  function setScenario(next: typeof scenario): void {
+    scenario = next
+    scenarioResponseCount = 0
+    nativeTurnActive = false
+    providerStreamOpen = false
+  }
 
-      const messageResponse = await fetch(`${base}/api/sessions/${sessionId}/message`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ content: 'edit target.txt' }),
-      })
-      expect(messageResponse.status).toBe(200)
+  async function createSessionAndSend(content: string): Promise<string> {
+    const sessionResponse = await fetch(`${base}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId, title: `preflight-worker-${scenario}` }),
+    })
+    expect(sessionResponse.status).toBe(201)
+    const sessionId = ((await sessionResponse.json()) as { session: { id: string } }).session.id
 
-      const rejected = await waitFor(
-        async () => {
-          const view = await getSession(sessionId)
-          const toolCall = view.messages
-            .flatMap((message) => message.toolCalls ?? [])
-            .find((call) => call.name === 'edit_file' && call.result?.success === false)
-          return toolCall ? view : null
-        },
-        'preflight tool.result success=false',
-        10_000,
-      )
+    const messageResponse = await fetch(`${base}/api/sessions/${sessionId}/message`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content }),
+    })
+    expect(messageResponse.status).toBe(200)
+    return sessionId
+  }
 
-      expect(rejected.queuedMessages ?? []).toHaveLength(0)
-      expect(rejected.pendingToolReconciliations ?? []).toHaveLength(0)
+  async function waitUntilIdle(sessionId: string): Promise<SessionView> {
+    return waitFor(
+      async () => {
+        const view = await getSession(sessionId)
+        return view.session.isRunning ? null : view
+      },
+      'worker settlement',
+      5_000,
+    )
+  }
 
-      let settled = rejected
-      const deadline = Date.now() + 2_000
-      while (settled.session.isRunning && Date.now() <= deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 25))
-        settled = await getSession(sessionId)
-      }
-      expect(
-        {
-          isRunning: settled.session.isRunning,
-          queuedMessages: settled.queuedMessages ?? [],
-          pendingToolReconciliations: settled.pendingToolReconciliations ?? [],
-        },
-        'tool.result success=false persisted, but the worker did not settle',
-      ).toEqual({
-        isRunning: false,
-        queuedMessages: [],
-        pendingToolReconciliations: [],
-      })
-    },
-    30_000,
-  )
+  it('settles the worker after a preflight-rejected tool result', async () => {
+    setScenario('settle')
+    const sessionId = await createSessionAndSend('edit target.txt')
+
+    const rejected = await waitFor(
+      async () => {
+        const view = await getSession(sessionId)
+        const toolCall = view.messages
+          .flatMap((message) => message.toolCalls ?? [])
+          .find((call) => call.name === 'edit_file' && call.result?.success === false)
+        return toolCall ? view : null
+      },
+      'preflight tool.result success=false',
+      10_000,
+    )
+
+    const rejectedCall = rejected.messages
+      .flatMap((message) => message.toolCalls ?? [])
+      .find((call) => call.name === 'edit_file' && call.result?.success === false)
+    expect(rejectedCall?.arguments).toEqual({ path: 'target.txt' })
+    expect(await readFile(join(projectDir, 'target.txt'), 'utf8')).toBe('before')
+    expect(rejected.queuedMessages ?? []).toHaveLength(0)
+    expect(rejected.pendingToolReconciliations ?? []).toHaveLength(0)
+
+    let settled = rejected
+    const deadline = Date.now() + 2_000
+    while (settled.session.isRunning && Date.now() <= deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      settled = await getSession(sessionId)
+    }
+    expect(
+      {
+        isRunning: settled.session.isRunning,
+        queuedMessages: settled.queuedMessages ?? [],
+        pendingToolReconciliations: settled.pendingToolReconciliations ?? [],
+      },
+      'tool.result success=false persisted, but the worker did not settle',
+    ).toEqual({
+      isRunning: false,
+      queuedMessages: [],
+      pendingToolReconciliations: [],
+    })
+  }, 30_000)
+
+  it('settles the worker when the provider stream errors during drain', async () => {
+    setScenario('error')
+    const sessionId = await createSessionAndSend('edit target.txt and handle a drain error')
+
+    await waitFor(async () => (providerStreamOpen ? true : null), 'provider drain start', 5_000)
+    const settled = await waitUntilIdle(sessionId)
+
+    expect(scenarioResponseCount).toBe(1)
+    expect(providerStreamOpen).toBe(false)
+    expect(settled.queuedMessages ?? []).toHaveLength(0)
+    expect(settled.pendingToolReconciliations ?? []).toHaveLength(0)
+  }, 30_000)
+
+  it('settles the worker when the user stops during drain', async () => {
+    setScenario('abort')
+    const sessionId = await createSessionAndSend('edit target.txt and wait during drain')
+
+    await waitFor(async () => (providerStreamOpen ? true : null), 'provider drain start', 5_000)
+    expect((await getSession(sessionId)).session.isRunning).toBe(true)
+
+    const stop = await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
+    expect(stop.status).toBe(200)
+
+    const settled = await waitUntilIdle(sessionId)
+    await waitFor(async () => (!providerStreamOpen ? true : null), 'provider stream close', 5_000)
+    expect(settled.queuedMessages ?? []).toHaveLength(0)
+    expect(settled.pendingToolReconciliations ?? []).toHaveLength(0)
+  }, 30_000)
 })

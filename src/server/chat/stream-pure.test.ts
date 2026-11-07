@@ -896,8 +896,8 @@ describe('stream-pure', () => {
   })
 
   describe('preflight fast-fail', () => {
-    it('closes the provider stream when preflight rejects the path', async () => {
-      let closed = false
+    it('drains the provider stream before returning the preflight result', async () => {
+      let providerTurnClosed = false
       const client = {
         complete: async () => {
           throw new Error('Not implemented')
@@ -908,19 +908,19 @@ describe('stream-pure', () => {
         setBackend: () => {},
         setModel: () => {},
         stream: async function* () {
-          try {
-            yield { type: 'tool_call_delta', index: 0, id: 'call-1', name: 'edit_file' } as LLMStreamEvent
-            yield {
-              type: 'tool_call_delta',
-              index: 0,
-              arguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}',
-            } as LLMStreamEvent
-          } finally {
-            closed = true
-          }
+          yield { type: 'tool_call_delta', index: 0, id: 'call-1', name: 'edit_file' } as LLMStreamEvent
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            arguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}',
+          } as LLMStreamEvent
+          yield { type: 'thinking_delta', content: 'discarded after rejection' } as LLMStreamEvent
+          yield { type: 'done', response: mockResponse } as LLMStreamEvent
+          providerTurnClosed = true
         },
       }
 
+      const events: Array<{ type: string; data: unknown }> = []
       const result = await consumeStreamGenerator(
         streamLLMPure({
           messageId: 'msg-close',
@@ -930,11 +930,44 @@ describe('stream-pure', () => {
           tools: [{ type: 'function', function: { name: 'edit_file', description: 'Edit', parameters: {} } }],
           preflight: async () => 'File "src/app.ts" must be read before writing',
         }),
-        () => {},
+        (event) => {
+          events.push(event)
+        },
       )
 
       expect(result.toolCalls[0]).toMatchObject({ name: 'edit_file', preflightError: expect.any(String) })
-      expect(closed).toBe(true)
+      expect(providerTurnClosed).toBe(true)
+      expect(events).not.toContainEqual({
+        type: 'message.thinking',
+        data: { messageId: 'msg-close', content: 'discarded after rejection' },
+      })
+    })
+
+    it('returns a drain error instead of the preflight tool result', async () => {
+      const client = createMockClient([
+        { type: 'tool_call_delta', index: 0, id: 'call-1', name: 'edit_file' },
+        {
+          type: 'tool_call_delta',
+          index: 0,
+          arguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}',
+        },
+        { type: 'error', error: 'provider drain failed' },
+      ])
+
+      const result = await consumeStreamGenerator(
+        streamLLMPure({
+          messageId: 'msg-drain-error',
+          systemPrompt: 'system',
+          llmClient: client,
+          messages: [{ role: 'user', content: 'edit' }],
+          tools: [{ type: 'function', function: { name: 'edit_file', description: 'Edit', parameters: {} } }],
+          preflight: async () => 'File "src/app.ts" must be read before writing',
+        }),
+        () => {},
+      )
+
+      expect(result.error).toBe('provider drain failed')
+      expect(result.toolCalls).toEqual([])
     })
 
     it('aborts write_file stream early when preflight rejects the path', async () => {

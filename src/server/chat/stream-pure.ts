@@ -305,12 +305,9 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
 
   // Create abort controller for pattern-based abort
   const patternAbortController = new AbortController()
-  // Separate abort controller for preflight fast-fail (a rejected preflight
-  // must not look like a user abort — the caller turns it into a failed tool call)
-  const preflightAbortController = new AbortController()
   const combinedSignal = signal
-    ? AbortSignal.any([signal, patternAbortController.signal, preflightAbortController.signal])
-    : AbortSignal.any([patternAbortController.signal, preflightAbortController.signal])
+    ? AbortSignal.any([signal, patternAbortController.signal])
+    : patternAbortController.signal
 
   // Start streaming
   const stream = buildStreamRequest(llmClient, {
@@ -509,7 +506,6 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
                   path,
                   error: preflightError,
                 }
-                preflightAbortController.abort()
                 break
               }
             }
@@ -549,7 +545,13 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
   // complete arguments (e.g. a read_file preceding an edit_file in the same
   // response) are preserved — only the rejected call is reduced to its path.
   if (preflightFailure) {
-    await stream.return?.(null)
+    let drainError: string | undefined
+    for await (const event of stream) {
+      if (event.type === 'error') drainError = event.error
+    }
+    if (drainError) {
+      return createEmptyStreamResult(false, modelParams, undefined, drainError)
+    }
     const toolCalls: ToolCall[] = []
     for (const [index, name] of toolNames) {
       if (index === preflightFailure.index) continue
