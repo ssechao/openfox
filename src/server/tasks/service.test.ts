@@ -858,7 +858,7 @@ describe('project tasks service', () => {
       expect(service.get(projectId, task.id)?.auditTrail.at(-1)?.detail).not.toContain('running')
     })
 
-    it.fails('deletes only the fresh session of a refused workflow start', async () => {
+    it('deletes only the fresh session of a refused workflow start', async () => {
       sm.sessions.set('sess-user', { id: 'sess-user', projectId, messages: [] })
       launchSpy.mockReturnValueOnce('start_failed').mockReturnValueOnce('started').mockReturnValueOnce('start_failed')
       const task = create('/default')
@@ -1166,7 +1166,7 @@ describe('project tasks service', () => {
       expect(spawned.runState).toBe('queued')
     })
 
-    it.fails('removes the refused occurrence and its session without advancing the template', async () => {
+    it('removes the refused occurrence and its session without advancing the template', async () => {
       launchSpy.mockReturnValueOnce('start_failed').mockReturnValue('started')
       const template = create('/default', {
         schedule: {

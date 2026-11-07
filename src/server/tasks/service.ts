@@ -36,6 +36,7 @@ export class WorkerAdmissionRefusal extends Error {
   constructor(
     readonly admission: Exclude<AdmissionResult, 'started' | 'waiting'>,
     readonly sessionId: string,
+    readonly freshSession = false,
   ) {
     super(`Session worker admission ${admission}`)
     this.name = 'WorkerAdmissionRefusal'
@@ -445,7 +446,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
             if (!isWorkerAdmissionRefusal(error)) throw error
             dbSetTaskRunState(taskId, 'queued')
             dbAppendToBottom(taskId, 'in_progress')
-            dbAddTaskLink(taskId, error.sessionId, false)
+            if (!error.freshSession) dbAddTaskLink(taskId, error.sessionId, false)
             dbAddAuditEntry(
               taskId,
               opts.actor,
@@ -769,6 +770,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     targetSessionId?: string,
   ) {
     let session: Session
+    let created = false
     if (targetSessionId) {
       const existing = sessionManager.getSession(targetSessionId)
       if (!existing) {
@@ -781,6 +783,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       const providerId = task.providerId ?? defaults.providerId ?? null
       const model = task.model ?? defaults.model ?? null
       session = sessionManager.createSession(projectId, undefined, providerId, model)
+      created = true
     }
     if (task.agentId) {
       try {
@@ -810,7 +813,8 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           ...(attachments ? { attachments } : {}),
         })
         if (refusedAdmission(admission)) {
-          throw new WorkerAdmissionRefusal(admission, session.id)
+          if (created) sessionManager.deleteSession(session.id)
+          throw new WorkerAdmissionRefusal(admission, session.id, created)
         }
       } else {
         // No launcher wired (shouldn't happen in production) — degrade to a
@@ -853,7 +857,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     } catch (error) {
       if (!isWorkerAdmissionRefusal(error)) throw error
       dbSetTaskRunState(next.id, 'queued')
-      dbAddTaskLink(next.id, error.sessionId, false)
+      if (!error.freshSession) dbAddTaskLink(next.id, error.sessionId, false)
       logger.warn('Task auto-launch worker admission refused', {
         taskId: next.id,
         sessionId: error.sessionId,
