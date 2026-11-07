@@ -1849,7 +1849,7 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails('notifies exactly once when a finished worker or an explicit release frees a slot', async () => {
+  it('notifies exactly once when a finished worker or an explicit release frees a slot', async () => {
     const root = mkdtempSync(join(tmpdir(), 'openfox-worker-slot-freed-'))
     const { db, namedDb } = createDb(join(root, 'sessions.db'))
     openDbs.push(db)

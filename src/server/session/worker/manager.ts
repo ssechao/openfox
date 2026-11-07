@@ -1111,6 +1111,7 @@ export class SessionWorkerManager {
     worker.slotReleased = true
     if (this.scheduler.release(worker.sessionId)) {
       logger.info('Session worker slot released', { sessionId: worker.sessionId, workerId: worker.token.workerId })
+      this.deps.onSlotFreed?.()
     }
   }
 
