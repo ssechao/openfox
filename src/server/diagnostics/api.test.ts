@@ -24,6 +24,7 @@ describe('/api/diagnostics', () => {
   beforeAll(async () => {
     process.env['OPENFOX_MOCK_LLM'] = 'true'
     process.env['OPENFOX_SESSION_WORKER'] = 'true'
+    process.env['OPENFOX_SESSION_WORKER_MAX_PROCESSES'] = '1'
     root = join(tmpdir(), `openfox-diagnostics-test-${randomUUID()}`)
     const projectDir = join(root, 'project')
     await mkdir(projectDir, { recursive: true })
@@ -39,7 +40,11 @@ describe('/api/diagnostics', () => {
       globalConfigPath: join(root, 'config.json'),
     }
     const { createServerHandle } = await import('../index.js')
-    server = await createServerHandle(config)
+    try {
+      server = await createServerHandle(config)
+    } finally {
+      delete process.env['OPENFOX_SESSION_WORKER_MAX_PROCESSES']
+    }
     const { port } = await server.start(0)
     base = `http://127.0.0.1:${port}`
 
@@ -137,6 +142,97 @@ describe('/api/diagnostics', () => {
     }
     expect(stale).toMatchObject({ reason: 'exit' })
   }, 30_000)
+
+  it.fails(
+    'exposes worker pool capacity, active sessions and waiting sessions',
+    async () => {
+      const headers = { 'content-type': 'application/json', 'x-session-token': VALID_TOKEN }
+      const createSession = async (title: string) => {
+        const response = await fetch(`${base}/api/sessions`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ projectId, title }),
+        })
+        expect(response.status).toBe(201)
+        return ((await response.json()) as { session: { id: string } }).session.id
+      }
+      const sessionA = await createSession('pool-active')
+      const sessionB = await createSession('pool-waiting')
+      const sendMessage = async (sessionId: string) => {
+        const response = await fetch(`${base}/api/sessions/${sessionId}/message`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ content: 'Ask the user a question before continuing.' }),
+        })
+        expect(response.status).toBe(200)
+      }
+      await sendMessage(sessionA)
+      await sendMessage(sessionB)
+
+      type WorkerPoolDiagnostics = {
+        maxConcurrent: number
+        activeSessions: string[]
+        waitingSessions: string[]
+        closed: boolean
+      }
+      const readPool = async () =>
+        (
+          (await (await authed('/api/diagnostics')).json()) as DiagnosticsData & {
+            workerPool?: WorkerPoolDiagnostics
+          }
+        ).workerPool
+
+      const waiting = await readPool()
+      expect(waiting, 'workerPool').toBeDefined()
+      const deadline = Date.now() + 20_000
+      let pool = waiting
+      while (pool && Date.now() < deadline) {
+        if (
+          pool.maxConcurrent === 1 &&
+          pool.closed === false &&
+          pool.activeSessions.includes(sessionA) &&
+          pool.waitingSessions.includes(sessionB) &&
+          !pool.activeSessions.includes(sessionB)
+        ) {
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        pool = await readPool()
+      }
+      expect(pool).toEqual({
+        maxConcurrent: 1,
+        activeSessions: [sessionA],
+        waitingSessions: [sessionB],
+        closed: false,
+      })
+
+      const stopResponse = await fetch(`${base}/api/sessions/${sessionA}/stop`, {
+        method: 'POST',
+        headers: { 'x-session-token': VALID_TOKEN },
+      })
+      expect(stopResponse.status).toBe(200)
+
+      let promoted = pool
+      while (Date.now() < deadline) {
+        promoted = await readPool()
+        if (
+          promoted?.activeSessions.includes(sessionB) &&
+          !promoted.waitingSessions.includes(sessionB) &&
+          !promoted.activeSessions.includes(sessionA)
+        ) {
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(promoted).toEqual({
+        maxConcurrent: 1,
+        activeSessions: [sessionB],
+        waitingSessions: [],
+        closed: false,
+      })
+    },
+    30_000,
+  )
 
   it('does not expose the calibrated loop blocker outside the demo flag', async () => {
     const res = await fetch(`${base}/api/test/block-loop`, {

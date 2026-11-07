@@ -93,4 +93,37 @@ describe('SessionTurnScheduler', () => {
     expect(scheduler.admit('late', () => {})).toBe('closed')
     expect(scheduler.snapshot()).toEqual({ active: ['active'], waiting: [], closed: true })
   })
+
+  it.fails('rolls back an immediate start failure and admits the next session', () => {
+    const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
+    const starts: string[] = []
+
+    const broken = scheduler.admit('broken', () => {
+      throw new Error('start failed')
+    }) as string
+    expect(broken).toBe('start_failed')
+    expect(scheduler.snapshot().active).not.toContain('broken')
+
+    const next = scheduler.admit('next', () => starts.push('next')) as string
+    expect(next).toBe('started')
+    expect(starts).toEqual(['next'])
+    expect(scheduler.snapshot()).toEqual({ active: ['next'], waiting: [], closed: false })
+  })
+
+  it.fails('skips a failed awakened start and continues the FIFO queue', () => {
+    const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
+    const starts: string[] = []
+
+    expect(scheduler.admit('active', () => starts.push('active'))).toBe('started')
+    expect(
+      scheduler.admit('broken', () => {
+        throw new Error('start failed')
+      }),
+    ).toBe('waiting')
+    expect(scheduler.admit('next', () => starts.push('next'))).toBe('waiting')
+
+    scheduler.release('active')
+    expect(starts).toEqual(['active', 'next'])
+    expect(scheduler.snapshot()).toEqual({ active: ['next'], waiting: [], closed: false })
+  })
 })

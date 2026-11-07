@@ -1816,4 +1816,36 @@ describe('SessionWorkerManager', () => {
       vi.useRealTimers()
     }
   })
+
+  it.fails('logs the typed origin of every worker stop request', () => {
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-origin-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+    })
+    const requestStop = manager.requestStop.bind(manager) as (
+      sessionId: string,
+      origin: 'session_delete' | 'rest_stop' | 'mcp_stop' | 'queue_processor',
+    ) => boolean
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      expect(manager.requestTurn('sess-1', () => {})).toBe('started')
+      expect(manager.requestTurn('sess-2', () => {})).toBe('waiting')
+      expect(requestStop('sess-2', 'rest_stop')).toBe(true)
+      expect(warn).toHaveBeenCalledWith('Session worker stop requested', {
+        sessionId: 'sess-2',
+        origin: 'rest_stop',
+        activeWorker: false,
+        cancellation: 'waiting',
+      })
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })
