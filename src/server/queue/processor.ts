@@ -70,7 +70,7 @@ export class QueueProcessor {
     this.deps.sessionManager.clearPauseState(sessionId)
     // A turn running in a worker process never sees the in-process abort
     // signal — ask the worker to abort over IPC too.
-    this.deps.workerManager?.requestStop(sessionId)
+    this.deps.workerManager?.requestStop(sessionId, 'queue_processor')
     return this.deps.runtimeRegistry.get(sessionId).stop()
   }
 
@@ -109,7 +109,7 @@ export class QueueProcessor {
     const workerManager = this.deps.workerManager
     if (workerManager?.isEnabled()) {
       const admission = workerManager.requestTurn(sessionId, () => this.startAdmittedTurn(sessionId))
-      if (admission === 'full' || admission === 'closed') {
+      if (admission !== 'started' && admission !== 'waiting') {
         logger.warn('Worker turn admission refused', { sessionId, admission })
       }
       return

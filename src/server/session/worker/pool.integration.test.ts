@@ -94,7 +94,7 @@ describe('SessionTurnScheduler', () => {
     expect(scheduler.snapshot()).toEqual({ active: ['active'], waiting: [], closed: true })
   })
 
-  it.fails('rolls back an immediate start failure and admits the next session', () => {
+  it('rolls back an immediate start failure and admits the next session', () => {
     const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
     const starts: string[] = []
 
@@ -110,7 +110,7 @@ describe('SessionTurnScheduler', () => {
     expect(scheduler.snapshot()).toEqual({ active: ['next'], waiting: [], closed: false })
   })
 
-  it.fails('skips a failed awakened start and continues the FIFO queue', () => {
+  it('skips a failed awakened start and continues the FIFO queue', () => {
     const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
     const starts: string[] = []
 

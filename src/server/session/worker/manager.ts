@@ -79,6 +79,8 @@ import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
 import { executeBackgroundAction, type BackgroundActionResult } from '../../tools/background-process/actions.js'
 
+export type WorkerStopOrigin = 'session_delete' | 'rest_stop' | 'mcp_stop' | 'queue_processor'
+
 const WORKER_RECOVERY_TIMEOUT_MS = 4_000
 const WORKER_STOP_SETTLEMENT_TIMEOUT_MS = 2_000
 const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
@@ -174,10 +176,12 @@ export class SessionWorkerManager {
   private readonly interactiveBroker: WorkerInteractiveBroker
   private lastCrash: WorkerCrashReport | null = null
   private admissionsClosed = false
+  private readonly maxConcurrent: number
 
   constructor(private readonly deps: SessionWorkerManagerDeps) {
+    this.maxConcurrent = deps.maxProcesses ?? resolveWorkerPoolSize(process.env['OPENFOX_SESSION_WORKER_MAX_PROCESSES'])
     this.scheduler = new SessionTurnScheduler({
-      maxConcurrent: deps.maxProcesses ?? resolveWorkerPoolSize(process.env['OPENFOX_SESSION_WORKER_MAX_PROCESSES']),
+      maxConcurrent: this.maxConcurrent,
       maxWaitingSessions: MAX_WAITING_SESSIONS,
     })
     this.mcpBroker = deps.executeMcp
@@ -284,11 +288,32 @@ export class SessionWorkerManager {
     this.scheduler.closeAdmissions()
   }
 
-  requestStop(sessionId: string): boolean {
+  poolSnapshot(): {
+    maxConcurrent: number
+    activeSessions: string[]
+    waitingSessions: string[]
+    closed: boolean
+  } {
+    const slots = this.scheduler.snapshot()
+    return {
+      maxConcurrent: this.maxConcurrent,
+      activeSessions: slots.active,
+      waitingSessions: slots.waiting,
+      closed: slots.closed,
+    }
+  }
+
+  requestStop(sessionId: string, origin: WorkerStopOrigin): boolean {
     const epoch = this.interruptionEpoch.get(sessionId)
     if (epoch !== undefined) this.stoppedEpoch.set(sessionId, epoch)
     const cancellation = this.scheduler.cancel(sessionId)
     const worker = this.active.get(sessionId)
+    logger.warn('Session worker stop requested', {
+      sessionId,
+      origin,
+      activeWorker: worker !== undefined,
+      cancellation,
+    })
     if (!worker) return cancellation === 'waiting'
     this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
     this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session stopped by user')

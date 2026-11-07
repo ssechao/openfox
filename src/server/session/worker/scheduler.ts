@@ -1,10 +1,11 @@
 import { availableParallelism } from 'node:os'
+import { logger } from '../../utils/logger.js'
 
 export const MAX_WORKER_PROCESSES = 32
 export const MAX_WAITING_SESSIONS = 64
 export const MAX_QUEUED_COMMANDS_PER_SESSION = 100
 
-export type AdmissionResult = 'started' | 'waiting' | 'full' | 'closed'
+export type AdmissionResult = 'started' | 'waiting' | 'full' | 'closed' | 'start_failed'
 export type CancellationResult = 'active' | 'waiting' | 'none'
 
 interface WaitingTurn {
@@ -66,8 +67,10 @@ export class SessionTurnScheduler {
       return 'waiting'
     }
     if (this.active.size < this.options.maxConcurrent) {
-      this.active.set(sessionId, [])
-      start()
+      if (!this.tryStart(sessionId, [start])) {
+        this.startNext()
+        return 'start_failed'
+      }
       return 'started'
     }
     if (this.waiting.length >= this.options.maxWaitingSessions) return 'full'
@@ -126,11 +129,28 @@ export class SessionTurnScheduler {
 
   private startNext(): void {
     if (this.closed) return
-    const next = this.waiting.shift()
-    if (!next) return
-    const [start, ...queued] = next.starts
-    if (!start) return
-    this.active.set(next.sessionId, queued)
-    start()
+    while (this.active.size < this.options.maxConcurrent) {
+      const next = this.waiting.shift()
+      if (!next) return
+      if (this.tryStart(next.sessionId, next.starts)) return
+    }
+  }
+
+  private tryStart(sessionId: string, starts: Array<() => void>): boolean {
+    const [start, ...queued] = starts
+    if (!start) return false
+    this.active.set(sessionId, queued)
+    try {
+      start()
+      return true
+    } catch (error) {
+      this.active.delete(sessionId)
+      if (queued.length > 0) this.waiting.push({ sessionId, starts: queued })
+      logger.error('Session worker start failed', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
   }
 }

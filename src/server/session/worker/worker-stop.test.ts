@@ -114,7 +114,7 @@ describe('session worker stop relay', () => {
 
     const stopRes = await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
     expect(stopRes.status).toBe(200)
-    expect(requestStopSpy).toHaveBeenCalledWith(sessionId)
+    expect(requestStopSpy).toHaveBeenCalledWith(sessionId, 'rest_stop')
 
     const stopped = await getSessionView(sessionId)
     expect(stopped.session.isRunning).toBe(false)

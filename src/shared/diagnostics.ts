@@ -88,6 +88,13 @@ export interface WorkerProcessDiagnostics {
   freshness: WorkerProcessFreshness
 }
 
+export interface WorkerPoolDiagnostics {
+  maxConcurrent: number
+  activeSessions: string[]
+  waitingSessions: string[]
+  closed: boolean
+}
+
 export interface DiagnosticsData {
   collectedAt: number
   intervalMs: number
@@ -99,4 +106,5 @@ export interface DiagnosticsData {
   /** Worker series excluded from the aggregated totals (dead or TTL-expired). */
   staleSeries?: StaleWorkerSeries[]
   workerProcesses?: WorkerProcessDiagnostics[]
+  workerPool?: WorkerPoolDiagnostics
 }

@@ -420,7 +420,7 @@ describe('SessionWorkerManager', () => {
 
     expect(manager.requestTurn('sess-1', activeStart)).toBe('started')
     expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
-    expect(manager.requestStop('sess-2')).toBe(true)
+    expect(manager.requestStop('sess-2', 'rest_stop')).toBe(true)
     expect(waitingStart).not.toHaveBeenCalled()
     expect(manager.activeWorker('sess-2')).toBeNull()
     expect(namedDb.prepare(`SELECT worker_id, worker_generation FROM sessions WHERE id = 'sess-2'`).get()).toEqual({
@@ -521,7 +521,7 @@ describe('SessionWorkerManager', () => {
           runtime.acquire('compact')
         }),
       ).toBe('waiting')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: 'abort' }))
       expect(kill).not.toHaveBeenCalled()
 
@@ -712,7 +712,7 @@ describe('SessionWorkerManager', () => {
 
     try {
       manager.launch('sess-1', settled)
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(500)
       expect(kill).toHaveBeenCalledWith('SIGTERM')
       await vi.advanceTimersByTimeAsync(500)
@@ -791,7 +791,7 @@ describe('SessionWorkerManager', () => {
 
     try {
       manager.launch('sess-1', settled)
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(1_999)
       expect(settled).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
@@ -1036,7 +1036,7 @@ describe('SessionWorkerManager', () => {
 
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(1_999)
       expect(settled).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
@@ -1146,7 +1146,7 @@ describe('SessionWorkerManager', () => {
 
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(2_000)
       expect(settled).toHaveBeenCalledOnce()
 
@@ -1223,7 +1223,7 @@ describe('SessionWorkerManager', () => {
 
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(1_999)
       expect(settled).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
@@ -1305,7 +1305,7 @@ describe('SessionWorkerManager', () => {
     try {
       manager.launch('sess-1', vi.fn())
       const stopStartedAt = Date.now()
-      manager.requestStop('sess-1')
+      manager.requestStop('sess-1', 'rest_stop')
       await vi.advanceTimersByTimeAsync(4_000)
 
       expect(manager.lastCrashReport()).toMatchObject({
@@ -1503,7 +1503,7 @@ describe('SessionWorkerManager', () => {
     const manager = createSlotManager(namedDb)
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', () => {}))).toBe('started')
-      manager.requestStop('sess-1')
+      manager.requestStop('sess-1', 'rest_stop')
       namedDb.prepare(`DELETE FROM sessions WHERE id = 'sess-1'`).run()
       await vi.advanceTimersByTimeAsync(10_000)
       const next = vi.fn()
@@ -1817,7 +1817,7 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails('logs the typed origin of every worker stop request', () => {
+  it('logs the typed origin of every worker stop request', () => {
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-origin-${crypto.randomUUID()}.db`))
     openDbs.push(db)
     namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()

@@ -11,18 +11,16 @@ export function admitWithStartFailure(
   onDeferredFailure: (error: Error) => void,
 ): AdmissionResult {
   let admissionReturned = false
-  let immediateFailure: Error | undefined
   const admission = admit(() => {
     try {
       start()
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error))
       if (admissionReturned) onDeferredFailure(failure)
-      else immediateFailure = failure
+      else throw failure
     }
   })
   admissionReturned = true
-  if (immediateFailure) throw immediateFailure
   return admission
 }
 

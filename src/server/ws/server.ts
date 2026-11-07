@@ -961,6 +961,17 @@ async function handleClientMessage(
       send(createErrorMessage(startFailure.code, startFailure.reason, message.id))
     } else if (admission === 'started' || admission === 'waiting') {
       send({ type: 'ack', payload: { admission }, id: message.id })
+    } else if (admission === 'start_failed') {
+      send(
+        createErrorMessage(
+          'WORKER_LAUNCH_FAILED',
+          serverT({
+            en: 'The session worker failed to start',
+            fr: 'Le worker de session n’a pas pu démarrer',
+          }),
+          message.id,
+        ),
+      )
     } else {
       const reason =
         admission === 'full'

@@ -204,6 +204,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   setSessionRuntimeRegistry(runtimeRegistry)
 
   const healthAggregator = createHealthAggregator()
+  let readWorkerPool: (() => import('../shared/diagnostics.js').WorkerPoolDiagnostics) | null = null
   const diagnosticsCollector = createDiagnosticsCollector({
     dbPath: db.name,
     countRunningSessions: () => getEventStore().countRunningSessions(),
@@ -415,7 +416,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
 
   app.get('/api/diagnostics', (_req, res) => {
-    res.json(diagnosticsCollector.getData())
+    const workerPool = readWorkerPool?.()
+    res.json(workerPool ? { ...diagnosticsCollector.getData(), workerPool } : diagnosticsCollector.getData())
   })
 
   if (config.mode === 'test' && process.env['OPENFOX_TEST_BLOCK_LOOP'] === '1') {
@@ -1178,7 +1180,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     sessionManager.clearMessageQueue(sessionId)
     stopSessionExecution(sessionId, sessionManager)
-    abortSession(sessionId)
+    abortSession(sessionId, 'session_delete')
     cancelQuestionsForSession(sessionId, 'Session deleted')
     cancelPathConfirmationsForSession(sessionId, 'Session deleted')
 
@@ -1846,7 +1848,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     // Abort the single root runtime controller. This is synchronous before any
     // further I/O and clears the pause gate so the stop ACK is immediate.
-    abortSession(sessionId)
+    abortSession(sessionId, 'rest_stop')
 
     cancelQuestionsForSession(sessionId, 'Session stopped by user')
     cancelPathConfirmationsForSession(sessionId, 'Session stopped by user')
@@ -2037,6 +2039,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         })
       }
       if (!result.consumed) {
+        if (result.admission === 'start_failed') {
+          return res.status(503).json({
+            error: 'Session worker failed to start',
+            code: 'WORKER_LAUNCH_FAILED',
+            admission: result.admission,
+          })
+        }
         const status = result.admission === 'full' ? 429 : 503
         return retryAutomatic({
           status,
@@ -4064,7 +4073,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
     const workerController = webSocketWorkerController.current
     if (workerController?.isEnabled()) {
-      let cleanupFailure: () => void = () => {
+      const cleanupFailure = () => {
         workerController.releaseTurn(sessionId)
       }
       let admission: import('./session/worker/scheduler.js').AdmissionResult
@@ -4072,11 +4081,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         admission = admitWithStartFailure(
           (start) => workerController.requestTurn(sessionId, start),
           () => {
+            let releaseAcquired: (() => void) | undefined
             try {
               const acquired = runtimeRegistry.get(sessionId).acquire('workflow')
-              cleanupFailure = () => {
+              releaseAcquired = () => {
                 runtimeRegistry.peek(sessionId)?.release(acquired)
-                workerController.releaseTurn(sessionId)
               }
               workerController.launch(
                 sessionId,
@@ -4092,6 +4101,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
                 },
               )
             } catch (error) {
+              releaseAcquired?.()
               const failure = error instanceof Error ? error : new Error(String(error))
               logger.error('Task workflow worker launch failed', { sessionId, error })
               throw failure
@@ -4231,6 +4241,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     resumeInterruptedSession: (sessionId) => resumeInterruptedSession(sessionId, { automatic: true }),
   })
   webSocketWorkerController.current = workerManager
+  readWorkerPool = () => workerManager.poolSnapshot()
   deferCanStartSession = (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId)
   sessionManager.setQueueAdmissionGuard(
     (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId),
@@ -4372,8 +4383,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     logger.info('Boot auto-continuation queued', { sessions: staleIds.length, continued })
   }
 
-  const abortSession = (sessionId: string) => {
-    workerManager.requestStop(sessionId)
+  const abortSession = (sessionId: string, origin: 'session_delete' | 'rest_stop' | 'mcp_stop') => {
+    workerManager.requestStop(sessionId, origin)
     const aborted = runtimeRegistry.get(sessionId).stop()
     if (aborted) {
       sessionManager.clearPauseState(sessionId)
@@ -4423,7 +4434,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         const { stopSessionExecution } = await import('./session/chat-handler.js')
         sessionManager.clearMessageQueue(sessionId)
         stopSessionExecution(sessionId, sessionManager)
-        abortSession(sessionId)
+        abortSession(sessionId, 'mcp_stop')
         cancelQuestionsForSession(sessionId, 'Session stopped by user')
         cancelPathConfirmationsForSession(sessionId, 'Session stopped by user')
         getEventStore().append(sessionId, { type: 'running.changed', data: { isRunning: false } })
