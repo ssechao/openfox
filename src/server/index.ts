@@ -4220,7 +4220,11 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     ...(processSupervisor ? { processSupervisor } : {}),
     healthAggregator,
     onSlotFreed: () => {
-      void tasksService.retryQueuedLaunches()
+      void tasksService.retryQueuedLaunches().catch((error: unknown) => {
+        logger.error('Queued task retry failed', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
     },
     getMcpTools: () => createWorkerMcpTools(mcpManager),
     executeMcp: async (request, signal) => {

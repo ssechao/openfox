@@ -52,6 +52,25 @@ function refusedAdmission(
 ): admission is Exclude<AdmissionResult, 'started' | 'waiting'> {
   return admission === 'full' || admission === 'closed' || admission === 'start_failed'
 }
+
+function isSqliteBusy(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'))
+}
+
+function runBusySync<T>(operation: () => T): T {
+  const deadline = Date.now() + 200
+  let delay = 5
+  for (;;) {
+    try {
+      return operation()
+    } catch (error) {
+      if (!isSqliteBusy(error) || Date.now() >= deadline) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay)
+      delay = Math.min(delay * 2, 40)
+    }
+  }
+}
 import { getProject, listProjects } from '../db/projects.js'
 import { resolveSlashLaunch, type SlashLaunch } from './slash.js'
 import {
@@ -448,12 +467,18 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
               taskId,
               opts.actor,
               'move',
-              `Moved to In Progress (queued): worker admission ${error.admission}`,
+              'Moved to In Progress (queued): waiting for a worker',
               opts.actorName,
             )
-            publish(projectId, taskId)
+            queued = {
+              reason: 'admission_refused',
+              active,
+              slotLimit: settings.slotLimit,
+              position: dbGetTask(taskId)?.queuePosition ?? 1,
+            }
+          } else {
+            throw error
           }
-          throw error
         }
       } else {
         // Queued: append at the bottom of In Progress so FIFO order (oldest
@@ -527,10 +552,17 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
    */
   async function retryQueuedLaunches() {
     for (const project of listProjects()) {
-      await withLock(project.id, async () => {
-        const autoLaunched = await maybeAutoLaunch(project.id)
-        if (autoLaunched) publish(project.id, undefined, autoLaunched)
-      })
+      try {
+        await withLock(project.id, async () => {
+          const autoLaunched = await maybeAutoLaunch(project.id)
+          if (autoLaunched) publish(project.id, undefined, autoLaunched)
+        })
+      } catch (error) {
+        logger.warn('Queued task retry failed', {
+          projectId: project.id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
   }
 
@@ -815,12 +847,18 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     }
     if (slash?.kind === 'workflow') {
       if (launchWorkflow) {
-        const admission = await launchWorkflow(session.id, {
-          workflowId: slash.workflowId,
-          params: slash.params,
-          scope: 'auto',
-          ...(attachments ? { attachments } : {}),
-        })
+        let admission: AdmissionResult | void
+        try {
+          admission = await launchWorkflow(session.id, {
+            workflowId: slash.workflowId,
+            params: slash.params,
+            scope: 'auto',
+            ...(attachments ? { attachments } : {}),
+          })
+        } catch (error) {
+          if (created) sessionManager.deleteSession(session.id)
+          throw error
+        }
         if (refusedAdmission(admission)) {
           if (created) sessionManager.deleteSession(session.id)
           throw new WorkerAdmissionRefusal(admission, session.id, created)
@@ -864,19 +902,24 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     const target = reusableTarget(projectId, earmarks[0]?.session_id)
     const admissionSessionId = target ?? `task:${next.id}`
     if (canStartSession && !canStartSession(admissionSessionId)) return undefined
-    dbSetTaskRunState(next.id, 'running')
+    runBusySync(() => dbSetTaskRunState(next.id, 'running'))
     let seeded: Awaited<ReturnType<typeof seedSession>>
     try {
       seeded = await seedSession(projectId, next, 'queued', target)
     } catch (error) {
-      if (!isWorkerAdmissionRefusal(error)) throw error
-      dbSetTaskRunState(next.id, 'queued')
-      if (!error.freshSession) dbAddTaskLink(next.id, error.sessionId, false)
-      logger.warn('Task auto-launch worker admission refused', {
-        taskId: next.id,
-        sessionId: error.sessionId,
-        admission: error.admission,
-      })
+      runBusySync(() => dbSetTaskRunState(next.id, 'queued'))
+      if (isWorkerAdmissionRefusal(error) && !error.freshSession) {
+        dbAddTaskLink(next.id, error.sessionId, false)
+      }
+      logger.warn(
+        isWorkerAdmissionRefusal(error) ? 'Task auto-launch worker admission refused' : 'Task auto-launch failed',
+        {
+          taskId: next.id,
+          ...(isWorkerAdmissionRefusal(error)
+            ? { sessionId: error.sessionId, admission: error.admission }
+            : { error: error instanceof Error ? error.message : String(error) }),
+        },
+      )
       return undefined
     }
     dbAddTaskLink(next.id, seeded.session.id, true)

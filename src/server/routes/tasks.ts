@@ -52,13 +52,10 @@ export function registerTaskRoutes(router: Router, tasksService: TasksService): 
                 en: 'Session worker failed to start',
                 fr: 'Le worker de session n’a pas pu démarrer',
               })
-            : serverT(
-                {
-                  en: 'Session worker admission {{admission}}',
-                  fr: 'Admission du worker de session {{admission}}',
-                },
-                { admission: error.admission },
-              ),
+            : serverT({
+                en: 'The task is waiting for a worker.',
+                fr: 'La tâche attend un worker.',
+              }),
         code: 'WORKER_ADMISSION_REFUSED',
         admission: error.admission,
       })

@@ -927,10 +927,11 @@ describe('project tasks service', () => {
     it('parks a full worker pool as queued and launches when a slot frees', async () => {
       launchSpy.mockReturnValueOnce('full').mockReturnValueOnce('started')
       const task = create('/default')
-      await expect(service.move(projectId, task.id, 'in_progress', { actor: 'human' })).rejects.toMatchObject({
-        admission: 'full',
-      })
-      expect(service.get(projectId, task.id)).toMatchObject({ status: 'in_progress', runState: 'queued' })
+      const parked = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
+      expect(parked.queued).toMatchObject({ reason: 'admission_refused' })
+      expect(parked.task).toMatchObject({ status: 'in_progress', runState: 'queued' })
+      expect(parked.task.auditTrail.at(-1)?.detail).toContain('waiting for a worker')
+      expect(parked.task.auditTrail.at(-1)?.detail).not.toContain('full')
 
       await service.retryQueuedLaunches()
 
@@ -938,6 +939,57 @@ describe('project tasks service', () => {
       expect(
         sm.reminders.some((reminder) => reminder.sessionId === service.get(projectId, task.id)?.activeSessionId),
       ).toBe(true)
+    })
+
+    it('returns the queued move instead of an admission error when the pool is full', async () => {
+      launchSpy.mockReturnValue('full')
+      const task = create('/default')
+      const app = express()
+      app.use(express.json())
+      const router = express.Router()
+      registerTaskRoutes(router, service)
+      app.use('/api', router)
+      const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+        const listening = app.listen(0, () => resolve(listening))
+      })
+      try {
+        const port = (server.address() as { port: number }).port
+        const response = await fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/tasks/${task.id}/move`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ to: 'in_progress' }),
+        })
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({
+          queued: { reason: 'admission_refused' },
+          task: { status: 'in_progress', runState: 'queued' },
+        })
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    })
+
+    it('keeps a busy auto-launch queued and still starts the next project', async () => {
+      const otherRoot = join(root, 'nested')
+      const otherProjectId = createProject('Other tasks', otherRoot).id
+      launchSpy.mockReturnValue('full')
+      const blocked = create('/default')
+      const next = service.create(otherProjectId, { prompt: '/default' }, { actor: 'human' })
+      await service.move(projectId, blocked.id, 'in_progress', { actor: 'human' })
+      await service.move(otherProjectId, next.id, 'in_progress', { actor: 'human' })
+
+      const busy = Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' })
+      launchSpy.mockImplementation((sessionId: string) => {
+        const session = sm.sessions.get(sessionId)
+        if (session?.projectId === projectId) throw busy
+        return 'started'
+      })
+      await service.retryQueuedLaunches()
+
+      expect(service.get(projectId, blocked.id)).toMatchObject({ status: 'in_progress', runState: 'queued' })
+      expect(service.get(projectId, blocked.id)?.activeSessionId).toBeUndefined()
+      expect(launchSpy.mock.calls.length).toBeGreaterThan(2)
+      expect(service.get(otherProjectId, next.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
     })
 
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
