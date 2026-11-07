@@ -31,6 +31,7 @@ function makeSessionManager(): FakeSessionManager & {
   queueMessage: (sessionId: string, mode: string, content?: string, attachments?: Attachment[]) => void
   setMode: (sessionId: string, mode: string) => void
   getSession: (id: string) => FakeSession | null
+  deleteSession: (id: string) => void
 } {
   const mgr = {
     createdSessions: [] as FakeSession[],
@@ -66,6 +67,11 @@ function makeSessionManager(): FakeSessionManager & {
       mgr.modes.set(sessionId, mode)
     },
     getSession: (id: string) => mgr.sessions.get(id) ?? null,
+    deleteSession: (id: string) => {
+      mgr.sessions.delete(id)
+      mgr.reminders.splice(0, mgr.reminders.length, ...mgr.reminders.filter((reminder) => reminder.sessionId !== id))
+      mgr.queued.splice(0, mgr.queued.length, ...mgr.queued.filter((item) => item.sessionId !== id))
+    },
   }
 }
 
@@ -852,6 +858,45 @@ describe('project tasks service', () => {
       expect(service.get(projectId, task.id)?.auditTrail.at(-1)?.detail).not.toContain('running')
     })
 
+    it.fails('deletes only the fresh session of a refused workflow start', async () => {
+      sm.sessions.set('sess-user', { id: 'sess-user', projectId, messages: [] })
+      launchSpy.mockReturnValueOnce('start_failed').mockReturnValueOnce('started').mockReturnValueOnce('start_failed')
+      const task = create('/default')
+
+      await expect(service.move(projectId, task.id, 'in_progress', { actor: 'human' })).rejects.toMatchObject({
+        code: 'WORKER_ADMISSION_REFUSED',
+        admission: 'start_failed',
+      })
+      const abandoned = sm.createdSessions.map((session) => session.id)
+      expect(abandoned).toEqual(['sess-1'])
+      expect(sm.sessions.has('sess-1')).toBe(false)
+      expect(sm.reminders.filter((reminder) => reminder.sessionId === 'sess-1')).toEqual([])
+      expect(service.get(projectId, task.id)).toMatchObject({
+        status: 'in_progress',
+        runState: 'queued',
+        sessionIds: [],
+      })
+      expect(service.get(projectId, task.id)?.activeSessionId).toBeUndefined()
+
+      await service.move(projectId, task.id, 'todo', { actor: 'human' })
+      const accepted = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
+      expect([...sm.sessions.keys()].filter((id) => id !== 'sess-user')).toEqual([accepted.sessionId])
+      expect(service.get(projectId, task.id)).toMatchObject({
+        runState: 'running',
+        activeSessionId: accepted.sessionId,
+        sessionIds: [accepted.sessionId],
+      })
+
+      await service.move(projectId, task.id, 'todo', { actor: 'human' })
+      const supplied = create('/default')
+      const before = sm.createdSessions.length
+      await expect(
+        service.move(projectId, supplied.id, 'in_progress', { actor: 'human', sessionId: 'sess-user' }),
+      ).rejects.toMatchObject({ admission: 'start_failed' })
+      expect(sm.sessions.has('sess-user')).toBe(true)
+      expect(sm.createdSessions).toHaveLength(before)
+    })
+
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
       const task = create('/fixme crash src/a.ts')
       const result = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
@@ -1119,6 +1164,43 @@ describe('project tasks service', () => {
       const spawned = service.list(projectId).find((t) => t.id !== task.id && t.id !== blocker.id)!
       expect(spawned.status).toBe('in_progress')
       expect(spawned.runState).toBe('queued')
+    })
+
+    it.fails('removes the refused occurrence and its session without advancing the template', async () => {
+      launchSpy.mockReturnValueOnce('start_failed').mockReturnValue('started')
+      const template = create('/default', {
+        schedule: {
+          type: 'recurring',
+          freq: 'day',
+          interval: 1,
+          startAt: '2020-01-01T09:00:00',
+          end: { kind: 'never' },
+          occurrencesDone: 0,
+          nextRunAt: '2020-01-01T09:00:00',
+        },
+      })
+
+      await service.runScheduled()
+
+      expect(service.list(projectId).map((task) => task.id)).toEqual([template.id])
+      expect([...sm.sessions.keys()]).toEqual([])
+      expect(sm.reminders).toEqual([])
+      const held = service.get(projectId, template.id)!.schedule as Extract<
+        NonNullable<typeof template.schedule>,
+        { type: 'recurring' }
+      >
+      expect(held.occurrencesDone).toBe(0)
+      expect(held.nextRunAt).toBe('2020-01-01T09:00:00')
+
+      await service.runScheduled()
+
+      const runs = service.list(projectId).filter((task) => task.id !== template.id)
+      expect(runs).toHaveLength(1)
+      expect(runs[0]).toMatchObject({ status: 'in_progress', runState: 'running' })
+      expect([...sm.sessions.keys()]).toEqual(runs[0]!.sessionIds)
+      expect(runs[0]!.sessionIds).toHaveLength(1)
+      const advanced = service.get(projectId, template.id)!.schedule as typeof held
+      expect(advanced.occurrencesDone).toBe(1)
     })
   })
 })

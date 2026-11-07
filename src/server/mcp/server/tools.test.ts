@@ -1036,6 +1036,31 @@ describe('openfx MCP tools', () => {
       expect(json(result).launched).toBeUndefined()
     })
 
+    it('reports a worker start failure instead of resumed', async () => {
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getActiveWorkflowExecution: vi.fn(() => ({
+            id: 'exec-1',
+            workflowId: 'default',
+            status: 'waiting',
+            currentStepId: 'work_location',
+            currentStepName: 'Where to work',
+            stepOutput: {},
+            pendingChoices: [{ id: 'stay', label: 'Stay', goto: 'build' }],
+          })),
+        } as never,
+      })
+      vi.mocked(deps.launchWorkflow).mockReturnValue('start_failed')
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_resume_workflow', {
+        sessionId: 's-1',
+        choice: 'stay',
+      })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('Session worker failed to start')
+      expect(json(result).resumed).toBeUndefined()
+    })
+
     it('refuses to launch on an interrupted session with SESSION_INTERRUPTED', async () => {
       const deps = makeDeps({
         sessionManager: {
