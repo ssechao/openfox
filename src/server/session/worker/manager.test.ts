@@ -1848,4 +1848,51 @@ describe('SessionWorkerManager', () => {
       warn.mockRestore()
     }
   })
+
+  it.fails('notifies exactly once when a finished worker or an explicit release frees a slot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openfox-worker-slot-freed-'))
+    const { db, namedDb } = createDb(join(root, 'sessions.db'))
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: () => true,
+    }) as unknown as ChildProcess
+    const onSlotFreed = vi.fn()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+      processSupervisor: { spawnWorker: () => child } as never,
+      eventStore: () => ({ invalidateExternalSession: () => {} }) as never,
+      onSlotFreed,
+    })
+
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', () => {}))).toBe('started')
+      const token = manager.activeWorker('sess-1')!.token
+      child.emit('message', { ...token, type: 'done', ok: true })
+      child.emit('exit', 0, null)
+      await vi.waitFor(() => expect(manager.activeWorker('sess-1')).toBeNull())
+      expect(onSlotFreed).toHaveBeenCalledTimes(1)
+
+      expect(manager.releaseTurn('sess-1')).toBe(false)
+      expect(onSlotFreed).toHaveBeenCalledTimes(1)
+
+      expect(manager.requestTurn('sess-2', () => {})).toBe('started')
+      expect(manager.releaseTurn('sess-2')).toBe(true)
+      expect(onSlotFreed).toHaveBeenCalledTimes(2)
+
+      expect(manager.releaseTurn('missing')).toBe(false)
+      expect(onSlotFreed).toHaveBeenCalledTimes(2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
