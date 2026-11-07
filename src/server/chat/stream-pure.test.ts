@@ -896,6 +896,47 @@ describe('stream-pure', () => {
   })
 
   describe('preflight fast-fail', () => {
+    it('closes the provider stream when preflight rejects the path', async () => {
+      let closed = false
+      const client = {
+        complete: async () => {
+          throw new Error('Not implemented')
+        },
+        getModel: () => 'test-model',
+        getProfile: () => ({}) as never,
+        getBackend: () => 'unknown' as const,
+        setBackend: () => {},
+        setModel: () => {},
+        stream: async function* () {
+          try {
+            yield { type: 'tool_call_delta', index: 0, id: 'call-1', name: 'edit_file' } as LLMStreamEvent
+            yield {
+              type: 'tool_call_delta',
+              index: 0,
+              arguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}',
+            } as LLMStreamEvent
+          } finally {
+            closed = true
+          }
+        },
+      }
+
+      const result = await consumeStreamGenerator(
+        streamLLMPure({
+          messageId: 'msg-close',
+          systemPrompt: 'system',
+          llmClient: client,
+          messages: [{ role: 'user', content: 'edit' }],
+          tools: [{ type: 'function', function: { name: 'edit_file', description: 'Edit', parameters: {} } }],
+          preflight: async () => 'File "src/app.ts" must be read before writing',
+        }),
+        () => {},
+      )
+
+      expect(result.toolCalls[0]).toMatchObject({ name: 'edit_file', preflightError: expect.any(String) })
+      expect(closed).toBe(true)
+    })
+
     it('aborts write_file stream early when preflight rejects the path', async () => {
       const client = createMockClient([
         { type: 'tool_call_delta', index: 0, id: 'call-1', name: 'write_file' },

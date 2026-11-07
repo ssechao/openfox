@@ -549,6 +549,7 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
   // complete arguments (e.g. a read_file preceding an edit_file in the same
   // response) are preserved — only the rejected call is reduced to its path.
   if (preflightFailure) {
+    await stream.return?.(null)
     const toolCalls: ToolCall[] = []
     for (const [index, name] of toolNames) {
       if (index === preflightFailure.index) continue
