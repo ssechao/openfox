@@ -9,7 +9,14 @@ import type {
 } from '../../../shared/types.js'
 import { projectSessionStatus } from '../../routes/session-status.js'
 import type { WorkflowLaunchPayload } from '../../runner/launch.js'
+import type { AdmissionResult } from '../../session/worker/scheduler.js'
 import type { OpenFoxMcpTool, OpenFoxMcpToolDeps, OpenFoxMcpToolResult } from './types.js'
+
+function workerAdmissionError(admission: AdmissionResult | void): string | undefined {
+  if (admission === undefined || admission === 'started' || admission === 'waiting') return undefined
+  if (admission === 'start_failed') return 'Session worker failed to start'
+  return `Session worker admission ${admission}`
+}
 
 const CONTINUE_PROMPT = 'Continue working on the acceptance criteria.'
 const MAX_DETAIL_CONTENT_LENGTH_DEFAULT = 400
@@ -686,7 +693,8 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
         if (session.phase === 'blocked') {
           sessionManager.setPhase(sessionId, 'build')
         }
-        deps.launchWorkflow(sessionId, payload)
+        const admissionError = workerAdmissionError(await deps.launchWorkflow(sessionId, payload))
+        if (admissionError) return fail(admissionError)
         return ok({ launched: true })
       },
     },
@@ -721,12 +729,15 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
           return fail(`Invalid choice "${choice}". Available: ${pendingChoices.map((c) => c.id).join(', ')}`)
         }
 
-        deps.launchWorkflow(sessionId, {
-          workflowId: execution.workflowId,
-          resumeFrom: execution.currentStepId,
-          userChoice: match.id,
-          stepOutput: execution.stepOutput,
-        })
+        const admissionError = workerAdmissionError(
+          await deps.launchWorkflow(sessionId, {
+            workflowId: execution.workflowId,
+            resumeFrom: execution.currentStepId,
+            userChoice: match.id,
+            stepOutput: execution.stepOutput,
+          }),
+        )
+        if (admissionError) return fail(admissionError)
         return ok({
           resumed: true,
           choice: match.id,

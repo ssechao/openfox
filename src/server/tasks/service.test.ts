@@ -837,6 +837,21 @@ describe('project tasks service', () => {
       expect(launchSpy.mock.calls[0]![1]).toEqual({ workflowId: 'default', params: {}, scope: 'auto' })
     })
 
+    it('queues the task instead of leaving it running when the worker fails to start', async () => {
+      launchSpy.mockReturnValue('start_failed')
+      const task = create('/default')
+
+      await expect(service.move(projectId, task.id, 'in_progress', { actor: 'human' })).rejects.toMatchObject({
+        code: 'WORKER_ADMISSION_REFUSED',
+        admission: 'start_failed',
+      })
+
+      expect(service.get(projectId, task.id)).toMatchObject({ status: 'in_progress', runState: 'queued' })
+      expect(service.get(projectId, task.id)?.activeSessionId).toBeUndefined()
+      expect(service.get(projectId, task.id)?.auditTrail.at(-1)?.detail).toContain('queued')
+      expect(service.get(projectId, task.id)?.auditTrail.at(-1)?.detail).not.toContain('running')
+    })
+
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
       const task = create('/fixme crash src/a.ts')
       const result = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })

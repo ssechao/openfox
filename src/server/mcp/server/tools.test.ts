@@ -1024,6 +1024,18 @@ describe('openfx MCP tools', () => {
       expect(json(result).launched).toBe(true)
     })
 
+    it('reports a worker start failure instead of launched', async () => {
+      const deps = makeDeps()
+      vi.mocked(deps.launchWorkflow).mockReturnValue('start_failed')
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_launch_workflow', {
+        sessionId: 's-1',
+        workflowId: 'default',
+      })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('Session worker failed to start')
+      expect(json(result).launched).toBeUndefined()
+    })
+
     it('refuses to launch on an interrupted session with SESSION_INTERRUPTED', async () => {
       const deps = makeDeps({
         sessionManager: {

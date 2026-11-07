@@ -28,6 +28,29 @@ import type { SessionManager } from '../session/manager.js'
 import type { TasksUpdatePayload } from '../../shared/protocol.js'
 import type { Attachment, WorkflowLaunchScope } from '../../shared/types.js'
 import { parseDefaultModelSelection } from '../provider-manager.js'
+import type { AdmissionResult } from '../session/worker/scheduler.js'
+import { logger } from '../utils/logger.js'
+
+export class WorkerAdmissionRefusal extends Error {
+  readonly code = 'WORKER_ADMISSION_REFUSED'
+  constructor(
+    readonly admission: Exclude<AdmissionResult, 'started' | 'waiting'>,
+    readonly sessionId: string,
+  ) {
+    super(`Session worker admission ${admission}`)
+    this.name = 'WorkerAdmissionRefusal'
+  }
+}
+
+export function isWorkerAdmissionRefusal(error: unknown): error is WorkerAdmissionRefusal {
+  return error instanceof WorkerAdmissionRefusal
+}
+
+function refusedAdmission(
+  admission: AdmissionResult | void,
+): admission is Exclude<AdmissionResult, 'started' | 'waiting'> {
+  return admission === 'full' || admission === 'closed' || admission === 'start_failed'
+}
 import { getProject } from '../db/projects.js'
 import { resolveSlashLaunch, type SlashLaunch } from './slash.js'
 import {
@@ -57,7 +80,6 @@ import {
 } from '../db/tasks.js'
 import type { TaskGateConfig, TaskActor, TaskSchedule } from '../../shared/types.js'
 import { serverT } from '../i18n.js'
-import { logger } from '../utils/logger.js'
 import { nextOccurrence } from './recurrence.js'
 import { SessionWorkerQueueFullError } from '../utils/errors.js'
 
@@ -173,7 +195,7 @@ export interface TasksServiceDeps {
       scope?: WorkflowLaunchScope
       attachments?: Attachment[]
     },
-  ) => void
+  ) => AdmissionResult | void | Promise<AdmissionResult | void>
   canStartSession?: (sessionId: string) => boolean
 }
 
@@ -414,10 +436,26 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         if (launched) {
           // Reuse the session the human is already in when it's still fresh
           // (Up-next Start) — otherwise seed a new one.
-          const seeded = await seedSession(projectId, task, from, reusableTarget(projectId, opts.sessionId))
-          dbAddTaskLink(taskId, seeded.session.id, true)
-          dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (running)`, opts.actorName)
-          sessionId = seeded.session.id
+          try {
+            const seeded = await seedSession(projectId, task, from, reusableTarget(projectId, opts.sessionId))
+            dbAddTaskLink(taskId, seeded.session.id, true)
+            dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (running)`, opts.actorName)
+            sessionId = seeded.session.id
+          } catch (error) {
+            if (!isWorkerAdmissionRefusal(error)) throw error
+            dbSetTaskRunState(taskId, 'queued')
+            dbAppendToBottom(taskId, 'in_progress')
+            dbAddTaskLink(taskId, error.sessionId, false)
+            dbAddAuditEntry(
+              taskId,
+              opts.actor,
+              'move',
+              `Moved to In Progress (queued): worker admission ${error.admission}`,
+              opts.actorName,
+            )
+            publish(projectId, taskId)
+            throw error
+          }
         } else {
           // Queued: append at the bottom of In Progress so FIFO order (oldest
           // first) matches the visible stacking and the per-task queue rank.
@@ -765,12 +803,15 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     }
     if (slash?.kind === 'workflow') {
       if (launchWorkflow) {
-        launchWorkflow(session.id, {
+        const admission = await launchWorkflow(session.id, {
           workflowId: slash.workflowId,
           params: slash.params,
           scope: 'auto',
           ...(attachments ? { attachments } : {}),
         })
+        if (refusedAdmission(admission)) {
+          throw new WorkerAdmissionRefusal(admission, session.id)
+        }
       } else {
         // No launcher wired (shouldn't happen in production) — degrade to a
         // plain message so the session still starts with the task's content.
@@ -806,7 +847,20 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     const admissionSessionId = target ?? `task:${next.id}`
     if (canStartSession && !canStartSession(admissionSessionId)) return undefined
     dbSetTaskRunState(next.id, 'running')
-    const seeded = await seedSession(projectId, next, 'queued', target)
+    let seeded: Awaited<ReturnType<typeof seedSession>>
+    try {
+      seeded = await seedSession(projectId, next, 'queued', target)
+    } catch (error) {
+      if (!isWorkerAdmissionRefusal(error)) throw error
+      dbSetTaskRunState(next.id, 'queued')
+      dbAddTaskLink(next.id, error.sessionId, false)
+      logger.warn('Task auto-launch worker admission refused', {
+        taskId: next.id,
+        sessionId: error.sessionId,
+        admission: error.admission,
+      })
+      return undefined
+    }
     dbAddTaskLink(next.id, seeded.session.id, true)
     dbAddAuditEntry(next.id, 'system', 'auto_launch', `Auto-launched into session ${seeded.session.id}`, 'system')
     return {
