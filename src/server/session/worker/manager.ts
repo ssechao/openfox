@@ -158,6 +158,7 @@ export interface SessionWorkerManagerDeps {
   getMcpTools?: () => WorkerMcpTool[]
   executeMcp?: (request: McpRequestMessage, signal: AbortSignal) => Promise<ToolResult>
   resumeInterruptedSession?: (sessionId: string) => void | Promise<unknown>
+  onSlotFreed?: () => void
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
@@ -345,7 +346,9 @@ export class SessionWorkerManager {
   }
 
   releaseTurn(sessionId: string): boolean {
-    return this.scheduler.release(sessionId)
+    const released = this.scheduler.release(sessionId)
+    if (released) this.deps.onSlotFreed?.()
+    return released
   }
 
   holdInterruption(sessionId: string): void {

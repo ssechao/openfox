@@ -2,6 +2,8 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import { registerTaskRoutes } from '../routes/tasks.js'
 import { loadConfig } from '../config.js'
 import { closeDatabase, initDatabase } from '../db/index.js'
 import { createProject } from '../db/projects.js'
@@ -843,19 +845,40 @@ describe('project tasks service', () => {
       expect(launchSpy.mock.calls[0]![1]).toEqual({ workflowId: 'default', params: {}, scope: 'auto' })
     })
 
-    it('queues the task instead of leaving it running when the worker fails to start', async () => {
+    it('leaves the card and its one-off schedule unchanged when the worker fails to start', async () => {
       launchSpy.mockReturnValue('start_failed')
-      const task = create('/default')
-
-      await expect(service.move(projectId, task.id, 'in_progress', { actor: 'human' })).rejects.toMatchObject({
-        code: 'WORKER_ADMISSION_REFUSED',
-        admission: 'start_failed',
+      const task = create('/default', { schedule: { type: 'once', runAt: '2030-01-01T09:00:00' } })
+      const app = express()
+      app.use(express.json())
+      const router = express.Router()
+      registerTaskRoutes(router, service)
+      app.use('/api', router)
+      const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+        const listening = app.listen(0, () => resolve(listening))
       })
+      try {
+        const port = (server.address() as { port: number }).port
+        const response = await fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/tasks/${task.id}/move`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ to: 'in_progress' }),
+        })
+        expect(response.status).toBe(503)
+        expect(await response.json()).toMatchObject({
+          code: 'WORKER_ADMISSION_REFUSED',
+          admission: 'start_failed',
+        })
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
 
-      expect(service.get(projectId, task.id)).toMatchObject({ status: 'in_progress', runState: 'queued' })
-      expect(service.get(projectId, task.id)?.activeSessionId).toBeUndefined()
-      expect(service.get(projectId, task.id)?.auditTrail.at(-1)?.detail).toContain('queued')
+      expect(service.get(projectId, task.id)).toMatchObject({
+        status: 'todo',
+        schedule: { type: 'once', runAt: '2030-01-01T09:00:00' },
+      })
+      expect(service.get(projectId, task.id)?.runState).toBeUndefined()
       expect(service.get(projectId, task.id)?.auditTrail.at(-1)?.detail).not.toContain('running')
+      expect(service.get(projectId, task.id)?.auditTrail.at(-1)?.detail).not.toContain('queued')
     })
 
     it('deletes only the fresh session of a refused workflow start', async () => {
@@ -872,10 +895,10 @@ describe('project tasks service', () => {
       expect(sm.sessions.has('sess-1')).toBe(false)
       expect(sm.reminders.filter((reminder) => reminder.sessionId === 'sess-1')).toEqual([])
       expect(service.get(projectId, task.id)).toMatchObject({
-        status: 'in_progress',
-        runState: 'queued',
+        status: 'todo',
         sessionIds: [],
       })
+      expect(service.get(projectId, task.id)?.runState).toBeUndefined()
       expect(service.get(projectId, task.id)?.activeSessionId).toBeUndefined()
 
       await service.move(projectId, task.id, 'todo', { actor: 'human' })
@@ -890,11 +913,31 @@ describe('project tasks service', () => {
       await service.move(projectId, task.id, 'todo', { actor: 'human' })
       const supplied = create('/default')
       const before = sm.createdSessions.length
+      sm.modes.set('sess-user', 'plan')
       await expect(
         service.move(projectId, supplied.id, 'in_progress', { actor: 'human', sessionId: 'sess-user' }),
       ).rejects.toMatchObject({ admission: 'start_failed' })
       expect(sm.sessions.has('sess-user')).toBe(true)
       expect(sm.createdSessions).toHaveLength(before)
+      expect(sm.reminders.filter((reminder) => reminder.sessionId === 'sess-user')).toEqual([])
+      expect(sm.modes.get('sess-user')).toBe('plan')
+      expect(service.get(projectId, supplied.id)?.status).toBe('todo')
+    })
+
+    it('parks a full worker pool as queued and launches when a slot frees', async () => {
+      launchSpy.mockReturnValueOnce('full').mockReturnValueOnce('started')
+      const task = create('/default')
+      await expect(service.move(projectId, task.id, 'in_progress', { actor: 'human' })).rejects.toMatchObject({
+        admission: 'full',
+      })
+      expect(service.get(projectId, task.id)).toMatchObject({ status: 'in_progress', runState: 'queued' })
+
+      await service.retryQueuedLaunches()
+
+      expect(service.get(projectId, task.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
+      expect(
+        sm.reminders.some((reminder) => reminder.sessionId === service.get(projectId, task.id)?.activeSessionId),
+      ).toBe(true)
     })
 
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {

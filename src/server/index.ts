@@ -4219,6 +4219,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     broadcastForSession: wssExports.broadcastForSession,
     ...(processSupervisor ? { processSupervisor } : {}),
     healthAggregator,
+    onSlotFreed: () => {
+      void tasksService.retryQueuedLaunches()
+    },
     getMcpTools: () => createWorkerMcpTools(mcpManager),
     executeMcp: async (request, signal) => {
       const startedAt = Date.now()

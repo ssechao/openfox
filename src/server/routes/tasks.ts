@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express'
 import type { TasksService } from '../tasks/service.js'
-import { isTaskGateError, isTaskConflictError } from '../tasks/service.js'
+import { isTaskGateError, isTaskConflictError, isWorkerAdmissionRefusal } from '../tasks/service.js'
 import type { TaskActor } from '../../shared/types.js'
 import { getProject } from '../db/projects.js'
 import { getGateConfig, getTaskSettings } from '../db/tasks.js'
@@ -43,6 +43,25 @@ export function registerTaskRoutes(router: Router, tasksService: TasksService): 
     }
     if (isTaskConflictError(error)) {
       return res.status(409).json({ error: error.message, code: 'CONFLICT', task: error.task })
+    }
+    if (isWorkerAdmissionRefusal(error)) {
+      return res.status(503).json({
+        error:
+          error.admission === 'start_failed'
+            ? serverT({
+                en: 'Session worker failed to start',
+                fr: 'Le worker de session n’a pas pu démarrer',
+              })
+            : serverT(
+                {
+                  en: 'Session worker admission {{admission}}',
+                  fr: 'Admission du worker de session {{admission}}',
+                },
+                { admission: error.admission },
+              ),
+        code: 'WORKER_ADMISSION_REFUSED',
+        admission: error.admission,
+      })
     }
     return res
       .status(400)

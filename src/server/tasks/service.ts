@@ -52,7 +52,7 @@ function refusedAdmission(
 ): admission is Exclude<AdmissionResult, 'started' | 'waiting'> {
   return admission === 'full' || admission === 'closed' || admission === 'start_failed'
 }
-import { getProject } from '../db/projects.js'
+import { getProject, listProjects } from '../db/projects.js'
 import { resolveSlashLaunch, type SlashLaunch } from './slash.js'
 import {
   createTask as dbCreateTask,
@@ -160,6 +160,8 @@ export interface TasksService {
   counts(projectId: string): ProjectTaskCounts
   /** Trigger every due scheduled task (boot catch-up + periodic tick). */
   runScheduled(now?: Date): Promise<void>
+  /** Launch the next queued task in each project once a worker slot is free. */
+  retryQueuedLaunches(): Promise<void>
 }
 
 export interface CreateTaskServiceInput {
@@ -408,8 +410,6 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           throw new SessionWorkerQueueFullError(admissionSessionId)
         }
       }
-      dbSetTaskStatus(taskId, 'in_progress')
-
       if (opts.actor === 'agent') {
         if (!opts.sessionId) {
           throw new Error(
@@ -420,32 +420,29 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           )
         }
         // Current-session rule: the agent is working in its own session NOW.
+        dbSetTaskStatus(taskId, 'in_progress')
         dbSetTaskRunState(taskId, 'running')
         dbAddTaskLink(taskId, opts.sessionId, true)
         dbAddAuditEntry(taskId, 'agent', 'move', `Moved to In Progress (running)`, opts.actorName)
         emitReminder(opts.sessionId, reminderForInProgress(task, opts.sessionId, from))
         sessionId = opts.sessionId
-      } else {
-        // Human drag / Start task / system trigger: allocate a slot or queue.
-        const launched = humanLaunch
-        dbSetTaskRunState(taskId, launched ? 'running' : 'queued')
-        if (task.schedule) {
-          // A planned task manually started (or system-triggered) is no longer
-          // "planned" — it becomes a plain task.
-          dbClearTaskSchedule(taskId)
-        }
-        if (launched) {
-          // Reuse the session the human is already in when it's still fresh
-          // (Up-next Start) — otherwise seed a new one.
-          try {
-            const seeded = await seedSession(projectId, task, from, reusableTarget(projectId, opts.sessionId))
-            dbAddTaskLink(taskId, seeded.session.id, true)
-            dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (running)`, opts.actorName)
-            sessionId = seeded.session.id
-          } catch (error) {
-            if (!isWorkerAdmissionRefusal(error)) throw error
+      } else if (humanLaunch) {
+        // Admit the worker before any status, schedule, mode, or reminder write.
+        try {
+          const seeded = await seedSession(projectId, task, from, reusableTarget(projectId, opts.sessionId))
+          dbSetTaskStatus(taskId, 'in_progress')
+          dbSetTaskRunState(taskId, 'running')
+          if (task.schedule) dbClearTaskSchedule(taskId)
+          dbAddTaskLink(taskId, seeded.session.id, true)
+          dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (running)`, opts.actorName)
+          sessionId = seeded.session.id
+        } catch (error) {
+          if (!isWorkerAdmissionRefusal(error)) throw error
+          if (error.admission !== 'start_failed') {
+            dbSetTaskStatus(taskId, 'in_progress')
             dbSetTaskRunState(taskId, 'queued')
             dbAppendToBottom(taskId, 'in_progress')
+            if (task.schedule) dbClearTaskSchedule(taskId)
             if (!error.freshSession) dbAddTaskLink(taskId, error.sessionId, false)
             dbAddAuditEntry(
               taskId,
@@ -455,23 +452,24 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
               opts.actorName,
             )
             publish(projectId, taskId)
-            throw error
           }
-        } else {
-          // Queued: append at the bottom of In Progress so FIFO order (oldest
-          // first) matches the visible stacking and the per-task queue rank.
-          dbAppendToBottom(taskId, 'in_progress')
-          // Remember where the human wants it to run (Up-next Start) so a
-          // later auto-launch lands in the same session, not an orphan.
-          const earmarked = reusableTarget(projectId, opts.sessionId)
-          if (earmarked) dbAddTaskLink(taskId, earmarked, false)
-          dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (queued)`, opts.actorName)
-          queued = {
-            reason: settings.queuePaused ? 'queue_paused' : 'slot_limit',
-            active,
-            slotLimit: settings.slotLimit,
-            position: dbGetTask(taskId)?.queuePosition ?? 1,
-          }
+          throw error
+        }
+      } else {
+        // Queued: append at the bottom of In Progress so FIFO order (oldest
+        // first) matches the visible stacking and the per-task queue rank.
+        dbSetTaskStatus(taskId, 'in_progress')
+        dbSetTaskRunState(taskId, 'queued')
+        if (task.schedule) dbClearTaskSchedule(taskId)
+        dbAppendToBottom(taskId, 'in_progress')
+        const earmarked = reusableTarget(projectId, opts.sessionId)
+        if (earmarked) dbAddTaskLink(taskId, earmarked, false)
+        dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (queued)`, opts.actorName)
+        queued = {
+          reason: settings.queuePaused ? 'queue_paused' : 'slot_limit',
+          active,
+          slotLimit: settings.slotLimit,
+          position: dbGetTask(taskId)?.queuePosition ?? 1,
         }
       }
     } else if (to === 'done') {
@@ -527,6 +525,15 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
    * spawn a schedule-free run and advance to the next occurrence (single
    * catch-up — several missed intervals collapse into one run).
    */
+  async function retryQueuedLaunches() {
+    for (const project of listProjects()) {
+      await withLock(project.id, async () => {
+        const autoLaunched = await maybeAutoLaunch(project.id)
+        if (autoLaunched) publish(project.id, undefined, autoLaunched)
+      })
+    }
+  }
+
   async function runScheduled(now = new Date()) {
     const due = dbListDueScheduledTasks(now.toISOString())
     for (const task of due) {
@@ -785,15 +792,17 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       session = sessionManager.createSession(projectId, undefined, providerId, model)
       created = true
     }
-    if (task.agentId) {
-      try {
-        sessionManager.setMode(session.id, task.agentId)
-      } catch {
-        // Unknown agent id — fall back to the session default.
-      }
-    }
-    emitReminder(session.id, reminderForInProgress(task, session.id, from))
     const attachments = task.attachments.length > 0 ? task.attachments : undefined
+    const commitSession = () => {
+      if (task.agentId) {
+        try {
+          sessionManager.setMode(session.id, task.agentId)
+        } catch {
+          // Unknown agent id — fall back to the session default.
+        }
+      }
+      emitReminder(session.id, reminderForInProgress(task, session.id, from))
+    }
 
     const projectDir = getProject(projectId)?.workdir
     let slash: SlashLaunch
@@ -816,12 +825,16 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           if (created) sessionManager.deleteSession(session.id)
           throw new WorkerAdmissionRefusal(admission, session.id, created)
         }
+        commitSession()
+        return { session }
       } else {
+        commitSession()
         // No launcher wired (shouldn't happen in production) — degrade to a
         // plain message so the session still starts with the task's content.
         sessionManager.queueMessage(session.id, 'asap', task.prompt, attachments)
       }
     } else if (slash?.kind === 'command') {
+      commitSession()
       if (slash.agentMode) {
         try {
           sessionManager.setMode(session.id, slash.agentMode)
@@ -831,6 +844,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       }
       sessionManager.queueMessage(session.id, 'asap', slash.prompt, attachments, 'command')
     } else {
+      commitSession()
       sessionManager.queueMessage(session.id, 'asap', task.prompt, attachments)
     }
     return { session }
@@ -960,6 +974,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     reorder,
     counts,
     runScheduled,
+    retryQueuedLaunches,
   }
 }
 
