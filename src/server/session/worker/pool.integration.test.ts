@@ -126,4 +126,26 @@ describe('SessionTurnScheduler', () => {
     expect(starts).toEqual(['active', 'next'])
     expect(scheduler.snapshot()).toEqual({ active: ['next'], waiting: [], closed: false })
   })
+
+  it.fails('keeps the replacement reservation when an awakened start releases and throws', () => {
+    const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
+    const starts: string[] = []
+
+    expect(scheduler.admit('A', () => starts.push('A'))).toBe('started')
+    expect(
+      scheduler.admit('B', () => {
+        starts.push('B1')
+        scheduler.release('B')
+        scheduler.admit('C', () => starts.push('C'))
+        throw new Error('start failed')
+      }),
+    ).toBe('waiting')
+    expect(scheduler.admit('B', () => starts.push('B2'))).toBe('waiting')
+
+    scheduler.release('A')
+
+    expect(scheduler.snapshot()).toEqual({ active: ['B'], waiting: ['C'], closed: false })
+    expect(starts.filter((name) => name === 'B2')).toHaveLength(1)
+    expect(starts).toEqual(['A', 'B1', 'B2'])
+  })
 })

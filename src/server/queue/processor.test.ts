@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } 
 import { QueueProcessor } from './processor.js'
 import { SessionRuntimeRegistry } from '../session/index.js'
 import { generateSessionNameForSession } from '../session/name-generator.js'
+import { SessionTurnScheduler } from '../session/worker/scheduler.js'
+import { logger } from '../utils/logger.js'
 import { initDatabase, closeDatabase } from '../db/index.js'
 import type { Config } from '../config.js'
 
@@ -646,6 +648,57 @@ describe('QueueProcessor', () => {
       expect(mockSessionManager.setRunning).toHaveBeenCalledWith('sess-1', true)
       expect(workerManager.launch).toHaveBeenCalledWith('sess-1', expect.any(Function))
       qp.stop()
+    })
+
+    it.fails('keeps the next reservation when acquire fails after the admission is released', () => {
+      const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
+      expect(scheduler.admit('blocker', () => {})).toBe('started')
+      sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }
+      queueItems = [
+        { queueId: 'q-1', mode: 'asap', content: 'first', queuedAt: '2024-01-01' },
+        { queueId: 'q-2', mode: 'asap', content: 'second', queuedAt: '2024-01-01' },
+      ]
+      const runtime = runtimeRegistry.get('sess-1')
+      const acquire = vi.spyOn(runtime, 'acquire').mockImplementationOnce(() => {
+        throw new Error('storage unavailable')
+      })
+      const launch = vi.fn()
+      const workerManager = {
+        isEnabled: () => true,
+        requestTurn: (sessionId: string, start: () => void) => scheduler.admit(sessionId, start),
+        releaseTurn: (sessionId: string) => scheduler.release(sessionId),
+        requestStop: () => false,
+        launch,
+      }
+      const qp = new QueueProcessor({
+        sessionManager: mockSessionManager,
+        providerManager: mockProviderManager,
+        runtimeRegistry,
+        getLLMClient: mockGetLLMClient,
+        getActiveProvider: mockGetActiveProvider,
+        broadcastForSession: mockBroadcastForSession,
+        workerManager: workerManager as never,
+      })
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+      try {
+        qp.start()
+        const callback = mockSessionManager.subscribe.mock.calls[0][0]
+        callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: 'first' })
+        callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-2', mode: 'asap', content: 'second' })
+        scheduler.release('blocker')
+
+        expect(error).toHaveBeenCalledWith(
+          'Session worker start failed',
+          expect.objectContaining({ sessionId: 'sess-1', error: 'storage unavailable' }),
+        )
+        expect(launch).toHaveBeenCalledTimes(1)
+        expect(acquire).toHaveBeenCalledTimes(2)
+        expect(scheduler.snapshot()).toEqual({ active: ['sess-1'], waiting: [], closed: false })
+      } finally {
+        error.mockRestore()
+        acquire.mockRestore()
+        qp.stop()
+      }
     })
   })
 
