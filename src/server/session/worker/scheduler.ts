@@ -8,6 +8,10 @@ export const MAX_QUEUED_COMMANDS_PER_SESSION = 100
 export type AdmissionResult = 'started' | 'waiting' | 'full' | 'closed' | 'start_failed'
 export type CancellationResult = 'active' | 'waiting' | 'none'
 
+interface Reservation {
+  readonly generation: number
+}
+
 interface WaitingTurn {
   sessionId: string
   starts: Array<() => void>
@@ -32,9 +36,10 @@ export function resolveWorkerPoolSize(raw: string | undefined, parallelism = ava
 }
 
 export class SessionTurnScheduler {
-  private readonly active = new Map<string, Array<() => void>>()
+  private readonly active = new Map<string, { reservation: Reservation; queued: Array<() => void> }>()
   private readonly waiting: WaitingTurn[] = []
   private closed = false
+  private generation = 0
 
   constructor(
     private readonly options: {
@@ -56,8 +61,8 @@ export class SessionTurnScheduler {
     const maxQueued = this.options.maxQueuedCommandsPerSession ?? MAX_QUEUED_COMMANDS_PER_SESSION
     const activeQueue = this.active.get(sessionId)
     if (activeQueue) {
-      if (activeQueue.length >= maxQueued) return 'full'
-      activeQueue.push(start)
+      if (activeQueue.queued.length >= maxQueued) return 'full'
+      activeQueue.queued.push(start)
       return 'waiting'
     }
     const waiting = this.waiting.find((entry) => entry.sessionId === sessionId)
@@ -82,17 +87,17 @@ export class SessionTurnScheduler {
     if (this.closed) return false
     const maxQueued = this.options.maxQueuedCommandsPerSession ?? MAX_QUEUED_COMMANDS_PER_SESSION
     const activeQueue = this.active.get(sessionId)
-    if (activeQueue) return activeQueue.length < maxQueued
+    if (activeQueue) return activeQueue.queued.length < maxQueued
     const waiting = this.waiting.find((entry) => entry.sessionId === sessionId)
     if (waiting) return waiting.starts.length < maxQueued
     return this.active.size < this.options.maxConcurrent || this.waiting.length < this.options.maxWaitingSessions
   }
 
   release(sessionId: string): boolean {
-    const queued = this.active.get(sessionId)
-    if (!queued) return false
+    const current = this.active.get(sessionId)
+    if (!current) return false
     this.active.delete(sessionId)
-    if (queued.length > 0) this.waiting.push({ sessionId, starts: queued })
+    if (current.queued.length > 0) this.waiting.push({ sessionId, starts: current.queued })
     this.startNext()
     return true
   }
@@ -100,7 +105,7 @@ export class SessionTurnScheduler {
   cancel(sessionId: string): CancellationResult {
     const activeQueue = this.active.get(sessionId)
     if (activeQueue) {
-      activeQueue.length = 0
+      activeQueue.queued.length = 0
       return 'active'
     }
     const index = this.waiting.findIndex((entry) => entry.sessionId === sessionId)
@@ -112,9 +117,9 @@ export class SessionTurnScheduler {
   closeAdmissions(): string[] {
     this.closed = true
     const cancelled = this.waiting.splice(0).map((entry) => entry.sessionId)
-    for (const [sessionId, queued] of this.active) {
-      if (queued.length > 0) cancelled.push(sessionId)
-      queued.length = 0
+    for (const [sessionId, current] of this.active) {
+      if (current.queued.length > 0) cancelled.push(sessionId)
+      current.queued.length = 0
     }
     return [...new Set(cancelled)]
   }
@@ -139,13 +144,17 @@ export class SessionTurnScheduler {
   private tryStart(sessionId: string, starts: Array<() => void>): boolean {
     const [start, ...queued] = starts
     if (!start) return false
-    this.active.set(sessionId, queued)
+    const reservation: Reservation = { generation: ++this.generation }
+    this.active.set(sessionId, { reservation, queued })
     try {
       start()
       return true
     } catch (error) {
-      this.active.delete(sessionId)
-      if (queued.length > 0) this.waiting.push({ sessionId, starts: queued })
+      const current = this.active.get(sessionId)
+      if (current?.reservation === reservation) {
+        this.active.delete(sessionId)
+        if (queued.length > 0) this.waiting.push({ sessionId, starts: queued })
+      }
       logger.error('Session worker start failed', {
         sessionId,
         error: error instanceof Error ? error.message : String(error),

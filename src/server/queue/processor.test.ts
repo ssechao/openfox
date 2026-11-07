@@ -650,7 +650,7 @@ describe('QueueProcessor', () => {
       qp.stop()
     })
 
-    it.fails('keeps the next reservation when acquire fails after the admission is released', () => {
+    it('keeps the next reservation when acquire fails after the admission is released', () => {
       const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
       expect(scheduler.admit('blocker', () => {})).toBe('started')
       sessionState = { id: 'sess-1', isRunning: false, metadata: { title: undefined } }

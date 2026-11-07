@@ -127,7 +127,7 @@ describe('SessionTurnScheduler', () => {
     expect(scheduler.snapshot()).toEqual({ active: ['next'], waiting: [], closed: false })
   })
 
-  it.fails('keeps the replacement reservation when an awakened start releases and throws', () => {
+  it('keeps the replacement reservation when an awakened start releases and throws', () => {
     const scheduler = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 64 })
     const starts: string[] = []
 
