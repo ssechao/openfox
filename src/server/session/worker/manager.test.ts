@@ -1463,4 +1463,239 @@ describe('SessionWorkerManager', () => {
       info.mockRestore()
     }
   })
+
+  function fakeIdentityChild(pid: number, proveStartIdentity: () => Promise<{ status: string; error?: Error }>) {
+    return Object.assign(new EventEmitter(), {
+      pid,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+      killVerified: vi.fn(async () => {}),
+      proveStartIdentity,
+    }) as unknown as ChildProcess
+  }
+
+  function createIdentityStopManager(
+    namedDb: Database.Database,
+    spawnWorker: () => ChildProcess,
+  ): SessionWorkerManager {
+    return new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        setRunning: () => {},
+        getActiveWorkflowExecution: () => null,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      maxProcesses: 1,
+      processSupervisor: { spawnWorker } as never,
+      captureInventory: (pid) => ({
+        capturedAt: Date.now(),
+        worker: { pid, startedAt: 'linux:original', pgid: pid },
+        children: [],
+        groups: [],
+        reservations: [],
+        errors: [],
+      }),
+      cleanupChildren: () => Promise.resolve([]),
+      verifyInventory: async (inventory) => ({
+        checkedAt: inventory.capturedAt + 2_000,
+        clean: true,
+        survivingIdentities: [],
+        survivingGroups: [],
+        liveReservations: [],
+        errors: [],
+      }),
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+  }
+
+  it('releases the slot once when Stop has no exit and the worker identity is absent', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-absent-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2'), ('sess-3')`).run()
+    const stopped = fakeIdentityChild(42, async () => ({ status: 'absent' }))
+    const successor = fakeIdentityChild(43, async () => ({ status: 'alive' }))
+    const spawnWorker = vi.fn().mockReturnValueOnce(stopped).mockReturnValueOnce(successor)
+    const settled = vi.fn()
+    const successorSettled = vi.fn()
+    const manager = createIdentityStopManager(namedDb, spawnWorker)
+    const successorStart = vi.fn(() => manager.launch('sess-2', successorSettled))
+    const thirdStart = vi.fn(() => manager.launch('sess-3', vi.fn()))
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+      expect(manager.requestTurn('sess-2', successorStart)).toBe('waiting')
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(settled).toHaveBeenCalledOnce()
+      expect(settled).toHaveBeenCalledWith(expect.objectContaining({ crashed: true }))
+      expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+        interrupted_at: expect.any(String),
+      })
+      expect(manager.activeWorker('sess-1')).toBeNull()
+      expect(successorStart).toHaveBeenCalledOnce()
+      expect(manager.activeWorker('sess-2')?.pid).toBe(43)
+      expect(manager.requestTurn('sess-3', thirdStart)).toBe('waiting')
+
+      stopped.emit('exit', null, 'SIGKILL')
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(thirdStart).not.toHaveBeenCalled()
+      expect(manager.activeWorker('sess-2')?.pid).toBe(43)
+      expect(successorSettled).not.toHaveBeenCalled()
+      expect(settled).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the slot and logs a structured alert when the stopped worker identity is still alive', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-alive-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const child = fakeIdentityChild(42, async () => ({ status: 'alive' }))
+    const settled = vi.fn()
+    const waitingStart = vi.fn()
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    const manager = createIdentityStopManager(namedDb, () => child)
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+      expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(manager.activeWorker('sess-1')?.pid).toBe(42)
+      expect(waitingStart).not.toHaveBeenCalled()
+      expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+        interrupted_at: null,
+      })
+      expect(errorLog).toHaveBeenCalledWith(
+        'Session worker Stop deadline reached without a proven exit; slot retained',
+        expect.objectContaining({
+          sessionId: 'sess-1',
+          pid: 42,
+          identityStatus: 'alive',
+        }),
+      )
+      expect(settled).toHaveBeenCalledWith(
+        expect.objectContaining({
+          crashed: true,
+          error: expect.stringMatching(/did not exit within the bounded Stop deadline/i),
+        }),
+      )
+    } finally {
+      errorLog.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the slot and logs a structured error when the stopped worker identity is unreadable', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-unreadable-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
+    const child = fakeIdentityChild(42, async () => ({
+      status: 'unreadable',
+      error: new Error('identity unreadable'),
+    }))
+    const settled = vi.fn()
+    const waitingStart = vi.fn()
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    const manager = createIdentityStopManager(namedDb, () => child)
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+      expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(manager.activeWorker('sess-1')?.pid).toBe(42)
+      expect(waitingStart).not.toHaveBeenCalled()
+      expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+        interrupted_at: null,
+      })
+      expect(errorLog).toHaveBeenCalledWith(
+        'Session worker Stop deadline reached without a proven exit; slot retained',
+        expect.objectContaining({
+          sessionId: 'sess-1',
+          pid: 42,
+          identityStatus: 'unreadable',
+          error: 'identity unreadable',
+        }),
+      )
+    } finally {
+      errorLog.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not signal a recycled worker PID and a late exit does not release the successor', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-recycled-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-3')`).run()
+    const signalPid = vi.fn()
+    const kill = vi.fn((signal?: NodeJS.Signals) => {
+      signalPid(signal)
+      return true
+    })
+    const stopped = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill,
+      killVerified: vi.fn(async () => {
+        throw new Error('Worker start identity changed; signal refused')
+      }),
+      proveStartIdentity: async () => ({ status: 'recycled' as const }),
+    }) as unknown as ChildProcess
+    const successor = fakeIdentityChild(99, async () => ({ status: 'alive' }))
+    const spawnWorker = vi.fn().mockReturnValueOnce(stopped).mockReturnValueOnce(successor)
+    const settled = vi.fn()
+    const successorSettled = vi.fn()
+    const thirdStart = vi.fn()
+    const manager = createIdentityStopManager(namedDb, spawnWorker)
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(signalPid).not.toHaveBeenCalled()
+      expect(kill).not.toHaveBeenCalled()
+      expect(settled).toHaveBeenCalledOnce()
+      expect(manager.activeWorker('sess-1')).toBeNull()
+      expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+        interrupted_at: expect.any(String),
+      })
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', successorSettled))).toBe('started')
+      expect(manager.activeWorker('sess-1')?.pid).toBe(99)
+      expect(manager.requestTurn('sess-3', thirdStart)).toBe('waiting')
+
+      stopped.emit('exit', null, 'SIGKILL')
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(thirdStart).not.toHaveBeenCalled()
+      expect(manager.activeWorker('sess-1')?.pid).toBe(99)
+      expect(successorSettled).not.toHaveBeenCalled()
+      expect(settled).toHaveBeenCalledOnce()
+      expect(signalPid).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

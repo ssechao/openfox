@@ -45,13 +45,16 @@ import {
 import {
   captureExclusiveProcessInventory,
   childrenFilePath,
+  classifyRecordedProcessIdentity,
   initChildrenTracking,
   killTrackedChildren,
   readProcessInventory,
+  readProcessStartIdentityAsync,
   removeChildrenFile,
   type ExclusiveProcessInventory,
   type OrphanInventoryCheck,
   type ProcessInventoryEntry,
+  type RecordedProcessIdentityVerdict,
 } from './children.js'
 import {
   markSessionInterrupted,
@@ -80,6 +83,7 @@ import { executeBackgroundAction, type BackgroundActionResult } from '../../tool
 const WORKER_RECOVERY_TIMEOUT_MS = 4_000
 const WORKER_STOP_SETTLEMENT_TIMEOUT_MS = 2_000
 const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
+const WORKER_IDENTITY_PROOF_TIMEOUT_MS = 500
 const WORKER_ORPHAN_PROOF_DELAY_MS = 2_000
 const WORKER_ORPHAN_PROOF_TOLERANCE_MS = 500
 const WORKER_LOG_MAX_LINE_BYTES = 64 * 1024
@@ -109,6 +113,7 @@ interface ActiveWorker {
   slotReleased?: boolean
   stopEscalatedAt?: number
   recoveryDeadlineAt?: number
+  absenceReconciled?: boolean
   exitObserved: boolean
   exitCodeObserved?: number | null
   exitSignalObserved?: NodeJS.Signals | null
@@ -567,7 +572,7 @@ export class SessionWorkerManager {
       worker.exitCodeObserved = code
       worker.exitSignalObserved = signal
       this.asapBroker.releaseWorker({ sessionId, workerId: worker.token.workerId, generation: worker.token.generation })
-      if (this.active.get(sessionId) !== worker) return
+      if (worker.absenceReconciled || this.active.get(sessionId) !== worker) return
       this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
       this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session worker exited')
       const capturedAt = worker.stopRequestedAt ?? Date.now()
@@ -668,6 +673,71 @@ export class SessionWorkerManager {
     }
   }
 
+  private proveWorkerIdentity(worker: ActiveWorker): Promise<RecordedProcessIdentityVerdict> {
+    const prove = (worker.child as { proveStartIdentity?: () => Promise<RecordedProcessIdentityVerdict> })
+      .proveStartIdentity
+    const proof = Promise.resolve()
+      .then(() => {
+        if (typeof prove === 'function') return prove.call(worker.child)
+        if (this.deps.processSupervisor) {
+          return { status: 'unreadable' as const, error: new Error('Worker start identity is unavailable') }
+        }
+        return this.readDirectWorkerIdentity(worker)
+      })
+      .catch((error: unknown): RecordedProcessIdentityVerdict => ({
+        status: 'unreadable',
+        error: error instanceof Error ? error : new Error(String(error)),
+      }))
+    let timer: NodeJS.Timeout | undefined
+    const timedOut = new Promise<RecordedProcessIdentityVerdict>((resolve) => {
+      timer = setTimeout(
+        () => resolve({ status: 'unreadable', error: new Error('Worker start identity check timed out') }),
+        WORKER_IDENTITY_PROOF_TIMEOUT_MS,
+      )
+    })
+    return Promise.race([proof, timedOut]).finally(() => {
+      if (timer) clearTimeout(timer)
+    })
+  }
+
+  private readDirectWorkerIdentity(worker: ActiveWorker): Promise<RecordedProcessIdentityVerdict> {
+    const pid = worker.child.pid
+    const recorded = worker.workerInventory
+    if (pid === undefined || recorded === undefined) {
+      return Promise.resolve({ status: 'unreadable', error: new Error('Worker start identity is unavailable') })
+    }
+    return readProcessStartIdentityAsync(pid)
+      .then((read) => classifyRecordedProcessIdentity(recorded, read))
+      .catch((error: unknown): RecordedProcessIdentityVerdict => ({
+        status: 'unreadable',
+        error: error instanceof Error ? error : new Error(String(error)),
+      }))
+  }
+
+  private async reconcileAbsentWorker(
+    worker: ActiveWorker,
+    identityStatus: 'absent' | 'recycled',
+    signalErrors: string,
+  ): Promise<void> {
+    if (worker.absenceReconciled || worker.exitObserved || worker.settledNotified) return
+    if (this.active.get(worker.sessionId) !== worker) return
+    worker.absenceReconciled = true
+    if (identityStatus === 'recycled') {
+      logger.error('Refusing to signal a recycled session worker PID', {
+        sessionId: worker.sessionId,
+        workerId: worker.token.workerId,
+        pid: worker.child.pid,
+        identityStatus: 'recycled',
+      })
+    }
+    const retired = this.retire(worker, {
+      crashed: true,
+      error: `Session worker did not exit within the bounded Stop deadline${signalErrors}`,
+    })
+    if (!retired) return
+    await this.settle(worker, null, null)
+  }
+
   private async settleStopAtDeadline(worker: ActiveWorker): Promise<void> {
     const stopRequestedAt = worker.stopRequestedAt
     if (stopRequestedAt === undefined) return
@@ -677,6 +747,19 @@ export class SessionWorkerManager {
     if (worker.settledNotified) return
     const signalErrors = worker.signalErrors.length > 0 ? `; ${worker.signalErrors.join('; ')}` : ''
     if (!worker.exitObserved) {
+      const verdict = await this.proveWorkerIdentity(worker)
+      if (worker.settledNotified || worker.exitObserved || this.active.get(worker.sessionId) !== worker) return
+      if (verdict.status === 'absent' || verdict.status === 'recycled') {
+        await this.reconcileAbsentWorker(worker, verdict.status, signalErrors)
+        return
+      }
+      logger.error('Session worker Stop deadline reached without a proven exit; slot retained', {
+        sessionId: worker.sessionId,
+        workerId: worker.token.workerId,
+        pid: worker.child.pid,
+        identityStatus: verdict.status,
+        ...(verdict.status === 'unreadable' ? { error: verdict.error.message } : {}),
+      })
       this.notifyWorkerSettled(worker, {
         crashed: true,
         error: `Session worker did not exit within the bounded Stop deadline${signalErrors}`,
