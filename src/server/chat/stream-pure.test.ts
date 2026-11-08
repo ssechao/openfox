@@ -47,6 +47,8 @@ const mockResponse: LLMCompletionResponse = {
   },
 }
 
+const drainedResponse: LLMCompletionResponse = { ...mockResponse, content: '', toolCalls: [] }
+
 describe('stream-pure', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
@@ -915,7 +917,7 @@ describe('stream-pure', () => {
             arguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}',
           } as LLMStreamEvent
           yield { type: 'thinking_delta', content: 'discarded after rejection' } as LLMStreamEvent
-          yield { type: 'done', response: mockResponse } as LLMStreamEvent
+          yield { type: 'done', response: drainedResponse } as LLMStreamEvent
           providerTurnClosed = true
         },
       }
@@ -976,7 +978,7 @@ describe('stream-pure', () => {
         { type: 'tool_call_delta', index: 0, arguments: '{"path":"src/app.ts","content":"const x = 1' },
         { type: 'tool_call_delta', index: 0, arguments: ';\\n' },
         { type: 'tool_call_delta', index: 0, arguments: 'export default x"}' },
-        { type: 'done', response: mockResponse },
+        { type: 'done', response: drainedResponse },
       ])
 
       const preflight = vi.fn(async (path: string) =>
@@ -1005,6 +1007,7 @@ describe('stream-pure', () => {
           name: 'write_file',
           arguments: { path: 'src/app.ts' },
           preflightError: 'File "src/app.ts" must be read before writing',
+          rawArguments: '{"path":"src/app.ts","content":"const x = 1;\\nexport default x"}',
         },
       ])
       expect(result.content).toBe('')
@@ -1017,7 +1020,7 @@ describe('stream-pure', () => {
       const client = createMockClient([
         { type: 'tool_call_delta', index: 0, id: 'call-1', name: 'edit_file' },
         { type: 'tool_call_delta', index: 0, arguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}' },
-        { type: 'done', response: mockResponse },
+        { type: 'done', response: drainedResponse },
       ])
 
       const preflight = vi.fn(async () => 'File "src/app.ts" must be read before writing')
@@ -1040,9 +1043,185 @@ describe('stream-pure', () => {
           name: 'edit_file',
           arguments: { path: 'src/app.ts' },
           preflightError: 'File "src/app.ts" must be read before writing',
+          rawArguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}',
         },
       ])
       expect(result.usage).toEqual({ promptTokens: 0, completionTokens: 0 })
+    })
+
+    it('adopts the terminal native call id and does not yield the rejected payload', async () => {
+      const full = '{"path":"src/app.ts","old_string":"before","new_string":"after"}'
+      const client = createMockClient([
+        { type: 'tool_call_delta', index: 0, id: 'fc-item', name: 'edit_file' },
+        { type: 'tool_call_delta', index: 0, arguments: full },
+        { type: 'thinking_delta', content: 'discarded old_string after rejection' },
+        {
+          type: 'done',
+          response: {
+            id: 'resp-native',
+            content: '',
+            toolCalls: [
+              {
+                id: 'call-native',
+                name: 'edit_file',
+                arguments: { path: 'src/app.ts', old_string: 'before', new_string: 'after' },
+              },
+            ],
+            finishReason: 'tool_calls',
+            usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+          },
+        },
+      ])
+
+      const events: Array<{ type: string; data: unknown }> = []
+      const result = await consumeStreamGenerator(
+        streamLLMPure({
+          messageId: 'msg-native-id',
+          systemPrompt: 'system',
+          llmClient: client,
+          messages: [{ role: 'user', content: 'edit' }],
+          tools: [{ type: 'function', function: { name: 'edit_file', description: 'Edit', parameters: {} } }],
+          preflight: async () => 'File "src/app.ts" must be read before writing',
+        }),
+        (event) => {
+          events.push(event)
+        },
+      )
+
+      expect(result.toolCalls).toEqual([
+        {
+          id: 'call-native',
+          name: 'edit_file',
+          arguments: { path: 'src/app.ts' },
+          preflightError: 'File "src/app.ts" must be read before writing',
+          rawArguments: full,
+        },
+      ])
+      const yielded = JSON.stringify(events)
+      expect(yielded).not.toContain('old_string')
+      expect(yielded).not.toContain('new_string')
+      expect(yielded).not.toContain('before')
+      expect(yielded).not.toContain('after')
+      expect(yielded).not.toContain('call-native')
+    })
+
+    it('adopts each native call id when two edits share a tool name', async () => {
+      const rejected = '{"path":"src/a.ts","old_string":"before","new_string":"after"}'
+      const siblingEdit = '{"path":"src/b.ts","old_string":"one","new_string":"two"}'
+      const events: Array<{ type: string; data: unknown }> = []
+      const result = await consumeStreamGenerator(
+        streamLLMPure({
+          messageId: 'msg-two-edits',
+          systemPrompt: 'system',
+          llmClient: createMockClient([
+            { type: 'tool_call_delta', index: 2, id: 'fc-a', name: 'edit_file' },
+            { type: 'tool_call_delta', index: 2, arguments: rejected },
+            { type: 'tool_call_delta', index: 3, id: 'fc-b', name: 'edit_file' },
+            { type: 'tool_call_delta', index: 3, arguments: siblingEdit },
+            {
+              type: 'done',
+              response: {
+                id: 'resp-two',
+                content: '',
+                toolCalls: [
+                  {
+                    id: 'call-a',
+                    name: 'edit_file',
+                    arguments: { path: 'src/a.ts', old_string: 'before', new_string: 'after' },
+                  },
+                  {
+                    id: 'call-b',
+                    name: 'edit_file',
+                    arguments: { path: 'src/b.ts', old_string: 'one', new_string: 'two' },
+                  },
+                  { id: 'call-read', name: 'read_file', arguments: { path: 'src/a.ts' } },
+                ],
+                finishReason: 'tool_calls',
+                usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+              },
+            },
+          ]),
+          messages: [{ role: 'user', content: 'edit both' }],
+          tools: [{ type: 'function', function: { name: 'edit_file', description: 'Edit', parameters: {} } }],
+          preflight: async (path: string) =>
+            path === 'src/a.ts' ? 'File "src/a.ts" must be read before writing' : undefined,
+        }),
+        (event) => {
+          events.push(event)
+        },
+      )
+
+      expect(result.toolCalls).toEqual([
+        {
+          id: 'call-b',
+          name: 'edit_file',
+          arguments: { path: 'src/b.ts', old_string: 'one', new_string: 'two' },
+        },
+        { id: 'call-read', name: 'read_file', arguments: { path: 'src/a.ts' } },
+        {
+          id: 'call-a',
+          name: 'edit_file',
+          arguments: { path: 'src/a.ts' },
+          preflightError: 'File "src/a.ts" must be read before writing',
+          rawArguments: rejected,
+        },
+      ])
+      const yielded = JSON.stringify(events)
+      expect(yielded).not.toContain('old_string')
+      expect(yielded).not.toContain('before')
+      expect(yielded).not.toContain('call-a')
+    })
+
+    it('adopts the drained call id when two edits share a path', async () => {
+      const rejected = '{"path":"src/a.ts","old_string":"before","new_string":"after"}'
+      const result = await consumeStreamGenerator(
+        streamLLMPure({
+          messageId: 'msg-same-path',
+          systemPrompt: 'system',
+          llmClient: createMockClient([
+            { type: 'tool_call_delta', index: 2, id: 'fc-rejected', name: 'edit_file' },
+            { type: 'tool_call_delta', index: 2, arguments: rejected },
+            { type: 'tool_call_delta', index: 2, id: 'call-rejected' },
+            { type: 'tool_call_delta', index: 3, id: 'fc-other', name: 'edit_file' },
+            {
+              type: 'tool_call_delta',
+              index: 3,
+              arguments: '{"path":"src/a.ts","old_string":"one","new_string":"two"}',
+            },
+            {
+              type: 'done',
+              response: {
+                id: 'resp-same',
+                content: '',
+                toolCalls: [
+                  {
+                    id: 'call-rejected',
+                    name: 'edit_file',
+                    arguments: { path: 'src/a.ts', old_string: 'before', new_string: 'after' },
+                  },
+                  {
+                    id: 'call-other',
+                    name: 'edit_file',
+                    arguments: { path: 'src/a.ts', old_string: 'one', new_string: 'two' },
+                  },
+                ],
+                finishReason: 'tool_calls',
+                usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+              },
+            },
+          ]),
+          messages: [{ role: 'user', content: 'edit twice' }],
+          tools: [{ type: 'function', function: { name: 'edit_file', description: 'Edit', parameters: {} } }],
+          preflight: async () => 'File "src/a.ts" must be read before writing',
+        }),
+        () => {},
+      )
+
+      expect(result.toolCalls.map((call) => call.id)).toEqual(['call-other', 'call-rejected'])
+      expect(result.toolCalls[1]).toMatchObject({
+        arguments: { path: 'src/a.ts' },
+        rawArguments: rejected,
+      })
     })
 
     it('does not abort when preflight allows the path', async () => {
@@ -1116,7 +1295,7 @@ describe('stream-pure', () => {
           arguments: '{"content":"{\\"path\\":\\"/fake\\"}","path": "src/app.ts","content":"x',
         },
         { type: 'tool_call_delta', index: 0, arguments: '"}' },
-        { type: 'done', response: mockResponse },
+        { type: 'done', response: drainedResponse },
       ])
 
       const preflight = vi.fn(async () => 'rejected')
@@ -1218,7 +1397,7 @@ describe('stream-pure', () => {
           index: 1,
           arguments: '{"path":"src/math.ts","old_string":"add","new_string":"sum"}',
         },
-        { type: 'done', response: mockResponse },
+        { type: 'done', response: drainedResponse },
       ])
 
       const preflight = vi.fn(async () => 'File "src/math.ts" must be read before writing')
@@ -1245,6 +1424,7 @@ describe('stream-pure', () => {
           name: 'edit_file',
           arguments: { path: 'src/math.ts' },
           preflightError: 'File "src/math.ts" must be read before writing',
+          rawArguments: '{"path":"src/math.ts","old_string":"add","new_string":"sum"}',
         },
       ])
     })

@@ -661,7 +661,9 @@ export function createWebSocketServer(
       const events = combineEventsWithSnapshot(updatedSession.id, snapshot, eventsSinceSnapshot)
 
       const maxVisible = getMaxVisibleItems()
-      const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisible || undefined)
+      const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisible || undefined, {
+        omitReplayArguments: true,
+      })
       const sessionStats = computeSessionStatsSummary(buildSessionStatsMessages(events))
       const pendingConfirmations = foldPendingConfirmations(events)
       const pendingQuestions = getPendingQuestionsForSession(updatedSession.id)

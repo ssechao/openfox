@@ -198,7 +198,9 @@ export function applyGeneratedSessionName(sessionId: string, name: string, deps:
     const { snapshot, events: eventsSinceSnapshot } = deps.eventStore.getEventsSinceSnapshot(sessionId)
     const events = combineEventsWithSnapshot(sessionId, snapshot, eventsSinceSnapshot)
     const maxVisibleItems = getMaxVisibleItems()
-    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined)
+    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined, {
+      omitReplayArguments: true,
+    })
     const pendingConfirmations = foldPendingConfirmations(events)
     const pendingQuestions = getPendingQuestionsForSession(sessionId)
     // Carry the live workflow execution (e.g. a paused user step) through the

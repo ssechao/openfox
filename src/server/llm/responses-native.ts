@@ -306,11 +306,19 @@ export function parseResponsesEvent(event: Record<string, unknown>): ChatComplet
       return chunk(responseId, { tool_calls: [toolCall] })
     }
 
+    case 'response.output_item.done': {
+      const item = event['item'] as ResponsesOutputItem | undefined
+      if (item?.type !== 'function_call' || !item.call_id) return null
+      const outputIndex = typeof event['output_index'] === 'number' ? event['output_index'] : 0
+      return chunk(responseId, {
+        tool_calls: [{ index: outputIndex, id: item.call_id, function: {} }],
+      })
+    }
+
     case 'response.output_text.done':
     case 'response.reasoning_summary_text.done':
     case 'response.reasoning_text.done':
     case 'response.function_call_arguments.done':
-    case 'response.output_item.done':
     case 'response.content_part.added':
     case 'response.content_part.done':
       return null
@@ -345,11 +353,20 @@ function chunk(id: string, delta: ChatCompletionChunk['choices'][0]['delta']): C
 
 function finalChunk(id: string, response?: ResponsesApiResponse): ChatCompletionChunk | typeof DONE {
   const usage = response?.usage
+  // The terminal output is the native call id. Streaming may have bound the
+  // item id first; this id-only delta reconciles it without replaying arguments.
+  const toolCalls: StreamToolCall[] = []
+  for (const [index, item] of (response?.output ?? []).entries()) {
+    if (item.type !== 'function_call') continue
+    const callId = item.call_id ?? item.id
+    if (!callId) continue
+    toolCalls.push({ index, id: callId, function: {} })
+  }
   const c: ChatCompletionChunk = {
     id,
     choices: [
       {
-        delta: {},
+        delta: toolCalls.length > 0 ? { tool_calls: toolCalls } : {},
         finish_reason: mapResponseStatus(response?.status, response?.incomplete_details?.reason),
       },
     ],

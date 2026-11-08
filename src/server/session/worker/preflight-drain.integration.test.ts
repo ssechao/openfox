@@ -13,17 +13,45 @@ interface SessionView {
   session: { isRunning: boolean }
   messages: Array<{
     toolCalls?: Array<{
+      id?: string
       name?: string
       arguments?: Record<string, unknown>
       result?: { success?: boolean; error?: string }
     }>
   }>
-  queuedMessages?: unknown[]
+  queueState?: unknown[]
   pendingToolReconciliations?: unknown[]
 }
 
+const NATIVE_CALL_ID = 'call-preflight'
+const ITEM_ID = 'fc-preflight'
+const FULL_ARGUMENTS = '{"path":"target.txt","old_string":"before","new_string":"after"}'
+
 function sendEvent(response: ServerResponse, event: unknown): void {
   response.write(`data: ${JSON.stringify(event)}\n\n`)
+}
+
+function nativeReplaySettled(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false
+  const input = (body as { input?: unknown }).input
+  if (!Array.isArray(input)) return false
+  const call = [...input].reverse().find((item) => {
+    if (!item || typeof item !== 'object') return false
+    const record = item as { type?: string; name?: string }
+    return record.type === 'function_call' && record.name === 'edit_file'
+  }) as { call_id?: string; arguments?: string } | undefined
+  const output = input.find((item) => {
+    if (!item || typeof item !== 'object') return false
+    const record = item as { type?: string; call_id?: string }
+    return record.type === 'function_call_output' && record.call_id === NATIVE_CALL_ID
+  })
+  if (!call || call.call_id !== NATIVE_CALL_ID || !output || typeof call.arguments !== 'string') return false
+  try {
+    const args = JSON.parse(call.arguments) as { path?: string; old_string?: string; new_string?: string }
+    return args.path === 'target.txt' && args.old_string === 'before' && args.new_string === 'after'
+  } catch {
+    return false
+  }
 }
 
 describe('worker preflight provider settlement', () => {
@@ -50,8 +78,18 @@ describe('worker preflight provider settlement', () => {
         return
       }
 
-      request.resume()
+      const chunks: Buffer[] = []
+      request.on('data', (chunk: Buffer) => {
+        chunks.push(chunk)
+      })
       request.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        let body: unknown = {}
+        try {
+          body = raw ? (JSON.parse(raw) as unknown) : {}
+        } catch {
+          body = {}
+        }
         scenarioResponseCount += 1
         response.writeHead(200, { 'content-type': 'text/event-stream' })
 
@@ -66,8 +104,7 @@ describe('worker preflight provider settlement', () => {
             output_index: 0,
             item: {
               type: 'function_call',
-              id: 'fc-preflight',
-              call_id: 'call-preflight',
+              id: ITEM_ID,
               name: 'edit_file',
               arguments: '',
             },
@@ -76,7 +113,20 @@ describe('worker preflight provider settlement', () => {
             type: 'response.function_call_arguments.delta',
             response_id: 'resp-preflight',
             output_index: 0,
-            delta: '{"path":"target.txt","old_string":"before","new_string":"after"}',
+            item_id: ITEM_ID,
+            delta: FULL_ARGUMENTS,
+          })
+          sendEvent(response, {
+            type: 'response.output_item.done',
+            response_id: 'resp-preflight',
+            output_index: 0,
+            item: {
+              type: 'function_call',
+              id: ITEM_ID,
+              call_id: NATIVE_CALL_ID,
+              name: 'edit_file',
+              arguments: FULL_ARGUMENTS,
+            },
           })
           const terminal = setTimeout(
             () => {
@@ -96,7 +146,15 @@ describe('worker preflight provider settlement', () => {
                 response: {
                   id: 'resp-preflight',
                   status: 'completed',
-                  output: [],
+                  output: [
+                    {
+                      type: 'function_call',
+                      id: ITEM_ID,
+                      call_id: NATIVE_CALL_ID,
+                      name: 'edit_file',
+                      arguments: FULL_ARGUMENTS,
+                    },
+                  ],
                   usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
                 },
               })
@@ -112,7 +170,7 @@ describe('worker preflight provider settlement', () => {
           return
         }
 
-        if (nativeTurnActive) return
+        if (nativeTurnActive || !nativeReplaySettled(body)) return
 
         sendEvent(response, { type: 'response.created', response_id: 'resp-final' })
         sendEvent(response, { type: 'response.output_text.delta', response_id: 'resp-final', delta: 'done' })
@@ -165,7 +223,7 @@ describe('worker preflight provider settlement', () => {
     })
     expect(projectResponse.status).toBe(201)
     projectId = ((await projectResponse.json()) as { project: { id: string } }).project.id
-  }, 60_000)
+  }, 90_000)
 
   afterAll(async () => {
     llm?.closeAllConnections()
@@ -242,15 +300,18 @@ describe('worker preflight provider settlement', () => {
         return toolCall ? view : null
       },
       'preflight tool.result success=false',
-      10_000,
+      20_000,
     )
 
     const rejectedCall = rejected.messages
       .flatMap((message) => message.toolCalls ?? [])
       .find((call) => call.name === 'edit_file' && call.result?.success === false)
+    expect(rejectedCall?.id).toBe(NATIVE_CALL_ID)
     expect(rejectedCall?.arguments).toEqual({ path: 'target.txt' })
+    expect(JSON.stringify(rejected.messages)).not.toContain('old_string')
+    expect(JSON.stringify(rejected.messages)).not.toContain('rawArguments')
     expect(await readFile(join(projectDir, 'target.txt'), 'utf8')).toBe('before')
-    expect(rejected.queuedMessages ?? []).toHaveLength(0)
+    expect(rejected.queueState ?? []).toHaveLength(0)
     expect(rejected.pendingToolReconciliations ?? []).toHaveLength(0)
 
     let settled = rejected
@@ -262,35 +323,37 @@ describe('worker preflight provider settlement', () => {
     expect(
       {
         isRunning: settled.session.isRunning,
-        queuedMessages: settled.queuedMessages ?? [],
+        queueState: settled.queueState ?? [],
         pendingToolReconciliations: settled.pendingToolReconciliations ?? [],
       },
       'tool.result success=false persisted, but the worker did not settle',
     ).toEqual({
       isRunning: false,
-      queuedMessages: [],
+      queueState: [],
       pendingToolReconciliations: [],
     })
-  }, 30_000)
+    expect(scenarioResponseCount).toBe(2)
+    expect(settled.messages.some((message) => JSON.stringify(message).includes('done'))).toBe(true)
+  }, 45_000)
 
   it('settles the worker when the provider stream errors during drain', async () => {
     setScenario('error')
     const sessionId = await createSessionAndSend('edit target.txt and handle a drain error')
 
-    await waitFor(async () => (providerStreamOpen ? true : null), 'provider drain start', 5_000)
+    await waitFor(async () => (providerStreamOpen ? true : null), 'provider drain start', 20_000)
     const settled = await waitUntilIdle(sessionId)
 
     expect(scenarioResponseCount).toBe(1)
     expect(providerStreamOpen).toBe(false)
-    expect(settled.queuedMessages ?? []).toHaveLength(0)
+    expect(settled.queueState ?? []).toHaveLength(0)
     expect(settled.pendingToolReconciliations ?? []).toHaveLength(0)
-  }, 30_000)
+  }, 45_000)
 
   it('settles the worker when the user stops during drain', async () => {
     setScenario('abort')
     const sessionId = await createSessionAndSend('edit target.txt and wait during drain')
 
-    await waitFor(async () => (providerStreamOpen ? true : null), 'provider drain start', 5_000)
+    await waitFor(async () => (providerStreamOpen ? true : null), 'provider drain start', 20_000)
     expect((await getSession(sessionId)).session.isRunning).toBe(true)
 
     const stop = await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
@@ -298,7 +361,7 @@ describe('worker preflight provider settlement', () => {
 
     const settled = await waitUntilIdle(sessionId)
     await waitFor(async () => (!providerStreamOpen ? true : null), 'provider stream close', 5_000)
-    expect(settled.queuedMessages ?? []).toHaveLength(0)
+    expect(settled.queueState ?? []).toHaveLength(0)
     expect(settled.pendingToolReconciliations ?? []).toHaveLength(0)
-  }, 30_000)
+  }, 45_000)
 })

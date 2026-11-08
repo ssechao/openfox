@@ -3436,3 +3436,37 @@ describe('buildSessionStatsMessages', () => {
     expect(result[0]!.stats!.totalTime).toBe(99)
   })
 })
+
+describe('client projection of replay arguments', () => {
+  const replay = '{"path":"src/a.ts","old_string":"before","new_string":"after"}'
+  const events: StoredEvent[] = [
+    { ...baseEvent, type: 'message.start', data: { messageId: 'm1', role: 'assistant' } },
+    {
+      ...baseEvent,
+      type: 'tool.call',
+      data: {
+        messageId: 'm1',
+        toolCall: {
+          id: 'call-1',
+          name: 'edit_file',
+          arguments: { path: 'src/a.ts' },
+          rawArguments: replay,
+        },
+      },
+    },
+  ]
+
+  it('keeps rawArguments on the server history', () => {
+    const call = buildMessagesFromStoredEvents(events).messages[0]!.toolCalls![0]!
+    expect(call.arguments).toEqual({ path: 'src/a.ts' })
+    expect(call.rawArguments).toBe(replay)
+  })
+
+  it('strips rawArguments from the client projection', () => {
+    const { messages } = buildMessagesFromStoredEvents(events, undefined, { omitReplayArguments: true })
+    const call = messages[0]!.toolCalls![0]!
+    expect(call.arguments).toEqual({ path: 'src/a.ts' })
+    expect(call.rawArguments).toBeUndefined()
+    expect(JSON.stringify(call)).not.toContain('old_string')
+  })
+})

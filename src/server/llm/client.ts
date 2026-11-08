@@ -425,6 +425,12 @@ export function createLLMClient(
 
             // Handle tool call deltas
             if (delta.tool_calls) {
+              // A terminal chunk may carry only the canonical native call id.
+              // Apply it without replaying arguments. Yield the id only when it
+              // replaces the earlier item id.
+              const terminalIdReconcile =
+                Boolean(choice.finish_reason) &&
+                delta.tool_calls.every((tc) => Boolean(tc.id) && !tc.function?.name && !tc.function?.arguments)
               for (const tc of delta.tool_calls) {
                 const existing = toolCalls.get(tc.index)
 
@@ -435,11 +441,29 @@ export function createLLMClient(
                     arguments: tc.function?.arguments ?? '',
                   })
                 } else {
+                  const idChanged = Boolean(tc.id) && tc.id !== existing.id
                   if (tc.id) existing.id = tc.id
-                  if (tc.function?.name) existing.name += tc.function.name
-                  if (tc.function?.arguments) existing.arguments += tc.function.arguments
+                  if (!terminalIdReconcile) {
+                    if (tc.function?.name) existing.name += tc.function.name
+                    if (tc.function?.arguments) existing.arguments += tc.function.arguments
+                  }
+                  // An id-only terminal chunk must not replay arguments. Yield
+                  // the id only when it replaces the item id, so a later drain
+                  // can tell two calls of the same tool apart.
+                  const idOnly = !tc.function?.name && !tc.function?.arguments
+                  if (terminalIdReconcile || idOnly) {
+                    if (idChanged && tc.id) {
+                      yield {
+                        type: 'tool_call_delta' as const,
+                        index: tc.index,
+                        id: tc.id,
+                      }
+                    }
+                    continue
+                  }
                 }
 
+                if (terminalIdReconcile) continue
                 yield {
                   type: 'tool_call_delta' as const,
                   index: tc.index,
