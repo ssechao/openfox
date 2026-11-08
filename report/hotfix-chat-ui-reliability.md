@@ -6,9 +6,9 @@ Hotfix commit: `bb60a9a8815eaaaa82abf2028a4bc1649fc3628c`. Its pre-commit hook o
 
 ## Send refusal
 
-`sendMessage` returns `{ ok: true }` only after HTTP 2xx. HTTP 409 and 429 set a pane error that says what to do (resume, wait for stop, or wait for the queue) and that the draft and attachments were kept. A send that resumes a running workflow waits for the `runner.launch` ack; a refusal or a disconnected socket keeps the draft and shows the same kind of error. The composer clears only the text and attachments that were posted, keeps anything typed while the request was in flight, and ignores a second click until that request settles. A slash command stays locked until its send settles.
+`sendMessage` returns `{ ok: true }` only after HTTP 2xx. HTTP 409 and 429 set a pane error that says what to do (resume, wait for stop, or wait for the queue) and that the draft and attachments were kept. A send that resumes a running workflow waits for the `runner.launch` ack; a refusal or a disconnected socket keeps the draft and shows the same kind of error. The composer clears only the text and attachments that were posted, keeps anything typed while the request was in flight, and ignores a second click until that request settles. A slash command, including a slash workflow, stays locked until its launch is accepted. A refused launch keeps the draft and shows the error only beside the composer, not again as a transcript banner.
 
-Background-exit cards decode `&amp;`, `&lt;`, and `&gt;` for display. The stored notice stays escaped for the model.
+Background-exit cards decode `&amp;`, `&lt;`, and `&gt;` for display, including when the process name contains a quote or a newline. The stored notice stays escaped for the model.
 
 ## Background exit
 

@@ -13,7 +13,7 @@ import type {
 } from '@shared/types.js'
 import type { QueuedMessage, PendingQuestionPayload } from '@shared/protocol.js'
 import { t } from '@shared/i18n/index.js'
-import { sendFailedMessage } from '../../lib/send-failure'
+import { closedSessionResult, sendFailedMessage } from '../../lib/send-failure'
 import { wsClient } from '../../lib/ws'
 import { useConfigStore } from '../config'
 import { projectsResource } from '../../lib/resources'
@@ -1077,13 +1077,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
     sendMessage: async (sessionId, content, attachments, opts) => {
       const pane = paneFor(get(), sessionId)
-      if (!pane?.session) {
-        const message = t({
-          en: 'This session is not open. Your draft and attachments were kept.',
-          fr: 'Cette session n\u2019est pas ouverte. Votre brouillon et vos pi\u00e8ces jointes ont \u00e9t\u00e9 conserv\u00e9s.',
-        })
-        return { ok: false as const, status: 0, code: 'NO_SESSION', message }
-      }
+      if (!pane?.session) return closedSessionResult()
       set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: null })))
 
       // If there's an active workflow execution that was aborted (status 'running'),
@@ -1101,9 +1095,6 @@ export const useSessionStore = create<SessionState>((set, get) => {
           const settled = await launch.promise
           if (!settled.ok) {
             const refusal = sendRefusal(0, settled.code, settled.detail)
-            set((s) =>
-              updatePane(s, sessionId, (p) => ({ ...p, error: { code: refusal.code, message: refusal.message } })),
-            )
             return { ok: false as const, status: 0, code: refusal.code, message: refusal.message }
           }
           return { ok: true as const }
@@ -1111,9 +1102,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           launch.cancel()
           console.error('Error sending message:', error)
           const detail = error instanceof Error ? error.message : String(error)
-          const message = sendFailedMessage(detail)
-          set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: { code: 'SEND_FAILED', message } })))
-          return { ok: false as const, status: 0, code: 'SEND_FAILED', message }
+          return { ok: false as const, status: 0, code: 'SEND_FAILED', message: sendFailedMessage(detail) }
         }
       }
 
@@ -1143,9 +1132,6 @@ export const useSessionStore = create<SessionState>((set, get) => {
         }
         if (!res.ok) {
           const refusal = sendRefusal(res.status, data.code, data.error)
-          set((s) =>
-            updatePane(s, sessionId, (p) => ({ ...p, error: { code: refusal.code, message: refusal.message } })),
-          )
           return { ok: false as const, status: res.status, code: refusal.code, message: refusal.message }
         }
         const queueState = data.queueState
@@ -1156,9 +1142,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       } catch (error) {
         console.error('Error sending message:', error)
         const detail = error instanceof Error ? error.message : String(error)
-        const message = sendFailedMessage(detail)
-        set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: { code: 'SEND_FAILED', message } })))
-        return { ok: false as const, status: 0, code: 'SEND_FAILED', message }
+        return { ok: false as const, status: 0, code: 'SEND_FAILED', message: sendFailedMessage(detail) }
       }
     },
 
@@ -1242,8 +1226,9 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }
     },
 
-    launchWorkflow: (sessionId, content?, attachments?, workflowId?, subGroup?, params?, scope?) => {
-      if (!paneFor(get(), sessionId)?.session) return
+    launchWorkflow: async (sessionId, content?, attachments?, workflowId?, subGroup?, params?, scope?) => {
+      if (!paneFor(get(), sessionId)?.session) return closedSessionResult()
+      set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: null })))
       const payload: Record<string, unknown> = { sessionId }
       if (content?.trim()) payload.content = content
       if (attachments && attachments.length > 0) payload.attachments = attachments
@@ -1251,7 +1236,21 @@ export const useSessionStore = create<SessionState>((set, get) => {
       if (subGroup) payload.subGroup = subGroup
       if (params) payload.params = params
       payload.scope = scope ?? 'auto'
-      wsClient.send('runner.launch', payload)
+      const launch = waitForLaunchAck()
+      try {
+        launch.bind(wsClient.send('runner.launch', payload))
+        const settled = await launch.promise
+        if (!settled.ok) {
+          const refusal = sendRefusal(0, settled.code, settled.detail)
+          return { ok: false as const, status: 0, code: refusal.code, message: refusal.message }
+        }
+        return { ok: true as const }
+      } catch (error) {
+        launch.cancel()
+        console.error('Error launching workflow:', error)
+        const detail = error instanceof Error ? error.message : String(error)
+        return { ok: false as const, status: 0, code: 'SEND_FAILED', message: sendFailedMessage(detail) }
+      }
     },
 
     launchWorkflowAtStep: (sessionId, workflowId, stepId, scope?) => {

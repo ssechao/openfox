@@ -1,6 +1,6 @@
 import type { Message } from '@shared/types.js'
 import { useT } from '../../hooks/useT'
-import { parseBackgroundExitNotice } from './background-exit-notice'
+import { decodeProcessEntities, parseBackgroundExitNotice } from './background-exit-notice'
 
 export function BackgroundExitNotice({ message }: { message: Message }) {
   const t = useT()
@@ -21,7 +21,7 @@ export function BackgroundExitNotice({ message }: { message: Message }) {
       className="feed-item my-3 rounded border border-border bg-bg-tertiary/40 px-3 py-2"
     >
       <div className="text-[10px] uppercase tracking-wide text-text-muted">{title}</div>
-      {parsed && outcome ? (
+      {parsed && parsed.name && outcome ? (
         <div className="mt-1 text-sm text-text-primary">
           {t(
             { en: '{{name}} ({{processId}}) {{outcome}}', fr: '{{name}} ({{processId}}) {{outcome}}' },
@@ -30,7 +30,7 @@ export function BackgroundExitNotice({ message }: { message: Message }) {
         </div>
       ) : null}
       <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-text-secondary">
-        {parsed ? parsed.output : message.content}
+        {parsed ? parsed.output : decodeProcessEntities(message.content)}
       </pre>
     </div>
   )

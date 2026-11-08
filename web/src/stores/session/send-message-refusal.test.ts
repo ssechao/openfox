@@ -177,7 +177,7 @@ describe('sendMessage refusal', () => {
       expect(result.code).toBe(code)
       expect(result.message).toContain('draft and attachments were kept')
       expect(result.message.toLowerCase()).toContain(hint.toLowerCase())
-      expect(useSessionStore.getState().error).toEqual({ code, message: result.message })
+      expect(useSessionStore.getState().error).toBeNull()
       expect(fetchMock).toHaveBeenCalledTimes(1)
     },
   )
@@ -246,6 +246,34 @@ describe('sendMessage refusal', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('launchWorkflow acknowledgement', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    wsSendMock.mockClear()
+    launchHandlers.clear()
+    wsSendMock.mockImplementation(() => 'launch-1')
+  })
+
+  it('does not open a transcript error when the launch is refused', async () => {
+    const useSessionStore = await loadSessionStore()
+    useSessionStore.setState({
+      currentSession: session('session-1') as never,
+      error: { code: 'CHAT_ERROR', message: 'stale' },
+    })
+    const pending = useSessionStore.getState().launchWorkflow('session-1', undefined, undefined, 'simple')
+    emitLaunch({
+      id: 'launch-1',
+      type: 'error',
+      payload: { code: 'SESSION_RUNNING', message: 'A turn is already running' },
+    })
+    const result = await pending
+    expect(result?.ok).toBe(false)
+    if (!result || result.ok) return
+    expect(result.message).toContain('draft and attachments were kept')
+    expect(useSessionStore.getState().error).toBeNull()
   })
 })
 

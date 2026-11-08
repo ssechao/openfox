@@ -6,7 +6,7 @@ import { parseModelValue } from '../lib/model-value'
 import { shouldGateEffortChange, resolveWorkflowFirstAgentId } from '../lib/effort-gate'
 import { useEffortGateContext } from './useEffortGateContext'
 import type { Attachment, WorkflowLaunchScope } from '@shared/types.js'
-import { t } from '@shared/i18n/index.js'
+import { closedSessionResult } from '../lib/send-failure'
 
 function sessionWorkdir(sessionId: string | null | undefined): string | undefined {
   const state = useSessionStore.getState()
@@ -27,17 +27,7 @@ export function useScrolledSend(setAutoScroll: (active: boolean) => void, sessio
   const sendMessage = useCallback(
     (content: string, attachments?: Attachment[], opts?: { messageKind?: 'command'; isSystemGenerated?: boolean }) => {
       setAutoScroll(true)
-      if (!sessionId) {
-        return Promise.resolve({
-          ok: false as const,
-          status: 0,
-          code: 'NO_SESSION',
-          message: t({
-            en: 'This session is not open. Your draft and attachments were kept.',
-            fr: 'Cette session n\u2019est pas ouverte. Votre brouillon et vos pi\u00e8ces jointes ont \u00e9t\u00e9 conserv\u00e9s.',
-          }),
-        })
-      }
+      if (!sessionId) return Promise.resolve(closedSessionResult())
       return storeSendMessage(sessionId, content, attachments, opts)
     },
     [setAutoScroll, storeSendMessage, sessionId],
@@ -53,7 +43,7 @@ export function useScrolledSend(setAutoScroll: (active: boolean) => void, sessio
       scope: WorkflowLaunchScope = 'auto',
     ) => {
       setAutoScroll(true)
-      if (!sessionId) return
+      if (!sessionId) return closedSessionResult()
 
       // A workflow whose first agent step carries an effort override may
       // invalidate the LLM prefix cache on a warm session. Gate it behind an
@@ -97,7 +87,7 @@ export function useScrolledSend(setAutoScroll: (active: boolean) => void, sessio
         }
       }
 
-      storeLaunchWorkflow(sessionId, content, attachments, workflowId, subGroup, params, scope)
+      return storeLaunchWorkflow(sessionId, content, attachments, workflowId, subGroup, params, scope)
     },
     [
       setAutoScroll,
