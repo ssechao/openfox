@@ -93,6 +93,13 @@ export class WorkerAsapBroker {
     this.giveBack(identity.sessionId, current.requestId)
   }
 
+  discardHold(sessionId: string): void {
+    const current = this.held.get(sessionId)
+    if (!current) return
+    clearTimeout(current.timer)
+    this.held.delete(sessionId)
+  }
+
   private giveBack(sessionId: string, requestId: string, identity?: WorkerIpcIdentity): void {
     const current = this.held.get(sessionId)
     if (!current || current.requestId !== requestId) return

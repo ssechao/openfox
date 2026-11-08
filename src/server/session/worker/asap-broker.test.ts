@@ -146,4 +146,17 @@ describe('WorkerAsapBroker', () => {
     broker.handleAbort({ ...replacement, type: 'asap.drain.abort', requestId: 'r-new' })
     expect(queue().map((message) => message.content)).toEqual(['one'])
   })
+
+  it('discards a hold without restoring it after a late abort or timeout', async () => {
+    const { broker, queue, setQueue, onRestored, commitAsap } = harness(30)
+    setQueue([queued('old')])
+    broker.handleRequest(request('r-1'))
+    broker.discardHold('s-1')
+    setQueue([queued('fresh')])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    broker.handleAbort({ ...identity, type: 'asap.drain.abort', requestId: 'r-1' })
+    expect(queue().map((message) => message.content)).toEqual(['fresh'])
+    expect(onRestored).not.toHaveBeenCalled()
+    expect(commitAsap).not.toHaveBeenCalled()
+  })
 })

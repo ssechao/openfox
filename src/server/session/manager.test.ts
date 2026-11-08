@@ -726,6 +726,7 @@ describe('SessionManager', () => {
       const first = manager.queueMessage(session.id, 'asap', 'one', [attachment], 'command')
       manager.queueMessage(session.id, 'completion', 'later')
       const drained = manager.drainAsapMessages(session.id)
+      manager.reserveHeldAsap(session.id, drained)
       manager.queueMessage(session.id, 'asap', 'during')
       manager.setQueueAdmissionGuard(() => false)
       manager.restoreAsapMessages(session.id, drained)
@@ -788,6 +789,32 @@ describe('SessionManager', () => {
       expect(() => manager.queueMessage(session.id, 'asap', 'blocked-again')).toThrow(/queue.*100/i)
       manager.restoreAsapMessages(session.id, again)
       expect(manager.getQueueState(session.id)).toHaveLength(100)
+    })
+
+    it('does not restore a cleared hold over messages admitted afterwards', () => {
+      const session = manager.createSession(projectId)
+      const held = []
+      for (let index = 0; index < 100; index += 1) {
+        held.push(manager.queueMessage(session.id, 'asap', `old-${index}`))
+      }
+      const drained = manager.drainAsapMessages(session.id)
+      manager.reserveHeldAsap(session.id, drained)
+      const cleared: string[] = []
+      manager.setQueueClearedListener((sessionId) => cleared.push(sessionId))
+      manager.clearMessageQueue(session.id)
+      expect(cleared).toEqual([session.id])
+      const fresh = []
+      for (let index = 0; index < 100; index += 1) {
+        fresh.push(manager.queueMessage(session.id, 'asap', `new-${index}`))
+      }
+
+      manager.restoreAsapMessages(session.id, drained)
+
+      expect(manager.getQueueState(session.id)).toHaveLength(100)
+      expect(manager.getQueueState(session.id).map((message) => message.content)).toEqual(
+        fresh.map((message) => message.content),
+      )
+      expect(held).toHaveLength(100)
     })
 
     it('refuses the 101st queued message without changing the queue', () => {

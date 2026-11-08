@@ -207,6 +207,9 @@ export class SessionWorkerManager {
         )
       },
     })
+    this.deps.sessionManager.setQueueClearedListener?.((sessionId) => {
+      this.asapBroker.discardHold(sessionId)
+    })
     this.interactiveBroker = new WorkerInteractiveBroker({
       isCurrent: (identity) => this.isCurrentIdentity(identity),
       send: (message) => {
