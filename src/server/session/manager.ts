@@ -1578,7 +1578,14 @@ export class SessionManager {
     const options: {
       contextWindowId?: string
       isSystemGenerated?: boolean
-      messageKind?: 'correction' | 'auto-prompt' | 'context-reset' | 'task-completed' | 'workflow-started' | 'command'
+      messageKind?:
+        | 'correction'
+        | 'auto-prompt'
+        | 'context-reset'
+        | 'task-completed'
+        | 'workflow-started'
+        | 'command'
+        | 'background-exit'
       tokenCount?: number
       attachments?: Attachment[] // Optional image attachments
       subAgentId?: string

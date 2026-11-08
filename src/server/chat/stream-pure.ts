@@ -928,7 +928,14 @@ export function createMessageStartEvent(
     subAgentId?: string
     subAgentType?: string
     isSystemGenerated?: boolean
-    messageKind?: 'correction' | 'auto-prompt' | 'context-reset' | 'task-completed' | 'workflow-started' | 'command'
+    messageKind?:
+      | 'correction'
+      | 'auto-prompt'
+      | 'context-reset'
+      | 'task-completed'
+      | 'workflow-started'
+      | 'command'
+      | 'background-exit'
     metadata?: { type: string; name: string; color: string }
   },
 ): TurnEvent {

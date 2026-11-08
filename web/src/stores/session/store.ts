@@ -13,6 +13,7 @@ import type {
 } from '@shared/types.js'
 import type { QueuedMessage, PendingQuestionPayload } from '@shared/protocol.js'
 import { t } from '@shared/i18n/index.js'
+import { sendFailedMessage } from '../../lib/send-failure'
 import { wsClient } from '../../lib/ws'
 import { useConfigStore } from '../config'
 import { projectsResource } from '../../lib/resources'
@@ -80,6 +81,120 @@ function applyToolOutputs(
 
 function addToOrdered(list: string[], sessionId: string): string[] {
   return list.includes(sessionId) ? list : [...list, sessionId]
+}
+
+function sendRefusal(status: number, code: string | undefined, detail: string | undefined) {
+  const kept = {
+    en: 'Your draft and attachments were kept.',
+    fr: 'Votre brouillon et vos pi\u00e8ces jointes ont \u00e9t\u00e9 conserv\u00e9s.',
+  }
+  if (code === 'SESSION_INTERRUPTED') {
+    return {
+      code,
+      message: t({
+        en: `This session is interrupted. Resume it, then send again. ${kept.en}`,
+        fr: `Cette session est interrompue. Reprenez-la, puis renvoyez. ${kept.fr}`,
+      }),
+    }
+  }
+  if (status === 409 && (code === 'SESSION_ALREADY_RUNNING' || detail === 'Session is stopping')) {
+    return {
+      code: code ?? 'SESSION_ALREADY_RUNNING',
+      message: t({
+        en: `This session is stopping. Wait until it stops, then send again. ${kept.en}`,
+        fr: `Cette session est en cours d\u2019arr\u00eat. Attendez qu\u2019elle s\u2019arr\u00eate, puis renvoyez. ${kept.fr}`,
+      }),
+    }
+  }
+  if (code === 'SESSION_RUNNING') {
+    return {
+      code,
+      message: t({
+        en: `A turn is already running. Wait until it finishes, then send again. ${kept.en}`,
+        fr: `Un tour est d\u00e9j\u00e0 en cours. Attendez qu\u2019il se termine, puis renvoyez. ${kept.fr}`,
+      }),
+    }
+  }
+  if (code === 'WORKFLOW_RESUMING') {
+    return {
+      code,
+      message: t({
+        en: `This workflow is already resuming. Wait for it, then send again. ${kept.en}`,
+        fr: `Ce workflow est d\u00e9j\u00e0 en cours de reprise. Attendez, puis renvoyez. ${kept.fr}`,
+      }),
+    }
+  }
+  if (status === 429 || code === 'WORKER_ADMISSION_REFUSED') {
+    return {
+      code: code ?? 'SESSION_QUEUE_FULL',
+      message: t({
+        en: `The session queue is full. Wait for the current turn, then send again. ${kept.en}`,
+        fr: `La file de la session est pleine. Attendez le tour en cours, puis renvoyez. ${kept.fr}`,
+      }),
+    }
+  }
+  return {
+    code: code ?? `HTTP_${status}`,
+    message: t(
+      {
+        en: 'The message was not accepted ({{detail}}). {{kept}}',
+        fr: 'Le message n\u2019a pas \u00e9t\u00e9 accept\u00e9 ({{detail}}). {{kept}}',
+      },
+      { detail: detail || `HTTP ${status}`, kept: t(kept) },
+    ),
+  }
+}
+
+const LAUNCH_ACK_MS = 10_000
+
+type LaunchAck = { ok: true } | { ok: false; code: string; detail: string }
+
+function waitForLaunchAck(): {
+  bind: (id: string) => void
+  cancel: () => void
+  promise: Promise<LaunchAck>
+} {
+  let messageId = ''
+  let settled = false
+  let unsubscribe = () => {}
+  let resolvePromise: (value: LaunchAck) => void = () => {}
+  const promise = new Promise<LaunchAck>((resolve) => {
+    resolvePromise = resolve
+  })
+  const timer = setTimeout(() => {
+    if (settled) return
+    settled = true
+    unsubscribe()
+    resolvePromise({ ok: false, code: 'SEND_FAILED', detail: 'No acknowledgement from the server' })
+  }, LAUNCH_ACK_MS)
+  const finish = (value: LaunchAck) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    unsubscribe()
+    resolvePromise(value)
+  }
+  unsubscribe = wsClient.subscribe((message) => {
+    if (!messageId || message.id !== messageId) return
+    if (message.type === 'ack') {
+      finish({ ok: true })
+      return
+    }
+    if (message.type !== 'error') return
+    const payload = message.payload as { code?: unknown; message?: unknown }
+    finish({
+      ok: false,
+      code: typeof payload.code === 'string' ? payload.code : 'SEND_FAILED',
+      detail: typeof payload.message === 'string' ? payload.message : '',
+    })
+  })
+  return {
+    bind: (id: string) => {
+      messageId = id
+    },
+    cancel: () => finish({ ok: false, code: 'SEND_FAILED', detail: 'cancelled' }),
+    promise,
+  }
 }
 
 async function postMessage(
@@ -962,15 +1077,44 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
     sendMessage: async (sessionId, content, attachments, opts) => {
       const pane = paneFor(get(), sessionId)
-      if (!pane?.session) return
+      if (!pane?.session) {
+        const message = t({
+          en: 'This session is not open. Your draft and attachments were kept.',
+          fr: 'Cette session n\u2019est pas ouverte. Votre brouillon et vos pi\u00e8ces jointes ont \u00e9t\u00e9 conserv\u00e9s.',
+        })
+        return { ok: false as const, status: 0, code: 'NO_SESSION', message }
+      }
       set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: null })))
 
       // If there's an active workflow execution that was aborted (status 'running'),
       // route the message as a workflow resume instead of a normal chat message.
       const exec = pane.activeWorkflowExecution
       if (exec && exec.status === 'running') {
-        wsClient.send('runner.launch', buildResumePayload(exec, sessionId, content, attachments, opts?.messageKind))
-        return
+        const launch = waitForLaunchAck()
+        try {
+          launch.bind(
+            wsClient.send(
+              'runner.launch',
+              buildResumePayload(exec, sessionId, content, attachments, opts?.messageKind),
+            ),
+          )
+          const settled = await launch.promise
+          if (!settled.ok) {
+            const refusal = sendRefusal(0, settled.code, settled.detail)
+            set((s) =>
+              updatePane(s, sessionId, (p) => ({ ...p, error: { code: refusal.code, message: refusal.message } })),
+            )
+            return { ok: false as const, status: 0, code: refusal.code, message: refusal.message }
+          }
+          return { ok: true as const }
+        } catch (error) {
+          launch.cancel()
+          console.error('Error sending message:', error)
+          const detail = error instanceof Error ? error.message : String(error)
+          const message = sendFailedMessage(detail)
+          set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: { code: 'SEND_FAILED', message } })))
+          return { ok: false as const, status: 0, code: 'SEND_FAILED', message }
+        }
       }
 
       try {
@@ -992,12 +1136,29 @@ export const useSessionStore = create<SessionState>((set, get) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
-        const data = await res.json()
-        if (data.queueState) {
-          set((state) => updatePane(state, sessionId, (p) => ({ ...p, queuedMessages: data.queueState })))
+        const data = (await res.json().catch(() => ({}))) as {
+          queueState?: import('@shared/protocol.js').QueuedMessage[]
+          error?: string
+          code?: string
         }
+        if (!res.ok) {
+          const refusal = sendRefusal(res.status, data.code, data.error)
+          set((s) =>
+            updatePane(s, sessionId, (p) => ({ ...p, error: { code: refusal.code, message: refusal.message } })),
+          )
+          return { ok: false as const, status: res.status, code: refusal.code, message: refusal.message }
+        }
+        const queueState = data.queueState
+        if (queueState) {
+          set((state) => updatePane(state, sessionId, (p) => ({ ...p, queuedMessages: queueState })))
+        }
+        return { ok: true as const }
       } catch (error) {
         console.error('Error sending message:', error)
+        const detail = error instanceof Error ? error.message : String(error)
+        const message = sendFailedMessage(detail)
+        set((s) => updatePane(s, sessionId, (p) => ({ ...p, error: { code: 'SEND_FAILED', message } })))
+        return { ok: false as const, status: 0, code: 'SEND_FAILED', message }
       }
     },
 

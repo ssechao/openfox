@@ -86,6 +86,8 @@ export interface SessionPane {
   sessionStats: SessionStatsSummary | null
 }
 
+export type SendMessageResult = { ok: true } | { ok: false; status: number; code: string; message: string }
+
 export interface SessionState {
   connectionStatus: ConnectionStatus
   showPasswordModal: boolean
@@ -161,7 +163,7 @@ export interface SessionState {
     content: string,
     attachments?: Attachment[],
     opts?: { messageKind?: 'command'; isSystemGenerated?: boolean },
-  ) => void
+  ) => Promise<SendMessageResult>
   stopGeneration: (sessionId: string) => void
   continueGeneration: (sessionId: string) => void
   /** Request a cooperative pause (takes effect before the next LLM request). */

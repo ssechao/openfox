@@ -7,6 +7,8 @@ import { useWorkflows } from '../../hooks/useWorkflows'
 import { commandsResource, commandResource, skillsResource, selectActiveSkills } from '../../lib/resources'
 import { authFetch } from '../../lib/api'
 import { parseSlashCommand, extractTemplateParams } from '../../lib/parse-slash-command'
+import { applySendResult } from './clear-sent-draft'
+import { failureDetail, sendFailedMessage } from '../../lib/send-failure'
 import { insertSuggestionAtCursor, focusTextareaAt, resolveSlashParamIds } from '../../lib/composer-utils'
 import { resolveWorkflowForLaunch } from '../../lib/workflow-scope'
 import { dedupById } from '../../lib/modal-utils'
@@ -52,7 +54,7 @@ const COMPOSER_EXPANDED_RESERVE = 96
 
 interface ChatInputProps {
   input: string
-  setInput: (value: string) => void
+  setInput: Dispatch<SetStateAction<string>>
   attachments: Attachment[]
   setAttachments: Dispatch<SetStateAction<Attachment[]>>
   dragOver: boolean
@@ -76,7 +78,13 @@ interface ChatInputProps {
   onOpenWorkflowsModal: () => void
   onSelectWorkflow: (workflowId: string, scope?: WorkflowLaunchScope) => void
   onSelectWorkflowWithSubGroup: (workflowId: string, subGroup: string, scope?: WorkflowLaunchScope) => void
-  onSendCommand: (content: string, agentMode?: string, textareaContent?: string, attachments?: Attachment[]) => void
+  onSendCommand: (
+    content: string,
+    agentMode?: string,
+    textareaContent?: string,
+    attachments?: Attachment[],
+    composer?: { input: string; attachments: Attachment[] },
+  ) => void | Promise<void>
   clearInput: () => void
 }
 
@@ -462,11 +470,17 @@ export function ChatInput({
     fileInputRef.current?.click()
   }, [])
 
+  const releaseSend = () => {
+    sendingRef.current = false
+  }
+
   const handleSend = () => {
     if (sendingRef.current) return
     if (!input.trim() && attachments.length === 0) return
     sendingRef.current = true
     scrollToBottom?.()
+    const sentText = input
+    const sentAttachments = attachments
 
     // Detect slash commands: /workflow-id arg1 arg2 or /command-name arg1 arg2
     const trimmed = input.trim()
@@ -501,8 +515,10 @@ export function ChatInput({
       }
       if (slashResult?.commandId) {
         // Fetch command, resolve params, send as message
-        commandResource.refresh(slashResult.commandId, workdir).then((full) => {
-          if (full) {
+        void commandResource
+          .refresh(slashResult.commandId, workdir)
+          .then(async (full) => {
+            if (!full) return
             // Map positional args to named params by order of appearance in the prompt
             const paramNames = extractTemplateParams(full.prompt)
             const namedParams: Record<string, string> = {}
@@ -515,19 +531,27 @@ export function ChatInput({
             for (const [key, value] of Object.entries(namedParams)) {
               prompt = prompt.replaceAll(`{{${key}}}`, value)
             }
-            onSendCommand(prompt, full.metadata.agentMode)
-            clearInput()
-          }
-          sendingRef.current = false
-          // If fetch fails (null), leave input intact so user can retry
-        })
+            await onSendCommand(prompt, full.metadata.agentMode, undefined, sentAttachments, {
+              input: sentText,
+              attachments: sentAttachments,
+            })
+          })
+          .catch((error: unknown) => {
+            setErrorMessage(sendFailedMessage(failureDetail(error)))
+          })
+          .finally(releaseSend)
         return
       }
     }
 
-    sendMessage(input, attachments)
-    clearInput()
-    sendingRef.current = false
+    void Promise.resolve(sendMessage(sentText, sentAttachments))
+      .then((result) => {
+        applySendResult(result, sentText, sentAttachments, setInput, setAttachments, setErrorMessage)
+      })
+      .catch((error: unknown) => {
+        setErrorMessage(sendFailedMessage(failureDetail(error)))
+      })
+      .finally(releaseSend)
   }
 
   const handleSelectFile = useCallback(

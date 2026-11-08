@@ -318,10 +318,41 @@ describe('ChatInput slash command integration', () => {
     fireEvent.click(sendButton)
 
     await waitFor(() => {
-      expect(onSendCommand).toHaveBeenCalledWith('Please review PR 123', 'builder')
+      expect(onSendCommand).toHaveBeenCalledWith('Please review PR 123', 'builder', undefined, [], {
+        input: '/review 123',
+        attachments: [],
+      })
     })
     expect(mockSendMessage).not.toHaveBeenCalled()
     expect(mockLaunchWorkflow).not.toHaveBeenCalled()
+  })
+
+  it('does not send a slash command again while the first command is still in flight', async () => {
+    await commandsResource.refresh('/tmp')
+    let resolveCommand: () => void = () => {}
+    const onSendCommand = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCommand = resolve
+        }),
+    )
+    renderChatInput({ input: '/review 123', onSendCommand })
+
+    fireEvent.click(screen.getByTestId('chat-send-button'))
+    await waitFor(() => {
+      expect(onSendCommand).toHaveBeenCalledTimes(1)
+    })
+    fireEvent.click(screen.getByTestId('chat-send-button'))
+    expect(onSendCommand).toHaveBeenCalledTimes(1)
+
+    resolveCommand()
+    await waitFor(() => {
+      expect(onSendCommand).toHaveBeenCalledTimes(1)
+    })
+    fireEvent.click(screen.getByTestId('chat-send-button'))
+    await waitFor(() => {
+      expect(onSendCommand).toHaveBeenCalledTimes(2)
+    })
   })
 
   it('shows error for missing required params', () => {

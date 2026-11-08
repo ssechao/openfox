@@ -26,7 +26,7 @@ export function drainQueue(
       createMessageStartEvent(asapMsgId, 'user', asap.content, {
         ...(getCurrentWindowMessageOptions(sessionId) ?? {}),
         ...(asap.attachments ? { attachments: asap.attachments } : {}),
-        ...(generated ? { isSystemGenerated: true, messageKind: 'auto-prompt' as const } : {}),
+        ...(generated ? { isSystemGenerated: true, messageKind: 'background-exit' as const } : {}),
       }),
     )
     append({ type: 'message.done', data: { messageId: asapMsgId } })
@@ -37,7 +37,7 @@ export function drainQueue(
       content: asap.content,
       timestamp: new Date().toISOString(),
       ...(asap.attachments ? { attachments: asap.attachments } : {}),
-      ...(generated ? { isSystemGenerated: true, messageKind: 'auto-prompt' as const } : {}),
+      ...(generated ? { isSystemGenerated: true, messageKind: 'background-exit' as const } : {}),
     }
     onMessage?.(createChatMessageMessage(message))
     onMessage?.(createChatDoneMessage(asapMsgId, 'complete'))

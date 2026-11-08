@@ -488,7 +488,10 @@ export async function executeWorkflow(
       content: options.userMessage.content,
       ...(options.userMessage.attachments ? { attachments: options.userMessage.attachments } : {}),
       ...(options.userMessage.isSystemGenerated
-        ? { isSystemGenerated: true, messageKind: 'auto-prompt' as const }
+        ? {
+            isSystemGenerated: true,
+            messageKind: options.userMessage.messageKind ?? 'auto-prompt',
+          }
         : {}),
     })
   }

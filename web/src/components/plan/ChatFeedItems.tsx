@@ -8,6 +8,7 @@ import { FeedDivider } from './FeedDivider'
 import { FEED_REVEAL_EVENT } from './feed-window'
 import { useDisplaySettings } from '../../hooks/useDisplaySettings'
 import { useT } from '../../hooks/useT'
+import { isBackgroundExitNotice } from './background-exit-notice'
 
 const ITEM_CONTAINMENT_STYLE = { contentVisibility: 'auto', containIntrinsicSize: 'auto 200px' } as const
 const PLACEHOLDER_STYLE = { contentVisibility: 'auto', containIntrinsicSize: '160px', minHeight: '160px' } as const
@@ -276,7 +277,8 @@ export const ChatFeedItems = memo(function ChatFeedItems({
           )
         }
 
-        const skipAutoPrompt = !showAgentDefinitions && message.messageKind === 'auto-prompt'
+        const skipAutoPrompt =
+          !showAgentDefinitions && message.messageKind === 'auto-prompt' && !isBackgroundExitNotice(message)
         const skipWorkflow =
           !showWorkflowBars && (message.messageKind === 'workflow-started' || message.messageKind === 'task-completed')
         if (skipAutoPrompt || skipWorkflow) {

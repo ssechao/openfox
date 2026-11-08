@@ -246,7 +246,7 @@ describe('worker background processes', () => {
       )
     }, 20_000)
     expect(notice.isSystemGenerated).toBe(true)
-    expect(notice.messageKind).toBe('auto-prompt')
+    expect(notice.messageKind).toBe('background-exit')
     expect(notice.content).toContain('<process-output>')
     await waitFor(async () => {
       const response = await fetch(`${base}/api/sessions/${notifySessionId}`)

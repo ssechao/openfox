@@ -520,7 +520,14 @@ export interface Message {
   completeReason?: 'complete' | 'stopped' | 'error' | 'waiting_for_user' | 'truncated' | 'step_done' // How the message ended
   isSystemGenerated?: boolean // true for auto-injected messages (retry prompts, etc.)
   isStreaming?: boolean // true while assistant is still generating
-  messageKind?: 'correction' | 'auto-prompt' | 'context-reset' | 'task-completed' | 'workflow-started' | 'command' // Visual styling hint for system-generated messages
+  messageKind?:
+    | 'correction'
+    | 'auto-prompt'
+    | 'context-reset'
+    | 'task-completed'
+    | 'workflow-started'
+    | 'command'
+    | 'background-exit' // Visual styling hint for system-generated messages
   isCompactionSummary?: boolean // true if this is the summary message after compaction
   subAgentId?: string // If set, this message belongs to a sub-agent process
   subAgentType?: string // Sub-agent ID from agent registry

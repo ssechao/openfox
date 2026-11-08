@@ -21,6 +21,8 @@ import { ChatInput } from './ChatInput'
 import { FeedTaskPreview } from '../tasks/FeedTaskPreview'
 import { WorkflowParamModal } from './WorkflowParamModal'
 import { extractTemplateParams } from '../../lib/parse-slash-command'
+import { failureDetail, sendFailedMessage } from '../../lib/send-failure'
+import { applySendResult } from './clear-sent-draft'
 import { resolveWorkflowForLaunch } from '../../lib/workflow-scope'
 import type { WorkflowLaunchScope } from '@shared/types.js'
 import { SidebarSummaryHeader } from './SidebarSummaryHeader'
@@ -185,6 +187,8 @@ export function PlanPanel({
     agentMode?: string
     textareaContent?: string
     attachments?: import('@shared/types.js').Attachment[]
+    composerInput: string
+    composerAttachments: import('@shared/types.js').Attachment[]
   } | null>(null)
 
   const launchOrShowParams = useCallback(
@@ -303,25 +307,40 @@ export function PlanPanel({
       content: string,
       agentMode?: string,
       textareaContent?: string,
-      attachments?: import('@shared/types.js').Attachment[],
+      commandAttachments?: import('@shared/types.js').Attachment[],
+      composer?: { input: string; attachments: import('@shared/types.js').Attachment[] },
     ) => {
+      const sentText = composer?.input ?? input
+      const sentAttachments = composer?.attachments ?? attachments
       const paramKeys = extractTemplateParams(content)
       if (paramKeys.length > 0) {
-        setPendingCommandParams({ prompt: content, paramKeys, agentMode, textareaContent, attachments })
-      } else {
+        setPendingCommandParams({
+          prompt: content,
+          paramKeys,
+          agentMode,
+          textareaContent,
+          attachments: commandAttachments,
+          composerInput: sentText,
+          composerAttachments: sentAttachments,
+        })
+        return
+      }
+      try {
         if (agentMode && targetSessionId && session?.mode !== agentMode) {
           await useSessionStore.getState().switchMode(targetSessionId, agentMode)
         }
         const combinedContent =
           textareaContent && textareaContent.trim() ? `${textareaContent.trim()}\n\n${content}` : content
-        sendMessage(combinedContent, attachments?.length ? attachments : undefined, {
+        const result = await sendMessage(combinedContent, commandAttachments?.length ? commandAttachments : undefined, {
           messageKind: 'command',
           isSystemGenerated: true,
         })
-        clearInput()
+        applySendResult(result, sentText, sentAttachments, setInput, setAttachments, setErrorMessage)
+      } catch (error) {
+        setErrorMessage(sendFailedMessage(failureDetail(error)))
       }
     },
-    [sendMessage, clearInput, session],
+    [sendMessage, session, input, attachments, targetSessionId],
   )
 
   return (
@@ -461,11 +480,18 @@ export function PlanPanel({
               }
               const combinedContent =
                 textareaContent && textareaContent.trim() ? `${textareaContent.trim()}\n\n${prompt}` : prompt
-              sendMessage(combinedContent, attachments?.length ? attachments : undefined, {
+              const sentText = pendingCommandParams.composerInput
+              const sentAttachments = pendingCommandParams.composerAttachments
+              void sendMessage(combinedContent, attachments?.length ? attachments : undefined, {
                 messageKind: 'command',
                 isSystemGenerated: true,
               })
-              clearInput()
+                .then((result) => {
+                  applySendResult(result, sentText, sentAttachments, setInput, setAttachments, setErrorMessage)
+                })
+                .catch((error: unknown) => {
+                  setErrorMessage(sendFailedMessage(failureDetail(error)))
+                })
               setPendingCommandParams(null)
             }}
             onCancel={() => setPendingCommandParams(null)}

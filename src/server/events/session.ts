@@ -447,7 +447,14 @@ export function emitUserMessage(
   options?: {
     contextWindowId?: string
     isSystemGenerated?: boolean
-    messageKind?: 'correction' | 'auto-prompt' | 'context-reset' | 'task-completed' | 'workflow-started' | 'command'
+    messageKind?:
+      | 'correction'
+      | 'auto-prompt'
+      | 'context-reset'
+      | 'task-completed'
+      | 'workflow-started'
+      | 'command'
+      | 'background-exit'
     isCompactionSummary?: boolean
     tokenCount?: number
     attachments?: Attachment[] // Optional image attachments
