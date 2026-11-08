@@ -1,5 +1,5 @@
 import type { Config } from '../../../shared/types.js'
-import type { ChoiceOption, ServerMessage } from '../../../shared/protocol.js'
+import type { ChoiceOption, QueuedMessage, ServerMessage } from '../../../shared/protocol.js'
 import type { DiagnosticsData } from '../../../shared/diagnostics.js'
 import type { LLMToolDefinition } from '../../llm/types.js'
 import type { WorkerToken } from './token.js'
@@ -49,6 +49,29 @@ export type BackgroundResponseMessage = WorkerIpcIdentity & {
   type: 'background.response'
   requestId: string
   result: BackgroundActionResult
+}
+
+export type AsapDrainRequestMessage = WorkerIpcIdentity & {
+  type: 'asap.drain.request'
+  requestId: string
+}
+
+export type AsapDrainAckMessage = WorkerIpcIdentity & {
+  type: 'asap.drain.ack'
+  requestId: string
+}
+
+export type AsapDrainAbortMessage = WorkerIpcIdentity & {
+  type: 'asap.drain.abort'
+  requestId: string
+}
+
+export type AsapDrainResponseMessage = WorkerIpcIdentity & {
+  type: 'asap.drain.response'
+  requestId: string
+  status: 'ok' | 'busy'
+  messages: QueuedMessage[]
+  queueState: QueuedMessage[]
 }
 
 export type McpResponseChunkMessage = WorkerIpcIdentity & {
@@ -129,6 +152,7 @@ export type GatewayToWorkerMessage =
   | WorkerMcpResponseMessage
   | WorkerInteractiveResponseMessage
   | BackgroundResponseMessage
+  | AsapDrainResponseMessage
 
 export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'ready'; pid: number })
@@ -139,4 +163,7 @@ export type WorkerToGatewayMessage =
   | McpRequestMessage
   | McpCancelMessage
   | BackgroundRequestMessage
+  | AsapDrainRequestMessage
+  | AsapDrainAckMessage
+  | AsapDrainAbortMessage
   | InteractiveOpenMessage

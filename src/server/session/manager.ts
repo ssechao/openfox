@@ -1962,6 +1962,24 @@ export class SessionManager {
     return asap
   }
 
+  restoreAsapMessages(sessionId: string, messages: QueuedMessage[]): void {
+    if (messages.length === 0) return
+    const queue = this.messageQueues.get(sessionId) ?? []
+    const present = new Set(queue.map((message) => message.queueId))
+    const restored = messages.filter((message) => message.mode === 'asap' && !present.has(message.queueId))
+    if (restored.length === 0) return
+    this.messageQueues.set(sessionId, [...restored, ...queue])
+    for (const message of restored) {
+      this.emit({
+        type: 'queue_added',
+        sessionId,
+        queueId: message.queueId,
+        mode: 'asap',
+        content: message.content,
+      })
+    }
+  }
+
   drainCompletionMessages(sessionId: string): QueuedMessage[] {
     const queue = this.messageQueues.get(sessionId)
     if (!queue) return []

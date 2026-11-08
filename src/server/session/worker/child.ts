@@ -31,6 +31,8 @@ import { setMcpTools } from '../../tools/index.js'
 import { WorkerMcpClient } from './mcp-client.js'
 import { WorkerInteractiveClient } from './interactive-client.js'
 import { WorkerBackgroundClient } from './background-client.js'
+import { WorkerAsapClient } from './asap-client.js'
+import { setAsapQueueDrain } from '../../chat/drain-queue.js'
 import { setBackgroundProcessBackend } from '../../tools/background-process/backend.js'
 import { linkAbortSignal } from './abort-link.js'
 import { storedEventToServerMessage } from '../../ws/protocol.js'
@@ -66,6 +68,7 @@ const controller = new AbortController()
 let mcpClient: WorkerMcpClient | null = null
 let interactiveClient: WorkerInteractiveClient | null = null
 let backgroundClient: WorkerBackgroundClient | null = null
+let asapClient: WorkerAsapClient | null = null
 
 process.on('message', (raw) => {
   const msg = raw as GatewayToWorkerMessage
@@ -76,6 +79,13 @@ process.on('message', (raw) => {
     mcpClient = new WorkerMcpClient(identity, send)
     interactiveClient = new WorkerInteractiveClient(identity, send)
     backgroundClient = new WorkerBackgroundClient(identity, send)
+    asapClient = new WorkerAsapClient(identity, send)
+    setAsapQueueDrain((sessionId) => {
+      if (!asapClient || sessionId !== identity.sessionId) {
+        return { messages: [], queueState: [], commit() {}, abort() {} }
+      }
+      return asapClient.drain()
+    })
     setBackgroundProcessBackend((_sessionId, defaultCwd, args) => backgroundClient!.execute(defaultCwd, args))
     setMcpTools(mcpClient.createTools(msg.mcpTools ?? []))
     void runTurn(msg.sessionId, msg.config, msg.command ?? { kind: 'chat' })
@@ -83,11 +93,13 @@ process.on('message', (raw) => {
     mcpClient?.cancelAll()
     interactiveClient?.close('Session stopped by user')
     backgroundClient?.close('Session stopped by user')
+    asapClient?.close('Session stopped by user')
     controller.abort()
   } else {
     mcpClient?.handleMessage(msg)
     interactiveClient?.handleMessage(msg)
     backgroundClient?.handleMessage(msg)
+    asapClient?.handleMessage(msg)
   }
 })
 
@@ -103,6 +115,8 @@ async function runTurn(
     healthCollector.stop()
     interactiveClient?.close('Worker turn finished')
     backgroundClient?.close('Worker turn finished')
+    asapClient?.close('Worker turn finished')
+    setAsapQueueDrain(null)
     send({ ...token, type: 'done', ok, ...(error ? { error } : {}) }, () => process.exit(ok ? 0 : 1))
     // Safety net if the IPC channel is already gone.
     setTimeout(() => process.exit(ok ? 0 : 1), 2000).unref()

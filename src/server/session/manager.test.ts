@@ -720,6 +720,25 @@ describe('SessionManager', () => {
       expect(queueState[0]!.messageKind).toBe('command')
     })
 
+    it('restores drained asap messages in front without duplicating them', () => {
+      const session = manager.createSession(projectId)
+      const attachment = { id: 'a', filename: 'n.txt', mimeType: 'text/plain', size: 1, data: 'n' }
+      const first = manager.queueMessage(session.id, 'asap', 'one', [attachment], 'command')
+      manager.queueMessage(session.id, 'completion', 'later')
+      const drained = manager.drainAsapMessages(session.id)
+      manager.queueMessage(session.id, 'asap', 'during')
+      manager.setQueueAdmissionGuard(() => false)
+      manager.restoreAsapMessages(session.id, drained)
+      manager.restoreAsapMessages(session.id, drained)
+
+      expect(manager.getQueueState(session.id).map((message) => message.content)).toEqual(['one', 'later', 'during'])
+      expect(manager.getQueueState(session.id)[0]).toMatchObject({
+        queueId: first.queueId,
+        messageKind: 'command',
+        attachments: [attachment],
+      })
+    })
+
     it('refuses the 101st queued message without changing the queue', () => {
       const session = manager.createSession(projectId)
       for (let index = 0; index < 100; index += 1) {

@@ -63,6 +63,7 @@ vi.mock('./stream-pure.js', async (importOriginal) => {
 
 import { setPluginMessageTransforms, clearPluginMessageTransforms } from '../plugins/message-transforms.js'
 import { runTopLevelAgentLoop } from './agent-loop.js'
+import { setAsapQueueDrain } from './drain-queue.js'
 import { executeTools } from './execute-tools.js'
 import { getEventStore } from '../events/store.js'
 import { getAllInstructions } from '../context/instructions.js'
@@ -2123,6 +2124,10 @@ describe('runTopLevelAgentLoop live stats', () => {
 // ============================================================================
 
 describe('runTopLevelAgentLoop queue draining', () => {
+  afterEach(() => {
+    setAsapQueueDrain(null)
+  })
+
   let mockEventStore: EventStore
   let mockSessionManager: any
   let mockLLMClient: any
@@ -2276,6 +2281,54 @@ describe('runTopLevelAgentLoop queue draining', () => {
       (e: any) => e?.type === 'message.start' && e.data?.content === 'Hello from the queue',
     )
     expect(queuedInHistory).toHaveLength(0)
+  })
+
+  it('puts a gateway asap into the next llm call exactly once', async () => {
+    const commits: string[] = []
+    const drain = vi.fn(async () => ({
+      messages: [queuedMessage],
+      queueState: [],
+      commit: () => commits.push('commit'),
+      abort: () => commits.push('abort'),
+    }))
+    setAsapQueueDrain(drain)
+    const seen: string[][] = []
+    await runTopLevelAgentLoop(
+      makeConfig({
+        getConversationMessages: vi.fn(async () => {
+          const contents = mockAppend.mock.calls
+            .map((call) => call[0] as { type?: string; data?: { role?: string; content?: string } })
+            .filter((event) => event?.type === 'message.start' && event.data?.role === 'user')
+            .map((event) => event.data?.content ?? '')
+          seen.push(contents)
+          return contents.map((content) => ({ role: 'user' as const, content, source: 'history' as const }))
+        }),
+      }),
+      mockTurnMetrics,
+    )
+
+    expect(drain).toHaveBeenCalledTimes(1)
+    expect(mockSessionManager.drainAsapMessages).not.toHaveBeenCalled()
+    expect(seen[0]).not.toContain('Hello from the queue')
+    expect(seen[1]?.filter((content) => content === 'Hello from the queue')).toEqual(['Hello from the queue'])
+    expect(commits).toEqual(['commit'])
+  })
+
+  it('does not ask the gateway to drain during a sub-agent run', async () => {
+    const drain = vi.fn(async () => ({
+      messages: [queuedMessage],
+      queueState: [],
+      commit: () => undefined,
+      abort: () => undefined,
+    }))
+    setAsapQueueDrain(drain)
+    await runTopLevelAgentLoop(
+      makeConfig({ subAgentMetadata: { subAgentId: 'sub-1', subAgentType: 'explorer' } }),
+      mockTurnMetrics,
+    )
+
+    expect(drain).not.toHaveBeenCalled()
+    expect(mockSessionManager.drainAsapMessages).not.toHaveBeenCalled()
   })
 })
 

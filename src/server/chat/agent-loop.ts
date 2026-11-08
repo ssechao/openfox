@@ -913,7 +913,7 @@ ${COMPACTION_PROMPT}`,
       }
 
       if (!config.subAgentMetadata) {
-        void drainQueue(sessionManager, sessionId, append, onMessage)
+        await drainQueue(sessionManager, sessionId, append, onMessage)
       }
 
       retryLimiter.reset()

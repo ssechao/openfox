@@ -28,6 +28,7 @@ import {
   createSessionRunningMessage,
   createSessionInterruptedMessage,
   createChatMessageMessage,
+  createQueueStateMessage,
 } from '../../ws/protocol.js'
 import { createMessageDoneEvent } from '../../chat/stream-pure.js'
 import { serverT } from '../../i18n.js'
@@ -68,6 +69,7 @@ import type {
   WorkerTurnCommand,
 } from './protocol.js'
 import { WorkerMcpBroker } from './mcp-broker.js'
+import { WorkerAsapBroker } from './asap-broker.js'
 import { WorkerInteractiveBroker, type InteractiveAnswerResult } from './interactive-broker.js'
 import { cancelQuestion, registerPendingQuestion, provideAnswer } from '../../tools/ask.js'
 import { cancelPathConfirmation, providePathConfirmation, registerPathConfirmation } from '../../tools/path-security.js'
@@ -160,6 +162,7 @@ export class SessionWorkerManager {
   private readonly exitPromises = new WeakMap<object, Promise<void>>()
   private readonly scheduler: SessionTurnScheduler
   private readonly mcpBroker: WorkerMcpBroker | null
+  private readonly asapBroker: WorkerAsapBroker
   private readonly interactiveBroker: WorkerInteractiveBroker
   private lastCrash: WorkerCrashReport | null = null
   private admissionsClosed = false
@@ -180,6 +183,25 @@ export class SessionWorkerManager {
           reconcile: (request) => this.appendMcpReconciliation(request),
         })
       : null
+    this.asapBroker = new WorkerAsapBroker({
+      isCurrent: (identity) => this.isCurrentIdentity(identity),
+      send: (message) => {
+        const worker = this.active.get(message.sessionId)
+        if (!worker || worker.token.workerId !== message.workerId || worker.token.generation !== message.generation) {
+          return
+        }
+        this.sendTo(worker, message)
+      },
+      takeAsap: (sessionId) => this.deps.sessionManager.drainAsapMessages(sessionId),
+      restoreAsap: (sessionId, messages) => this.deps.sessionManager.restoreAsapMessages(sessionId, messages),
+      queueState: (sessionId) => this.deps.sessionManager.getQueueState(sessionId),
+      onRestored: (sessionId) => {
+        this.deps.broadcastForSession(
+          sessionId,
+          createQueueStateMessage(this.deps.sessionManager.getQueueState(sessionId)),
+        )
+      },
+    })
     this.interactiveBroker = new WorkerInteractiveBroker({
       isCurrent: (identity) => this.isCurrentIdentity(identity),
       send: (message) => {
@@ -513,6 +535,12 @@ export class SessionWorkerManager {
         this.mcpBroker?.handleCancel(msg)
       } else if (msg.type === 'background.request') {
         void this.handleBackgroundRequest(worker, msg)
+      } else if (msg.type === 'asap.drain.request') {
+        this.asapBroker.handleRequest(msg)
+      } else if (msg.type === 'asap.drain.ack') {
+        this.asapBroker.handleAck(msg)
+      } else if (msg.type === 'asap.drain.abort') {
+        this.asapBroker.handleAbort(msg)
       } else if (msg.type === 'interactive.question.open' || msg.type === 'interactive.path.open') {
         this.interactiveBroker.handleOpen(msg)
       } else if (msg.type === 'done') {
@@ -530,6 +558,7 @@ export class SessionWorkerManager {
       worker.exitObserved = true
       worker.exitCodeObserved = code
       worker.exitSignalObserved = signal
+      this.asapBroker.releaseWorker({ sessionId, workerId: worker.token.workerId, generation: worker.token.generation })
       if (this.active.get(sessionId) !== worker) return
       this.mcpBroker?.cancelWorker({ sessionId, ...worker.token })
       this.interactiveBroker.cancelWorker({ sessionId, ...worker.token }, 'Session worker exited')
