@@ -629,15 +629,7 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
     }
     for (const call of terminalCalls) {
       if (!call.id || !call.name) continue
-      if (call.name === preflightFailure.toolName && call.arguments['path'] === preflightFailure.path) continue
-      const already = toolCalls.some((existing) => {
-        if (existing.id === call.id) return true
-        if (existing.name !== call.name) return false
-        const path = call.arguments['path']
-        if (typeof path === 'string' && existing.arguments['path'] === path) return true
-        return JSON.stringify(existing.arguments) === JSON.stringify(call.arguments)
-      })
-      if (already) continue
+      if (call.id === canonicalId || toolCalls.some((existing) => existing.id === call.id)) continue
       toolCalls.push({ id: call.id, name: call.name, arguments: call.arguments })
     }
     const rawArguments = providerReplayArguments(toolArgs.get(preflightFailure.index), terminalArguments)

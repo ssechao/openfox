@@ -151,6 +151,11 @@ export function parseSessionExport(payload: unknown): ParsedSessionExport {
  * messages and all non-tombstoned events in sequence order (original
  * seq/timestamp kept). Throws if the session does not exist.
  */
+/** Client downloads must not carry the provider body kept for server replay. */
+function omitReplayArgumentsFromExport<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value), (key, nested: unknown) => (key === 'rawArguments' ? undefined : nested)) as T
+}
+
 export function buildSessionExport(sessionManager: SessionManager, sessionId: string): SessionExportPayload {
   const session = sessionManager.requireSession(sessionId)
   const project = getProject(session.projectId)
@@ -219,8 +224,8 @@ export function buildSessionExport(sessionManager: SessionManager, sessionId: st
           },
         }
       : {}),
-    messages: sessionManager.getCurrentWindowMessages(sessionId),
-    events,
+    messages: omitReplayArgumentsFromExport(sessionManager.getCurrentWindowMessages(sessionId)),
+    events: omitReplayArgumentsFromExport(events),
     ...(exportBlobs.length > 0 ? { blobs: exportBlobs } : {}),
   }
 }
