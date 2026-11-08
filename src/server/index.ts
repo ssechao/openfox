@@ -4531,14 +4531,12 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       workerManager.closeAdmissions()
       const interruptedAt = new Date().toISOString()
       const eventStore = getEventStore()
+      const interruptedSessionIds: string[] = []
       for (const runtime of runtimeRegistry.list()) {
         if (runtime.state === 'idle') continue
         markSessionInterrupted(db, runtime.sessionId, interruptedAt)
         prepareSessionInterruptionEvents(eventStore, runtime.sessionId)
-        eventStore.append(runtime.sessionId, {
-          type: 'worker.recovery_clean',
-          data: { interruptedAt },
-        })
+        interruptedSessionIds.push(runtime.sessionId)
       }
       queueProcessor.stop()
       taskScheduler.stop()
@@ -4591,6 +4589,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
               : Promise.resolve(),
           ])
           await workerManager.shutdown()
+          for (const sessionId of interruptedSessionIds) {
+            if (getSessionInterruptedAt(db, sessionId) !== interruptedAt) continue
+            eventStore.append(sessionId, {
+              type: 'worker.recovery_clean',
+              data: { interruptedAt },
+            })
+          }
           setExternalGitRunner(null)
           await Promise.all([ancillaryCleanup, mcpManager.disconnectAll(), processSupervisor?.shutdown()])
           finish()
