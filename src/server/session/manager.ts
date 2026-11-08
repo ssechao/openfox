@@ -1903,6 +1903,7 @@ export class SessionManager {
   // ============================================================================
 
   private messageQueues = new Map<string, QueuedMessage[]>()
+  private heldAsap = new Map<string, QueuedMessage[]>()
   private static readonly MAX_QUEUED_MESSAGES_PER_SESSION = 100
   private queueAdmissionGuard: ((sessionId: string) => boolean) | undefined
 
@@ -1921,7 +1922,7 @@ export class SessionManager {
     if (this.queueAdmissionGuard && !this.queueAdmissionGuard(sessionId)) {
       throw new SessionWorkerQueueFullError(sessionId)
     }
-    if (queue.length >= SessionManager.MAX_QUEUED_MESSAGES_PER_SESSION) {
+    if (queue.length + this.heldCount(sessionId) >= SessionManager.MAX_QUEUED_MESSAGES_PER_SESSION) {
       throw new SessionQueueFullError(sessionId, SessionManager.MAX_QUEUED_MESSAGES_PER_SESSION)
     }
     const msg: QueuedMessage = {
@@ -1962,7 +1963,27 @@ export class SessionManager {
     return asap
   }
 
+  reserveHeldAsap(sessionId: string, messages: QueuedMessage[]): void {
+    const added = messages.filter((message) => message.mode === 'asap')
+    if (added.length === 0) return
+    const held = this.heldAsap.get(sessionId) ?? []
+    const present = new Set(held.map((message) => message.queueId))
+    const reserved = added.filter((message) => !present.has(message.queueId))
+    if (reserved.length === 0) return
+    this.heldAsap.set(sessionId, [...held, ...reserved])
+  }
+
+  releaseHeldAsap(sessionId: string, messages: QueuedMessage[]): void {
+    const held = this.heldAsap.get(sessionId)
+    if (!held) return
+    const drop = new Set(messages.map((message) => message.queueId))
+    const remaining = held.filter((message) => !drop.has(message.queueId))
+    if (remaining.length === 0) this.heldAsap.delete(sessionId)
+    else this.heldAsap.set(sessionId, remaining)
+  }
+
   restoreAsapMessages(sessionId: string, messages: QueuedMessage[]): void {
+    this.releaseHeldAsap(sessionId, messages)
     if (messages.length === 0) return
     const queue = this.messageQueues.get(sessionId) ?? []
     const present = new Set(queue.map((message) => message.queueId))
@@ -2005,6 +2026,11 @@ export class SessionManager {
 
   clearMessageQueue(sessionId: string): void {
     this.messageQueues.delete(sessionId)
+    this.heldAsap.delete(sessionId)
+  }
+
+  private heldCount(sessionId: string): number {
+    return this.heldAsap.get(sessionId)?.length ?? 0
   }
 
   // ============================================================================

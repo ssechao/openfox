@@ -124,6 +124,38 @@ describe('drainQueue', () => {
     expect(drained.aborts).toBe(0)
   })
 
+  it('repairs a persisted start that has no message.done before ack', async () => {
+    events.push({
+      type: 'message.start',
+      data: { messageId: 'id-one', role: 'user', content: 'one', contextWindowId: 'window-1' },
+    } as StoredEvent)
+    const drained = batch([queued('one', { messageKind: 'command' })])
+    setAsapQueueDrain(() => drained)
+    const outbound: Array<{ type: string; payload: Record<string, unknown> }> = []
+    await drainQueue(
+      {} as never,
+      'session-1',
+      (event) => {
+        events.push(event as StoredEvent)
+      },
+      (message) => outbound.push(message as { type: string; payload: Record<string, unknown> }),
+    )
+
+    expect(events.filter((event) => event.type === 'message.start')).toHaveLength(1)
+    expect(events.filter((event) => event.type === 'message.done')).toEqual([
+      { type: 'message.done', data: { messageId: 'id-one' } },
+    ])
+    expect(outbound.map((message) => message.type)).toEqual(['chat.done', 'queue.state'])
+    expect(drained.commits).toBe(1)
+    expect(drained.aborts).toBe(0)
+
+    await drainQueue({} as never, 'session-1', (event) => {
+      events.push(event as StoredEvent)
+    })
+    expect(events.filter((event) => event.type === 'message.done')).toHaveLength(1)
+    expect(drained.commits).toBe(2)
+  })
+
   it('appends a repeated delivery only once', async () => {
     const drained = batch([queued('one'), queued('two')])
     setAsapQueueDrain(() => drained)

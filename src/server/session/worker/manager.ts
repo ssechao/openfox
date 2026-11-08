@@ -192,8 +192,13 @@ export class SessionWorkerManager {
         }
         this.sendTo(worker, message)
       },
-      takeAsap: (sessionId) => this.deps.sessionManager.drainAsapMessages(sessionId),
+      takeAsap: (sessionId) => {
+        const messages = this.deps.sessionManager.drainAsapMessages(sessionId)
+        this.deps.sessionManager.reserveHeldAsap(sessionId, messages)
+        return messages
+      },
       restoreAsap: (sessionId, messages) => this.deps.sessionManager.restoreAsapMessages(sessionId, messages),
+      commitAsap: (sessionId, messages) => this.deps.sessionManager.releaseHeldAsap(sessionId, messages),
       queueState: (sessionId) => this.deps.sessionManager.getQueueState(sessionId),
       onRestored: (sessionId) => {
         this.deps.broadcastForSession(

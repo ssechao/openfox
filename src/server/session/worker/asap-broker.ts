@@ -23,6 +23,7 @@ interface WorkerAsapBrokerDeps {
   send: (message: AsapDrainResponseMessage) => void
   takeAsap: (sessionId: string) => QueuedMessage[]
   restoreAsap: (sessionId: string, messages: QueuedMessage[]) => void
+  commitAsap: (sessionId: string, messages: QueuedMessage[]) => void
   queueState: (sessionId: string) => QueuedMessage[]
   onRestored?: ((sessionId: string) => void) | undefined
   holdMs?: number
@@ -79,6 +80,7 @@ export class WorkerAsapBroker {
     if (!current || current.requestId !== message.requestId || !sameWorker(current, message)) return
     clearTimeout(current.timer)
     this.held.delete(message.sessionId)
+    this.deps.commitAsap(message.sessionId, current.messages)
   }
 
   handleAbort(message: AsapDrainAbortMessage): void {

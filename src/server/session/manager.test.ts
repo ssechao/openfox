@@ -739,6 +739,57 @@ describe('SessionManager', () => {
       })
     })
 
+    it('keeps held asap inside the cap across later admission cycles', () => {
+      const session = manager.createSession(projectId)
+      const held: string[] = []
+      let accepted = 0
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        const batch = []
+        for (let index = 0; index < 100; index += 1) {
+          try {
+            batch.push(manager.queueMessage(session.id, 'asap', `c${cycle}-${index}`))
+            accepted += 1
+          } catch {
+            break
+          }
+        }
+        if (batch.length === 0) continue
+        const drained = manager.drainAsapMessages(session.id)
+        manager.reserveHeldAsap(session.id, drained)
+        held.push(...drained.map((message) => message.content))
+      }
+
+      expect(accepted).toBe(100)
+      expect(held.length + manager.getQueueState(session.id).length).toBe(100)
+      expect(() => manager.queueMessage(session.id, 'asap', 'overflow')).toThrow(/queue.*100/i)
+    })
+
+    it('releases a held asap reservation on ack and keeps it when the batch returns', () => {
+      const session = manager.createSession(projectId)
+      const first = []
+      for (let index = 0; index < 100; index += 1) {
+        first.push(manager.queueMessage(session.id, 'asap', `held-${index}`))
+      }
+      const drained = manager.drainAsapMessages(session.id)
+      manager.reserveHeldAsap(session.id, drained)
+      expect(() => manager.queueMessage(session.id, 'asap', 'blocked')).toThrow(/queue.*100/i)
+
+      manager.releaseHeldAsap(session.id, drained)
+      for (let index = 0; index < 100; index += 1) {
+        manager.queueMessage(session.id, 'asap', `next-${index}`)
+      }
+      expect(manager.getQueueState(session.id)).toHaveLength(100)
+      const again = manager.drainAsapMessages(session.id)
+      manager.reserveHeldAsap(session.id, again)
+      manager.restoreAsapMessages(session.id, again)
+      expect(manager.getQueueState(session.id).map((message) => message.content)).toEqual(
+        again.map((message) => message.content),
+      )
+      expect(() => manager.queueMessage(session.id, 'asap', 'blocked-again')).toThrow(/queue.*100/i)
+      manager.restoreAsapMessages(session.id, again)
+      expect(manager.getQueueState(session.id)).toHaveLength(100)
+    })
+
     it('refuses the 101st queued message without changing the queue', () => {
       const session = manager.createSession(projectId)
       for (let index = 0; index < 100; index += 1) {

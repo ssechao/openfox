@@ -49,14 +49,17 @@ function carriedFields(messageKind: string | undefined):
   return undefined
 }
 
-function knownMessageIds(sessionId: string): Set<string> {
-  const ids = new Set<string>()
+function persistedMessageIds(sessionId: string): { started: Set<string>; finished: Set<string> } {
+  const started = new Set<string>()
+  const finished = new Set<string>()
   for (const event of getEventStore().getEvents(sessionId)) {
-    if (event.type !== 'message.start') continue
+    if (event.type !== 'message.start' && event.type !== 'message.done') continue
     const messageId = (event.data as { messageId?: unknown }).messageId
-    if (typeof messageId === 'string') ids.add(messageId)
+    if (typeof messageId !== 'string') continue
+    if (event.type === 'message.start') started.add(messageId)
+    else finished.add(messageId)
   }
-  return ids
+  return { started, finished }
 }
 
 export async function drainQueue(
@@ -76,11 +79,22 @@ export async function drainQueue(
       }
 
   try {
-    const known = batch.messages.length > 0 ? knownMessageIds(sessionId) : new Set<string>()
+    const persisted =
+      batch.messages.length > 0
+        ? persistedMessageIds(sessionId)
+        : { started: new Set<string>(), finished: new Set<string>() }
     const delivered: QueuedMessage[] = []
     for (const asap of batch.messages) {
-      if (known.has(asap.queueId)) continue
-      known.add(asap.queueId)
+      if (persisted.finished.has(asap.queueId)) continue
+      if (persisted.started.has(asap.queueId)) {
+        persisted.finished.add(asap.queueId)
+        delivered.push(asap)
+        append({ type: 'message.done', data: { messageId: asap.queueId } })
+        onMessage?.(createChatDoneMessage(asap.queueId, 'complete'))
+        continue
+      }
+      persisted.started.add(asap.queueId)
+      persisted.finished.add(asap.queueId)
       delivered.push(asap)
       const carried = carriedFields(asap.messageKind)
       const windowOptions = getCurrentWindowMessageOptions(sessionId)

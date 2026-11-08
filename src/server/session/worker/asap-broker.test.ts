@@ -20,6 +20,7 @@ function harness(holdMs = 40) {
   let current = true
   const send = vi.fn()
   const onRestored = vi.fn()
+  const commitAsap = vi.fn()
   const broker = new WorkerAsapBroker({
     isCurrent: () => current,
     send,
@@ -32,6 +33,7 @@ function harness(holdMs = 40) {
       const present = new Set(queue.map((message) => message.queueId))
       queue = [...messages.filter((message) => !present.has(message.queueId)), ...queue]
     },
+    commitAsap,
     queueState: () => [...queue],
     onRestored,
     holdMs,
@@ -40,6 +42,7 @@ function harness(holdMs = 40) {
     broker,
     send,
     onRestored,
+    commitAsap,
     setCurrent: (value: boolean) => {
       current = value
     },
@@ -82,20 +85,24 @@ describe('WorkerAsapBroker', () => {
   })
 
   it('commits exactly once and ignores a late ack', async () => {
-    const { broker, queue, setQueue, onRestored } = harness(30)
-    setQueue([queued('one')])
+    const { broker, queue, setQueue, onRestored, commitAsap } = harness(30)
+    const message = queued('one')
+    setQueue([message])
     broker.handleRequest(request('r-1'))
     expect(queue()).toEqual([])
     broker.handleAck({ ...identity, type: 'asap.drain.ack', requestId: 'r-1' })
+    expect(commitAsap).toHaveBeenCalledTimes(1)
+    expect(commitAsap).toHaveBeenCalledWith('s-1', [message])
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(queue()).toEqual([])
     expect(onRestored).not.toHaveBeenCalled()
     broker.handleAck({ ...identity, type: 'asap.drain.ack', requestId: 'r-1' })
+    expect(commitAsap).toHaveBeenCalledTimes(1)
     expect(queue()).toEqual([])
   })
 
   it('restores the same messages after timeout and ignores the late ack', async () => {
-    const { broker, queue, setQueue, onRestored } = harness(30)
+    const { broker, queue, setQueue, onRestored, commitAsap } = harness(30)
     const messages = [queued('one', { messageKind: 'command' }), queued('two')]
     setQueue(messages)
     broker.handleRequest(request('r-1'))
@@ -103,7 +110,9 @@ describe('WorkerAsapBroker', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(queue()).toEqual(messages)
     expect(onRestored).toHaveBeenCalledTimes(1)
+    expect(commitAsap).not.toHaveBeenCalled()
     broker.handleAck({ ...identity, type: 'asap.drain.ack', requestId: 'r-1' })
+    expect(commitAsap).not.toHaveBeenCalled()
     expect(queue()).toEqual(messages)
   })
 
