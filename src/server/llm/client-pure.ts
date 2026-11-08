@@ -103,14 +103,16 @@ type MinimalProfile = Pick<
 >
 
 function convertToolCalls(
-  toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[],
+  toolCalls: { id: string; name: string; arguments: Record<string, unknown>; rawArguments?: string }[],
 ): ChatCompletionMessageToolCall[] {
   return toolCalls.map((toolCall) => ({
     id: toolCall.id,
     type: 'function' as const,
     function: {
       name: toolCall.name,
-      arguments: JSON.stringify(toolCall.arguments),
+      // rawArguments is the provider's original call. The visible arguments
+      // of a preflight rejection are path-only and must not replace it.
+      arguments: toolCall.rawArguments ?? JSON.stringify(toolCall.arguments),
     },
   }))
 }

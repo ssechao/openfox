@@ -164,6 +164,25 @@ function createEmptyStreamResult(
 // Preflight fast-fail helpers
 // ============================================================================
 
+/** Original provider arguments, kept for the native replay and never shown. */
+function providerReplayArguments(
+  raw: string | undefined,
+  terminal: Record<string, unknown> | undefined,
+): string | undefined {
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length > 1) {
+        return raw
+      }
+    } catch {
+      // Partial JSON cannot be replayed as the native function_call.
+    }
+  }
+  if (terminal && Object.keys(terminal).length > 1) return JSON.stringify(terminal)
+  return undefined
+}
+
 /**
  * Extract the complete top-level "path" string value from partial tool-call
  * JSON arguments. Returns undefined until the value's closing quote has
@@ -396,8 +415,44 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
             toolArgs.set(value.index, existingArgs + value.arguments)
           }
 
-          // Emit preparing event on first delta for this index (when we have a complete name)
+          // Fast-fail before any preparing yield: the delta that completes the
+          // path often also carries the doomed payload, and that payload must
+          // not be broadcast once preflight rejects the write.
           const fullName = toolNames.get(value.index)
+          if (options.preflight && (fullName === 'write_file' || fullName === 'edit_file')) {
+            const path = extractTopLevelPathArg(toolArgs.get(value.index) ?? '')
+            if (path !== undefined && !checkedPreflight.has(value.index)) {
+              checkedPreflight.add(value.index)
+              // A throwing preflight must not break the turn — the tool's own
+              // validation at execution time remains the safety net.
+              let preflightError: string | undefined
+              try {
+                preflightError = await options.preflight(path)
+              } catch (error) {
+                logger.warn('Preflight check failed, falling back to tool-time validation', {
+                  tool: fullName,
+                  path,
+                  error: error instanceof Error ? error.message : String(error),
+                })
+              }
+              if (preflightError) {
+                // A sibling read of the same path in this response makes the
+                // flow legitimate — don't fail fast, let batch execution race.
+                if (!siblingReadsSamePath(toolNames, toolArgs, value.index, path)) {
+                  preflightFailure = {
+                    index: value.index,
+                    toolName: fullName,
+                    toolCallId: toolIds.get(value.index) ?? randomUUID(),
+                    path,
+                    error: preflightError,
+                  }
+                  break
+                }
+              }
+            }
+          }
+
+          // Emit preparing event on first delta for this index (when we have a complete name)
           if (!seenToolIndices.has(value.index) && fullName) {
             seenToolIndices.add(value.index)
             // If the tool name is a sub-agent alias, show call_sub_agent instead
@@ -476,44 +531,6 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
             }
           }
 
-          // Fast-fail preflight: as soon as a complete top-level "path" is
-          // available for a path-based tool, ask the caller whether the write
-          // is legal. A rejection aborts the stream before the payload tokens
-          // are generated — the result carries a path-only tool call instead.
-          if (options.preflight && (fullName === 'write_file' || fullName === 'edit_file')) {
-            const path = extractTopLevelPathArg(toolArgs.get(value.index) ?? '')
-            if (path !== undefined && !checkedPreflight.has(value.index)) {
-              checkedPreflight.add(value.index)
-              // A throwing preflight must not break the turn — the tool's own
-              // validation at execution time remains the safety net.
-              let preflightError: string | undefined
-              try {
-                preflightError = await options.preflight(path)
-              } catch (error) {
-                logger.warn('Preflight check failed, falling back to tool-time validation', {
-                  tool: fullName,
-                  path,
-                  error: error instanceof Error ? error.message : String(error),
-                })
-              }
-              if (preflightError) {
-                // A sibling read of the same path in this response makes the
-                // flow legitimate — don't fail fast, let batch execution race.
-                if (siblingReadsSamePath(toolNames, toolArgs, value.index, path)) {
-                  break
-                }
-                preflightFailure = {
-                  index: value.index,
-                  toolName: fullName,
-                  toolCallId: toolIds.get(value.index) ?? randomUUID(),
-                  path,
-                  error: preflightError,
-                }
-                preflightAbortController.abort()
-                break
-              }
-            }
-          }
           break
         }
 
@@ -549,7 +566,37 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
   // complete arguments (e.g. a read_file preceding an edit_file in the same
   // response) are preserved — only the rejected call is reduced to its path.
   if (preflightFailure) {
-    await stream.return?.(null)
+    let drainError: string | undefined
+    let canonicalId = preflightFailure.toolCallId
+    let terminalArguments: Record<string, unknown> | undefined
+    let terminalCalls: ToolCall[] = []
+    for await (const event of stream) {
+      if (event.type === 'error') drainError = event.error
+      // Later deltas belong to the same provider turn. Keep them for the
+      // replay id and for siblings, and never yield the drained payload.
+      if (event.type === 'tool_call_delta') {
+        if (event.name) toolNames.set(event.index, (toolNames.get(event.index) ?? '') + event.name)
+        if (event.id) toolIds.set(event.index, event.id)
+        if (event.arguments) toolArgs.set(event.index, (toolArgs.get(event.index) ?? '') + event.arguments)
+        if (event.index === preflightFailure.index && event.id) canonicalId = event.id
+      }
+      if (event.type === 'done') {
+        terminalCalls = event.response.toolCalls ?? []
+        const named = terminalCalls.filter((call) => call.name === preflightFailure.toolName)
+        const samePath = named.filter((call) => call.arguments['path'] === preflightFailure.path)
+        const matched =
+          named.find((call) => call.id === canonicalId) ??
+          (samePath.length === 1 ? samePath[0] : undefined) ??
+          (named.length === 1 ? named[0] : undefined)
+        if (matched?.id) {
+          canonicalId = matched.id
+          terminalArguments = matched.arguments
+        }
+      }
+    }
+    if (drainError) {
+      return createEmptyStreamResult(false, modelParams, undefined, drainError)
+    }
     const toolCalls: ToolCall[] = []
     for (const [index, name] of toolNames) {
       if (index === preflightFailure.index) continue
@@ -558,21 +605,42 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
       try {
         const parsedArgs = JSON.parse(rawArgs)
         if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
+          const args = parsedArgs as Record<string, unknown>
+          const sameName = terminalCalls.filter((call) => call.name === name)
+          const path = args['path']
+          const samePath = typeof path === 'string' ? sameName.filter((call) => call.arguments['path'] === path) : []
+          const sameArgs = sameName.filter((call) => JSON.stringify(call.arguments) === JSON.stringify(args))
+          const terminal = samePath.length === 1 ? samePath[0] : sameArgs.length === 1 ? sameArgs[0] : undefined
           toolCalls.push({
-            id: toolIds.get(index) ?? randomUUID(),
+            id: terminal?.id ?? toolIds.get(index) ?? randomUUID(),
             name,
-            arguments: parsedArgs as Record<string, unknown>,
+            arguments: args,
           })
         }
       } catch {
         // Incomplete arguments — the call was cut mid-stream, drop it
       }
     }
+    for (const call of terminalCalls) {
+      if (!call.id || !call.name) continue
+      if (call.name === preflightFailure.toolName && call.arguments['path'] === preflightFailure.path) continue
+      const already = toolCalls.some((existing) => {
+        if (existing.id === call.id) return true
+        if (existing.name !== call.name) return false
+        const path = call.arguments['path']
+        if (typeof path === 'string' && existing.arguments['path'] === path) return true
+        return JSON.stringify(existing.arguments) === JSON.stringify(call.arguments)
+      })
+      if (already) continue
+      toolCalls.push({ id: call.id, name: call.name, arguments: call.arguments })
+    }
+    const rawArguments = providerReplayArguments(toolArgs.get(preflightFailure.index), terminalArguments)
     toolCalls.push({
-      id: preflightFailure.toolCallId,
+      id: canonicalId,
       name: preflightFailure.toolName,
       arguments: { path: preflightFailure.path },
       preflightError: preflightFailure.error,
+      ...(rawArguments ? { rawArguments } : {}),
     })
 
     return {

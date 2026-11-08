@@ -132,7 +132,15 @@ export function combineEventsWithSnapshot(
         timestamp: messageTimestamp,
         sessionId,
         type: 'tool.call',
-        data: { messageId, toolCall: { id: tc.id, name: tc.name, arguments: tc.arguments } },
+        data: {
+          messageId,
+          toolCall: {
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+            ...(tc.rawArguments ? { rawArguments: tc.rawArguments } : {}),
+          },
+        },
       })
       if (tc.result !== undefined) {
         reconstructed.push({

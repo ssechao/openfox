@@ -340,4 +340,91 @@ describe('parseResponsesEvent terminal errors', () => {
     expect(chunk).not.toBeNull()
     expect(typeof chunk === 'object' && chunk?.choices[0]?.finish_reason).toBe('stop')
   })
+
+  it('puts only the native call id on the completed chunk', () => {
+    const chunk = parseResponsesEvent({
+      type: 'response.completed',
+      response: {
+        status: 'completed',
+        output: [
+          {
+            type: 'function_call',
+            id: 'fc-preflight',
+            call_id: 'call-preflight',
+            name: 'edit_file',
+            arguments: '{"path":"target.txt","old_string":"before","new_string":"after"}',
+          },
+        ],
+      },
+    })
+    expect(chunk).toMatchObject({
+      choices: [
+        {
+          finish_reason: 'stop',
+          delta: {
+            tool_calls: [{ index: 0, id: 'call-preflight', function: {} }],
+          },
+        },
+      ],
+    })
+    expect(JSON.stringify(chunk)).not.toContain('old_string')
+  })
+
+  it('reconciles each function call at its output array index', () => {
+    const chunk = parseResponsesEvent({
+      type: 'response.completed',
+      response: {
+        status: 'completed',
+        output: [
+          { type: 'reasoning', id: 'reasoning' },
+          { type: 'message', id: 'message', content: [] },
+          {
+            type: 'function_call',
+            id: 'fc-a',
+            call_id: 'call-a',
+            name: 'edit_file',
+            arguments: '{"path":"a.ts","old_string":"x","new_string":"y"}',
+          },
+          {
+            type: 'function_call',
+            id: 'fc-b',
+            call_id: 'call-b',
+            name: 'edit_file',
+            arguments: '{"path":"b.ts","old_string":"x","new_string":"y"}',
+          },
+        ],
+      },
+    })
+    expect(chunk).toMatchObject({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              { index: 2, id: 'call-a', function: {} },
+              { index: 3, id: 'call-b', function: {} },
+            ],
+          },
+        },
+      ],
+    })
+    expect(JSON.stringify(chunk)).not.toContain('old_string')
+  })
+
+  it('yields the native call id from output_item.done at that output index', () => {
+    const chunk = parseResponsesEvent({
+      type: 'response.output_item.done',
+      output_index: 3,
+      item: {
+        type: 'function_call',
+        id: 'fc-b',
+        call_id: 'call-b',
+        name: 'edit_file',
+        arguments: '{"path":"b.ts","old_string":"x","new_string":"y"}',
+      },
+    })
+    expect(chunk).toMatchObject({
+      choices: [{ finish_reason: null, delta: { tool_calls: [{ index: 3, id: 'call-b', function: {} }] } }],
+    })
+    expect(JSON.stringify(chunk)).not.toContain('old_string')
+  })
 })

@@ -109,7 +109,12 @@ export function snapshotMessagesToEvents(messages: SnapshotMessage[], sessionId 
         type: 'tool.call',
         data: {
           messageId: message.id,
-          toolCall: { id: toolCall.id, name: toolCall.name, arguments: toolCall.arguments },
+          toolCall: {
+            id: toolCall.id,
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+            ...(toolCall.rawArguments ? { rawArguments: toolCall.rawArguments } : {}),
+          },
         },
       })
     }
@@ -208,10 +213,30 @@ export function buildSessionStatsMessages(events: StoredEvent[]): StatsSource[] 
   return Array.from(statsById.values())
 }
 
+/** Drop the provider replay body. Clients keep the path-only arguments. */
+export function omitReplayArguments(messages: Message[]): Message[] {
+  return messages.map((message) => {
+    if (!message.toolCalls?.some((call) => call.rawArguments !== undefined)) return message
+    return {
+      ...message,
+      toolCalls: message.toolCalls.map((call) => {
+        if (call.rawArguments === undefined) return call
+        const { rawArguments: _replayArguments, ...visible } = call
+        return visible
+      }),
+    }
+  })
+}
+
 export function buildMessagesFromStoredEvents(
   events: StoredEvent[],
   maxVisibleItems?: number,
+  options?: { omitReplayArguments?: boolean },
 ): { messages: Message[]; hiddenCount: number } {
+  const present = (messages: Message[], hiddenCount: number) => ({
+    messages: options?.omitReplayArguments ? omitReplayArguments(messages) : messages,
+    hiddenCount,
+  })
   // hiddenCount counts "user-facing messages" (distinct message.start IDs),
   // not all rendered items. This is intentional: tool results and other
   // expanded items are treated as belonging to their parent message, so
@@ -243,7 +268,7 @@ export function buildMessagesFromStoredEvents(
 
     // If we need to further truncate after applying later events
     if (maxVisibleItems !== undefined && maxVisibleItems > 0 && messages.length > maxVisibleItems) {
-      return { messages: messages.slice(-maxVisibleItems), hiddenCount: totalOriginal - maxVisibleItems }
+      return present(messages.slice(-maxVisibleItems), totalOriginal - maxVisibleItems)
     }
 
     // Compute hiddenCount from any pre-clone slicing
@@ -251,13 +276,13 @@ export function buildMessagesFromStoredEvents(
       maxVisibleItems !== undefined && maxVisibleItems > 0 && totalOriginal > maxVisibleItems
         ? totalOriginal - maxVisibleItems
         : 0
-    return { messages, hiddenCount }
+    return present(messages, hiddenCount)
   }
   const messages = applyStoredMessageEvents([], events)
   if (maxVisibleItems !== undefined && maxVisibleItems > 0 && messages.length > maxVisibleItems) {
-    return { messages: messages.slice(-maxVisibleItems), hiddenCount: messages.length - maxVisibleItems }
+    return present(messages.slice(-maxVisibleItems), messages.length - maxVisibleItems)
   }
-  return { messages, hiddenCount: 0 }
+  return present(messages, 0)
 }
 
 export function buildContextMessagesFromStoredEvents(

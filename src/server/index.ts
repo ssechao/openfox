@@ -1093,7 +1093,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const events = combineEventsWithSnapshot(req.params.id, snapshot, eventsSinceSnapshot)
 
     const maxVisibleItems = req.query['full'] === 'true' ? undefined : getMaxVisibleItems() || undefined
-    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems)
+    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems, {
+      omitReplayArguments: true,
+    })
     const sessionStats = computeSessionStatsSummary(buildSessionStatsMessages(events))
     const contextState = sessionManager.getContextState(req.params.id)
     const queueState = sessionManager.getQueueState(req.params.id)
@@ -1254,7 +1256,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const { snapshot, events: eventsSinceSnapshot } = eventStore.getEventsSinceSnapshot(sessionId)
     const events = combineEv(sessionId, snapshot, eventsSinceSnapshot)
     const maxVisibleItems = getMaxVisibleItems()
-    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined)
+    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined, {
+      omitReplayArguments: true,
+    })
     const updatedSession = sessionManager.getSession(sessionId)
 
     res.json({ session: toClientSession(updatedSession!), messages, hiddenCount, contextState })
@@ -1281,7 +1285,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const { snapshot, events: eventsSinceSnapshot } = eventStore.getEventsSinceSnapshot(sessionId)
     const events = combineEv(sessionId, snapshot, eventsSinceSnapshot)
     const maxVisibleItems = getMaxVisibleItems()
-    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined)
+    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined, {
+      omitReplayArguments: true,
+    })
     const updatedSession = sessionManager.getSession(sessionId)
 
     res.json({ session: toClientSession(updatedSession!), messages, hiddenCount })
@@ -1467,7 +1473,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const { snapshot, events: eventsSinceSnapshot } = eventStore.getEventsSinceSnapshot(sessionId)
     const events = combineEv(sessionId, snapshot, eventsSinceSnapshot)
     const maxVisibleItems = getMaxVisibleItems()
-    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined)
+    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined, {
+      omitReplayArguments: true,
+    })
     const updatedSession = sessionManager.getSession(sessionId)
 
     res.json({ session: toClientSession(updatedSession!), messages, hiddenCount })
@@ -1623,7 +1631,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     const events = combineEvents(sessionId, snapshot, eventsSinceSnapshot)
 
     const maxVisibleItems = getMaxVisibleItems()
-    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined)
+    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined, {
+      omitReplayArguments: true,
+    })
     const pendingConfirmations = foldPendingConfirmations(events)
     const pendingQuestions = getPendingQuestionsForSession(sessionId)
     const session = sessionManager.getSession(sessionId)
@@ -4366,7 +4376,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       const eventStore = getEventStore()
       const { snapshot, events } = eventStore.getEventsSinceSnapshot(sessionId)
       const combined = combineEventsWithSnapshot(sessionId, snapshot, events)
-      return buildMessagesFromStoredEvents(combined, Math.max(1, Math.min(limit, 50)))
+      return buildMessagesFromStoredEvents(combined, Math.max(1, Math.min(limit, 50)), {
+        omitReplayArguments: true,
+      })
     },
   }
 
