@@ -276,16 +276,7 @@ export async function executeTools(
     // Preflight-rejected calls must never execute: their arguments were cut
     // short (path-only), so running the tool would either crash or produce a
     // misleading result. Surface the preflight error directly instead.
-    const pendingReconciliations = ctx.pendingToolReconciliations ?? []
-    if (pendingReconciliations.length > 0 && isEffectfulToolCall(toolCall)) {
-      toolResult = {
-        success: false,
-        error: `Effectful tool execution is blocked until pending tool outcomes are explicitly reconciled via POST /api/sessions/${ctx.sessionId}/reconcile-tools. Pending calls: ${pendingReconciliations.map((item) => item.toolCallId).join(', ')}`,
-        durationMs: Date.now() - startTime,
-        truncated: false,
-        metadata: { reconciliationRequired: true },
-      }
-    } else if (toolCall.preflightError) {
+    if (toolCall.preflightError) {
       toolResult = {
         success: false,
         error: toolCall.preflightError,

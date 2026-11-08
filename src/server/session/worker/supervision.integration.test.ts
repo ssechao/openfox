@@ -163,7 +163,7 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('w
         JSON.stringify({
           type: 'child',
           reservationId: 'reservation-empty',
-          pid: 20,
+          pid: 200,
           startedAt: 'linux:gone',
           pgid: 200,
           command: 'orphan',

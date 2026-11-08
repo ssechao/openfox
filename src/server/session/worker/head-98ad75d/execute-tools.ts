@@ -1,0 +1,391 @@
+import type { ToolCall, ToolResult } from '../../shared/types.js'
+import type { SessionManager } from '../session/index.js'
+import type { ToolContext, ToolRegistry } from '../tools/types.js'
+import type { TurnMetrics } from './stream-pure.js'
+import type { PendingToolReconciliation, TurnEvent } from '../events/types.js'
+import type { RequestContextMessage } from './request-context.js'
+import type { LLMClientWithModel } from '../llm/client.js'
+import type { StatsIdentity } from '../../shared/types.js'
+import type { ProviderManager } from '../provider-manager.js'
+import type { ServerMessage } from '../../shared/protocol.js'
+import type { DangerLevel } from '../../shared/types.js'
+import { createToolProgressHandler } from './tool-streaming.js'
+import { createToolCallEvent, createToolResultEvent, createChatDoneEvent } from './stream-pure.js'
+import { PathAccessDeniedError, AskUserInterrupt } from '../tools/index.js'
+import { loadAllAgentsDefault, findAgentById } from '../agents/registry.js'
+import { serverT } from '../i18n.js'
+import { renderToolResultContent } from './tool-result-content.js'
+
+export interface ToolBatchContext {
+  toolRegistry: ToolRegistry
+  sessionManager: SessionManager
+  sessionId: string
+  workdir: string
+  dangerLevel?: DangerLevel
+  nightMode?: boolean
+  isSubAgent?: boolean
+  turnMetrics: TurnMetrics
+  signal?: AbortSignal | undefined
+  onMessage?: ((msg: ServerMessage) => void) | undefined
+  llmClient?: LLMClientWithModel | undefined
+  statsIdentity?: StatsIdentity | undefined
+  providerManager?: ProviderManager | undefined
+  onToolExecuted?: ((toolCall: ToolCall, result: ToolResult) => void) | undefined
+  agentTimeout?: number
+  allowParallelSubAgents?: boolean | undefined
+  pendingToolReconciliations?: PendingToolReconciliation[] | undefined
+}
+
+export interface ToolBatchResult {
+  toolMessages: RequestContextMessage[]
+  criteriaChanged: boolean
+  returnValueContent?: string | undefined
+  returnValueResult?: string | undefined
+  stepDoneCalled?: boolean | undefined
+  reconciliationRequired?: boolean | undefined
+}
+
+export interface ExecutedToolCall {
+  toolCall: ToolCall
+  toolResult: ToolResult
+  content: string
+  index: number
+}
+
+// LLM-facing (rendered into the tool content) — English by design.
+function interruptedError(): string {
+  return 'Tool execution was interrupted by user'
+}
+
+const READ_ONLY_TOOLS = new Set([
+  'read_file',
+  'glob',
+  'grep',
+  'web_fetch',
+  'web_search',
+  'list_mcp_resources',
+  'list_mcp_resource_templates',
+  'read_mcp_resource',
+])
+
+export function isEffectfulToolCall(toolCall: ToolCall): boolean {
+  if (READ_ONLY_TOOLS.has(toolCall.name)) return false
+  if (toolCall.name === 'session_metadata') {
+    return !['get', 'list', 'schema'].includes(String(toolCall.arguments['action'] ?? ''))
+  }
+  if (toolCall.name === 'project_tasks') {
+    return !['list', 'get_attachment'].includes(String(toolCall.arguments['action'] ?? ''))
+  }
+  if (toolCall.name === 'workspace') return toolCall.arguments['action'] !== 'list'
+  return true
+}
+
+/**
+ * Extract a prompt string from tool call arguments, trying common keys.
+ */
+function extractSubAgentPrompt(args: Record<string, unknown>): string {
+  return (args['prompt'] as string) || (args['query'] as string) || (args['task'] as string) || ''
+}
+
+/**
+ * Transform sub-agent alias tool calls in place.
+ * When a tool call name matches a registered sub-agent ID (e.g. "explorer"),
+ * mutates it to call_sub_agent with the original name as subAgentType.
+ * Must happen before event emission so the feed displays the correct tool name.
+ */
+export async function transformSubAgentAliases(
+  toolCalls: ToolCall[],
+  toolRegistry: ToolRegistry,
+  projectDir?: string,
+): Promise<void> {
+  const hasCallSubAgent = toolRegistry.tools.some((t) => t.name === 'call_sub_agent')
+  if (!hasCallSubAgent) return
+
+  const agents = await loadAllAgentsDefault(projectDir)
+
+  for (const tc of toolCalls) {
+    const agentDef = findAgentById(tc.name, agents)
+    if (!agentDef?.metadata.subagent) continue
+
+    const prompt = extractSubAgentPrompt(tc.arguments)
+    tc.name = 'call_sub_agent'
+    tc.arguments = { subAgentType: agentDef.metadata.id, prompt }
+  }
+}
+
+export function createInterruptedResult(startTime?: number): ToolResult {
+  return {
+    success: false,
+    error: interruptedError(),
+    durationMs: startTime ? Date.now() - startTime : 0,
+    truncated: false,
+    metadata: { interrupted: true },
+  }
+}
+
+export async function executeTools(
+  assistantMsgId: string,
+  toolCalls: ToolCall[],
+  ctx: ToolBatchContext,
+  append: (event: TurnEvent) => void,
+): Promise<ToolBatchResult> {
+  const toolMessages: RequestContextMessage[] = []
+  let returnValueContent: string | undefined
+  let returnValueResult: string | undefined
+  let stepDoneCalled = false
+
+  if (ctx.signal?.aborted) {
+    throw new Error('Aborted')
+  }
+
+  // Transform sub-agent aliases in place before emitting events,
+  // so the feed displays the correct tool name (call_sub_agent)
+  // instead of the hallucinated name (e.g. "explorer").
+  await transformSubAgentAliases(toolCalls, ctx.toolRegistry, ctx.sessionManager.getProjectWorkdir(ctx.sessionId))
+
+  for (const toolCall of toolCalls) {
+    append(createToolCallEvent(assistantMsgId, toolCall))
+  }
+
+  const handleToolExecutionError = async (
+    error: unknown,
+    _sessionId: string,
+    startTime: number,
+  ): Promise<ToolResult> => {
+    if (error instanceof PathAccessDeniedError) {
+      return {
+        // LLM-facing (rendered into the tool content) — English by design.
+        success: false,
+        error:
+          error.customMessage ??
+          `User denied access to ${error.paths.join(', ')}. If you need this file, explain why and ask for permission.`,
+        durationMs: Date.now() - startTime,
+        truncated: false,
+      }
+    } else if (error instanceof AskUserInterrupt) {
+      append({
+        type: 'chat.ask_user',
+        data: { callId: error.callId, question: error.question, type: error.type, options: error.options },
+      })
+
+      // Signal to the client that the agent is waiting for user input
+      append(createChatDoneEvent(assistantMsgId, 'waiting_for_user'))
+
+      const { awaitAnswer } = await import('../tools/ask.js')
+      const answerPromise = awaitAnswer(error.callId)
+      if (!answerPromise) {
+        throw new Error(
+          serverT(
+            {
+              en: 'No pending question found for callId: {{id}}',
+              fr: 'Aucune question en attente trouvée pour callId : {{id}}',
+            },
+            { id: error.callId },
+          ),
+        )
+      }
+      const answer = await answerPromise
+      return {
+        success: true,
+        output: answer,
+        durationMs: Date.now() - startTime,
+        truncated: false,
+      }
+    } else if (error instanceof Error && (error.message === 'Aborted' || error.name === 'AbortError')) {
+      return createInterruptedResult(startTime)
+    } else {
+      throw error
+    }
+  }
+
+  const executeTool = async (toolCall: ToolCall, index: number): Promise<ExecutedToolCall> => {
+    if (ctx.signal?.aborted) {
+      const toolResult = createInterruptedResult()
+      append(createToolResultEvent(assistantMsgId, toolCall.id, toolResult))
+      return {
+        toolCall,
+        toolResult,
+        content: renderToolResultContent(toolResult),
+        index,
+      }
+    }
+
+    if (toolCall.parseError) {
+      if (toolCall.name === 'step_done') {
+        const { parseError: _pe, rawArguments: _ra, ...rest } = toolCall
+        toolCall = { ...rest, arguments: {} }
+      } else {
+        const toolResult: ToolResult = {
+          success: false,
+          // LLM-facing (rendered into the tool content) — English by design.
+          error: `Failed to parse tool call arguments: ${toolCall.parseError ?? ''}. Please ensure your JSON function call arguments are valid.`,
+          durationMs: 0,
+          truncated: false,
+        }
+        append(createToolResultEvent(assistantMsgId, toolCall.id, toolResult))
+        return {
+          toolCall,
+          toolResult,
+          content: renderToolResultContent(toolResult),
+          index,
+        }
+      }
+    }
+
+    const onProgress = ctx.onMessage
+      ? createToolProgressHandler(append, assistantMsgId, toolCall.id, ctx.sessionId)
+      : undefined
+
+    // Resolved once here so path checks do not rebuild the whole session to read it.
+    const projectId =
+      typeof ctx.sessionManager.getSessionProjectId === 'function'
+        ? ctx.sessionManager.getSessionProjectId(ctx.sessionId)
+        : undefined
+    const toolContext: ToolContext = {
+      sessionManager: ctx.sessionManager,
+      workdir: ctx.sessionManager.getEffectiveWorkdir(ctx.sessionId),
+      sessionId: ctx.sessionId,
+      signal: ctx.signal,
+      llmClient: ctx.llmClient,
+      statsIdentity: ctx.statsIdentity,
+      lspManager: ctx.sessionManager.getLspManager(ctx.sessionId),
+      ...(projectId ? { projectId } : {}),
+      onEvent: ctx.onMessage,
+      onProgress,
+      toolCallId: toolCall.id,
+      messageId: assistantMsgId,
+    }
+    if (ctx.dangerLevel) {
+      toolContext.dangerLevel = ctx.dangerLevel
+    }
+    if (ctx.nightMode) {
+      toolContext.nightMode = true
+    }
+    if (ctx.isSubAgent) {
+      toolContext.isSubAgent = true
+    }
+    if (ctx.providerManager) {
+      toolContext.providerManager = ctx.providerManager
+    }
+    if (ctx.agentTimeout !== undefined) {
+      toolContext.agentTimeout = ctx.agentTimeout
+    }
+
+    const startTime = Date.now()
+    let toolResult: ToolResult
+    // Preflight-rejected calls must never execute: their arguments were cut
+    // short (path-only), so running the tool would either crash or produce a
+    // misleading result. Surface the preflight error directly instead.
+    const pendingReconciliations = ctx.pendingToolReconciliations ?? []
+    if (pendingReconciliations.length > 0 && isEffectfulToolCall(toolCall)) {
+      toolResult = {
+        success: false,
+        error: `Effectful tool execution is blocked until pending tool outcomes are explicitly reconciled via POST /api/sessions/${ctx.sessionId}/reconcile-tools. Pending calls: ${pendingReconciliations.map((item) => item.toolCallId).join(', ')}`,
+        durationMs: Date.now() - startTime,
+        truncated: false,
+        metadata: { reconciliationRequired: true },
+      }
+    } else if (toolCall.preflightError) {
+      toolResult = {
+        success: false,
+        error: toolCall.preflightError,
+        durationMs: Date.now() - startTime,
+        truncated: false,
+      }
+    } else {
+      try {
+        toolResult = await ctx.toolRegistry.execute(toolCall.name, toolCall.arguments, toolContext)
+      } catch (error) {
+        toolResult = await handleToolExecutionError(error, ctx.sessionId, startTime)
+      }
+    }
+
+    ctx.onToolExecuted?.(toolCall, toolResult)
+
+    if (toolCall.name === 'return_value' && !toolCall.parseError) {
+      returnValueContent = (toolCall.arguments as Record<string, unknown>)['content'] as string
+      returnValueResult = (toolCall.arguments as Record<string, unknown>)['result'] as string | undefined
+    }
+
+    // Detected at two levels:
+    //   1. Here in execute-tools: signals the agent loop to break immediately
+    //      (no further LLM calls after step_done).
+    //   2. In executor.ts via onToolExecuted callback: signals the workflow
+    //      orchestrator to evaluate transitions and move to the next step.
+    // Both checks are needed — they serve different concerns.
+    if (toolCall.name === 'step_done' && toolResult.success) {
+      stepDoneCalled = true
+    }
+
+    // Single locale-free renderer — must stay byte-identical to the
+    // history-fold path (fold-messages.ts) to preserve the KV-cache prefix.
+    const content = renderToolResultContent(toolResult)
+
+    append(createToolResultEvent(assistantMsgId, toolCall.id, toolResult))
+
+    return {
+      toolCall,
+      toolResult,
+      content,
+      index,
+    }
+  }
+
+  const batchStart = Date.now()
+
+  const runParallel = (calls: Array<{ toolCall: ToolCall; index: number }>) =>
+    Promise.all(calls.map(({ toolCall, index }) => executeTool(toolCall, index)))
+
+  const runSubAgentsSequentially = async (
+    calls: Array<{ toolCall: ToolCall; index: number }>,
+  ): Promise<ExecutedToolCall[]> => {
+    const executed: ExecutedToolCall[] = []
+    for (const { toolCall, index } of calls) {
+      executed.push(await executeTool(toolCall, index))
+    }
+    return executed
+  }
+
+  const allCalls = toolCalls.map((toolCall, index) => ({ toolCall, index }))
+  const subAgentCalls = allCalls.filter(({ toolCall }) => toolCall.name === 'call_sub_agent')
+
+  // Sub-agents are expensive on local models (context + compute), so by
+  // default several sub-agent calls in one batch run one after the other,
+  // while other tools in the batch stay in parallel. The advanced
+  // "allowParallelSubAgents" setting restores full parallelism.
+  let results: ExecutedToolCall[]
+  if (subAgentCalls.length > 1 && !ctx.allowParallelSubAgents) {
+    const [others, sequential] = await Promise.all([
+      runParallel(allCalls.filter(({ toolCall }) => toolCall.name !== 'call_sub_agent')),
+      runSubAgentsSequentially(subAgentCalls),
+    ])
+    results = [...others, ...sequential]
+  } else {
+    results = await runParallel(allCalls)
+  }
+
+  ctx.turnMetrics.addToolTime(Date.now() - batchStart)
+
+  results.sort((a, b) => a.index - b.index)
+
+  for (const result of results) {
+    toolMessages.push({
+      role: 'tool',
+      content: result.content,
+      source: 'history',
+      toolCallId: result.toolCall.id,
+    })
+  }
+
+  const reconciliationRequired = results.some(
+    ({ toolResult }) => toolResult.metadata?.['reconciliationRequired'] === true,
+  )
+  return {
+    toolMessages,
+    criteriaChanged: false,
+    returnValueContent,
+    returnValueResult,
+    stepDoneCalled,
+    reconciliationRequired,
+  }
+}

@@ -1214,6 +1214,49 @@ describe('feed memory bounds', () => {
     expect(toolCall?.streamingOutput).toBeUndefined()
   })
 
+  it('keeps the first tool result when a later result arrives for the same call', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      currentSession: { id: 'session-1' } as any,
+    }))
+    const handler = useSessionStore.getState().handleServerMessage
+
+    handler({
+      type: 'chat.message',
+      sessionId: 'session-1',
+      payload: {
+        message: {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            {
+              id: 'tc-1',
+              name: 'run_command',
+              arguments: {},
+              result: { success: false, outcomeUnknown: true, error: 'unknown' },
+            },
+          ],
+        } as any,
+      },
+    })
+    handler({
+      type: 'chat.tool_result',
+      sessionId: 'session-1',
+      payload: {
+        messageId: 'm1',
+        callId: 'tc-1',
+        tool: 'run_command',
+        result: { success: true, output: 'late' },
+      } as any,
+    })
+
+    const toolCall = useSessionStore.getState().panes['session-1']?.messages[0]?.toolCalls?.[0]
+    expect(toolCall?.result).toEqual({ success: false, outcomeUnknown: true, error: 'unknown' })
+  })
+
   it('caps streamingOutput while a tool streams beyond the byte budget', async () => {
     const useSessionStore = await loadSessionStore()
     const { MAX_STREAMING_OUTPUT_BYTES, MAX_STREAMING_OUTPUT_CHUNKS } = await import('./messageHandler')

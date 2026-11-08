@@ -99,6 +99,7 @@ export interface AsyncProcessInventoryDependencies extends Omit<
 }
 
 const PROCESS_INVENTORY_READ_TIMEOUT_MS = 250
+const RESERVATION_INVENTORY_SCAN_TIMEOUT_MS = 1_500
 
 function processRootExists(pid: number): boolean {
   try {
@@ -503,7 +504,7 @@ async function findReservationProcessesAsync(reservationId: string): Promise<num
     execFile(
       'ps',
       ['-Eww', '-axo', 'pid=,pgid=,command='],
-      { encoding: 'utf-8', timeout: 1_000, maxBuffer: 16 * 1024 * 1024 },
+      { encoding: 'utf-8', timeout: RESERVATION_INVENTORY_SCAN_TIMEOUT_MS - 100, maxBuffer: 16 * 1024 * 1024 },
       (error, output) => (error ? reject(error) : resolve(output)),
     )
   })
@@ -540,7 +541,6 @@ function captureExclusiveProcessInventoryFromState(
   let worker: ProcessInventoryEntry | undefined
   if (workerRead.status === 'found') worker = workerRead.process
   else if (workerRead.status === 'unreadable') errors.push(`worker ${workerPid}: ${workerRead.error.message}`)
-  else errors.push(`worker ${workerPid}: identity unavailable before cleanup`)
 
   const children: ProcessInventoryEntry[] = []
   const groups = new Set<number>()
@@ -548,17 +548,16 @@ function captureExclusiveProcessInventoryFromState(
     const childRead = readInventory(child.pid, child.command)
     if (childRead.status === 'found' && childRead.process.startedAt === child.startedAt) {
       children.push(childRead.process)
-      groups.add(childRead.process.pgid)
-      if (child.pgid) groups.add(child.pgid)
+      if (childRead.process.pgid > 1 && childRead.process.pgid === childRead.process.pid) {
+        groups.add(childRead.process.pgid)
+      }
     } else {
       if (childRead.status === 'unreadable') errors.push(`child ${child.pid}: ${childRead.error.message}`)
-      if (child.pgid) {
+      if (child.pgid === child.pid && child.pgid > 1) {
         const groupRead = readGroup(child.pgid)
         if (groupRead.status === 'found') groups.add(child.pgid)
         else if (groupRead.status === 'unreadable')
           errors.push(`process group ${child.pgid}: ${groupRead.error.message}`)
-      } else {
-        errors.push(`child ${child.pid}: process group unavailable before cleanup`)
       }
     }
   }
@@ -636,7 +635,7 @@ export async function captureExclusiveProcessInventoryAsync(
       try {
         const pids = await boundedOperation(
           () => findReservationPids(id),
-          timeoutMs,
+          Math.max(timeoutMs, RESERVATION_INVENTORY_SCAN_TIMEOUT_MS),
           'reservation inventory scan timed out',
         )
         reservationScans.set(id, pids)
@@ -701,11 +700,12 @@ export async function verifyExclusiveProcessInventoryAfter(
   }
 
   const survivingGroups: number[] = []
-  const groups = new Set([
-    ...inventory.groups,
-    ...inventory.children.map((entry) => entry.pgid),
-    ...inventory.reservations.flatMap((reservation) => reservation.processes.map((entry) => entry.pgid)),
-  ])
+  const groups = new Set(
+    [
+      ...inventory.groups,
+      ...inventory.reservations.flatMap((reservation) => reservation.processes.map((entry) => entry.pgid)),
+    ].filter((pgid) => pgid > 1),
+  )
   for (const pgid of groups) {
     const groupRead = readGroup(pgid)
     if (groupRead.status === 'found') survivingGroups.push(pgid)

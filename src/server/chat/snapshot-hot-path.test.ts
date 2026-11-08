@@ -39,3 +39,22 @@ test('the actual conversation and window/count accessors use the shared reader a
   await processEventsForConversation('s', client, () => {})
   expect(store.getDiagnostics()?.fullReads).toBe(0)
 })
+
+test('building context does not settle a live tool call', async () => {
+  const db = new Database(':memory:')
+  databases.push(db)
+  const store = new EventStore(db, { diagnostics: true, hotPath: true })
+  vi.mocked(getEventStore).mockReturnValue(store)
+  store.append('s', { type: 'session.initialized', data: { projectId: 'p', workdir: '/tmp', contextWindowId: 'w' } })
+  store.append('s', { type: 'running.changed', data: { isRunning: true } })
+  store.append('s', { type: 'message.start', data: { messageId: 'a', role: 'assistant', contextWindowId: 'w' } })
+  store.append('s', {
+    type: 'tool.call',
+    data: { messageId: 'a', toolCall: { id: 'call-1', name: 'run_command', arguments: { command: 'printf x' } } },
+  })
+  const appended: string[] = []
+  const client = { getModel: () => 'gpt-4o' } as LLMClientWithModel
+  await processEventsForConversation('s', client, (event) => appended.push(event.type))
+  expect(appended).not.toContain('tool.result')
+  expect(store.getEvents('s').some((event) => event.type === 'tool.result')).toBe(false)
+})

@@ -750,9 +750,9 @@ export function handleServerMessage(
                   ...m,
                   toolCalls: m.toolCalls?.map((tc) =>
                     tc.id === payload.callId
-                      ? // The final result supersedes the streamed view; drop the
-                        // accumulated chunks so done tool calls stop retaining them.
-                        { ...tc, result: payload.result, streamingOutput: undefined }
+                      ? tc.result !== undefined
+                        ? tc
+                        : { ...tc, result: payload.result, streamingOutput: undefined }
                       : tc,
                   ),
                 }

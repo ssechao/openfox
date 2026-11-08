@@ -10,7 +10,7 @@ import { listPluginModelMetadataProviders } from './model-metadata.js'
 import { listPluginMessageTransforms } from './message-transforms.js'
 import { listPluginVcsProviders } from './vcs-providers.js'
 import { listPluginTransitionHandlers, runPluginTransitionHandler } from './transition-handlers.js'
-import { getAllSettings } from '../db/settings.js'
+import { getAllSettings, setSetting } from '../db/settings.js'
 
 const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
@@ -53,6 +53,7 @@ describe('PluginHost', () => {
     const config = loadConfig()
     config.database.path = ':memory:'
     initDatabase(config)
+    setSetting('notification_settings', JSON.stringify({ pluginUpdateNotificationEnabled: false }))
     configDirectory = await mkdtemp(join(tmpdir(), 'openfox-plugin-host-'))
     vi.clearAllMocks()
   })
@@ -452,6 +453,7 @@ describe('PluginHost', () => {
       2,
       `registry.context.notify({ title: { en: 'Build done', fr: 'Build terminé' }, level: 'success', actions: [{ label: { en: 'Retry', fr: 'Réessayer' }, onActivate: { kind: 'rpc', method: 'retry' } }] });`,
     )
+    setSetting('notification_settings', JSON.stringify({ pluginUpdateNotificationEnabled: false }))
     const host = makeHost(configDirectory)
     const broadcast = vi.fn()
     host.setBroadcaster(broadcast)

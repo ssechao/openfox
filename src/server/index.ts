@@ -1901,20 +1901,22 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     res.json({ success: true, pauseState: sessionManager.getPauseState(sessionId) })
   })
 
-  // Explicit resume of a session interrupted by a worker crash (étape 6a).
-  // This is the ONLY way an interrupted turn continues: the continuation turn
-  // gets the same "stream interrupted" reminder as the LLM-drop recovery, so
-  // a tool call with an unknown outcome is never replayed blindly.
-  app.post('/api/sessions/:id/resume-interruption', async (req, res) => {
-    const sessionId = req.params.id
+  // Resumes a session interrupted by a worker crash or gateway shutdown.
+  // Chat receives the stream-interrupted reminder and does not replay the tool.
+  // An active workflow is relaunched from its current step. Boot and worker
+  // recovery call this themselves, so no UI decision is required.
+  const resumeInterruptedSession = async (
+    sessionId: string,
+    options?: { automatic?: boolean; attempt?: number },
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
     const session = sessionManager.getSession(sessionId)
     if (!session) {
-      return res.status(404).json({ error: 'Session not found' })
+      return { status: 404, body: { error: 'Session not found' } }
     }
 
     const runtimeState = runtimeRegistry.peek(sessionId)?.state
     if (runtimeState !== undefined && runtimeState !== 'idle') {
-      return res.status(409).json({ error: 'Session is already running', code: 'SESSION_ALREADY_RUNNING' })
+      return { status: 409, body: { error: 'Session is already running', code: 'SESSION_ALREADY_RUNNING' } }
     }
 
     const db = getDatabase()
@@ -1927,12 +1929,33 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     } = await import('./session/worker/index.js')
     const interruptedAt = getSessionInterruptedAt(db, sessionId)
     if (!interruptedAt) {
-      return res.status(409).json({ error: 'Session is not interrupted' })
+      return { status: 409, body: { error: 'Session is not interrupted' } }
     }
 
     const initialGeneration = getWorkerGeneration(db, sessionId)
     if (initialGeneration === null) {
-      return res.status(404).json({ error: 'Session not found' })
+      return { status: 404, body: { error: 'Session not found' } }
+    }
+
+    const retryAutomatic = async (result: {
+      status: number
+      body: Record<string, unknown>
+    }): Promise<{ status: number; body: Record<string, unknown> }> => {
+      const attempt = options?.attempt ?? 0
+      if (
+        !options?.automatic ||
+        attempt >= 2 ||
+        result.status < 400 ||
+        result.status === 404 ||
+        result.status === 409
+      ) {
+        return result
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 300)
+        timer.unref()
+      })
+      return resumeInterruptedSession(sessionId, { automatic: true, attempt: attempt + 1 })
     }
 
     const eventStore = getEventStore()
@@ -1951,6 +1974,15 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
             if (restored) {
               eventStore.invalidateExternalSession(sessionId)
               broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(interruptedAt))
+              if (options?.automatic && (options.attempt ?? 0) < 2) {
+                const timer = setTimeout(() => {
+                  void resumeInterruptedSession(sessionId, {
+                    automatic: true,
+                    attempt: (options.attempt ?? 0) + 1,
+                  })
+                }, 300)
+                timer.unref()
+              }
             } else {
               logger.warn('Deferred workflow interruption restoration superseded', {
                 sessionId,
@@ -1996,38 +2028,50 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error))
         logger.error('Interrupted workflow failed to start', { sessionId, error: failure.message })
-        return res.status(503).json({
-          error: failure.message,
-          code: 'WORKER_LAUNCH_FAILED',
+        return retryAutomatic({
+          status: 503,
+          body: {
+            error: failure.message,
+            code: 'WORKER_LAUNCH_FAILED',
+          },
         })
       }
       if (!result.consumed) {
         const status = result.admission === 'full' ? 429 : 503
-        return res.status(status).json({
-          error: `Session worker admission ${result.admission}; the interruption remains resumable`,
-          code: 'WORKER_ADMISSION_REFUSED',
-          admission: result.admission,
+        return retryAutomatic({
+          status,
+          body: {
+            error: `Session worker admission ${result.admission}; the interruption remains resumable`,
+            code: 'WORKER_ADMISSION_REFUSED',
+            admission: result.admission,
+          },
         })
       }
-      logger.info('Interrupted workflow resumed explicitly', {
+      logger.info('Interrupted workflow resumed', {
         sessionId,
         workflowId: activeWorkflow.workflowId,
         admission: result.admission,
+        automatic: options?.automatic === true,
       })
-      return res.json({ success: true, admission: result.admission })
+      return { status: 200, body: { success: true, admission: result.admission } }
     }
 
     const plan = planWorkerCrashRecovery(eventStore.getEvents(sessionId), false)
     if (!plan) {
-      return res.status(409).json({ error: 'Nothing to resume' })
+      return { status: 409, body: { error: 'Nothing to resume' } }
     }
 
     clearSessionInterrupted(db, sessionId)
     sessionManager.queueMessage(sessionId, 'asap', plan.content, undefined, 'auto-prompt')
     runtimeRegistry.get(sessionId).recordCommand('resume')
     broadcastForSessionDeferred(sessionId, createSessionInterruptedMessage(null))
-    logger.info('Interrupted session resumed explicitly', { sessionId })
-    res.json({ success: true })
+    logger.info('Interrupted session resumed', { sessionId, automatic: options?.automatic === true })
+    return { status: 200, body: { success: true } }
+  }
+
+  app.post('/api/sessions/:id/resume-interruption', async (req, res) => {
+    const result = await resumeInterruptedSession(req.params.id)
+    res.status(result.status).json(result.body)
   })
 
   app.post('/api/sessions/:id/reconcile-tools', async (req, res) => {
@@ -4184,6 +4228,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         truncated: false,
       }
     },
+    resumeInterruptedSession: (sessionId) => resumeInterruptedSession(sessionId, { automatic: true }),
   })
   webSocketWorkerController.current = workerManager
   deferCanStartSession = (sessionId) => !workerManager.isEnabled() || workerManager.canAcceptTurn(sessionId)
@@ -4270,9 +4315,52 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const { getSetting, SETTINGS_KEYS } = await import('./db/settings.js')
   const { getStaleRunningSessionIds } = await import('./events/store.js')
   const { runBootAutoContinuations } = await import('./session/auto-continue.js')
-  const continueStaleSessions = () => {
+  const { sessionResumeAllowed, settleUnknownToolOutcomes } = await import('./session/worker/settle-unknown.js')
+  const { getSessionInterruptedAt } = await import('./session/worker/crash.js')
+  const continueStaleSessions = async () => {
+    const eventStore = getEventStore()
+    let pendingIds: string[]
+    try {
+      pendingIds = (
+        db
+          .prepare(`SELECT DISTINCT session_id AS id FROM events WHERE event_type = 'tool.reconciliation_required'`)
+          .all() as { id: string }[]
+      ).map((row) => row.id)
+    } catch {
+      pendingIds = []
+    }
+    let interruptedIds: string[]
+    try {
+      interruptedIds = (
+        db.prepare(`SELECT id FROM sessions WHERE interrupted_at IS NOT NULL`).all() as { id: string }[]
+      ).map((row) => row.id)
+    } catch {
+      interruptedIds = []
+    }
+    for (const sessionId of new Set([...getStaleRunningSessionIds(), ...pendingIds, ...interruptedIds])) {
+      settleUnknownToolOutcomes(eventStore.getEvents(sessionId), (event) => {
+        eventStore.append(sessionId, event)
+      })
+    }
+    for (const sessionId of interruptedIds) {
+      const interruptedAt = getSessionInterruptedAt(db, sessionId)
+      if (!interruptedAt || !sessionResumeAllowed(eventStore.getEvents(sessionId), interruptedAt)) {
+        logger.warn('Interrupted session left stopped: no persisted clean orphan proof', { sessionId })
+        continue
+      }
+      try {
+        const result = await resumeInterruptedSession(sessionId, { automatic: true })
+        logger.info('Interrupted session auto-resume finished', { sessionId, status: result.status })
+      } catch (error) {
+        logger.error('Interrupted session auto-resume failed', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
     if (getSetting(SETTINGS_KEYS.AUTO_CONTINUE_ON_BOOT) !== 'true') return
-    const staleIds = getStaleRunningSessionIds()
+    const interrupted = new Set(interruptedIds)
+    const staleIds = getStaleRunningSessionIds().filter((sessionId) => !interrupted.has(sessionId))
     if (staleIds.length === 0) return
     const continued = runBootAutoContinuations(staleIds, {
       getEvents: (sessionId) => getEventStore().getEvents(sessionId),
@@ -4459,6 +4547,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         if (runtime.state === 'idle') continue
         markSessionInterrupted(db, runtime.sessionId, interruptedAt)
         prepareSessionInterruptionEvents(eventStore, runtime.sessionId)
+        eventStore.append(runtime.sessionId, {
+          type: 'worker.recovery_clean',
+          data: { interruptedAt },
+        })
       }
       queueProcessor.stop()
       taskScheduler.stop()

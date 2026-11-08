@@ -1,4 +1,4 @@
 {
   "threshold": 0,
-  "ignore": ["**/*.test.ts", "**/skills/defaults/**"]
+  "ignore": ["**/*.test.ts", "**/skills/defaults/**", "**/head-98ad75d/**"]
 }

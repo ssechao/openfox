@@ -16,7 +16,9 @@ describe('startContinuationServices', () => {
       },
       configureSupervisor: () => calls.push('supervisor.configure'),
       startQueueProcessor: () => calls.push('queue.start'),
-      runBootAutoContinuations: () => calls.push('boot.continue'),
+      runBootAutoContinuations: () => {
+        calls.push('boot.continue')
+      },
       startTaskScheduler: () => calls.push('tasks.start'),
     })
 

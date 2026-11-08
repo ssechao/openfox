@@ -2,21 +2,23 @@
  * Worker-crash recovery (étape 6a).
  *
  * When the gateway detects a worker's death it marks the session interrupted
- * (`sessions.interrupted_at`, persisted, API-visible) and finalizes any
- * partial assistant message — the UI shows « interrompue — reprendre ».
- *
- * Nothing is replayed automatically: the interrupted turn's last tool call
- * may have unknown external effects, so the continuation turn only ever runs
- * on an explicit resume (`POST /api/sessions/:id/resume-interruption`), and
- * it uses the same "stream interrupted" reminder as the LLM-drop recovery —
- * the model is told the previous turn was cut off, never asked to blindly
- * redo a tool call.
+ * and finalizes any partial assistant message. Each open tool call is closed
+ * with one synthetic terminal result (`success: false`, `outcomeUnknown: true`)
+ * before the continuation is queued. The interrupted call is not executed again.
+ * An active workflow is resumed from its current step, not left for a button.
  */
 
 import type Database from 'better-sqlite3'
 import type { EventStore } from '../../events/store.js'
-import type { PendingToolReconciliation, SessionSnapshot, StoredEvent, TurnEvent } from '../../events/types.js'
+import type { StoredEvent } from '../../events/types.js'
 import { planBootContinuation, type BootContinuationPlan } from '../auto-continue.js'
+import { settleUnknownToolOutcomes } from './settle-unknown.js'
+
+export {
+  findPendingToolReconciliations,
+  settleUnknownToolOutcomes,
+  syntheticUnknownToolResult,
+} from './settle-unknown.js'
 
 export function markSessionInterrupted(db: Database.Database, sessionId: string, interruptedAt: string): void {
   db.prepare(
@@ -71,68 +73,16 @@ export function getSessionInterruptedAt(db: Database.Database, sessionId: string
   return row?.interrupted_at ?? null
 }
 
-export function findPendingToolReconciliations(events: StoredEvent[]): PendingToolReconciliation[] {
-  let turnStartedAt = -Infinity
-  for (const event of events) {
-    if (event.type === 'running.changed' && (event.data as { isRunning: boolean }).isRunning) {
-      turnStartedAt = event.timestamp
-    } else if (event.type === 'message.start' && (event.data as { role?: string }).role === 'user') {
-      turnStartedAt = Math.max(turnStartedAt, event.timestamp)
-    } else if (event.type === 'turn.snapshot') {
-      for (const message of (event.data as SessionSnapshot).messages) {
-        if (message.role === 'user') turnStartedAt = Math.max(turnStartedAt, message.timestamp)
-      }
-    }
-  }
-
-  const pending = new Map<string, PendingToolReconciliation>()
-  for (const event of events) {
-    if (event.type === 'turn.snapshot') {
-      const snapshot = event.data as SessionSnapshot
-      for (const message of snapshot.messages) {
-        for (const toolCall of message.toolCalls ?? []) {
-          if (!toolCall.result && (toolCall.startedAt ?? message.timestamp) >= turnStartedAt) {
-            pending.set(toolCall.id, {
-              messageId: message.id,
-              toolCallId: toolCall.id,
-              name: toolCall.name,
-              arguments: toolCall.arguments,
-            })
-          }
-        }
-      }
-    } else if (event.type === 'tool.call' && event.timestamp >= turnStartedAt) {
-      const data = event.data as Extract<TurnEvent, { type: 'tool.call' }>['data']
-      pending.set(data.toolCall.id, {
-        messageId: data.messageId,
-        toolCallId: data.toolCall.id,
-        name: data.toolCall.name,
-        arguments: data.toolCall.arguments,
-      })
-    } else if (event.type === 'tool.result') {
-      pending.delete((event.data as { toolCallId: string }).toolCallId)
-    }
-  }
-  return [...pending.values()]
-}
-
 export function prepareSessionInterruptionEvents(
   eventStore: Pick<EventStore, 'invalidateExternalSession' | 'getEvents' | 'append'>,
   sessionId: string,
 ): StoredEvent[] {
   eventStore.invalidateExternalSession(sessionId)
   const events = eventStore.getEvents(sessionId)
-  const reconciled = new Set<string>()
-  for (const event of events) {
-    if (event.type === 'tool.reconciliation_required' || event.type === 'tool.reconciliation_resolved') {
-      reconciled.add((event.data as { toolCallId: string }).toolCallId)
-    }
-  }
-  for (const pending of findPendingToolReconciliations(events)) {
-    if (reconciled.has(pending.toolCallId)) continue
-    eventStore.append(sessionId, { type: 'tool.reconciliation_required', data: pending })
-  }
-  return events
+  settleUnknownToolOutcomes(events, (event) => {
+    eventStore.append(sessionId, event)
+  })
+  return eventStore.getEvents(sessionId)
 }
 
 /**

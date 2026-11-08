@@ -114,9 +114,14 @@ describe('executeTools', () => {
     })
   })
 
-  it('refuses effectful tools while reconciliation is pending', async () => {
+  it('runs effectful tools even when a stale reconciliation list is passed', async () => {
     const append = vi.fn()
-    mockToolRegistry.execute = vi.fn()
+    mockToolRegistry.execute = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'ran',
+      durationMs: 1,
+      truncated: false,
+    })
     const pendingToolReconciliations = [
       { messageId: 'old-message', toolCallId: 'unknown-call', name: 'run_command', arguments: { command: 'touch x' } },
     ]
@@ -128,12 +133,9 @@ describe('executeTools', () => {
       append,
     )
 
-    expect(mockToolRegistry.execute).not.toHaveBeenCalled()
-    expect(result.toolMessages[0]?.content).toContain('explicitly reconciled')
-    expect(result.reconciliationRequired).toBe(true)
-    expect(
-      append.mock.calls.find((args: unknown[]) => (args[0] as TurnEvent).type === 'tool.result')?.[0],
-    ).toMatchObject({ data: { result: { success: false, metadata: { reconciliationRequired: true } } } })
+    expect(mockToolRegistry.execute).toHaveBeenCalledOnce()
+    expect(result.toolMessages[0]?.content).toBe('ran')
+    expect(result.reconciliationRequired).toBe(false)
   })
 
   it('allows read-only tools while reconciliation is pending', async () => {

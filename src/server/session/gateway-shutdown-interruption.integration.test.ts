@@ -8,6 +8,9 @@ import type { ServerHandle } from '../context.js'
 
 interface SessionView {
   session: { interruptedAt?: string | null }
+  messages: Array<{
+    toolCalls?: Array<{ id: string; result?: { success: boolean; outcomeUnknown?: boolean } }>
+  }>
   pendingToolReconciliations: Array<{ toolCallId: string }>
 }
 
@@ -96,6 +99,10 @@ describe('gateway shutdown interruption recovery', () => {
     ] as const) {
       getEventStore().append(sessionId, { type: 'running.changed', data: { isRunning: true } })
       getEventStore().append(sessionId, {
+        type: 'message.start',
+        data: { messageId: `message-${toolCallId}`, role: 'assistant' },
+      })
+      getEventStore().append(sessionId, {
         type: 'tool.call',
         data: {
           messageId: `message-${toolCallId}`,
@@ -114,24 +121,41 @@ describe('gateway shutdown interruption recovery', () => {
     closeDatabase()
     await startServer()
 
-    const chat = await getSession(chatSessionId)
-    const workflow = await getSession(workflowSessionId)
-    expect(chat.session.interruptedAt).toBeTruthy()
-    expect(workflow.session.interruptedAt).toBeTruthy()
-    expect(chat.pendingToolReconciliations).toEqual([expect.objectContaining({ toolCallId: 'chat-tool' })])
-    expect(workflow.pendingToolReconciliations).toEqual([expect.objectContaining({ toolCallId: 'workflow-tool' })])
+    const deadline = Date.now() + 30_000
+    let chat = await getSession(chatSessionId)
+    let workflow = await getSession(workflowSessionId)
+    while (
+      (chat.session.interruptedAt || workflow.session.interruptedAt || getSessionRuntimeRegistry().countActive() > 0) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      chat = await getSession(chatSessionId)
+      workflow = await getSession(workflowSessionId)
+    }
+    expect(chat.session.interruptedAt ?? null).toBeNull()
+    expect(workflow.session.interruptedAt ?? null).toBeNull()
+    expect(chat.pendingToolReconciliations).toEqual([])
+    expect(workflow.pendingToolReconciliations).toEqual([])
+    for (const [view, toolCallId] of [
+      [chat, 'chat-tool'],
+      [workflow, 'workflow-tool'],
+    ] as const) {
+      expect(
+        view.messages.flatMap((message) => message.toolCalls ?? []).filter((call) => call.result?.outcomeUnknown),
+      ).toEqual([
+        expect.objectContaining({
+          id: toolCallId,
+          result: expect.objectContaining({ success: false, outcomeUnknown: true }),
+        }),
+      ])
+    }
 
     const chatResume = await fetch(`${base}/api/sessions/${chatSessionId}/resume-interruption`, { method: 'POST' })
     const workflowResume = await fetch(`${base}/api/sessions/${workflowSessionId}/resume-interruption`, {
       method: 'POST',
     })
-    expect(chatResume.status).toBe(200)
-    expect(workflowResume.status).toBe(200)
-
-    const deadline = Date.now() + 30_000
-    while (getSessionRuntimeRegistry().countActive() > 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25))
-    }
+    expect(chatResume.status).toBe(409)
+    expect(workflowResume.status).toBe(409)
     expect(getSessionRuntimeRegistry().countActive()).toBe(0)
   }, 120_000)
 })

@@ -593,6 +593,7 @@ export interface EditContextRegion {
 
 export interface ToolResult {
   success: boolean
+  outcomeUnknown?: boolean
   output?: string
   error?: string
   durationMs: number

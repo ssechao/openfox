@@ -561,6 +561,12 @@ function getConversationAwareToolResponse(request: LLMCompletionRequest): MockMa
   const conversationText = getConversationText(request)
 
   if (/LLM stream was interrupted mid-response|Continue your previous response/i.test(prompt)) {
+    if (/Do not retry this call automatically/i.test(conversationText)) {
+      return {
+        tools: [],
+        response: 'Interrupted tool outcome is unknown; it was not retried.',
+      }
+    }
     const command = conversationText.match(/Run the exact command:\s*(.+)$/im)?.[1]?.trim()
     if (command) {
       return {
