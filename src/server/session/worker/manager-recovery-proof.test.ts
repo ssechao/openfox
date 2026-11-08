@@ -188,14 +188,42 @@ function crashChild(): ChildProcess {
   }) as unknown as ChildProcess
 }
 
-async function retireThenStop(options: { workflow: boolean; failCleanProofOnce?: boolean }): Promise<{
+function failFirstInterruptedClear(namedDb: Database.Database): Database.Database {
+  let remaining = 1
+  const prepare = namedDb.prepare.bind(namedDb)
+  return {
+    name: (namedDb as unknown as { name: string }).name,
+    prepare: (sql: string) => {
+      const stmt = prepare(sql)
+      if (!sql.includes('interrupted_at = NULL')) return stmt
+      const run = stmt.run.bind(stmt)
+      return Object.assign(stmt, {
+        run: (...args: Parameters<typeof stmt.run>) => {
+          if (remaining > 0) {
+            remaining -= 1
+            throw new Error('clear interrupted_at failed')
+          }
+          return run(...args)
+        },
+      })
+    },
+    transaction: namedDb.transaction.bind(namedDb),
+  } as unknown as Database.Database
+}
+
+async function retireThenStop(options: {
+  workflow: boolean
+  failCleanProofOnce?: boolean
+  failClearOnce?: boolean
+}): Promise<{
   queueMessage: ReturnType<typeof vi.fn>
   resumeInterruptedSession: ReturnType<typeof vi.fn>
   interruptedAt: string | null
   events: StoredEvent[]
 }> {
-  const { db, namedDb } = createDb(join(tmpdir(), `openfox-late-stop-${crypto.randomUUID()}.db`))
+  const { db, namedDb: realDb } = createDb(join(tmpdir(), `openfox-late-stop-${crypto.randomUUID()}.db`))
   openDbs.push(db)
+  const namedDb = options.failClearOnce ? failFirstInterruptedClear(realDb) : realDb
   const events: StoredEvent[] = []
   let cleanProofAttempts = 0
   let resolveProof: (proof: OrphanInventoryCheck) => void = () => {}
@@ -282,7 +310,8 @@ async function retireThenStop(options: { workflow: boolean; failCleanProofOnce?:
     liveReservations: [],
     errors: [],
   })
-  await new Promise((resolve) => setTimeout(resolve, options.failCleanProofOnce ? 500 : 30))
+  const waitMs = options.failClearOnce ? 800 : options.failCleanProofOnce ? 500 : 30
+  await new Promise((resolve) => setTimeout(resolve, waitMs))
   return { queueMessage, resumeInterruptedSession, interruptedAt: interruptedAtOf(namedDb), events }
 }
 
@@ -307,6 +336,14 @@ describe('deferred clean proof after Stop', () => {
     expect(result.events.some((event) => event.type === 'worker.recovery_clean')).toBe(true)
     expect(result.queueMessage).not.toHaveBeenCalled()
     expect(result.resumeInterruptedSession).not.toHaveBeenCalled()
+    expect(result.interruptedAt).toBeNull()
+  })
+
+  it.fails('keeps a late Stop stopped when clearing the marker fails and the callback is replayed', async () => {
+    const result = await retireThenStop({ workflow: false, failClearOnce: true })
+    expect(result.queueMessage).not.toHaveBeenCalled()
+    expect(result.resumeInterruptedSession).not.toHaveBeenCalled()
+    expect(result.events.filter((event) => event.type === 'tool.call')).toEqual([])
     expect(result.interruptedAt).toBeNull()
   })
 })
