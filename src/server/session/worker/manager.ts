@@ -1244,9 +1244,9 @@ export class SessionWorkerManager {
       afterVerification(() => {
         const stopped = userRequestedStop || this.stoppedEpoch.get(sessionId) === interruptionEpoch
         if (stopped) {
-          if (this.stoppedEpoch.get(sessionId) === interruptionEpoch) this.stoppedEpoch.delete(sessionId)
           clearSessionInterrupted(this.deps.db(), sessionId)
           this.deps.broadcastForSession(sessionId, createSessionInterruptedMessage(null))
+          if (this.stoppedEpoch.get(sessionId) === interruptionEpoch) this.stoppedEpoch.delete(sessionId)
           return
         }
         if (!plan) {

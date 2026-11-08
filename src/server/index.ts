@@ -4580,6 +4580,18 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           finish(error)
         }, 4_000)
 
+        const recordRuntimeRecovery = (clean: boolean): void => {
+          for (const sessionId of interruptedSessionIds) {
+            if (getSessionInterruptedAt(db, sessionId) !== interruptedAt) continue
+            eventStore.append(
+              sessionId,
+              clean
+                ? { type: 'worker.recovery_clean', data: { interruptedAt } }
+                : { type: 'worker.recovery_blocked', data: { interruptedAt, reason: 'orphan_proof' } },
+            )
+          }
+        }
+
         void (async () => {
           try {
             getEventStore().flushAllStreaming()
@@ -4601,17 +4613,22 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
               : Promise.resolve(),
           ])
           await workerManager.shutdown()
-          for (const sessionId of interruptedSessionIds) {
-            if (getSessionInterruptedAt(db, sessionId) !== interruptedAt) continue
-            eventStore.append(sessionId, {
-              type: 'worker.recovery_clean',
-              data: { interruptedAt },
-            })
-          }
           setExternalGitRunner(null)
           await Promise.all([ancillaryCleanup, mcpManager.disconnectAll(), processSupervisor?.shutdown()])
+          if (completed) {
+            recordRuntimeRecovery(false)
+            return
+          }
+          recordRuntimeRecovery(true)
           finish()
-        })().catch(finish)
+        })().catch((error) => {
+          try {
+            recordRuntimeRecovery(false)
+          } catch {
+            void 0
+          }
+          finish(error)
+        })
       })
     },
   }
