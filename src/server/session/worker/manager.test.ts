@@ -1611,7 +1611,7 @@ describe('SessionWorkerManager', () => {
       expect(settled).toHaveBeenCalledOnce()
       expect(settled).toHaveBeenCalledWith(expect.objectContaining({ crashed: true }))
       expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
-        interrupted_at: expect.any(String),
+        interrupted_at: null,
       })
       expect(manager.activeWorker('sess-1')).toBeNull()
       expect(successorStart).toHaveBeenCalledOnce()
@@ -1749,7 +1749,7 @@ describe('SessionWorkerManager', () => {
       expect(settled).toHaveBeenCalledOnce()
       expect(manager.activeWorker('sess-1')).toBeNull()
       expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
-        interrupted_at: expect.any(String),
+        interrupted_at: null,
       })
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', successorSettled))).toBe('started')
       expect(manager.activeWorker('sess-1')?.pid).toBe(99)
