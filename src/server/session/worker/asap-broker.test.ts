@@ -147,6 +147,36 @@ describe('WorkerAsapBroker', () => {
     expect(queue().map((message) => message.content)).toEqual(['one'])
   })
 
+  it('hold 100, clearMessageQueue, admit 100, then abort of the old hold restores 200', () => {
+    const { broker, setQueue, queue } = harness()
+    const held = Array.from({ length: 100 }, (_, index) => queued(`old-${index}`))
+    const admitted = Array.from({ length: 100 }, (_, index) => queued(`new-${index}`))
+    setQueue(held)
+    broker.handleRequest(request('r-1'))
+    const clearMessageQueue = () => setQueue([])
+    clearMessageQueue()
+    setQueue(admitted)
+    broker.handleAbort({ ...identity, type: 'asap.drain.abort', requestId: 'r-1' })
+    expect(queue()).toHaveLength(200)
+    expect(queue().slice(0, 100)).toEqual(held)
+    expect(queue().slice(100)).toEqual(admitted)
+  })
+
+  it('hold 100, clearMessageQueue, admit 100, then timeout of the old hold restores 200', async () => {
+    const { broker, setQueue, queue } = harness(30)
+    const held = Array.from({ length: 100 }, (_, index) => queued(`old-${index}`))
+    const admitted = Array.from({ length: 100 }, (_, index) => queued(`new-${index}`))
+    setQueue(held)
+    broker.handleRequest(request('r-1'))
+    const clearMessageQueue = () => setQueue([])
+    clearMessageQueue()
+    setQueue(admitted)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(queue()).toHaveLength(200)
+    expect(queue().slice(0, 100)).toEqual(held)
+    expect(queue().slice(100)).toEqual(admitted)
+  })
+
   it('discards a hold without restoring it after a late abort or timeout', async () => {
     const { broker, queue, setQueue, onRestored, commitAsap } = harness(30)
     setQueue([queued('old')])

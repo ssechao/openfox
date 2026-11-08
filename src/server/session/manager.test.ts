@@ -41,6 +41,7 @@ import { buildContextMessagesFromEventHistory, foldContextState } from '../event
 import * as eventModule from '../events/index.js'
 import { setAgentModelOverride } from '../agents/model-overrides.js'
 import { SessionManager } from './manager.js'
+import { WorkerAsapBroker } from './worker/asap-broker.js'
 
 // Mock provider manager
 const mockGlobalClient = {
@@ -815,6 +816,38 @@ describe('SessionManager', () => {
         fresh.map((message) => message.content),
       )
       expect(held).toHaveLength(100)
+    })
+
+    it('drops the broker hold on clear so a late abort or timeout keeps the new batch at 100', async () => {
+      const session = manager.createSession(projectId)
+      const broker = new WorkerAsapBroker({
+        isCurrent: () => true,
+        send: () => {},
+        takeAsap: (sessionId) => {
+          const messages = manager.drainAsapMessages(sessionId)
+          manager.reserveHeldAsap(sessionId, messages)
+          return messages
+        },
+        restoreAsap: (sessionId, messages) => manager.restoreAsapMessages(sessionId, messages),
+        commitAsap: (sessionId, messages) => manager.releaseHeldAsap(sessionId, messages),
+        queueState: (sessionId) => manager.getQueueState(sessionId),
+        holdMs: 30,
+      })
+      manager.setQueueClearedListener((sessionId) => broker.discardHold(sessionId))
+      const identity = { sessionId: session.id, workerId: 'w-1', generation: 1 }
+      for (let index = 0; index < 100; index += 1) manager.queueMessage(session.id, 'asap', `old-${index}`)
+      broker.handleRequest({ ...identity, type: 'asap.drain.request', requestId: 'r-1' })
+      manager.clearMessageQueue(session.id)
+      const fresh = []
+      for (let index = 0; index < 100; index += 1) {
+        fresh.push(manager.queueMessage(session.id, 'asap', `new-${index}`))
+      }
+      broker.handleAbort({ ...identity, type: 'asap.drain.abort', requestId: 'r-1' })
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(manager.getQueueState(session.id)).toHaveLength(100)
+      expect(manager.getQueueState(session.id).map((message) => message.content)).toEqual(
+        fresh.map((message) => message.content),
+      )
     })
 
     it('refuses the 101st queued message without changing the queue', () => {
