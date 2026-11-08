@@ -13,6 +13,7 @@ import type { StoredEvent, TurnEvent } from '../events/types.js'
 import { createMessageDoneEvent } from '../chat/stream-pure.js'
 import { CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT } from '../chat/agent-loop.js'
 import { logger } from '../utils/logger.js'
+import { settleUnknownToolOutcomes } from './worker/settle-unknown.js'
 
 export { CONTINUE_PROMPT, CONTINUE_AFTER_STREAM_ERROR_PROMPT }
 
@@ -41,18 +42,6 @@ export function planBootContinuation(events: StoredEvent[], hasActiveWorkflow: b
  * finalize the assistant bubble before executing tools, so an unfinalized one
  * means the LLM stream was cut off mid-response.
  */
-function hasPendingToolReconciliation(events: StoredEvent[]): boolean {
-  const pending = new Set<string>()
-  for (const event of events) {
-    if (event.type === 'tool.reconciliation_required') {
-      pending.add((event.data as { toolCallId: string }).toolCallId)
-    } else if (event.type === 'tool.reconciliation_resolved') {
-      pending.delete((event.data as { toolCallId: string }).toolCallId)
-    }
-  }
-  return pending.size > 0
-}
-
 function findUnfinalizedAssistantMessage(events: StoredEvent[]): string | undefined {
   let lastAssistantId: string | undefined
   const finalized = new Set<string>()
@@ -94,14 +83,31 @@ export interface BootAutoContinueDeps {
  * Apply the boot continuation plan for every stale session. Returns the number
  * of sessions queued for continuation.
  */
+function withSettledOutcomes(
+  sessionId: string,
+  events: StoredEvent[],
+  appendEvent: (sessionId: string, event: TurnEvent) => void,
+): StoredEvent[] {
+  const settled = events.slice()
+  settleUnknownToolOutcomes(events, (event) => {
+    appendEvent(sessionId, event)
+    settled.push({
+      seq: settled.length + 1,
+      timestamp: Date.now(),
+      sessionId,
+      type: event.type,
+      data: event.data,
+    } as StoredEvent)
+  })
+  return settled
+}
+
 export function runBootAutoContinuations(sessionIds: string[], deps: BootAutoContinueDeps): number {
   let continued = 0
 
   for (const sessionId of sessionIds) {
-    const events = deps.getEvents(sessionId)
-    const plan = hasPendingToolReconciliation(events)
-      ? null
-      : planBootContinuation(events, deps.hasActiveWorkflow(sessionId))
+    const settled = withSettledOutcomes(sessionId, deps.getEvents(sessionId), deps.appendEvent)
+    const plan = planBootContinuation(settled, deps.hasActiveWorkflow(sessionId))
     if (!plan) {
       logger.debug('Skipping boot auto-continuation', { sessionId })
       continue
@@ -115,4 +121,36 @@ export function runBootAutoContinuations(sessionIds: string[], deps: BootAutoCon
   }
 
   return continued
+}
+
+export interface InterruptedResumeDeps {
+  getEvents: (sessionId: string) => StoredEvent[]
+  hasActiveWorkflow: (sessionId: string) => boolean
+  appendEvent: (sessionId: string, event: TurnEvent) => void
+  queueChatContinuation: (sessionId: string, content: string) => void
+  resumeWorkflow: (sessionId: string) => void
+  clearInterrupted: (sessionId: string) => void
+}
+
+export function resumeInterruptedSessions(sessionIds: string[], deps: InterruptedResumeDeps): number {
+  let resumed = 0
+
+  for (const sessionId of sessionIds) {
+    const settled = withSettledOutcomes(sessionId, deps.getEvents(sessionId), deps.appendEvent)
+    if (deps.hasActiveWorkflow(sessionId)) {
+      deps.resumeWorkflow(sessionId)
+      resumed++
+      continue
+    }
+    const plan = planBootContinuation(settled, false)
+    if (!plan) continue
+    if (plan.finalizeMessageId) {
+      deps.appendEvent(sessionId, createMessageDoneEvent(plan.finalizeMessageId, { partial: true }))
+    }
+    deps.clearInterrupted(sessionId)
+    deps.queueChatContinuation(sessionId, plan.content)
+    resumed++
+  }
+
+  return resumed
 }

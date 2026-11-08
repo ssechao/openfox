@@ -94,7 +94,7 @@ export function attachToolResultToMessage(
 ): void {
   if (msg.toolCalls) {
     const toolCall = msg.toolCalls.find((tc) => tc.id === toolCallId)
-    if (toolCall) {
+    if (toolCall && toolCall.result === undefined) {
       toolCall.result = result
     }
   }

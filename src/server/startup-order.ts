@@ -2,7 +2,7 @@ interface ContinuationServices {
   startSupervisor: () => Promise<void>
   configureSupervisor: () => void
   startQueueProcessor: () => void
-  runBootAutoContinuations: () => void
+  runBootAutoContinuations: () => void | Promise<void>
   startTaskScheduler: () => void
 }
 
@@ -10,6 +10,6 @@ export async function startContinuationServices(services: ContinuationServices):
   await services.startSupervisor()
   services.configureSupervisor()
   services.startQueueProcessor()
-  services.runBootAutoContinuations()
+  await services.runBootAutoContinuations()
   services.startTaskScheduler()
 }

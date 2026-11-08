@@ -258,7 +258,7 @@ describe('gateway IPC integration', () => {
         return view.session.interruptedAt && !view.session.isRunning ? view.session.interruptedAt : null
       }, 'workflow interruption before token failure')
 
-      const { exited } = await holdDatabaseLock(join(root, 'sessions.db'), 500)
+      const { exited } = await holdDatabaseLock(join(root, 'sessions.db'), 6_000)
       const failed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
       expect(failed.status).toBe(503)
       await expect(failed.json()).resolves.toMatchObject({ code: 'WORKER_LAUNCH_FAILED' })
@@ -266,7 +266,11 @@ describe('gateway IPC integration', () => {
 
       expect(await exited).toBe(0)
       const retried = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
-      expect(retried.status).toBe(200)
+      if (retried.status !== 200) {
+        expect(retried.status).toBe(409)
+        const body = (await retried.json()) as { error?: string }
+        expect(['Session is not interrupted', 'Session is already running']).toContain(body.error)
+      }
       await waitFor(async () => {
         const view = await getSession(sessionId)
         return !view.session.interruptedAt && !view.session.isRunning ? true : null
@@ -276,7 +280,7 @@ describe('gateway IPC integration', () => {
       await rm(join(root, 'workflow-started'), { force: true })
       await rm(join(root, 'late-effect'), { force: true })
     }
-  }, 30_000)
+  }, 45_000)
 
   it('keeps HTTP, WebSocket and Stop responsive while gateway writes recover after a long lock', async () => {
     const stopSessionId = await createSession('busy-stop')

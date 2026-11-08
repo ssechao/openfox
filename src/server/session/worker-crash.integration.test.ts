@@ -6,9 +6,9 @@
  *
  * A session runs in its worker (OPENFOX_MOCK_LLM); kill -9 on the worker
  * process must be detected by the gateway via the exit handler (no timeout),
- * the session must be marked interrupted (persisted, API-visible) with an
- * explicit resume proposal, nothing may be replayed automatically, and other
- * sessions must keep working.
+ * the session must be marked interrupted, each open tool call closed with one
+ * synthetic outcomeUnknown result, and the turn continued without replaying
+ * the tool or asking the user. Other sessions must keep working.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
@@ -62,7 +62,14 @@ interface SessionView {
   messages: Array<{
     role: string
     content?: string
-    toolCalls?: Array<{ result?: { success: boolean; error?: string; metadata?: Record<string, unknown> } }>
+    toolCalls?: Array<{
+      result?: {
+        success: boolean
+        outcomeUnknown?: boolean
+        error?: string
+        metadata?: Record<string, unknown>
+      }
+    }>
   }>
   pendingToolReconciliations: Array<{ toolCallId: string; name: string }>
 }
@@ -161,6 +168,10 @@ describe('session worker crash', () => {
     return activeWorkers.find((worker) => worker.sessionId === sessionId) ?? null
   }
 
+  function hasUnknownOutcome(view: SessionView): boolean {
+    return view.messages.some((message) => message.toolCalls?.some((call) => call.result?.outcomeUnknown === true))
+  }
+
   async function waitFor<T>(probe: () => Promise<T | null>, timeoutMs: number, what: string): Promise<T> {
     const deadline = Date.now() + timeoutMs
     for (;;) {
@@ -171,7 +182,7 @@ describe('session worker crash', () => {
     }
   }
 
-  it('detects kill -9, marks the session interrupted, and resumes only explicitly', async () => {
+  it('detects kill -9, records one unknown outcome, and continues without asking', async () => {
     await setWorkerMode(true)
     const sessionA = await createSession('crash-victim')
     const sessionB = await createSession('witness')
@@ -192,44 +203,39 @@ describe('session worker crash', () => {
     const killedAt = Date.now()
     process.kill(active!.pid!, 'SIGKILL')
 
-    const interrupted = await waitFor(
+    const settled = await waitFor(
       async () => {
         const view = await getSessionView(sessionA)
-        return view.session.interruptedAt && !view.session.isRunning ? view : null
+        return hasUnknownOutcome(view) && view.pendingToolReconciliations.length === 0 ? view : null
       },
       10_000,
-      'session to be marked interrupted',
+      'synthetic unknown tool result',
     )
     expect(Date.now() - killedAt).toBeLessThan(10_000)
-    const detected = interrupted!
+    expect(settled.pendingToolReconciliations).toEqual([])
+    expect(await readFile(effectPath, 'utf-8')).toBe('x')
 
-    // « interrompue — reprendre »: persisted marker + system resume proposal.
-    expect(detected.session.interruptedAt).toBeTruthy()
-    expect(detected.pendingToolReconciliations).toHaveLength(1)
-    expect(detected.pendingToolReconciliations[0]?.name).toBe('run_command')
-    expect(
-      detected.messages.some(
-        (m) => m.role === 'user' && typeof m.content === 'string' && /interromp|interrupted/i.test(m.content),
-      ),
-    ).toBe(true)
-
-    // Crash report available for the cleanup proof (criterion 3 reads it too).
     const introspection = await waitFor(async () => (await getWorkerIntrospection()).lastCrash, 5_000, 'crash report')
     expect(introspection?.sessionId).toBe(sessionA)
     expect(introspection?.signal).toBe('SIGKILL')
 
-    // No blind replay: the session must not restart by itself.
-    await new Promise((resolve) => setTimeout(resolve, 700))
-    const stillDown = await getSessionView(sessionA)
-    expect(stillDown.session.isRunning).toBe(false)
-    expect(stillDown.session.interruptedAt).toBeTruthy()
-    expect(stillDown.messages.length).toBe(detected.messages.length)
-
-    // The resume gate refuses sessions that were never interrupted.
     const refused = await fetch(`${base}/api/sessions/${sessionB}/resume-interruption`, { method: 'POST' })
     expect(refused.status).toBe(409)
 
-    // The gateway and other sessions are unaffected (witness, in-process).
+    const recovered = await waitFor(
+      async () => {
+        const view = await getSessionView(sessionA)
+        return !view.session.interruptedAt && !view.session.isRunning && hasUnknownOutcome(view) ? view : null
+      },
+      30_000,
+      'automatic continuation',
+    )
+    expect(recovered.pendingToolReconciliations).toEqual([])
+    expect(
+      recovered.messages.flatMap((message) => message.toolCalls ?? []).filter((call) => call.result?.outcomeUnknown),
+    ).toHaveLength(1)
+    expect(await readFile(effectPath, 'utf-8')).toBe('x')
+
     await setWorkerMode(false)
     await sendMessage(sessionB, 'Hello')
     const witnessDone = await waitFor(
@@ -241,44 +247,6 @@ describe('session worker crash', () => {
       'witness session to answer',
     )
     expect(witnessDone.messages.some((m) => m.role === 'assistant')).toBe(true)
-
-    // Explicit resume: the continuation turn runs (in a fresh worker), the
-    // interrupted marker clears, and the session completes.
-    await setWorkerMode(true)
-    const resumed = await fetch(`${base}/api/sessions/${sessionA}/resume-interruption`, { method: 'POST' })
-    expect(resumed.status).toBe(200)
-
-    const recovered = await waitFor(
-      async () => {
-        const view = await getSessionView(sessionA)
-        return !view.session.interruptedAt &&
-          !view.session.isRunning &&
-          view.messages.some((m) => m.role === 'assistant')
-          ? view
-          : null
-      },
-      30_000,
-      'resumed session to complete',
-    )
-    expect(recovered.session.interruptedAt).toBeNull()
-    expect(recovered.messages.some((m) => m.role === 'assistant')).toBe(true)
-    expect(recovered.pendingToolReconciliations).toHaveLength(1)
-    expect(
-      recovered.messages.some((message) =>
-        message.toolCalls?.some(
-          (call) => call.result?.success === false && call.result.metadata?.['reconciliationRequired'] === true,
-        ),
-      ),
-    ).toBe(true)
-    expect(await readFile(effectPath, 'utf-8')).toBe('x')
-
-    const reconciled = await fetch(`${base}/api/sessions/${sessionA}/reconcile-tools`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ toolCallIds: [recovered.pendingToolReconciliations[0]!.toolCallId] }),
-    })
-    expect(reconciled.status).toBe(200)
-    expect((await getSessionView(sessionA)).pendingToolReconciliations).toEqual([])
   }, 120_000)
 
   it('releases the slot before a lock longer than the recovery deadline and persists interruption afterward', async () => {
@@ -351,23 +319,18 @@ describe('session worker crash', () => {
     expect((await getSessionView(sessionId)).session.interruptedAt ?? null).toBeNull()
 
     expect(await exited).toBe(0)
-    const interrupted = await waitFor(
+    await waitFor(
       async () => {
         const view = await getSessionView(sessionId)
-        return view.session.interruptedAt && !view.session.isRunning ? view : null
+        return hasUnknownOutcome(view) &&
+          view.pendingToolReconciliations.length === 0 &&
+          !view.session.interruptedAt &&
+          !view.session.isRunning
+          ? true
+          : null
       },
-      10_000,
-      'deferred interruption marker',
-    )
-    expect(interrupted.session.interruptedAt).toBeTruthy()
-
-    expect(queuedResponses).toHaveLength(1)
-    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
-    expect(resumed.status).toBe(200)
-    await waitFor(
-      async () => (!(await getSessionView(sessionId)).session.interruptedAt ? true : null),
-      20_000,
-      'explicit resume after deferred interruption',
+      30_000,
+      'automatic continuation after deferred interruption',
     )
     expect(queuedResponses).toHaveLength(1)
     expect(await readFile(effectPath, 'utf-8')).toBe('x')
@@ -397,16 +360,6 @@ describe('session worker crash', () => {
     const stopAcknowledgedAt = Date.now()
     expect(stopped.status).toBe(200)
 
-    const interrupted = await waitFor(
-      async () => {
-        const view = await getSessionView(sessionId)
-        return view.session.interruptedAt && !view.session.isRunning ? view : null
-      },
-      10_000,
-      'forced Stop interruption',
-    )
-    expect(interrupted.pendingToolReconciliations).toHaveLength(1)
-    expect(interrupted.pendingToolReconciliations[0]?.name).toBe('run_command')
     const report = await waitFor(
       async () => {
         const current = (await getWorkerIntrospection()).lastCrash
@@ -426,28 +379,29 @@ describe('session worker crash', () => {
     expect(report.orphanCheck?.checkedAt).toBeLessThanOrEqual(report.inventory.capturedAt + 2_500)
     expect(report.orphanCheck).toMatchObject({ clean: true, errors: [] })
 
-    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
-    expect(resumed.status).toBe(200)
     const recovered = await waitFor(
       async () => {
         const view = await getSessionView(sessionId)
-        return !view.session.interruptedAt && !view.session.isRunning ? view : null
+        return hasUnknownOutcome(view) &&
+          view.pendingToolReconciliations.length === 0 &&
+          !view.session.interruptedAt &&
+          !view.session.isRunning
+          ? view
+          : null
       },
       30_000,
-      'forced Stop resume',
+      'forced Stop stays stopped',
     )
-    expect(recovered.pendingToolReconciliations).toHaveLength(1)
     expect(
-      recovered.messages.some((message) =>
-        message.toolCalls?.some(
-          (call) => call.result?.success === false && call.result.metadata?.['reconciliationRequired'] === true,
-        ),
-      ),
-    ).toBe(true)
+      recovered.messages.some((message) => (message.content ?? '').includes('Continue your previous response')),
+    ).toBe(false)
+    expect(
+      recovered.messages.flatMap((message) => message.toolCalls ?? []).filter((call) => call.result?.outcomeUnknown),
+    ).toHaveLength(1)
     expect(await readFile(effectPath, 'utf-8')).toBe('x')
   }, 120_000)
 
-  it('syncs interruptedAt over the real WebSocket on crash and clears it on resume', async () => {
+  it('syncs interruptedAt over the real WebSocket and clears it when continuation is queued', async () => {
     await setWorkerMode(true)
     await waitFor(
       async () => ((await getWorkerIntrospection()).active === null ? true : null),
@@ -494,25 +448,12 @@ describe('session worker crash', () => {
     expect(active?.sessionId).toBe(sessionId)
     process.kill(active!.pid!, 'SIGKILL')
 
-    const crashed = await waitFor(
-      async () => {
-        const view = await getSessionView(sessionId)
-        return view.session.interruptedAt && !view.session.isRunning ? view : null
-      },
-      10_000,
-      'session to be marked interrupted',
-    )
-    const interruptedAt = crashed!.session.interruptedAt!
-
     const crashSync = await waitFor(
       async () => interruptedMessages.find((m) => m.interruptedAt !== null) ?? null,
-      5_000,
+      10_000,
       'session.interrupted over WS',
     )
-    expect(crashSync.interruptedAt).toBe(interruptedAt)
-
-    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
-    expect(resumed.status).toBe(200)
+    expect(crashSync.interruptedAt).toBeTruthy()
 
     const clearSync = await waitFor(
       async () => interruptedMessages.find((m) => m.interruptedAt === null) ?? null,
@@ -524,7 +465,7 @@ describe('session worker crash', () => {
     ws.close()
   }, 120_000)
 
-  it('preserves the reconciliation guard across gateway shutdown and restart', async () => {
+  it('settles an open tool call across gateway shutdown without replaying it', async () => {
     await waitFor(
       async () => ((await getWorkerIntrospection()).active === null ? true : null),
       40_000,
@@ -550,28 +491,20 @@ describe('session worker crash', () => {
     const { port } = await server.start(0)
     base = `http://127.0.0.1:${port}`
 
-    const interrupted = await getSessionView(sessionId)
-    expect(interrupted.session.interruptedAt).toBeTruthy()
-    expect(interrupted.pendingToolReconciliations).toHaveLength(1)
-
-    const resumed = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
-    expect(resumed.status).toBe(200)
     const recovered = await waitFor(
       async () => {
         const view = await getSessionView(sessionId)
-        return !view.session.isRunning && !view.session.interruptedAt ? view : null
+        return !view.session.isRunning && !view.session.interruptedAt && hasUnknownOutcome(view) ? view : null
       },
       30_000,
       'shutdown-interrupted session to resume',
     )
-    expect(recovered.pendingToolReconciliations).toHaveLength(1)
+    const refused = await fetch(`${base}/api/sessions/${sessionId}/resume-interruption`, { method: 'POST' })
+    expect(refused.status).toBe(409)
+    expect(recovered.pendingToolReconciliations).toEqual([])
     expect(
-      recovered.messages.some((message) =>
-        message.toolCalls?.some(
-          (call) => call.result?.success === false && call.result.metadata?.['reconciliationRequired'] === true,
-        ),
-      ),
-    ).toBe(true)
+      recovered.messages.flatMap((message) => message.toolCalls ?? []).filter((call) => call.result?.outcomeUnknown),
+    ).toHaveLength(1)
     expect(await readFile(effectPath, 'utf-8')).toBe('x')
   }, 120_000)
 })

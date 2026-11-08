@@ -450,6 +450,8 @@ describe('SessionWorkerManager', () => {
     }) as unknown as ChildProcess
     const settled = vi.fn()
     const queuedStart = vi.fn()
+    const queueMessage = vi.fn()
+    const resumeInterruptedSession = vi.fn()
     const runtime = new SessionRuntimeRegistry().get('sess-1')
     const appended: string[] = []
     const cleanupChildren = vi.fn(async () => [99])
@@ -459,8 +461,10 @@ describe('SessionWorkerManager', () => {
       sessionManager: {
         setRunning: () => {},
         getActiveWorkflowExecution: () => null,
+        queueMessage,
         addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
       } as unknown as SessionManager,
+      resumeInterruptedSession,
       isEnabled: () => true,
       broadcastForSession: () => {},
       cleanupChildren,
@@ -531,14 +535,16 @@ describe('SessionWorkerManager', () => {
 
       expect(cleanupChildren).toHaveBeenCalledTimes(1)
       expect(settled).toHaveBeenCalledWith({ crashed: true })
-      expect(appended).toContain('tool.reconciliation_required')
+      expect(appended).toContain('tool.result')
       expect(manager.activeWorker('sess-1')).toBeNull()
       expect(queuedStart).not.toHaveBeenCalled()
+      expect(queueMessage).not.toHaveBeenCalled()
+      expect(resumeInterruptedSession).not.toHaveBeenCalled()
       expect(runtime.state).toBe('idle')
       const interrupted = namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get() as {
         interrupted_at: string | null
       }
-      expect(interrupted.interrupted_at).toBeTruthy()
+      expect(interrupted.interrupted_at).toBeNull()
     } finally {
       vi.useRealTimers()
     }
@@ -872,6 +878,68 @@ describe('SessionWorkerManager', () => {
     await vi.waitFor(() => expect(settled).toHaveBeenCalledWith({ crashed: true }))
     expect(queuedStart).not.toHaveBeenCalled()
     expect(directSettled).not.toHaveBeenCalled()
+  })
+
+  it('does not resume a crash when the orphan proof is not clean', async () => {
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-dirty-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const queueMessage = vi.fn()
+    const resumeInterruptedSession = vi.fn()
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        getActiveWorkflowExecution: () => null,
+        queueMessage,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
+      resumeInterruptedSession,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+      captureInventory: (pid) => ({
+        capturedAt: 1_000,
+        worker: { pid, startedAt: 'linux:42', pgid: 42 },
+        children: [],
+        groups: [],
+        reservations: [],
+        errors: [],
+      }),
+      cleanupChildren: async () => [],
+      verifyInventory: async () => ({
+        checkedAt: 3_000,
+        clean: false,
+        survivingIdentities: [],
+        survivingGroups: [42],
+        liveReservations: [],
+        errors: [],
+      }),
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [
+            { seq: 1, timestamp: 1, sessionId: 'sess-1', type: 'message.start', data: { role: 'user' } },
+          ],
+          append: (_sessionId: string, event: { type: string }) => {
+            appended.push(event.type)
+          },
+        }) as never,
+    })
+
+    const appended: string[] = []
+    manager.launch('sess-1', () => {})
+    child.emit('exit', null, 'SIGKILL')
+    await vi.waitFor(() => expect(appended).toContain('worker.recovery_blocked'))
+    expect(queueMessage).not.toHaveBeenCalled()
+    expect(resumeInterruptedSession).not.toHaveBeenCalled()
   })
 
   it('keeps a successor generation admitted when stopped-worker cleanup finishes after T+2', async () => {
@@ -1344,8 +1412,8 @@ describe('SessionWorkerManager', () => {
         interrupted_at: string | null
       }
       expect(cleanupCalls).toBe(1)
-      expect(interrupted.interrupted_at).toBeTruthy()
-      expect(appended).toContain('tool.reconciliation_required')
+      expect(interrupted.interrupted_at).toBeNull()
+      expect(appended).toContain('tool.result')
       await vi.waitFor(() => expect(manager.lastCrashReport()?.orphanCheck?.clean).toBe(true))
       expect(manager.lastCrashReport()).toMatchObject({
         cleanupError: expect.stringMatching(/reservation scan failed/),

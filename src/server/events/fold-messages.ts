@@ -366,6 +366,7 @@ export function handleToolResult(
     }
   },
 ): void {
+  if (fulfilled.has(data.toolCallId)) return
   fulfilled.add(data.toolCallId)
   if (messageMap.has(data.messageId)) {
     const imageMeta = data.result.metadata as Record<string, unknown> | undefined

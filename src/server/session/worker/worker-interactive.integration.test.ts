@@ -216,7 +216,7 @@ describe('worker interactive IPC', () => {
 
     await waitFor(async () => {
       const view = await getSession(sessionId)
-      return view.session.interruptedAt && view.pendingQuestions.length === 0 ? true : null
+      return !view.session.isRunning && !view.session.interruptedAt && view.pendingQuestions.length === 0 ? true : null
     }, 'question cancellation after crash')
 
     const late = await fetch(`${base}/api/sessions/${sessionId}/answer`, {

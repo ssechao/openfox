@@ -8,13 +8,11 @@
  *
  * Crash handling: the child `exit` handler is the detection point — no
  * timeout. The gateway then (1) marks the session interrupted in the
- * database (API-visible, « interrompue — reprendre »), (2) finalizes any
- * partial assistant message, (3) appends a system message proposing the
- * explicit resume, and (4) kills the worker's exclusive children recorded in
- * the sidecar file (proof in lastCrashReport). Shared MCP/LSP servers live in
- * the gateway process and are never touched. Nothing is replayed
- * automatically — a tool call with an unknown outcome is never redone
- * blindly; the continuation turn only runs on POST /resume-interruption.
+ * database, (2) closes each open tool call with one synthetic unknown
+ * result, (3) finalizes any partial assistant message, and (4) queues the
+ * continuation, or resumes an active workflow, after the orphan proof.
+ * The interrupted tool call is not executed again. Shared MCP/LSP servers
+ * live in the gateway process and are never touched.
  */
 
 import { fork, type ChildProcess } from 'node:child_process'
@@ -24,13 +22,8 @@ import type { SessionProcessSupervisor, SupervisorWorkerHandle } from '../proces
 import type { Config, ToolResult } from '../../../shared/types.js'
 import type { ChatErrorPayload, ServerMessage } from '../../../shared/protocol.js'
 import { logger } from '../../utils/logger.js'
-import {
-  createSessionRunningMessage,
-  createSessionInterruptedMessage,
-  createChatMessageMessage,
-} from '../../ws/protocol.js'
+import { createSessionRunningMessage, createSessionInterruptedMessage } from '../../ws/protocol.js'
 import { createMessageDoneEvent } from '../../chat/stream-pure.js'
-import { serverT } from '../../i18n.js'
 import { getEventStore } from '../../events/index.js'
 import { emitRunningChanged } from '../../events/session.js'
 import type { SessionManager } from '../manager.js'
@@ -53,11 +46,14 @@ import {
   type ProcessInventoryEntry,
 } from './children.js'
 import {
+  clearSessionInterrupted,
   markSessionInterrupted,
   markWorkerSessionInterrupted,
   planWorkerCrashRecovery,
   prepareSessionInterruptionEvents,
 } from './crash.js'
+import type { TurnEvent } from '../../events/types.js'
+import { settleOneUnknownToolOutcome } from './settle-unknown.js'
 import type {
   BackgroundRequestMessage,
   GatewayToWorkerMessage,
@@ -103,6 +99,7 @@ interface ActiveWorker {
   doneOk: boolean
   doneError?: string
   stopRequestedAt?: number
+  gatewayShutdown?: boolean
   /** Set once this worker has given its scheduler slot back (exactly once, whatever the exit path). */
   slotReleased?: boolean
   stopEscalatedAt?: number
@@ -148,6 +145,7 @@ export interface SessionWorkerManagerDeps {
   eventStore?: () => ReturnType<typeof getEventStore>
   getMcpTools?: () => WorkerMcpTool[]
   executeMcp?: (request: McpRequestMessage, signal: AbortSignal) => Promise<ToolResult>
+  resumeInterruptedSession?: (sessionId: string) => void | Promise<unknown>
 }
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
@@ -685,6 +683,9 @@ export class SessionWorkerManager {
       const interruptedAt = new Date().toISOString()
       markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
       this.prepareInterruptedEvents(worker.sessionId)
+      const eventStore = this.deps.eventStore?.() ?? getEventStore()
+      eventStore.append(worker.sessionId, { type: 'worker.recovery_clean', data: { interruptedAt } })
+      worker.gatewayShutdown = true
       try {
         this.deps.sessionManager.setRunning(worker.sessionId, false)
         emitRunningChanged(worker.sessionId, false)
@@ -953,14 +954,8 @@ export class SessionWorkerManager {
 
   private appendMcpReconciliation(request: McpRequestMessage): void {
     const eventStore = this.deps.eventStore?.() ?? getEventStore()
-    eventStore.append(request.sessionId, {
-      type: 'tool.reconciliation_required',
-      data: {
-        messageId: request.messageId,
-        toolCallId: request.toolCallId,
-        name: request.name,
-        arguments: request.args,
-      },
+    settleOneUnknownToolOutcome(eventStore.getEvents(request.sessionId), request, (event) => {
+      eventStore.append(request.sessionId, event)
     })
   }
 
@@ -981,7 +976,27 @@ export class SessionWorkerManager {
     return { eventStore, events }
   }
 
-  private scheduleInterruptedPersistence(worker: ActiveWorker, interruptedAt: string, report: WorkerCrashReport): void {
+  private scheduleInterruptedPersistence(
+    worker: ActiveWorker,
+    interruptedAt: string,
+    report: WorkerCrashReport,
+    verification: Promise<unknown>,
+  ): void {
+    let continuationScheduled = false
+    const afterVerification = (continueTurn: () => void): void => {
+      if (continuationScheduled) return
+      continuationScheduled = true
+      void Promise.resolve(verification).then((value) => {
+        const orphanCheck = value as OrphanInventoryCheck
+        report.orphanCheck = orphanCheck
+        const event = orphanCheck.clean
+          ? { type: 'worker.recovery_clean' as const, data: { interruptedAt } }
+          : { type: 'worker.recovery_blocked' as const, data: { interruptedAt, reason: 'orphan_proof' as const } }
+        this.persistRecoveryEvent(worker.sessionId, event, () => {
+          if (orphanCheck.clean) continueTurn()
+        })
+      })
+    }
     const persist = async (): Promise<void> => {
       const db = this.deps.db()
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
@@ -1008,7 +1023,13 @@ export class SessionWorkerManager {
           return
         }
         this.pendingInterruptions.delete(worker.sessionId)
-        await this.finalizePersistedInterruption(worker.sessionId, interruptedAt, report)
+        await this.finalizePersistedInterruption(
+          worker.sessionId,
+          interruptedAt,
+          report,
+          afterVerification,
+          worker.stopRequestedAt !== undefined,
+        )
       } catch (error) {
         logger.error('Worker interruption marker persistence failed; retrying', {
           sessionId: worker.sessionId,
@@ -1023,10 +1044,32 @@ export class SessionWorkerManager {
     void persist()
   }
 
+  private persistRecoveryEvent(sessionId: string, event: TurnEvent, afterPersist: () => void): void {
+    const attempt = async (): Promise<void> => {
+      const store = this.deps.eventStore?.() ?? getEventStore()
+      try {
+        if (typeof store.appendRecoverable === 'function') await store.appendRecoverable(sessionId, event)
+        else store.append(sessionId, event)
+        afterPersist()
+      } catch (error) {
+        logger.error('Worker recovery proof was not persisted; retrying', {
+          sessionId,
+          type: event.type,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        const timer = setTimeout(() => void attempt(), 250)
+        timer.unref()
+      }
+    }
+    void attempt()
+  }
+
   private async finalizePersistedInterruption(
     sessionId: string,
     interruptedAt: string,
     report: WorkerCrashReport,
+    afterVerification: (continueTurn: () => void) => void,
+    userRequestedStop: boolean,
   ): Promise<void> {
     const eventStore = this.deps.eventStore?.() ?? getEventStore()
     eventStore.invalidateExternalSession(sessionId)
@@ -1051,16 +1094,20 @@ export class SessionWorkerManager {
         eventStore.append(sessionId, createMessageDoneEvent(plan.finalizeMessageId, { partial: true }))
         report.finalizedMessageId = plan.finalizeMessageId
       }
-      const notice = this.deps.sessionManager.addMessage(sessionId, {
-        role: 'user',
-        content: serverT({
-          en: 'Session interrupted: the worker process died. Nothing was replayed automatically. Resume explicitly when ready (POST /api/sessions/:id/resume-interruption).',
-          fr: 'Session interrompue : le processus worker est mort. Rien n’a été rejoué automatiquement. Reprenez explicitement quand vous êtes prêt (POST /api/sessions/:id/resume-interruption).',
-        }),
-        isSystemGenerated: true,
-        messageKind: 'auto-prompt',
+      afterVerification(() => {
+        if (userRequestedStop) {
+          clearSessionInterrupted(this.deps.db(), sessionId)
+          this.deps.broadcastForSession(sessionId, createSessionInterruptedMessage(null))
+          return
+        }
+        if (!plan) {
+          void this.deps.resumeInterruptedSession?.(sessionId)
+          return
+        }
+        clearSessionInterrupted(this.deps.db(), sessionId)
+        this.deps.sessionManager.queueMessage?.(sessionId, 'asap', plan.content, undefined, 'auto-prompt')
+        this.deps.broadcastForSession(sessionId, createSessionInterruptedMessage(null))
       })
-      this.deps.broadcastForSession(sessionId, createChatMessageMessage(notice))
     } catch (error) {
       logger.warn('Worker crash finalization failed', {
         sessionId,
@@ -1074,6 +1121,10 @@ export class SessionWorkerManager {
     const { sessionId, token } = worker
     const db = this.deps.db()
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
+    if (worker.gatewayShutdown) {
+      this.retire(worker, { crashed: false })
+      return
+    }
     if (!clean) {
       if (worker.stopRequestedAt === undefined) this.pendingInterruptions.add(sessionId)
       this.scheduler.cancel(sessionId)
@@ -1142,10 +1193,6 @@ export class SessionWorkerManager {
 
     const inventory = await this.beginWorkerInventoryCapture(worker, interruptedAtMs, recoveryDeadlineAt)
     const verification = this.beginWorkerInventoryVerification(worker, inventory, recoveryDeadlineAt)
-
-    // Reap the worker's exclusive children (recorded synchronously in the
-    // sidecar, so kill -9 cannot hide them). Shared MCP/LSP servers belong to
-    // the gateway process and are not in that file — never touched.
     const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
     if (!isLatestWorkerGeneration(db, sessionId, token)) {
       this.pendingInterruptions.delete(sessionId)
@@ -1175,6 +1222,6 @@ export class SessionWorkerManager {
         ? { error: worker.doneError ?? `Worker interruption recovery failed: ${recoveryErrors.join('; ')}` }
         : {}),
     })
-    this.scheduleInterruptedPersistence(worker, interruptedAt, report)
+    this.scheduleInterruptedPersistence(worker, interruptedAt, report, verification)
   }
 }

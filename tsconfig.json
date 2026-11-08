@@ -18,5 +18,5 @@
     "allowSyntheticDefaultImports": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "e2e", "src/server/lsp/__fixtures__"]
+  "exclude": ["node_modules", "dist", "e2e", "src/server/lsp/__fixtures__", "src/server/session/worker/head-98ad75d"]
 }

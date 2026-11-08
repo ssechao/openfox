@@ -10,8 +10,10 @@ import {
   CONTINUE_PROMPT,
   CONTINUE_AFTER_STREAM_ERROR_PROMPT,
   planBootContinuation,
+  resumeInterruptedSessions,
   runBootAutoContinuations,
   type BootAutoContinueDeps,
+  type InterruptedResumeDeps,
 } from './auto-continue.js'
 
 function stored(seq: number, type: string, data: unknown): StoredEvent {
@@ -51,8 +53,9 @@ describe('planBootContinuation', () => {
 })
 
 describe('runBootAutoContinuations', () => {
-  it('turn requiring tool reconciliation is not auto-restarted', () => {
+  it('settles an old pending reconciliation and auto-continues without asking', () => {
     const queued: string[] = []
+    const appended: Array<{ type: string; data: unknown }> = []
     const deps: BootAutoContinueDeps = {
       getEvents: () => [
         userStart('u1', 1),
@@ -65,14 +68,27 @@ describe('runBootAutoContinuations', () => {
         }),
       ],
       hasActiveWorkflow: () => false,
-      appendEvent: () => {},
+      appendEvent: (_sessionId, event) => appended.push(event as { type: string; data: unknown }),
       queueMessage: (sessionId) => queued.push(sessionId),
     }
 
     const count = runBootAutoContinuations(['s-1'], deps)
 
-    expect(count).toBe(0)
-    expect(queued).toEqual([])
+    expect(count).toBe(1)
+    expect(queued).toEqual(['s-1'])
+    expect(appended.some((event) => event.type === 'tool.reconciliation_required')).toBe(false)
+    expect(appended).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'tool.result',
+          data: expect.objectContaining({
+            toolCallId: 'tool-1',
+            result: expect.objectContaining({ success: false, outcomeUnknown: true }),
+          }),
+        }),
+        expect.objectContaining({ type: 'tool.reconciliation_resolved', data: { toolCallId: 'tool-1' } }),
+      ]),
+    )
   })
   it('queues the stream-error reminder and appends a partial-done finalize event for mid-generation sessions', () => {
     const appended: Array<{ sessionId: string; event: unknown }> = []
@@ -148,5 +164,36 @@ describe('runBootAutoContinuations', () => {
     const count = runBootAutoContinuations(['s-1', 's-2'], deps)
 
     expect(count).toBe(2)
+  })
+})
+
+describe('resumeInterruptedSessions', () => {
+  it('resumes an interrupted workflow and a chat session without a user decision', () => {
+    const workflows: string[] = []
+    const queued: string[] = []
+    const cleared: string[] = []
+    const appended: string[] = []
+    const openTool = [
+      userStart('u1', 1),
+      assistantStart('a1', 2),
+      stored(3, 'tool.call', {
+        messageId: 'a1',
+        toolCall: { id: 'call-1', name: 'run_command', arguments: { command: 'effect' } },
+      }),
+    ]
+    const deps: InterruptedResumeDeps = {
+      getEvents: () => openTool,
+      hasActiveWorkflow: (sessionId) => sessionId === 'wf-1',
+      appendEvent: (_sessionId, event) => appended.push(event.type),
+      queueChatContinuation: (sessionId) => queued.push(sessionId),
+      resumeWorkflow: (sessionId) => workflows.push(sessionId),
+      clearInterrupted: (sessionId) => cleared.push(sessionId),
+    }
+
+    expect(resumeInterruptedSessions(['chat-1', 'wf-1'], deps)).toBe(2)
+    expect(workflows).toEqual(['wf-1'])
+    expect(queued).toEqual(['chat-1'])
+    expect(cleared).toEqual(['chat-1'])
+    expect(appended.some((type) => type === 'tool.reconciliation_required')).toBe(false)
   })
 })

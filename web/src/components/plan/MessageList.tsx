@@ -13,7 +13,6 @@ import { ChatFeedItems } from './ChatFeedItems'
 import { CloseButton } from '../shared/CloseButton'
 import { Modal } from '../shared/Modal'
 import { ChevronUpIcon, InfoIcon } from '../shared/icons'
-import { SessionResumeButton } from '../session/SessionResumeButton'
 import { useClickOutside } from '../../hooks/useClickOutside'
 import { useSessionScope, useScopedPaneState } from '../../stores/session/session-scope'
 import type { DisplayItem } from './groupMessages.js'
@@ -134,12 +133,6 @@ export const MessageList = memo(function MessageList({
     scopeId,
     (pane) => pane.session?.phase ?? null,
     (state) => state.currentSession?.phase ?? null,
-    null,
-  )
-  const interruptedAt = useScopedPaneState(
-    scopeId,
-    (pane) => pane.session?.interruptedAt ?? null,
-    (state) => state.currentSession?.interruptedAt ?? null,
     null,
   )
   const error = useScopedPaneState(
@@ -423,10 +416,6 @@ export const MessageList = memo(function MessageList({
                   />
                 </div>
               </div>
-            )}
-
-            {interruptedAt && !isRunning && sessionId && (
-              <SessionResumeButton sessionId={sessionId} interruptedAt={interruptedAt} />
             )}
 
             {showContinueWorkflow && activeWorkflowExecution && (

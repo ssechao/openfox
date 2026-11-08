@@ -153,6 +153,19 @@ export type TurnEvent =
         toolCallId: string
       }
     }
+  | {
+      type: 'worker.recovery_blocked'
+      data: {
+        interruptedAt: string
+        reason: 'orphan_proof'
+      }
+    }
+  | {
+      type: 'worker.recovery_clean'
+      data: {
+        interruptedAt: string
+      }
+    }
 
   // ----------------------------------------------------------------------------
   // Session state changes

@@ -301,12 +301,12 @@ describe('worker crash cleanup', () => {
       async () => {
         const res = await fetch(`${base}/api/test/worker`)
         const data = (await res.json()) as WorkerIntrospection
-        return data.active
+        return data.active?.sessionId === sessionA ? data.active : null
       },
       20_000,
       'worker to be launched',
     )
-    expect(active?.sessionId).toBe(sessionA)
+    expect(active.sessionId).toBe(sessionA)
     const workerPid = active!.pid!
     const childrenPath = `${dbPath}.worker-${active!.token.workerId}.children`
 

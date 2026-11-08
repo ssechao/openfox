@@ -197,10 +197,8 @@ it('restores a deferred failed resume before releasing its admitted successor', 
       async () => ((await readFile(join(root, 'long-started'), 'utf-8').catch(() => '')).length >= 1 ? true : null),
       'interrupted workflow effect',
     )
-    process.kill(interruptedWorker.pid!, 'SIGKILL')
-    await waitFor(async () => ((await getSession(interruptedId)).session.interruptedAt ? true : null), 'interruption')
-
     await launchWorkflow(ws, blockerId, 'launch-blocker')
+    process.kill(interruptedWorker.pid!, 'SIGKILL')
     const blockerWorker = await waitFor(
       async () => (await workers()).find((worker) => worker.sessionId === blockerId) ?? null,
       'blocker worker',
@@ -209,13 +207,15 @@ it('restores a deferred failed resume before releasing its admitted successor', 
       async () => ((await readFile(join(root, 'long-started'), 'utf-8').catch(() => '')).length >= 2 ? true : null),
       'blocker workflow effect',
     )
-
-    const waitingResume = await fetch(`${base}/api/sessions/${interruptedId}/resume-interruption`, {
-      method: 'POST',
-    })
-    expect(waitingResume.status).toBe(200)
-    await expect(waitingResume.json()).resolves.toMatchObject({ admission: 'waiting' })
-    expect((await getSession(interruptedId)).session.interruptedAt ?? null).toBeNull()
+    await waitFor(async () => {
+      const view = await getSession(interruptedId)
+      const active = await workers()
+      return !view.session.interruptedAt &&
+        !view.session.isRunning &&
+        !active.some((worker) => worker.sessionId === interruptedId)
+        ? true
+        : null
+    }, 'automatic workflow resume waiting behind the blocker')
 
     ws.on('message', (raw) => {
       const message = JSON.parse(String(raw)) as {
