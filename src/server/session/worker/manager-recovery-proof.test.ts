@@ -339,7 +339,7 @@ describe('deferred clean proof after Stop', () => {
     expect(result.interruptedAt).toBeNull()
   })
 
-  it.fails('keeps a late Stop stopped when clearing the marker fails and the callback is replayed', async () => {
+  it('keeps a late Stop stopped when clearing the marker fails and the callback is replayed', async () => {
     const result = await retireThenStop({ workflow: false, failClearOnce: true })
     expect(result.queueMessage).not.toHaveBeenCalled()
     expect(result.resumeInterruptedSession).not.toHaveBeenCalled()
