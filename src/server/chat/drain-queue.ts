@@ -12,6 +12,7 @@ const CARRIED_MESSAGE_KINDS = [
   'task-completed',
   'workflow-started',
   'command',
+  'background-exit',
 ] as const
 
 type CarriedMessageKind = (typeof CARRIED_MESSAGE_KINDS)[number]
@@ -42,7 +43,7 @@ function carriedFields(messageKind: string | undefined):
       isSystemGenerated?: true
     }
   | undefined {
-  if (messageKind === 'background-exit') return { messageKind: 'auto-prompt', isSystemGenerated: true }
+  if (messageKind === 'background-exit') return { messageKind: 'background-exit', isSystemGenerated: true }
   if (messageKind && (CARRIED_MESSAGE_KINDS as readonly string[]).includes(messageKind)) {
     return { messageKind: messageKind as CarriedMessageKind }
   }

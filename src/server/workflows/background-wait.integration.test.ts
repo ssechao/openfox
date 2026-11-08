@@ -202,7 +202,7 @@ describe('workflow background wait', () => {
         (message) => message.role === 'user' && message.content.startsWith('Background process "wait-job"'),
       )
       expect(notice?.isSystemGenerated).toBe(true)
-      expect(notice?.messageKind).toBe('auto-prompt')
+      expect(notice?.messageKind).toBe('background-exit')
       let idleSince: number | null = null
       const settledMessages = await waitFor(async () => {
         const body = (await (await fetch(`${base}/api/sessions/${sessionId}`)).json()) as {

@@ -9,6 +9,8 @@ import { WorkflowStartedCard } from './WorkflowStartedCard'
 import { MessageAttachments } from '../shared/MessageAttachments.js'
 import { AttachmentPreview } from '../shared/AttachmentPreview.js'
 import { AutoPromptCard } from './AutoPromptCard'
+import { BackgroundExitNotice } from './BackgroundExitNotice'
+import { isBackgroundExitNotice } from './background-exit-notice'
 import { CheckIcon, CopyIcon, EditSmallIcon, ReloadIcon } from '../shared/icons'
 import { useT } from '../../hooks/useT'
 import { replayMessage, forkSession, forkSessionErrorMessage } from '../../lib/api.js'
@@ -338,6 +340,10 @@ export const ChatMessage = memo(function ChatMessage({
         <div className="flex-1 border-t border-border" />
       </div>
     )
+  }
+
+  if (isBackgroundExitNotice(message)) {
+    return <BackgroundExitNotice message={message} />
   }
 
   if (message.messageKind === 'auto-prompt' && message.isSystemGenerated) {

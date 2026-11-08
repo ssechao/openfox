@@ -6,6 +6,7 @@ import { parseModelValue } from '../lib/model-value'
 import { shouldGateEffortChange, resolveWorkflowFirstAgentId } from '../lib/effort-gate'
 import { useEffortGateContext } from './useEffortGateContext'
 import type { Attachment, WorkflowLaunchScope } from '@shared/types.js'
+import { t } from '@shared/i18n/index.js'
 
 function sessionWorkdir(sessionId: string | null | undefined): string | undefined {
   const state = useSessionStore.getState()
@@ -26,8 +27,18 @@ export function useScrolledSend(setAutoScroll: (active: boolean) => void, sessio
   const sendMessage = useCallback(
     (content: string, attachments?: Attachment[], opts?: { messageKind?: 'command'; isSystemGenerated?: boolean }) => {
       setAutoScroll(true)
-      if (!sessionId) return
-      storeSendMessage(sessionId, content, attachments, opts)
+      if (!sessionId) {
+        return Promise.resolve({
+          ok: false as const,
+          status: 0,
+          code: 'NO_SESSION',
+          message: t({
+            en: 'This session is not open. Your draft and attachments were kept.',
+            fr: 'Cette session n\u2019est pas ouverte. Votre brouillon et vos pi\u00e8ces jointes ont \u00e9t\u00e9 conserv\u00e9s.',
+          }),
+        })
+      }
+      return storeSendMessage(sessionId, content, attachments, opts)
     },
     [setAutoScroll, storeSendMessage, sessionId],
   )

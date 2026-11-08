@@ -96,7 +96,7 @@ describe('drainQueue', () => {
     expect(appended[4]?.data).toMatchObject({
       messageId: 'id-exit',
       content: 'exit',
-      messageKind: 'auto-prompt',
+      messageKind: 'background-exit',
       isSystemGenerated: true,
     })
     expect(outbound.map((message) => message.type)).toEqual([
@@ -116,7 +116,7 @@ describe('drainQueue', () => {
     expect(outbound[2]?.payload['message']).toMatchObject({ id: 'id-two', messageKind: 'command' })
     expect(outbound[4]?.payload['message']).toMatchObject({
       id: 'id-exit',
-      messageKind: 'auto-prompt',
+      messageKind: 'background-exit',
       isSystemGenerated: true,
     })
     expect(outbound[6]?.payload).toEqual({ messages: [remaining] })

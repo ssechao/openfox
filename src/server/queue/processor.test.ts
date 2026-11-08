@@ -201,7 +201,14 @@ describe('QueueProcessor', () => {
       const callback = mockSessionManager.subscribe.mock.calls[0][0]
       callback({ type: 'queue_added', sessionId: 'sess-1', queueId: 'q-1', mode: 'asap', content: notice.content })
 
-      expect(mockSessionManager.addMessage).toHaveBeenCalled()
+      expect(mockSessionManager.addMessage).toHaveBeenCalledWith(
+        'sess-1',
+        expect.objectContaining({
+          isSystemGenerated: true,
+          messageKind: 'background-exit',
+          content: notice.content,
+        }),
+      )
       expect(generateSessionNameForSession).not.toHaveBeenCalled()
     })
 

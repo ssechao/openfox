@@ -26,7 +26,14 @@ export async function startChatSession(
   deps: ChatHandlerDeps,
   options?: {
     attachments?: Attachment[]
-    messageKind?: 'correction' | 'auto-prompt' | 'context-reset' | 'task-completed' | 'workflow-started' | 'command'
+    messageKind?:
+      | 'correction'
+      | 'auto-prompt'
+      | 'context-reset'
+      | 'task-completed'
+      | 'workflow-started'
+      | 'command'
+      | 'background-exit'
     isSystemGenerated?: boolean
   },
 ): Promise<void> {

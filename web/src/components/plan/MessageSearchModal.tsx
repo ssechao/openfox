@@ -120,6 +120,7 @@ export function getItemLabel(item: DisplayItem): string {
       }
     }
     if (msg.messageKind === 'task-completed') return 'Task completed'
+    if (msg.messageKind === 'background-exit') return 'Background process'
     if (msg.messageKind === 'auto-prompt') return 'Auto-prompt'
     if (msg.messageKind === 'correction') return 'Correction'
     if (msg.messageKind === 'context-reset') return 'Context reset'

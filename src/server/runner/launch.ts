@@ -179,7 +179,7 @@ export function launchWorkflowRun(deps: LaunchWorkflowRunDeps, payload: Workflow
           userMessage: {
             content: payload.content ?? '',
             ...(hasUserAttachments ? { attachments: launchAttachments! } : {}),
-            ...(payload.systemGenerated ? { isSystemGenerated: true } : {}),
+            ...(payload.systemGenerated ? { isSystemGenerated: true, messageKind: 'background-exit' as const } : {}),
           },
         }
       : {}),
