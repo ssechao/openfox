@@ -711,24 +711,28 @@ export class SessionWorkerManager {
     const signalErrors = worker.signalErrors.length > 0 ? `; ${worker.signalErrors.join('; ')}` : ''
     if (!worker.exitObserved) {
       const verdict = await this.proveWorkerIdentity(worker)
-      if (worker.settledNotified || worker.exitObserved || this.active.get(worker.sessionId) !== worker) return
-      if (verdict.status === 'absent' || verdict.status === 'recycled') {
-        await this.reconcileAbsentWorker(worker, verdict.status, signalErrors)
+      if (worker.settledNotified) return
+      if (!worker.exitObserved) {
+        if (this.active.get(worker.sessionId) !== worker) return
+        if (verdict.status === 'absent' || verdict.status === 'recycled') {
+          await this.reconcileAbsentWorker(worker, verdict.status, signalErrors)
+          return
+        }
+        logger.error('Session worker Stop deadline reached without a proven exit; slot retained', {
+          sessionId: worker.sessionId,
+          workerId: worker.token.workerId,
+          pid: worker.child.pid,
+          identityStatus: verdict.status,
+          ...(verdict.status === 'unreadable' ? { error: verdict.error.message } : {}),
+        })
+        this.notifyWorkerSettled(worker, {
+          crashed: true,
+          error: `Session worker did not exit within the bounded Stop deadline${signalErrors}`,
+        })
         return
       }
-      logger.error('Session worker Stop deadline reached without a proven exit; slot retained', {
-        sessionId: worker.sessionId,
-        workerId: worker.token.workerId,
-        pid: worker.child.pid,
-        identityStatus: verdict.status,
-        ...(verdict.status === 'unreadable' ? { error: verdict.error.message } : {}),
-      })
-      this.notifyWorkerSettled(worker, {
-        crashed: true,
-        error: `Session worker did not exit within the bounded Stop deadline${signalErrors}`,
-      })
-      return
     }
+    if (worker.settledNotified || this.active.get(worker.sessionId) !== worker) return
     const clean =
       worker.doneReceived && worker.doneOk && worker.exitCodeObserved === 0 && worker.exitSignalObserved === null
     this.retire(worker, {

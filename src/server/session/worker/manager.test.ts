@@ -1481,6 +1481,7 @@ describe('SessionWorkerManager', () => {
   function createIdentityStopManager(
     namedDb: Database.Database,
     spawnWorker: () => ChildProcess,
+    cleanupChildren: () => Promise<number[]> = () => Promise.resolve([]),
   ): SessionWorkerManager {
     return new SessionWorkerManager({
       db: () => namedDb,
@@ -1502,7 +1503,7 @@ describe('SessionWorkerManager', () => {
         reservations: [],
         errors: [],
       }),
-      cleanupChildren: () => Promise.resolve([]),
+      cleanupChildren,
       verifyInventory: async (inventory) => ({
         checkedAt: inventory.capturedAt + 2_000,
         clean: true,
@@ -1694,6 +1695,55 @@ describe('SessionWorkerManager', () => {
       expect(successorSettled).not.toHaveBeenCalled()
       expect(settled).toHaveBeenCalledOnce()
       expect(signalPid).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('settles inside the Stop bound when exit arrives during a deferred identity proof and cleanup is blocked', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-stop-proof-exit-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-3')`).run()
+    let cleanupFinished = false
+    const cleanup = new Promise<number[]>(() => {}).then((pids) => {
+      cleanupFinished = true
+      return pids
+    })
+    const stopped = fakeIdentityChild(42, () => new Promise(() => {}))
+    const successor = fakeIdentityChild(43, async () => ({ status: 'alive' }))
+    const spawnWorker = vi.fn().mockReturnValueOnce(stopped).mockReturnValueOnce(successor)
+    const settled = vi.fn()
+    const successorSettled = vi.fn()
+    const thirdStart = vi.fn()
+    const manager = createIdentityStopManager(namedDb, spawnWorker, () => cleanup)
+    try {
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
+      expect(manager.requestStop('sess-1')).toBe(true)
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(settled).not.toHaveBeenCalled()
+      stopped.emit('exit', null, 'SIGKILL')
+      await vi.advanceTimersByTimeAsync(500)
+
+      expect(settled).toHaveBeenCalledOnce()
+      expect(settled).toHaveBeenCalledWith({
+        crashed: true,
+        error: expect.stringMatching(/cleanup exceeded the Stop settlement deadline and continues in background/i),
+      })
+      expect(cleanupFinished).toBe(false)
+      expect(manager.activeWorker('sess-1')).toBeNull()
+      expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', successorSettled))).toBe('started')
+      expect(manager.activeWorker('sess-1')?.pid).toBe(43)
+      expect(manager.requestTurn('sess-3', thirdStart)).toBe('waiting')
+
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(cleanupFinished).toBe(false)
+      expect(thirdStart).not.toHaveBeenCalled()
+      expect(manager.activeWorker('sess-1')?.pid).toBe(43)
+      expect(successorSettled).not.toHaveBeenCalled()
+      expect(settled).toHaveBeenCalledOnce()
     } finally {
       vi.useRealTimers()
     }
