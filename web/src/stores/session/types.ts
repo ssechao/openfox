@@ -180,7 +180,7 @@ export interface SessionState {
     subGroup?: string,
     params?: Record<string, string>,
     scope?: WorkflowLaunchScope,
-  ) => void
+  ) => Promise<SendMessageResult>
   launchWorkflowAtStep: (sessionId: string, workflowId: string, stepId: string, scope?: WorkflowLaunchScope) => void
   continueWorkflow: (sessionId: string, choiceId?: string) => void
   /** Interrupt the current LLM-retry backoff wait and retry immediately. */

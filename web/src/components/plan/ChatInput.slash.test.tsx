@@ -368,6 +368,58 @@ describe('ChatInput slash command integration', () => {
     expect(mockSendMessage).not.toHaveBeenCalled()
   })
 
+  it('keeps the slash workflow draft until the launch is accepted', async () => {
+    let resolveLaunch: (value: { ok: true } | { ok: false; message: string }) => void = () => {}
+    mockLaunchWorkflow.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveLaunch = resolve
+        }),
+    )
+    const setInput = vi.fn()
+    const setErrorMessage = vi.fn()
+    const clearInput = vi.fn()
+    renderChatInput({ input: '/simple foo', setInput, setErrorMessage, clearInput })
+
+    fireEvent.click(screen.getByTestId('chat-send-button'))
+    fireEvent.click(screen.getByTestId('chat-send-button'))
+
+    expect(mockLaunchWorkflow).toHaveBeenCalledTimes(1)
+    expect(setInput).not.toHaveBeenCalled()
+    expect(clearInput).not.toHaveBeenCalled()
+
+    resolveLaunch({ ok: false, message: 'A turn is already running. Your draft and attachments were kept.' })
+    await waitFor(() => {
+      expect(setErrorMessage).toHaveBeenCalledWith('A turn is already running. Your draft and attachments were kept.')
+    })
+    expect(setInput).not.toHaveBeenCalled()
+    expect(clearInput).not.toHaveBeenCalled()
+    mockLaunchWorkflow.mockReset()
+  })
+
+  it('clears only the posted slash workflow draft after the launch is accepted', async () => {
+    mockLaunchWorkflow.mockResolvedValue({ ok: true })
+    const setInput = vi.fn()
+    const setErrorMessage = vi.fn()
+    const clearInput = vi.fn()
+    renderChatInput({ input: '/simple foo', setInput, setErrorMessage, clearInput })
+
+    fireEvent.click(screen.getByTestId('chat-send-button'))
+
+    expect(mockLaunchWorkflow).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(setInput.mock.calls.some((call) => typeof call[0] === 'function')).toBe(true)
+    })
+    const updateInput = setInput.mock.calls.map((call) => call[0]).find((arg) => typeof arg === 'function') as (
+      current: string,
+    ) => string
+    expect(updateInput('/simple foo')).toBe('')
+    expect(updateInput('/simple foo still typing')).toBe(' still typing')
+    expect(setErrorMessage).toHaveBeenCalledWith(null)
+    expect(clearInput).not.toHaveBeenCalled()
+    mockLaunchWorkflow.mockReset()
+  })
+
   it('launches workflow via Enter key', () => {
     const setInput = vi.fn()
     renderChatInput({ input: '/simple foo', setInput })

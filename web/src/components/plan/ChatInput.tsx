@@ -115,7 +115,7 @@ export function ChatInput({
   onSelectWorkflow,
   onSelectWorkflowWithSubGroup,
   onSendCommand,
-  clearInput,
+  clearInput: _clearInput,
 }: ChatInputProps) {
   const t = useT()
   const isTouch = useIsTouchDevice()
@@ -481,6 +481,13 @@ export function ChatInput({
     scrollToBottom?.()
     const sentText = input
     const sentAttachments = attachments
+    const guardSend = (pending: Promise<unknown>) => {
+      void pending
+        .catch((error: unknown) => {
+          setErrorMessage(sendFailedMessage(failureDetail(error)))
+        })
+        .finally(releaseSend)
+    }
 
     // Detect slash commands: /workflow-id arg1 arg2 or /command-name arg1 arg2
     const trimmed = input.trim()
@@ -508,16 +515,19 @@ export function ChatInput({
           sendingRef.current = false
           return
         }
-        launchWorkflow(undefined, undefined, slashResult.workflowId, undefined, slashResult.params, scope)
-        clearInput()
-        sendingRef.current = false
+        guardSend(
+          Promise.resolve(
+            launchWorkflow(undefined, undefined, slashResult.workflowId, undefined, slashResult.params, scope),
+          ).then((result) => {
+            applySendResult(result, sentText, sentAttachments, setInput, setAttachments, setErrorMessage)
+          }),
+        )
         return
       }
       if (slashResult?.commandId) {
         // Fetch command, resolve params, send as message
-        void commandResource
-          .refresh(slashResult.commandId, workdir)
-          .then(async (full) => {
+        guardSend(
+          commandResource.refresh(slashResult.commandId, workdir).then(async (full) => {
             if (!full) return
             // Map positional args to named params by order of appearance in the prompt
             const paramNames = extractTemplateParams(full.prompt)
@@ -535,23 +545,17 @@ export function ChatInput({
               input: sentText,
               attachments: sentAttachments,
             })
-          })
-          .catch((error: unknown) => {
-            setErrorMessage(sendFailedMessage(failureDetail(error)))
-          })
-          .finally(releaseSend)
+          }),
+        )
         return
       }
     }
 
-    void Promise.resolve(sendMessage(sentText, sentAttachments))
-      .then((result) => {
+    guardSend(
+      Promise.resolve(sendMessage(sentText, sentAttachments)).then((result) => {
         applySendResult(result, sentText, sentAttachments, setInput, setAttachments, setErrorMessage)
-      })
-      .catch((error: unknown) => {
-        setErrorMessage(sendFailedMessage(failureDetail(error)))
-      })
-      .finally(releaseSend)
+      }),
+    )
   }
 
   const handleSelectFile = useCallback(
