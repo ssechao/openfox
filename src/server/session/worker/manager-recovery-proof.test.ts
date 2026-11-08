@@ -131,7 +131,7 @@ describe('shutdown recovery proof', () => {
     }
   })
 
-  it.fails('blocks boot resume when shutdown child cleanup fails after the interruption marker', async () => {
+  it('blocks boot resume when shutdown child cleanup fails after the interruption marker', async () => {
     vi.useFakeTimers()
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-recovery-blocked-${crypto.randomUUID()}.db`))
     openDbs.push(db)
@@ -287,7 +287,7 @@ async function retireThenStop(options: { workflow: boolean; failCleanProofOnce?:
 }
 
 describe('deferred clean proof after Stop', () => {
-  it.fails('does not auto-prompt or relaunch a tool when Stop arrives after retire', async () => {
+  it('does not auto-prompt or relaunch a tool when Stop arrives after retire', async () => {
     const result = await retireThenStop({ workflow: false })
     expect(result.queueMessage).not.toHaveBeenCalled()
     expect(result.resumeInterruptedSession).not.toHaveBeenCalled()
@@ -295,14 +295,14 @@ describe('deferred clean proof after Stop', () => {
     expect(result.interruptedAt).toBeNull()
   })
 
-  it.fails('does not resume a workflow when Stop arrives after retire', async () => {
+  it('does not resume a workflow when Stop arrives after retire', async () => {
     const result = await retireThenStop({ workflow: true })
     expect(result.resumeInterruptedSession).not.toHaveBeenCalled()
     expect(result.queueMessage).not.toHaveBeenCalled()
     expect(result.interruptedAt).toBeNull()
   })
 
-  it.fails('cancels continuation when the clean proof persist is retried after Stop', async () => {
+  it('cancels continuation when the clean proof persist is retried after Stop', async () => {
     const result = await retireThenStop({ workflow: false, failCleanProofOnce: true })
     expect(result.events.some((event) => event.type === 'worker.recovery_clean')).toBe(true)
     expect(result.queueMessage).not.toHaveBeenCalled()

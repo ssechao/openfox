@@ -165,6 +165,8 @@ function resolveWorkerEntry(): { path: string; execArgv: string[] } {
 export class SessionWorkerManager {
   private readonly active = new Map<string, ActiveWorker>()
   private readonly pendingInterruptions = new Set<string>()
+  private readonly interruptionEpoch = new Map<string, number>()
+  private readonly stoppedEpoch = new Map<string, number>()
   private readonly exitPromises = new WeakMap<object, Promise<void>>()
   private readonly scheduler: SessionTurnScheduler
   private readonly mcpBroker: WorkerMcpBroker | null
@@ -283,6 +285,8 @@ export class SessionWorkerManager {
   }
 
   requestStop(sessionId: string): boolean {
+    const epoch = this.interruptionEpoch.get(sessionId)
+    if (epoch !== undefined) this.stoppedEpoch.set(sessionId, epoch)
     const cancellation = this.scheduler.cancel(sessionId)
     const worker = this.active.get(sessionId)
     if (!worker) return cancellation === 'waiting'
@@ -806,12 +810,12 @@ export class SessionWorkerManager {
     this.closeAdmissions()
     const workers = [...this.active.values()]
     const deadlineAt = Date.now() + (this.deps.shutdownTimeoutMs ?? 3_900)
+    const interruptedAtBySession = new Map<string, string>()
     for (const worker of workers) {
       const interruptedAt = new Date().toISOString()
+      interruptedAtBySession.set(worker.sessionId, interruptedAt)
       markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
       this.prepareInterruptedEvents(worker.sessionId)
-      const eventStore = this.deps.eventStore?.() ?? getEventStore()
-      eventStore.append(worker.sessionId, { type: 'worker.recovery_clean', data: { interruptedAt } })
       worker.gatewayShutdown = true
       try {
         this.deps.sessionManager.setRunning(worker.sessionId, false)
@@ -836,9 +840,21 @@ export class SessionWorkerManager {
       )
     }
     this.active.clear()
-    const errors = (await Promise.all(workers.map((worker) => this.shutdownWorker(worker, deadlineAt)))).filter(
-      (error): error is string => error !== undefined,
+    const results = await Promise.all(
+      workers.map(async (worker) => ({ worker, error: await this.shutdownWorker(worker, deadlineAt) })),
     )
+    const eventStore = this.deps.eventStore?.() ?? getEventStore()
+    for (const { worker, error } of results) {
+      const interruptedAt = interruptedAtBySession.get(worker.sessionId)
+      if (!interruptedAt) continue
+      eventStore.append(
+        worker.sessionId,
+        error
+          ? { type: 'worker.recovery_blocked', data: { interruptedAt, reason: 'orphan_proof' } }
+          : { type: 'worker.recovery_clean', data: { interruptedAt } },
+      )
+    }
+    const errors = results.map((result) => result.error).filter((error): error is string => error !== undefined)
     if (errors.length > 0) throw new Error(`Gateway worker shutdown failed: ${errors.join('; ')}`)
   }
 
@@ -1109,6 +1125,8 @@ export class SessionWorkerManager {
     report: WorkerCrashReport,
     verification: Promise<unknown>,
   ): void {
+    const epoch = (this.interruptionEpoch.get(worker.sessionId) ?? 0) + 1
+    this.interruptionEpoch.set(worker.sessionId, epoch)
     let continuationScheduled = false
     const afterVerification = (continueTurn: () => void): void => {
       if (continuationScheduled) return
@@ -1156,6 +1174,7 @@ export class SessionWorkerManager {
           report,
           afterVerification,
           worker.stopRequestedAt !== undefined,
+          epoch,
         )
       } catch (error) {
         logger.error('Worker interruption marker persistence failed; retrying', {
@@ -1197,6 +1216,7 @@ export class SessionWorkerManager {
     report: WorkerCrashReport,
     afterVerification: (continueTurn: () => void) => void,
     userRequestedStop: boolean,
+    interruptionEpoch: number,
   ): Promise<void> {
     const eventStore = this.deps.eventStore?.() ?? getEventStore()
     eventStore.invalidateExternalSession(sessionId)
@@ -1222,7 +1242,9 @@ export class SessionWorkerManager {
         report.finalizedMessageId = plan.finalizeMessageId
       }
       afterVerification(() => {
-        if (userRequestedStop) {
+        const stopped = userRequestedStop || this.stoppedEpoch.get(sessionId) === interruptionEpoch
+        if (stopped) {
+          if (this.stoppedEpoch.get(sessionId) === interruptionEpoch) this.stoppedEpoch.delete(sessionId)
           clearSessionInterrupted(this.deps.db(), sessionId)
           this.deps.broadcastForSession(sessionId, createSessionInterruptedMessage(null))
           return
