@@ -1,6 +1,8 @@
 # Hotfix chat UI reliability
 
-Base: `98ad75d12ba9688641e33de7a511761a9fec4ee6` on `fix/hotfix-chat-ui-reliability`. No production deploy. The deciding gate is the pre-commit hook for the commit that adds this file, using `/tmp/openfox-hotfix-chat-ui-3` on `.122`.
+Base: `98ad75d12ba9688641e33de7a511761a9fec4ee6` on `fix/hotfix-chat-ui-reliability`. No production deploy.
+
+Hotfix commit: `bb60a9a8815eaaaa82abf2028a4bc1649fc3628c`. Its pre-commit hook on `.122` (`/tmp/openfox-hotfix-chat-ui-3`, `node:24-bookworm`) exited 0: check passed, unit 6818 passed / 31 skipped, e2e 375 passed / 49 skipped.
 
 ## Send refusal
 
@@ -14,7 +16,11 @@ Exit notices are stored as `messageKind: "background-exit"` (queue start, mid-tu
 
 ## Verification on .122
 
-Host `ssechao@192.168.71.122`, image `node:24-bookworm`, tree `/tmp/openfox-hotfix-chat-ui-2`.
+Host `ssechao@192.168.71.122`, image `node:24-bookworm`.
+
+Post-review tree, directory `/tmp/openfox-hotfix-chat-ui-3`, commit `bb60a9a8815eaaaa82abf2028a4bc1649fc3628c`: `scripts/test-remote.sh --all` exit 0 (check, unit 6818 passed / 31 skipped, e2e 375 passed / 49 skipped).
+
+Earlier pre-review tree, directory `/tmp/openfox-hotfix-chat-ui-2`:
 
 Isolated smoke: `send-message-refusal`, `ChatFeedItems.background-exit`, `ChatInput.send`, `drain-queue`, `processor` — 37 passed, exit 0.
 
