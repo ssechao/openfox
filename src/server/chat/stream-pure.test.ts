@@ -1011,7 +1011,10 @@ describe('stream-pure', () => {
         },
       ])
       expect(result.content).toBe('')
-      expect(result.usage).toEqual({ promptTokens: 0, completionTokens: 0 })
+      expect(result.usage).toEqual(mockResponse.usage)
+      expect(result.timing).toEqual(
+        expect.objectContaining({ ttft: expect.any(Number), completionTime: expect.any(Number) }),
+      )
       expect(result.aborted).toBe(false)
       expect(result.finishReason).toBe('stop')
     })
@@ -1046,7 +1049,7 @@ describe('stream-pure', () => {
           rawArguments: '{"path":"src/app.ts","old_string":"a","new_string":"b"}',
         },
       ])
-      expect(result.usage).toEqual({ promptTokens: 0, completionTokens: 0 })
+      expect(result.usage).toEqual(mockResponse.usage)
     })
 
     it('adopts the terminal native call id and does not yield the rejected payload', async () => {
@@ -1097,6 +1100,9 @@ describe('stream-pure', () => {
           rawArguments: full,
         },
       ])
+      expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 10, totalTokens: 20 })
+      expect(result.timing.ttft).toEqual(expect.any(Number))
+      expect(result.timing.completionTime).toEqual(expect.any(Number))
       const yielded = JSON.stringify(events)
       expect(yielded).not.toContain('old_string')
       expect(yielded).not.toContain('new_string')

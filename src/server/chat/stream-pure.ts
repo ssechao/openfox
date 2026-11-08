@@ -567,7 +567,15 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
     let canonicalId = preflightFailure.toolCallId
     let terminalArguments: Record<string, unknown> | undefined
     let terminalCalls: ToolCall[] = []
-    for await (const event of stream) {
+    let drainedResult: Exclude<typeof result, null> | null
+    let drainedUsage: PureStreamResult['usage'] | undefined
+    while (true) {
+      const next = await stream.next()
+      if (next.done) {
+        drainedResult = next.value
+        break
+      }
+      const event = next.value
       if (event.type === 'error') drainError = event.error
       // Later deltas belong to the same provider turn. Keep them for the
       // replay id and for siblings, and never yield the drained payload.
@@ -578,6 +586,7 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
         if (event.index === preflightFailure.index && event.id) canonicalId = event.id
       }
       if (event.type === 'done') {
+        drainedUsage = event.response.usage
         terminalCalls = event.response.toolCalls ?? []
         const named = terminalCalls.filter((call) => call.name === preflightFailure.toolName)
         const samePath = named.filter((call) => call.arguments['path'] === preflightFailure.path)
@@ -640,15 +649,19 @@ export async function* streamLLMPure(options: PureStreamOptions): AsyncGenerator
       ...(rawArguments ? { rawArguments } : {}),
     })
 
+    const providerUsage = drainedResult?.response.usage ?? drainedUsage
     return {
       content: accumulatedContent,
       toolCalls,
       segments: [],
-      usage: { promptTokens: 0, completionTokens: 0 },
-      timing: { ttft: 0, completionTime: 0, tps: 0, prefillTps: 0 },
+      usage: providerUsage ?? { promptTokens: 0, completionTokens: 0 },
+      timing: drainedResult?.timing ?? { ttft: 0, completionTime: 0, tps: 0, prefillTps: 0 },
       aborted: false,
       modelParams,
       finishReason: 'stop',
+      ...(thinkingStartedAt !== undefined
+        ? { thinkingDurationMs: Math.max(0, lastThinkingAt - thinkingStartedAt) }
+        : {}),
     }
   }
 
