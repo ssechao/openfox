@@ -78,6 +78,7 @@ import {
   emitModeChanged,
   getSessionState,
   getCurrentWindowMessageOptions,
+  getContextMessages,
   buildSnapshotFromSessionState,
 } from '../events/index.js'
 import type { SnapshotMessage } from '../events/types.js'
@@ -232,6 +233,35 @@ describe('Session export / import', () => {
 
     it('throws for an unknown session', () => {
       expect(() => buildSessionExport(manager, 'missing-session')).toThrow()
+    })
+
+    it('does not export the rejected body kept for server replay', () => {
+      const sessionId = createSourceSession()
+      const replay = '{"path":"secret.txt","old_string":"SECRET-BODY","new_string":"LEAKED"}'
+      const windowId = getCurrentWindowMessageOptions(sessionId)?.contextWindowId
+      const messageId = emitAssistantMessageStart(sessionId, windowId ? { contextWindowId: windowId } : undefined)
+      emitToolCall(sessionId, messageId, {
+        id: 'call-secret',
+        name: 'edit_file',
+        arguments: { path: 'secret.txt' },
+        rawArguments: replay,
+      })
+      const events = getEventStore().getEvents(sessionId)
+      emitTurnSnapshot(
+        sessionId,
+        buildSnapshotFromSessionState({
+          session: manager.requireSession(sessionId),
+          events,
+          latestSeq: getEventStore().getLatestSeq(sessionId) ?? events.length,
+        }),
+      )
+
+      const payload = buildSessionExport(manager, sessionId)
+
+      expect(JSON.stringify(payload)).not.toContain('SECRET-BODY')
+      expect(JSON.stringify(payload)).not.toContain('rawArguments')
+      expect(JSON.stringify(getEventStore().getEvents(sessionId))).toContain('SECRET-BODY')
+      expect(JSON.stringify(getContextMessages(sessionId))).toContain('SECRET-BODY')
     })
 
     it('is read-only: export does not mutate the cache or event store', () => {

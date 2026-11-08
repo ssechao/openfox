@@ -1230,6 +1230,59 @@ describe('stream-pure', () => {
       })
     })
 
+    it('keeps two terminal-only edits of the same path as distinct calls', async () => {
+      const rejected = '{"path":"src/a.ts","old_string":"before","new_string":"after"}'
+      const result = await consumeStreamGenerator(
+        streamLLMPure({
+          messageId: 'msg-terminal-siblings',
+          systemPrompt: 'system',
+          llmClient: createMockClient([
+            { type: 'tool_call_delta', index: 0, id: 'fc-rejected', name: 'edit_file' },
+            { type: 'tool_call_delta', index: 0, arguments: rejected },
+            { type: 'tool_call_delta', index: 0, id: 'call-rejected' },
+            {
+              type: 'done',
+              response: {
+                id: 'resp-terminal-siblings',
+                content: '',
+                toolCalls: [
+                  {
+                    id: 'call-rejected',
+                    name: 'edit_file',
+                    arguments: { path: 'src/a.ts', old_string: 'before', new_string: 'after' },
+                  },
+                  {
+                    id: 'call-sibling-1',
+                    name: 'edit_file',
+                    arguments: { path: 'src/a.ts', old_string: 'one', new_string: 'two' },
+                  },
+                  {
+                    id: 'call-sibling-2',
+                    name: 'edit_file',
+                    arguments: { path: 'src/a.ts', old_string: 'three', new_string: 'four' },
+                  },
+                ],
+                finishReason: 'tool_calls',
+                usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+              },
+            },
+          ]),
+          messages: [{ role: 'user', content: 'edit twice more' }],
+          tools: [{ type: 'function', function: { name: 'edit_file', description: 'Edit', parameters: {} } }],
+          preflight: async () => 'File "src/a.ts" must be read before writing',
+        }),
+        () => {},
+      )
+
+      expect(result.toolCalls.map((call) => call.id)).toEqual(['call-sibling-1', 'call-sibling-2', 'call-rejected'])
+      expect(result.toolCalls[0]?.arguments).toEqual({ path: 'src/a.ts', old_string: 'one', new_string: 'two' })
+      expect(result.toolCalls[1]?.arguments).toEqual({ path: 'src/a.ts', old_string: 'three', new_string: 'four' })
+      expect(result.toolCalls[2]).toMatchObject({
+        arguments: { path: 'src/a.ts' },
+        rawArguments: rejected,
+      })
+    })
+
     it('does not abort when preflight allows the path', async () => {
       const client = createMockClient([
         { type: 'tool_call_delta', index: 0, id: 'call-1', name: 'write_file' },
