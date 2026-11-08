@@ -1622,7 +1622,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     // Broadcast updated session state so all clients see the confirmation removed
     const { getEventStore, combineEventsWithSnapshot: combineEvents } = await import('./events/index.js')
-    const { buildMessagesFromStoredEvents, foldPendingConfirmations } = await import('./events/folding.js')
+    const { buildMessagesFromStoredEvents, foldPendingConfirmations, foldPendingToolReconciliations } =
+      await import('./events/folding.js')
     const { createSessionStateMessage } = await import('./ws/protocol.js')
     const { getPendingQuestionsForSession } = await import('./tools/index.js')
     const { getMaxVisibleItems } = await import('./db/settings.js')
@@ -1635,6 +1636,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       omitReplayArguments: true,
     })
     const pendingConfirmations = foldPendingConfirmations(events)
+    const pendingToolReconciliations = foldPendingToolReconciliations(events)
     const pendingQuestions = getPendingQuestionsForSession(sessionId)
     const session = sessionManager.getSession(sessionId)
     if (session) {
@@ -1647,6 +1649,8 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         undefined,
         hiddenCount,
         sessionManager.getDisplayWorkflowExecution(sessionId) ?? undefined,
+        undefined,
+        pendingToolReconciliations,
       )
       wssExports.broadcastForSession(sessionId, { ...stateMsg, sessionId })
     }
@@ -2052,7 +2056,36 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       eventStore.append(sessionId, { type: 'tool.reconciliation_resolved', data: { toolCallId: item.toolCallId } })
     }
     const resolved = new Set(selected.map((item) => item.toolCallId))
-    res.json({ success: true, pendingToolReconciliations: pending.filter((item) => !resolved.has(item.toolCallId)) })
+    const remaining = pending.filter((item) => !resolved.has(item.toolCallId))
+    const { combineEventsWithSnapshot } = await import('./events/index.js')
+    const { buildMessagesFromStoredEvents, foldPendingConfirmations, foldPendingToolReconciliations } =
+      await import('./events/folding.js')
+    const { createSessionStateMessage } = await import('./ws/protocol.js')
+    const { getPendingQuestionsForSession } = await import('./tools/index.js')
+    const { getMaxVisibleItems } = await import('./db/settings.js')
+    const { snapshot, events: eventsSinceSnapshot } = eventStore.getEventsSinceSnapshot(sessionId)
+    const events = combineEventsWithSnapshot(sessionId, snapshot, eventsSinceSnapshot)
+    const maxVisibleItems = getMaxVisibleItems()
+    const { messages, hiddenCount } = buildMessagesFromStoredEvents(events, maxVisibleItems || undefined, {
+      omitReplayArguments: true,
+    })
+    const session = sessionManager.getSession(sessionId)
+    if (session) {
+      const stateMsg = createSessionStateMessage(
+        session,
+        messages,
+        foldPendingConfirmations(events),
+        getPendingQuestionsForSession(sessionId),
+        undefined,
+        undefined,
+        hiddenCount,
+        sessionManager.getDisplayWorkflowExecution(sessionId) ?? undefined,
+        undefined,
+        foldPendingToolReconciliations(events),
+      )
+      wssExports.broadcastForSession(sessionId, { ...stateMsg, sessionId })
+    }
+    res.json({ success: true, pendingToolReconciliations: remaining })
   })
 
   // Truncate session messages at a given index

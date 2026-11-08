@@ -14,6 +14,7 @@ import { CloseButton } from '../shared/CloseButton'
 import { Modal } from '../shared/Modal'
 import { ChevronUpIcon, InfoIcon } from '../shared/icons'
 import { SessionResumeButton } from '../session/SessionResumeButton'
+import { ToolReconciliationBanner } from '../session/ToolReconciliationBanner'
 import { useClickOutside } from '../../hooks/useClickOutside'
 import { useSessionScope, useScopedPaneState } from '../../stores/session/session-scope'
 import type { DisplayItem } from './groupMessages.js'
@@ -22,6 +23,7 @@ import type { LLMRetryState } from '../../stores/session/types'
 import { prettyPrintError } from '../../lib/prettyPrintError'
 
 const EMPTY_CRITERIA: MetadataEntry[] = []
+const EMPTY_RECONCILIATIONS: import('@shared/protocol.js').PendingToolReconciliationPayload[] = []
 
 function ErrorInfoButton({ onClick }: { onClick: () => void }) {
   const t = useT()
@@ -141,6 +143,12 @@ export const MessageList = memo(function MessageList({
     (pane) => pane.session?.interruptedAt ?? null,
     (state) => state.currentSession?.interruptedAt ?? null,
     null,
+  )
+  const pendingToolReconciliations = useScopedPaneState(
+    scopeId,
+    (pane) => pane.pendingToolReconciliations,
+    (state) => state.pendingToolReconciliations,
+    EMPTY_RECONCILIATIONS,
   )
   const error = useScopedPaneState(
     scopeId,
@@ -427,6 +435,10 @@ export const MessageList = memo(function MessageList({
 
             {interruptedAt && !isRunning && sessionId && (
               <SessionResumeButton sessionId={sessionId} interruptedAt={interruptedAt} />
+            )}
+
+            {sessionId && pendingToolReconciliations.length > 0 && (
+              <ToolReconciliationBanner sessionId={sessionId} pending={pendingToolReconciliations} />
             )}
 
             {showContinueWorkflow && activeWorkflowExecution && (

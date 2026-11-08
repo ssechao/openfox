@@ -14,7 +14,11 @@ import type { ProviderManager } from '../provider-manager.js'
 import type { ServerMessage } from '../../shared/protocol.js'
 import { logger } from '../utils/logger.js'
 import { updateSessionMetadata } from '../db/sessions.js'
-import { buildMessagesFromStoredEvents, foldPendingConfirmations } from '../events/folding.js'
+import {
+  buildMessagesFromStoredEvents,
+  foldPendingConfirmations,
+  foldPendingToolReconciliations,
+} from '../events/folding.js'
 import { createSessionStateMessage } from '../ws/protocol.js'
 import { getPendingQuestionsForSession } from '../tools/index.js'
 import { getSessionMessageCount } from '../utils/session-utils.js'
@@ -202,6 +206,7 @@ export function applyGeneratedSessionName(sessionId: string, name: string, deps:
       omitReplayArguments: true,
     })
     const pendingConfirmations = foldPendingConfirmations(events)
+    const pendingToolReconciliations = foldPendingToolReconciliations(events)
     const pendingQuestions = getPendingQuestionsForSession(sessionId)
     // Carry the live workflow execution (e.g. a paused user step) through the
     // broadcast — omitting it would wipe the execution from every client.
@@ -218,6 +223,8 @@ export function applyGeneratedSessionName(sessionId: string, name: string, deps:
         undefined,
         hiddenCount,
         activeWorkflowExecution,
+        undefined,
+        pendingToolReconciliations,
       ),
     )
   }

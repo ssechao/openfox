@@ -13,7 +13,7 @@ import type {
   SessionStatsSummary,
   DangerLevel,
 } from '@shared/types.js'
-import type { ServerMessage, QueuedMessage, ChoiceOption } from '@shared/protocol.js'
+import type { ServerMessage, QueuedMessage, ChoiceOption, PendingToolReconciliationPayload } from '@shared/protocol.js'
 import type { ConnectionStatus } from '../../lib/ws'
 
 export interface PendingPathConfirmation {
@@ -71,6 +71,7 @@ export interface SessionPane {
   subAgentContextStates: Record<string, ContextState>
   pendingPathConfirmations: PendingPathConfirmation[]
   pendingQuestions: PendingQuestion[]
+  pendingToolReconciliations: PendingToolReconciliationPayload[]
   visionFallbackByMessage: Record<string, VisionFallbackItem>
   queuedMessages: QueuedMessage[]
   abortInProgress: boolean
@@ -110,6 +111,7 @@ export interface SessionState {
   sessionsWithPendingConfirmations: string[]
   gitStatus: GitStatus
   pendingQuestions: PendingQuestion[]
+  pendingToolReconciliations: PendingToolReconciliationPayload[]
   visionFallbackByMessage: Record<string, VisionFallbackItem>
   queuedMessages: QueuedMessage[]
   abortInProgress: boolean
@@ -170,6 +172,8 @@ export interface SessionState {
   resumeGeneration: (sessionId: string) => void
   /** Resume a session that was interrupted by a worker crash (étape 6b). */
   resumeInterruption: (sessionId: string) => Promise<void>
+  /** Confirm that the pending effectful tool calls did not complete, so later calls can run. */
+  reconcilePendingTools: (sessionId: string) => Promise<void>
   launchWorkflow: (
     sessionId: string,
     content?: string,

@@ -236,6 +236,7 @@ describe('ToolCallDisplay — PathConfirmationButtons placement', () => {
           subAgentContextStates: {},
           pendingPathConfirmations: [pendingConfirmation],
           pendingQuestions: [],
+          pendingToolReconciliations: [],
           visionFallbackByMessage: {},
           queuedMessages: [],
           abortInProgress: false,

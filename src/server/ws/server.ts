@@ -36,6 +36,7 @@ import {
   buildMessagesFromStoredEvents,
   buildSessionStatsMessages,
   foldPendingConfirmations,
+  foldPendingToolReconciliations,
 } from '../events/folding.js'
 import { computeSessionStatsSummary } from '../../shared/stats.js'
 import { getPendingQuestionsForSession } from '../tools/index.js'
@@ -666,6 +667,7 @@ export function createWebSocketServer(
       })
       const sessionStats = computeSessionStatsSummary(buildSessionStatsMessages(events))
       const pendingConfirmations = foldPendingConfirmations(events)
+      const pendingToolReconciliations = foldPendingToolReconciliations(events)
       const pendingQuestions = getPendingQuestionsForSession(updatedSession.id)
       const activeWorkflowExecution = sessionManager.getDisplayWorkflowExecution(updatedSession.id)
 
@@ -690,6 +692,7 @@ export function createWebSocketServer(
           hiddenCount,
           activeWorkflowExecution ?? undefined,
           sessionStats,
+          pendingToolReconciliations,
         ),
       )
 

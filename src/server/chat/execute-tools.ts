@@ -280,7 +280,7 @@ export async function executeTools(
     if (pendingReconciliations.length > 0 && isEffectfulToolCall(toolCall)) {
       toolResult = {
         success: false,
-        error: `Effectful tool execution is blocked until pending tool outcomes are explicitly reconciled via POST /api/sessions/${ctx.sessionId}/reconcile-tools. Pending calls: ${pendingReconciliations.map((item) => item.toolCallId).join(', ')}`,
+        error: `Effectful tool execution is blocked until the pending tool calls are confirmed or abandoned in the session. Pending calls: ${pendingReconciliations.map((item) => item.toolCallId).join(', ')}`,
         durationMs: Date.now() - startTime,
         truncated: false,
         metadata: { reconciliationRequired: true },

@@ -205,6 +205,13 @@ export interface PendingQuestionPayload {
   options: ChoiceOption[] | undefined
 }
 
+export interface PendingToolReconciliationPayload {
+  messageId: string
+  toolCallId: string
+  name: string
+  arguments: Record<string, unknown>
+}
+
 export interface SessionStatePayload {
   session: Session
   messages: Message[] // All messages for this session
@@ -212,6 +219,7 @@ export interface SessionStatePayload {
   sessionStats?: import('./types.js').SessionStatsSummary // Lean, exact headline stats for the whole session
   pendingConfirmations: PendingPathConfirmationPayload[]
   pendingQuestions?: PendingQuestionPayload[]
+  pendingToolReconciliations?: PendingToolReconciliationPayload[]
   gitStatus?: GitStatusPayload // Current branch and diff, embedded on session load
   activeWorkflowExecution?: import('./types.js').WorkflowExecution | null
 }

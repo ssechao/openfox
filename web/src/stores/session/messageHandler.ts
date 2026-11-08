@@ -373,6 +373,7 @@ export function handleServerMessage(
           currentTodos: [],
           pendingPathConfirmations: confs,
           pendingQuestions: payload.pendingQuestions ?? [],
+          pendingToolReconciliations: payload.pendingToolReconciliations ?? prior.pendingToolReconciliations,
           activeWorkflowExecution:
             (payload.activeWorkflowExecution as import('@shared/types.js').WorkflowExecution | undefined) ?? null,
           queuedMessages: prior.queuedMessages,

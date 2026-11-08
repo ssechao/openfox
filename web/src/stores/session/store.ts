@@ -56,6 +56,7 @@ interface SessionLoadData {
   queueState?: QueuedMessage[]
   pendingConfirmations?: PendingPathConfirmation[]
   pendingQuestions?: PendingQuestionPayload[]
+  pendingToolReconciliations?: import('@shared/protocol.js').PendingToolReconciliationPayload[]
   activeWorkflowExecution?: WorkflowExecution | null
 }
 
@@ -349,6 +350,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           queuedMessages: (data.queueState as QueuedMessage[] | undefined) ?? [],
           pendingPathConfirmations: (data.pendingConfirmations ?? []) as PendingPathConfirmation[],
           pendingQuestions: (data.pendingQuestions ?? []) as PendingQuestionPayload[],
+          pendingToolReconciliations: data.pendingToolReconciliations ?? [],
           activeWorkflowExecution: (data.activeWorkflowExecution as WorkflowExecution | undefined) ?? null,
           llmRetry: null,
         }
@@ -401,6 +403,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
     crossSessionConfirmations: {},
     sessionsWithPendingConfirmations: [],
     pendingQuestions: [],
+    pendingToolReconciliations: [],
     visionFallbackByMessage: {},
     gitStatus: null,
     queuedMessages: [],
@@ -1044,6 +1047,29 @@ export const useSessionStore = create<SessionState>((set, get) => {
       } catch (error) {
         console.error('Error resuming generation:', error)
       }
+    },
+
+    reconcilePendingTools: async (sessionId) => {
+      const pending = paneFor(get(), sessionId)?.pendingToolReconciliations ?? []
+      if (pending.length === 0) return
+      const res = await authFetch(`/api/sessions/${sessionId}/reconcile-tools`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ toolCallIds: pending.map((item) => item.toolCallId) }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body.error || `HTTP ${res.status}`)
+      }
+      const body = (await res.json()) as {
+        pendingToolReconciliations?: import('@shared/protocol.js').PendingToolReconciliationPayload[]
+      }
+      set((s) =>
+        updatePane(s, sessionId, (pane) => ({
+          ...pane,
+          pendingToolReconciliations: body.pendingToolReconciliations ?? [],
+        })),
+      )
     },
 
     resumeInterruption: async (sessionId) => {

@@ -132,6 +132,7 @@ export function createSessionStateMessage(
   hiddenCount?: number,
   activeWorkflowExecution?: import('../../shared/types.js').WorkflowExecution | null,
   sessionStats?: import('../../shared/types.js').SessionStatsSummary | null,
+  pendingToolReconciliations?: import('../../shared/protocol.js').PendingToolReconciliationPayload[],
 ): ServerMessage<SessionStatePayload> {
   // Enrich messages so toolCalls have their results attached
   const enrichedMessages = enrichMessagesWithToolResults(messages)
@@ -142,6 +143,7 @@ export function createSessionStateMessage(
       messages: enrichedMessages,
       pendingConfirmations,
       ...(pendingQuestions ? { pendingQuestions } : {}),
+      ...(pendingToolReconciliations !== undefined ? { pendingToolReconciliations } : {}),
       ...(gitStatus ? { gitStatus } : {}),
       ...(hiddenCount !== undefined ? { hiddenCount } : {}),
       ...(activeWorkflowExecution !== undefined && activeWorkflowExecution !== null ? { activeWorkflowExecution } : {}),
