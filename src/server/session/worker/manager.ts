@@ -25,7 +25,6 @@ import { logger } from '../../utils/logger.js'
 import {
   createSessionRunningMessage,
   createSessionInterruptedMessage,
-  createChatMessageMessage,
   createQueueStateMessage,
 } from '../../ws/protocol.js'
 import { createMessageDoneEvent } from '../../chat/stream-pure.js'
