@@ -32,3 +32,16 @@ Findings P1-A and P1-B. No MEP. No resume button and no user question.
 Targeted Vitest 4.1.10 on the Mac: `manager-recovery-proof.test.ts` 5/5, the two existing shutdown deadline tests, `settle-unknown.test.ts` 5/5, and `gateway-shutdown-interruption.integration.test.ts` 1/1.
 
 Hook `.122` (`git config openfox.testRemote=ssechao@192.168.71.122`) on `237a33a0`, 2026-11-08 21:45Z, exit 0. Unit 544 files passed, 2 skipped; 6819 tests passed, 31 skipped. E2E 58 files passed, 3 skipped; 375 tests passed, 49 skipped. Check, lint, format, and jscpd were in that hook. No second `--all`.
+
+## Release NO-GO cb0ccdbc residual
+
+Findings P1-A and P1-B residual. No MEP. No resume button and no user question.
+
+- RED `0ac931f744335ccf16740d572f2981eb90d95489` — a workerless runtime stored `worker.recovery_clean` before `ancillaryCleanup`, so a failed close still resumed on boot. A late Stop deleted `stoppedEpoch` before `clearSessionInterrupted`; when that UPDATE threw, the retried callback queued the auto-prompt.
+- GREEN `5fc4c5a891fdfde679a2250d5adccf6125083cb5` — `worker.recovery_clean` for a workerless runtime is stored only after ancillary cleanup succeeds. A failed cleanup stores `worker.recovery_blocked` (`reason: orphan_proof`) and boot stays stopped. `stoppedEpoch` is removed only after the interruption marker is cleared and the stop broadcast is sent, so a replayed callback stays stopped and does not queue an auto-prompt or resume a tool.
+
+Targeted Vitest 4.1.10 on the Mac: `manager-recovery-proof.test.ts` 6/6, `gateway-shutdown-ancillary-proof.integration.test.ts` 1/1, `gateway-shutdown-interruption.integration.test.ts` 1/1.
+
+RED hook `.122` on `0ac931f7`, 2026-11-08 22:16Z, exit 0. Unit 545 files passed, 2 skipped; 6819 tests passed, 2 expected fail, 31 skipped. E2E 58 files passed, 3 skipped; 375 tests passed, 49 skipped.
+
+GREEN hook `.122` on `5fc4c5a8`, 2026-11-08 22:25Z, exit 0. Unit 545 files passed, 2 skipped; 6821 tests passed, 31 skipped. E2E 58 files passed, 3 skipped; 375 tests passed, 49 skipped. Two earlier attempts on the same staged tree exited 1 on unrelated flakes (`process-supervisor/client.test.ts` output bound, then `gateway-ipc` late-effect) and were not code changes. Check, lint, format, and jscpd were in the passing hook. No second `--all`. No MEP.
