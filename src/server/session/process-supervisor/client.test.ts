@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { initChildrenTracking } from '../worker/children.js'
+import { classifyRecordedProcessIdentity, initChildrenTracking } from '../worker/children.js'
 import { SessionProcessSupervisor } from './client.js'
 
 function fakeChild() {
@@ -651,5 +651,109 @@ process.stdout.end(() => process.exit(0))
     })
 
     await expect(result).resolves.toEqual({ code: 0, stdout: 'clean' })
+  })
+
+  async function spawnProvenHandle(
+    readProcessIdentity: (
+      pid: number,
+    ) => Promise<{ status: 'found'; identity: string } | { status: 'absent' } | { status: 'unreadable'; error: Error }>,
+  ) {
+    const signalProcess = vi.fn((_pid: number, _signal?: string | number) => true as const)
+    const child = fakeChild()
+    const supervisor = new SessionProcessSupervisor({
+      forkProcess: vi.fn(() => child),
+      entry: { path: '/supervisor.js', execArgv: [] },
+      startupTimeoutMs: 100,
+      signalProcess,
+      readProcessIdentity,
+    })
+    const started = supervisor.start()
+    child.emit('message', { type: 'ready', pid: 41 })
+    await started
+    const handle = supervisor.spawnWorker({
+      workerKey: 'worker-proof',
+      path: '/worker.js',
+      execArgv: [],
+      env: process.env,
+    })
+    const request = child.send.mock.calls.find(([message]) => message.type === 'worker.spawn')![0]
+    child.emit('message', {
+      type: 'worker.spawned',
+      requestId: request.requestId,
+      workerKey: 'worker-proof',
+      pid: 99,
+      inventory: { pid: 99, startedAt: 'linux:original', pgid: 99 },
+    })
+    return { handle, signalProcess }
+  }
+
+  it('proves an absent worker identity and does not signal that PID', async () => {
+    const { handle, signalProcess } = await spawnProvenHandle(async () => ({ status: 'absent' }))
+    await expect(handle.proveStartIdentity()).resolves.toEqual({ status: 'absent' })
+    await expect(handle.killVerified('SIGKILL', Date.now() + 1_000)).rejects.toThrow(/absent/i)
+    expect(signalProcess).not.toHaveBeenCalled()
+  })
+
+  it('proves a living worker identity when the start time is unchanged', async () => {
+    const { handle, signalProcess } = await spawnProvenHandle(async () => ({
+      status: 'found',
+      identity: 'linux:original',
+    }))
+    await expect(handle.proveStartIdentity()).resolves.toEqual({ status: 'alive' })
+    expect(signalProcess).not.toHaveBeenCalled()
+  })
+
+  it('proves an unreadable worker identity without signaling', async () => {
+    const { handle, signalProcess } = await spawnProvenHandle(async () => ({
+      status: 'unreadable',
+      error: new Error('EIO'),
+    }))
+    const verdict = await handle.proveStartIdentity()
+    expect(verdict.status).toBe('unreadable')
+    if (verdict.status === 'unreadable') expect(verdict.error.message).toBe('EIO')
+    await expect(handle.killVerified('SIGKILL', Date.now() + 1_000)).rejects.toThrow(/unreadable/i)
+    expect(signalProcess).not.toHaveBeenCalled()
+  })
+
+  it('proves a recycled PID and refuses to signal the replacement', async () => {
+    const { handle, signalProcess } = await spawnProvenHandle(async () => ({
+      status: 'found',
+      identity: 'linux:replacement',
+    }))
+    await expect(handle.proveStartIdentity()).resolves.toEqual({ status: 'recycled' })
+    await expect(handle.killVerified('SIGKILL', Date.now() + 1_000)).rejects.toThrow(/changed/i)
+    expect(signalProcess).not.toHaveBeenCalled()
+  })
+})
+
+describe('classifyRecordedProcessIdentity', () => {
+  const recorded = { pid: 99, startedAt: 'linux:original' }
+
+  it('reads an absent process as gone', () => {
+    expect(classifyRecordedProcessIdentity(recorded, { status: 'absent' })).toEqual({ status: 'absent' })
+  })
+
+  it('reads the same start identity as alive', () => {
+    expect(classifyRecordedProcessIdentity(recorded, { status: 'found', identity: 'linux:original' })).toEqual({
+      status: 'alive',
+    })
+  })
+
+  it('reads a different start identity as recycled', () => {
+    expect(classifyRecordedProcessIdentity(recorded, { status: 'found', identity: 'linux:other' })).toEqual({
+      status: 'recycled',
+    })
+  })
+
+  it('reads an unreadable process as unreadable', () => {
+    const error = new Error('EIO')
+    expect(classifyRecordedProcessIdentity(recorded, { status: 'unreadable', error })).toEqual({
+      status: 'unreadable',
+      error,
+    })
+  })
+
+  it('does not prove death when the recorded identity is missing', () => {
+    expect(classifyRecordedProcessIdentity(undefined, { status: 'absent' }).status).toBe('unreadable')
   })
 })

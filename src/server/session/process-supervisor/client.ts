@@ -1,11 +1,13 @@
 import { fork, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import {
+  classifyRecordedProcessIdentity,
   readProcessStartIdentityAsync,
   type ExclusiveProcessInventory,
   type OrphanInventoryCheck,
   type ProcessIdentityRead,
   type ProcessInventoryEntry,
+  type RecordedProcessIdentityVerdict,
 } from '../worker/children.js'
 import { resolveSessionProcessEntry } from '../process-entry.js'
 import type { GatewayToSupervisorMessage, SupervisorToGatewayMessage } from './protocol.js'
@@ -22,6 +24,7 @@ export interface SupervisorWorkerHandle {
   send(message: unknown): boolean
   kill(signal?: NodeJS.Signals): boolean
   killVerified(signal: NodeJS.Signals, deadlineAt: number): Promise<void>
+  proveStartIdentity(): Promise<RecordedProcessIdentityVerdict>
   on(event: 'message', listener: (message: unknown) => void): this
   on(event: 'error', listener: (error: Error) => void): this
   on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this
@@ -92,6 +95,23 @@ class RemoteWorkerHandle extends EventEmitter implements SupervisorWorkerHandle 
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
     return this.dispatch({ type: 'worker.kill', workerKey: this.workerKey, signal })
+  }
+
+  async proveStartIdentity(): Promise<RecordedProcessIdentityVerdict> {
+    const pid = this.pid
+    const inventory = this.inventory
+    if (pid === undefined || inventory === undefined || inventory.pid !== pid || inventory.startedAt.trim() === '') {
+      return { status: 'unreadable', error: new Error('Worker start identity is unavailable') }
+    }
+    try {
+      const read = await this.readProcessIdentity(pid)
+      return classifyRecordedProcessIdentity({ pid: inventory.pid, startedAt: inventory.startedAt }, read)
+    } catch (error) {
+      return {
+        status: 'unreadable',
+        error: error instanceof Error ? error : new Error(String(error)),
+      }
+    }
   }
 
   async killVerified(signal: NodeJS.Signals, deadlineAt: number): Promise<void> {

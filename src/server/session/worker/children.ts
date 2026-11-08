@@ -170,6 +170,30 @@ function execFileText(file: string, args: string[], timeout?: number): Promise<s
   })
 }
 
+export type RecordedProcessIdentityVerdict =
+  { status: 'absent' } | { status: 'alive' } | { status: 'recycled' } | { status: 'unreadable'; error: Error }
+
+export function classifyRecordedProcessIdentity(
+  recorded: { pid: number; startedAt: string } | undefined,
+  read: ProcessIdentityRead | undefined,
+): RecordedProcessIdentityVerdict {
+  if (
+    recorded === undefined ||
+    !Number.isInteger(recorded.pid) ||
+    recorded.pid <= 0 ||
+    recorded.startedAt.trim() === ''
+  ) {
+    return { status: 'unreadable', error: new Error('Worker start identity is unavailable') }
+  }
+  if (read === undefined) {
+    return { status: 'unreadable', error: new Error('Worker start identity is unavailable') }
+  }
+  if (read.status === 'absent') return { status: 'absent' }
+  if (read.status === 'unreadable') return read
+  if (read.identity === recorded.startedAt) return { status: 'alive' }
+  return { status: 'recycled' }
+}
+
 export async function readProcessStartIdentityAsync(pid: number): Promise<ProcessIdentityRead> {
   try {
     if (process.platform === 'linux') {
