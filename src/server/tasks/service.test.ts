@@ -1273,6 +1273,98 @@ describe('project tasks service', () => {
       expect(nextAfter.activeSessionId).toBe(nextAfter.sessionIds[0])
     })
 
+    it.fails(
+      'deletes the fresh session after the delete budget expires and links one session on retry',
+      async () => {
+        closeDatabase()
+        const dbPath = join(root, 'delete-budget.db')
+        const config = loadConfig()
+        config.database.path = dbPath
+        initDatabase(config)
+        initEventStore(getDatabase())
+        const blockedProjectId = createProject('Budget locked', join(root, 'budget-locked')).id
+        const nextProjectId = createProject('Budget next', join(root, 'budget-next')).id
+        getDatabase()
+          .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+          .run('2020-01-02T00:00:00.000Z', blockedProjectId)
+        getDatabase()
+          .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+          .run('2020-01-01T00:00:00.000Z', nextProjectId)
+        const sessionCount = (id: string) =>
+          (
+            getDatabase().prepare('SELECT COUNT(*) AS n FROM sessions WHERE project_id = ?').get(id) as {
+              n: number
+            }
+          ).n
+        let releaseLock = () => {}
+        const lockClosed = new Promise<void>((resolve) => {
+          releaseLock = resolve
+        })
+        let locked = false
+        const sessions = new SessionManager({
+          getCurrentModelContext: () => 200000,
+          getProviders: () => [],
+        } as unknown as ConstructorParameters<typeof SessionManager>[0])
+        const tasks = createTasksService({
+          sessionManager: sessions,
+          config: loadConfig(),
+          broadcast: () => {},
+          configDir: join(root, 'config'),
+          launchWorkflow: (sessionId) => {
+            const session = sessions.getSession(sessionId)
+            if (session?.projectId === blockedProjectId && !locked) {
+              locked = true
+              const locker = new Database(dbPath)
+              locker.pragma('busy_timeout = 0')
+              locker.exec('BEGIN IMMEDIATE')
+              setTimeout(() => {
+                locker.exec('ROLLBACK')
+                locker.close()
+                releaseLock()
+              }, 3000)
+              return 'start_failed'
+            }
+            return 'started'
+          },
+        })
+        await tasks.setSettings(blockedProjectId, { queuePaused: true })
+        await tasks.setSettings(nextProjectId, { queuePaused: true })
+        const blockedTask = tasks.create(blockedProjectId, { prompt: '/default' }, { actor: 'human' })
+        const nextTask = tasks.create(nextProjectId, { prompt: '/default' }, { actor: 'human' })
+        await tasks.move(blockedProjectId, blockedTask.id, 'in_progress', { actor: 'human' })
+        await tasks.move(nextProjectId, nextTask.id, 'in_progress', { actor: 'human' })
+        getDatabase()
+          .prepare(`UPDATE project_task_settings SET queue_paused = 0 WHERE project_id IN (?, ?)`)
+          .run(blockedProjectId, nextProjectId)
+
+        await tasks.retryQueuedLaunches()
+        await lockClosed
+        const afterFailure = tasks.get(blockedProjectId, blockedTask.id)!
+        const failedSessions = sessionCount(blockedProjectId)
+        await tasks.retryQueuedLaunches()
+        const afterRetry = tasks.get(blockedProjectId, blockedTask.id)!
+        const retriedSessions = sessionCount(blockedProjectId)
+        const backlog = (tasks as { pendingFreshSessionDeletes?: () => number }).pendingFreshSessionDeletes?.() ?? -1
+
+        expect([
+          failedSessions,
+          retriedSessions,
+          afterFailure.sessionIds.length,
+          afterRetry.sessionIds.length,
+          afterFailure.runState,
+          afterRetry.runState,
+          backlog,
+        ]).toEqual([0, 1, 0, 1, 'queued', 'running', 0])
+        expect(afterFailure.activeSessionId).toBeUndefined()
+        expect(afterRetry.activeSessionId).toBe(afterRetry.sessionIds[0])
+        expect(sessionCount(nextProjectId)).toBe(1)
+        expect(tasks.get(nextProjectId, nextTask.id)?.activeSessionId).toBe(
+          tasks.get(nextProjectId, nextTask.id)?.sessionIds[0],
+        )
+      },
+      20000,
+    )
+
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
       const task = create('/fixme crash src/a.ts')
       const result = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
