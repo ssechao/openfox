@@ -58,18 +58,24 @@ function isSqliteBusy(error: unknown): boolean {
   return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'))
 }
 
-function runBusySync<T>(operation: () => T): T {
+function runBusy<T>(operation: () => T): T | Promise<T> {
   const deadline = Date.now() + 200
   let delay = 5
-  for (;;) {
+  const attempt = (): T | Promise<T> => {
     try {
       return operation()
     } catch (error) {
       if (!isSqliteBusy(error) || Date.now() >= deadline) throw error
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay)
+      const wait = delay
       delay = Math.min(delay * 2, 40)
+      return new Promise((resolve) => setTimeout(resolve, wait)).then(attempt)
     }
   }
+  return attempt()
+}
+
+function isThenable<T>(value: T | Promise<T>): value is Promise<T> {
+  return typeof value === 'object' && value !== null && typeof (value as { then?: unknown }).then === 'function'
 }
 import { getProject, listProjects } from '../db/projects.js'
 import { resolveSlashLaunch, type SlashLaunch } from './slash.js'
@@ -101,7 +107,6 @@ import {
 import type { TaskGateConfig, TaskActor, TaskSchedule } from '../../shared/types.js'
 import { serverT } from '../i18n.js'
 import { nextOccurrence } from './recurrence.js'
-import { SessionWorkerQueueFullError } from '../utils/errors.js'
 
 export type TaskDestination = 'todo' | 'in_progress' | 'done'
 
@@ -422,13 +427,12 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
 
       const settings = dbGetTaskSettings(projectId)
       const active = activeCount(projectId)
-      const humanLaunch = opts.actor !== 'agent' && active < settings.slotLimit && !settings.queuePaused
-      if (humanLaunch) {
-        const admissionSessionId = reusableTarget(projectId, opts.sessionId) ?? `task:${task.id}`
-        if (canStartSession && !canStartSession(admissionSessionId)) {
-          throw new SessionWorkerQueueFullError(admissionSessionId)
-        }
-      }
+      const humanEligible = opts.actor !== 'agent' && active < settings.slotLimit && !settings.queuePaused
+      const admissionSessionId = humanEligible
+        ? (reusableTarget(projectId, opts.sessionId) ?? `task:${task.id}`)
+        : undefined
+      const poolBlocked = Boolean(admissionSessionId && canStartSession && !canStartSession(admissionSessionId))
+      const humanLaunch = humanEligible && !poolBlocked
       if (opts.actor === 'agent') {
         if (!opts.sessionId) {
           throw new Error(
@@ -488,10 +492,16 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         if (task.schedule) dbClearTaskSchedule(taskId)
         dbAppendToBottom(taskId, 'in_progress')
         const earmarked = reusableTarget(projectId, opts.sessionId)
-        if (earmarked) dbAddTaskLink(taskId, earmarked, false)
-        dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (queued)`, opts.actorName)
+        if (earmarked && !poolBlocked) dbAddTaskLink(taskId, earmarked, false)
+        dbAddAuditEntry(
+          taskId,
+          opts.actor,
+          'move',
+          poolBlocked ? 'Moved to In Progress (queued): waiting for a worker' : 'Moved to In Progress (queued)',
+          opts.actorName,
+        )
         queued = {
-          reason: settings.queuePaused ? 'queue_paused' : 'slot_limit',
+          reason: poolBlocked ? 'admission_refused' : settings.queuePaused ? 'queue_paused' : 'slot_limit',
           active,
           slotLimit: settings.slotLimit,
           position: dbGetTask(taskId)?.queuePosition ?? 1,
@@ -902,12 +912,14 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     const target = reusableTarget(projectId, earmarks[0]?.session_id)
     const admissionSessionId = target ?? `task:${next.id}`
     if (canStartSession && !canStartSession(admissionSessionId)) return undefined
-    runBusySync(() => dbSetTaskRunState(next.id, 'running'))
+    const marked = runBusy(() => dbSetTaskRunState(next.id, 'running'))
+    if (isThenable(marked)) await marked
     let seeded: Awaited<ReturnType<typeof seedSession>>
     try {
       seeded = await seedSession(projectId, next, 'queued', target)
     } catch (error) {
-      runBusySync(() => dbSetTaskRunState(next.id, 'queued'))
+      const rolled = runBusy(() => dbSetTaskRunState(next.id, 'queued'))
+      if (isThenable(rolled)) await rolled
       if (isWorkerAdmissionRefusal(error) && !error.freshSession) {
         dbAddTaskLink(next.id, error.sessionId, false)
       }

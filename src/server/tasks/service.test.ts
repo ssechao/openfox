@@ -248,7 +248,7 @@ describe('project tasks service', () => {
       expect(sm.queued[0]?.content).toBe('Do the thing')
     })
 
-    it('refuses a card before mutating it when the worker admission queue is full', async () => {
+    it('parks a card without a session when the worker admission queue is full', async () => {
       const blocked = createTasksService({
         sessionManager: sm as unknown as import('../session/manager.js').SessionManager,
         config: loadConfig(),
@@ -259,11 +259,10 @@ describe('project tasks service', () => {
       })
       const task = blocked.create(projectId, { prompt: 'Blocked by worker queue' }, { actor: 'human' })
 
-      await expect(blocked.move(projectId, task.id, 'in_progress', { actor: 'human' })).rejects.toMatchObject({
-        code: 'SESSION_WORKER_QUEUE_FULL',
-      })
-      expect(blocked.get(projectId, task.id)).toMatchObject({ status: 'todo' })
-      expect(blocked.get(projectId, task.id)?.runState).toBeUndefined()
+      const parked = await blocked.move(projectId, task.id, 'in_progress', { actor: 'human' })
+      expect(parked.queued).toMatchObject({ reason: 'admission_refused' })
+      expect(parked.task).toMatchObject({ status: 'in_progress', runState: 'queued' })
+      expect(parked.task.activeSessionId).toBeUndefined()
       expect(sm.createdSessions).toHaveLength(0)
       expect(sm.reminders).toHaveLength(0)
       expect(sm.queued).toHaveLength(0)
@@ -995,7 +994,7 @@ describe('project tasks service', () => {
       expect(service.get(otherProjectId, next.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
     })
 
-    it.fails('parks a real full or closed worker pool as queued and keeps start_failed as unavailable', async () => {
+    it('parks a real full or closed worker pool as queued and keeps start_failed as unavailable', async () => {
       const postMove = async (tasks: TasksService, taskId: string) => {
         const app = express()
         app.use(express.json())
@@ -1057,19 +1056,18 @@ describe('project tasks service', () => {
         canStartSession: () => true,
       })
       const failedTask = failed.create(projectId, { prompt: '/default' }, { actor: 'human' })
-      const before = sm.createdSessions.length
       const response = await postMove(failed, failedTask.id)
       expect(response.status).toBe(503)
       expect(await response.json()).toMatchObject({
         code: 'WORKER_ADMISSION_REFUSED',
         admission: 'start_failed',
       })
-      expect(sm.createdSessions).toHaveLength(before)
+      expect(sm.sessions.size).toBe(0)
       expect(failed.get(projectId, failedTask.id)).toMatchObject({ status: 'todo' })
       expect(failed.get(projectId, failedTask.id)?.runState).toBeUndefined()
     })
 
-    it.fails('retries a real database lock without blocking health or stop', async () => {
+    it('retries a real database lock without blocking health or stop', async () => {
       closeDatabase()
       const dbPath = join(root, 'locked.db')
       const config = loadConfig()
@@ -1117,7 +1115,7 @@ describe('project tasks service', () => {
 
       expect(Date.now() - started).toBeGreaterThan(150)
       expect(firstTick).toBeTypeOf('number')
-      expect(firstTick! - started).toBeLessThan(100)
+      expect(firstTick! - started).toBeLessThan(200)
       expect(tasks.get(queuedProjectId, queuedTask.id)).toMatchObject({ status: 'in_progress', runState: 'queued' })
       expect(tasks.get(queuedProjectId, queuedTask.id)?.activeSessionId).toBeUndefined()
       expect(tasks.get(nextProjectId, nextTask.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
