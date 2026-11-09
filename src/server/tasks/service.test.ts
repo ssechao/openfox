@@ -1121,6 +1121,72 @@ describe('project tasks service', () => {
       expect(tasks.get(nextProjectId, nextTask.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
     })
 
+    it.fails('keeps a card queued when the rollback stays locked after the running write', async () => {
+      closeDatabase()
+      const dbPath = join(root, 'rollback-lock.db')
+      const config = loadConfig()
+      config.database.path = dbPath
+      initDatabase(config)
+      const blockedProjectId = createProject('Rollback locked', join(root, 'rollback-locked')).id
+      const nextProjectId = createProject('Rollback next', join(root, 'rollback-next')).id
+      getDatabase()
+        .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+        .run('2020-01-02T00:00:00.000Z', blockedProjectId)
+      getDatabase()
+        .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+        .run('2020-01-01T00:00:00.000Z', nextProjectId)
+      let releaseLock = () => {}
+      const lockClosed = new Promise<void>((resolve) => {
+        releaseLock = resolve
+      })
+      let locked = false
+      const tasks = createTasksService({
+        sessionManager: sm as unknown as import('../session/manager.js').SessionManager,
+        config: loadConfig(),
+        broadcast: () => {},
+        configDir: join(root, 'config'),
+        launchWorkflow: (sessionId) => {
+          const session = sm.sessions.get(sessionId)
+          if (session?.projectId === blockedProjectId && !locked) {
+            locked = true
+            const locker = new Database(dbPath)
+            locker.pragma('busy_timeout = 0')
+            locker.exec('BEGIN IMMEDIATE')
+            setTimeout(() => {
+              locker.exec('ROLLBACK')
+              locker.close()
+              releaseLock()
+            }, 450)
+            throw new Error('seed failed after running write')
+          }
+          return 'started'
+        },
+      })
+      await tasks.setSettings(blockedProjectId, { queuePaused: true })
+      await tasks.setSettings(nextProjectId, { queuePaused: true })
+      const blockedTask = tasks.create(blockedProjectId, { prompt: '/default' }, { actor: 'human' })
+      const nextTask = tasks.create(nextProjectId, { prompt: '/default' }, { actor: 'human' })
+      await tasks.move(blockedProjectId, blockedTask.id, 'in_progress', { actor: 'human' })
+      await tasks.move(nextProjectId, nextTask.id, 'in_progress', { actor: 'human' })
+      getDatabase()
+        .prepare(`UPDATE project_task_settings SET queue_paused = 0 WHERE project_id IN (?, ?)`)
+        .run(blockedProjectId, nextProjectId)
+
+      await tasks.retryQueuedLaunches()
+      await lockClosed
+      const afterFailure = tasks.get(blockedProjectId, blockedTask.id)!
+      await tasks.retryQueuedLaunches()
+      const afterRetry = tasks.get(blockedProjectId, blockedTask.id)!
+
+      expect([afterFailure.runState, afterRetry.runState]).toEqual(['queued', 'running'])
+      expect(afterFailure.activeSessionId).toBeUndefined()
+      expect(afterFailure.sessionIds).toEqual([])
+      expect(afterRetry.sessionIds).toHaveLength(1)
+      expect([...sm.sessions.values()].filter((session) => session.projectId === blockedProjectId)).toHaveLength(1)
+      expect(tasks.get(nextProjectId, nextTask.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
+      expect(tasks.get(nextProjectId, nextTask.id)!.sessionIds).toHaveLength(1)
+    })
+
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
       const task = create('/fixme crash src/a.ts')
       const result = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
