@@ -2,7 +2,10 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import Database from 'better-sqlite3'
 import express from 'express'
+import { SessionTurnScheduler } from '../session/worker/scheduler.js'
+import { getDatabase } from '../db/index.js'
 import { registerTaskRoutes } from '../routes/tasks.js'
 import { loadConfig } from '../config.js'
 import { closeDatabase, initDatabase } from '../db/index.js'
@@ -990,6 +993,134 @@ describe('project tasks service', () => {
       expect(service.get(projectId, blocked.id)?.activeSessionId).toBeUndefined()
       expect(launchSpy.mock.calls.length).toBeGreaterThan(2)
       expect(service.get(otherProjectId, next.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
+    })
+
+    it.fails('parks a real full or closed worker pool as queued and keeps start_failed as unavailable', async () => {
+      const postMove = async (tasks: TasksService, taskId: string) => {
+        const app = express()
+        app.use(express.json())
+        const router = express.Router()
+        registerTaskRoutes(router, tasks)
+        app.use('/api', router)
+        const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+          const listening = app.listen(0, () => resolve(listening))
+        })
+        try {
+          const port = (server.address() as { port: number }).port
+          return await fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/tasks/${taskId}/move`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ to: 'in_progress' }),
+          })
+        } finally {
+          await new Promise<void>((resolve) => server.close(() => resolve()))
+        }
+      }
+      const parked = async (scheduler: SessionTurnScheduler, title: string) => {
+        const tasks = createTasksService({
+          sessionManager: sm as unknown as import('../session/manager.js').SessionManager,
+          config: loadConfig(),
+          broadcast: () => {},
+          configDir: join(root, 'config'),
+          launchWorkflow: () => {
+            throw new Error(`${title} must not launch`)
+          },
+          canStartSession: (sessionId) => scheduler.canAccept(sessionId),
+        })
+        const task = tasks.create(projectId, { prompt: title }, { actor: 'human' })
+        const before = sm.createdSessions.length
+        const response = await postMove(tasks, task.id)
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({
+          queued: { reason: 'admission_refused' },
+          task: { status: 'in_progress', runState: 'queued' },
+        })
+        expect(sm.createdSessions).toHaveLength(before)
+        expect(tasks.get(projectId, task.id)?.runState).not.toBe('running')
+        expect(tasks.get(projectId, task.id)?.activeSessionId).toBeUndefined()
+      }
+
+      const full = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 0 })
+      expect(full.admit('holder', () => {})).toBe('started')
+      await parked(full, 'real full pool')
+
+      const closed = new SessionTurnScheduler({ maxConcurrent: 1, maxWaitingSessions: 1 })
+      closed.closeAdmissions()
+      await parked(closed, 'real closed pool')
+
+      const failed = createTasksService({
+        sessionManager: sm as unknown as import('../session/manager.js').SessionManager,
+        config: loadConfig(),
+        broadcast: () => {},
+        configDir: join(root, 'config'),
+        launchWorkflow: () => 'start_failed',
+        canStartSession: () => true,
+      })
+      const failedTask = failed.create(projectId, { prompt: '/default' }, { actor: 'human' })
+      const before = sm.createdSessions.length
+      const response = await postMove(failed, failedTask.id)
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({
+        code: 'WORKER_ADMISSION_REFUSED',
+        admission: 'start_failed',
+      })
+      expect(sm.createdSessions).toHaveLength(before)
+      expect(failed.get(projectId, failedTask.id)).toMatchObject({ status: 'todo' })
+      expect(failed.get(projectId, failedTask.id)?.runState).toBeUndefined()
+    })
+
+    it.fails('retries a real database lock without blocking health or stop', async () => {
+      closeDatabase()
+      const dbPath = join(root, 'locked.db')
+      const config = loadConfig()
+      config.database.path = dbPath
+      initDatabase(config)
+      const queuedProjectId = createProject('Queued during lock', join(root, 'queued-project')).id
+      const nextProjectId = createProject('Next during lock', join(root, 'next-project')).id
+      getDatabase()
+        .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+        .run('2020-01-02T00:00:00.000Z', queuedProjectId)
+      getDatabase()
+        .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+        .run('2020-01-01T00:00:00.000Z', nextProjectId)
+      const tasks = createTasksService({
+        sessionManager: sm as unknown as import('../session/manager.js').SessionManager,
+        config: loadConfig(),
+        broadcast: () => {},
+        configDir: join(root, 'config'),
+        launchWorkflow: () => 'started',
+      })
+      await tasks.setSettings(queuedProjectId, { queuePaused: true })
+      await tasks.setSettings(nextProjectId, { queuePaused: true })
+      const queuedTask = tasks.create(queuedProjectId, { prompt: 'stay queued' }, { actor: 'human' })
+      const nextTask = tasks.create(nextProjectId, { prompt: 'start next' }, { actor: 'human' })
+      await tasks.move(queuedProjectId, queuedTask.id, 'in_progress', { actor: 'human' })
+      await tasks.move(nextProjectId, nextTask.id, 'in_progress', { actor: 'human' })
+      getDatabase()
+        .prepare(`UPDATE project_task_settings SET queue_paused = 0 WHERE project_id IN (?, ?)`)
+        .run(queuedProjectId, nextProjectId)
+
+      const locker = new Database(dbPath)
+      locker.pragma('busy_timeout = 0')
+      locker.exec('BEGIN IMMEDIATE')
+      const started = Date.now()
+      let firstTick: number | undefined
+      const timer = setInterval(() => {
+        firstTick ??= Date.now()
+      }, 10)
+      setTimeout(() => {
+        locker.exec('ROLLBACK')
+        locker.close()
+      }, 280)
+      await tasks.retryQueuedLaunches()
+      clearInterval(timer)
+
+      expect(Date.now() - started).toBeGreaterThan(150)
+      expect(firstTick).toBeTypeOf('number')
+      expect(firstTick! - started).toBeLessThan(100)
+      expect(tasks.get(queuedProjectId, queuedTask.id)).toMatchObject({ status: 'in_progress', runState: 'queued' })
+      expect(tasks.get(queuedProjectId, queuedTask.id)?.activeSessionId).toBeUndefined()
+      expect(tasks.get(nextProjectId, nextTask.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
     })
 
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
