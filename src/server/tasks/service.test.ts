@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import express from 'express'
 import { SessionTurnScheduler } from '../session/worker/scheduler.js'
+import { SessionManager } from '../session/manager.js'
+import { initEventStore } from '../events/index.js'
 import { getDatabase } from '../db/index.js'
 import { registerTaskRoutes } from '../routes/tasks.js'
 import { loadConfig } from '../config.js'
@@ -1185,6 +1187,90 @@ describe('project tasks service', () => {
       expect([...sm.sessions.values()].filter((session) => session.projectId === blockedProjectId)).toHaveLength(1)
       expect(tasks.get(nextProjectId, nextTask.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
       expect(tasks.get(nextProjectId, nextTask.id)!.sessionIds).toHaveLength(1)
+    })
+
+    it.fails('deletes the fresh session once its lock clears and links one session on retry', async () => {
+      closeDatabase()
+      const dbPath = join(root, 'delete-lock.db')
+      const config = loadConfig()
+      config.database.path = dbPath
+      initDatabase(config)
+      initEventStore(getDatabase())
+      const blockedProjectId = createProject('Delete locked', join(root, 'delete-locked')).id
+      const nextProjectId = createProject('Delete next', join(root, 'delete-next')).id
+      getDatabase()
+        .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+        .run('2020-01-02T00:00:00.000Z', blockedProjectId)
+      getDatabase()
+        .prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`)
+        .run('2020-01-01T00:00:00.000Z', nextProjectId)
+      const sessionCount = (id: string) =>
+        (
+          getDatabase().prepare('SELECT COUNT(*) AS n FROM sessions WHERE project_id = ?').get(id) as {
+            n: number
+          }
+        ).n
+      let releaseLock = () => {}
+      const lockClosed = new Promise<void>((resolve) => {
+        releaseLock = resolve
+      })
+      let locked = false
+      const sessions = new SessionManager({
+        getCurrentModelContext: () => 200000,
+        getProviders: () => [],
+      } as unknown as ConstructorParameters<typeof SessionManager>[0])
+      const tasks = createTasksService({
+        sessionManager: sessions,
+        config: loadConfig(),
+        broadcast: () => {},
+        configDir: join(root, 'config'),
+        launchWorkflow: (sessionId) => {
+          const session = sessions.getSession(sessionId)
+          if (session?.projectId === blockedProjectId && !locked) {
+            locked = true
+            const locker = new Database(dbPath)
+            locker.pragma('busy_timeout = 0')
+            locker.exec('BEGIN IMMEDIATE')
+            setTimeout(() => {
+              locker.exec('ROLLBACK')
+              locker.close()
+              releaseLock()
+            }, 450)
+            return 'start_failed'
+          }
+          return 'started'
+        },
+      })
+      await tasks.setSettings(blockedProjectId, { queuePaused: true })
+      await tasks.setSettings(nextProjectId, { queuePaused: true })
+      const blockedTask = tasks.create(blockedProjectId, { prompt: '/default' }, { actor: 'human' })
+      const nextTask = tasks.create(nextProjectId, { prompt: '/default' }, { actor: 'human' })
+      await tasks.move(blockedProjectId, blockedTask.id, 'in_progress', { actor: 'human' })
+      await tasks.move(nextProjectId, nextTask.id, 'in_progress', { actor: 'human' })
+      getDatabase()
+        .prepare(`UPDATE project_task_settings SET queue_paused = 0 WHERE project_id IN (?, ?)`)
+        .run(blockedProjectId, nextProjectId)
+
+      await tasks.retryQueuedLaunches()
+      await lockClosed
+      const afterFailure = tasks.get(blockedProjectId, blockedTask.id)!
+      const failedSessions = sessionCount(blockedProjectId)
+      await tasks.retryQueuedLaunches()
+      const afterRetry = tasks.get(blockedProjectId, blockedTask.id)!
+      const retriedSessions = sessionCount(blockedProjectId)
+      const nextAfter = tasks.get(nextProjectId, nextTask.id)!
+
+      expect([failedSessions, retriedSessions, afterFailure.sessionIds.length, afterRetry.sessionIds.length]).toEqual([
+        0, 1, 0, 1,
+      ])
+      expect(afterFailure.runState).toBe('queued')
+      expect(afterFailure.activeSessionId).toBeUndefined()
+      expect(afterRetry.runState).toBe('running')
+      expect(afterRetry.activeSessionId).toBe(afterRetry.sessionIds[0])
+      expect(nextAfter).toMatchObject({ status: 'in_progress', runState: 'running' })
+      expect(sessionCount(nextProjectId)).toBe(1)
+      expect(nextAfter.sessionIds).toHaveLength(1)
+      expect(nextAfter.activeSessionId).toBe(nextAfter.sessionIds[0])
     })
 
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
