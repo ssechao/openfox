@@ -915,70 +915,72 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       slot.id = session.id
       created = true
     }
-    const attachments = task.attachments.length > 0 ? task.attachments : undefined
-    const commitSession = () => {
-      if (task.agentId) {
-        try {
-          sessionManager.setMode(session.id, task.agentId)
-        } catch {
-          // Unknown agent id — fall back to the session default.
-        }
-      }
-      emitReminder(session.id, reminderForInProgress(task, session.id, from))
+    try {
+      return await finishSeededSession()
+    } catch (error) {
+      if (created) await deleteFreshSession(session.id)
+      throw error
     }
 
-    const projectDir = getProject(projectId)?.workdir
-    let slash: SlashLaunch
-    try {
-      slash = await resolveSlashLaunch(configDir, projectDir, task.prompt)
-    } catch {
-      // Corrupt/missing slash config must not block a task from launching —
-      // degrade to seeding the raw prompt.
-      slash = null
-    }
-    if (slash?.kind === 'workflow') {
-      if (launchWorkflow) {
-        let admission: AdmissionResult | void
-        try {
-          admission = await launchWorkflow(session.id, {
+    async function finishSeededSession() {
+      const attachments = task.attachments.length > 0 ? task.attachments : undefined
+      const commitSession = () => {
+        if (task.agentId) {
+          try {
+            sessionManager.setMode(session.id, task.agentId)
+          } catch {
+            // Unknown agent id — fall back to the session default.
+          }
+        }
+        emitReminder(session.id, reminderForInProgress(task, session.id, from))
+      }
+
+      const projectDir = getProject(projectId)?.workdir
+      let slash: SlashLaunch
+      try {
+        slash = await resolveSlashLaunch(configDir, projectDir, task.prompt)
+      } catch {
+        // Corrupt/missing slash config must not block a task from launching —
+        // degrade to seeding the raw prompt.
+        slash = null
+      }
+      if (slash?.kind === 'workflow') {
+        if (launchWorkflow) {
+          const admission = await launchWorkflow(session.id, {
             workflowId: slash.workflowId,
             params: slash.params,
             scope: 'auto',
             ...(attachments ? { attachments } : {}),
           })
-        } catch (error) {
-          if (created) await deleteFreshSession(session.id)
-          throw error
+          if (refusedAdmission(admission)) {
+            throw new WorkerAdmissionRefusal(admission, session.id, created)
+          }
+          commitSession()
+          if (created) keepFreshSession(session.id)
+          return { session }
+        } else {
+          commitSession()
+          // No launcher wired (shouldn't happen in production) — degrade to a
+          // plain message so the session still starts with the task's content.
+          sessionManager.queueMessage(session.id, 'asap', task.prompt, attachments)
         }
-        if (refusedAdmission(admission)) {
-          if (created) await deleteFreshSession(session.id)
-          throw new WorkerAdmissionRefusal(admission, session.id, created)
-        }
+      } else if (slash?.kind === 'command') {
         commitSession()
-        if (created) keepFreshSession(session.id)
-        return { session }
+        if (slash.agentMode) {
+          try {
+            sessionManager.setMode(session.id, slash.agentMode)
+          } catch {
+            // Unknown agent — keep the task's configured agent.
+          }
+        }
+        sessionManager.queueMessage(session.id, 'asap', slash.prompt, attachments, 'command')
       } else {
         commitSession()
-        // No launcher wired (shouldn't happen in production) — degrade to a
-        // plain message so the session still starts with the task's content.
         sessionManager.queueMessage(session.id, 'asap', task.prompt, attachments)
       }
-    } else if (slash?.kind === 'command') {
-      commitSession()
-      if (slash.agentMode) {
-        try {
-          sessionManager.setMode(session.id, slash.agentMode)
-        } catch {
-          // Unknown agent — keep the task's configured agent.
-        }
-      }
-      sessionManager.queueMessage(session.id, 'asap', slash.prompt, attachments, 'command')
-    } else {
-      commitSession()
-      sessionManager.queueMessage(session.id, 'asap', task.prompt, attachments)
+      if (created) keepFreshSession(session.id)
+      return { session }
     }
-    if (created) keepFreshSession(session.id)
-    return { session }
   }
 
   async function maybeAutoLaunch(projectId: string): Promise<TasksUpdatePayload['autoLaunched'] | undefined> {

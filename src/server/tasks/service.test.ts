@@ -1439,7 +1439,7 @@ describe('project tasks service', () => {
       expect([createdDuringLock, backlogDuring, orphansAfter, backlogAfter, maxLinks]).toEqual([8, 8, 0, 0, 1])
     }, 20000)
 
-    it.fails('deletes the fresh session when queueing the command or the prompt throws', async () => {
+    it('deletes the fresh session when queueing the command or the prompt throws', async () => {
       const openTasks = (name: string) => {
         closeDatabase()
         const config = loadConfig()
