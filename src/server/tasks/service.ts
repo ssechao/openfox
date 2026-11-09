@@ -811,6 +811,11 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     return dbListTasks(projectId).filter((t) => t.status === 'in_progress' && t.runState === 'running').length
   }
 
+  async function deleteFreshSession(sessionId: string): Promise<void> {
+    const deleted = runBusy(() => sessionManager.deleteSession(sessionId), 2000)
+    if (isThenable(deleted)) await deleted
+  }
+
   /**
    * Seed a session for a claimed task: reminder first (opening context), then
    * the task's work — the plain prompt queued, a slash command expanded into
@@ -872,11 +877,11 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
             ...(attachments ? { attachments } : {}),
           })
         } catch (error) {
-          if (created) sessionManager.deleteSession(session.id)
+          if (created) await deleteFreshSession(session.id)
           throw error
         }
         if (refusedAdmission(admission)) {
-          if (created) sessionManager.deleteSession(session.id)
+          if (created) await deleteFreshSession(session.id)
           throw new WorkerAdmissionRefusal(admission, session.id, created)
         }
         commitSession()

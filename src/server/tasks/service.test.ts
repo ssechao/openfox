@@ -1189,7 +1189,7 @@ describe('project tasks service', () => {
       expect(tasks.get(nextProjectId, nextTask.id)!.sessionIds).toHaveLength(1)
     })
 
-    it.fails('deletes the fresh session once its lock clears and links one session on retry', async () => {
+    it('deletes the fresh session once its lock clears and links one session on retry', async () => {
       closeDatabase()
       const dbPath = join(root, 'delete-lock.db')
       const config = loadConfig()
