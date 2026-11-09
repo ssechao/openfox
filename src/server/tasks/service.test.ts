@@ -1439,6 +1439,67 @@ describe('project tasks service', () => {
       expect([createdDuringLock, backlogDuring, orphansAfter, backlogAfter, maxLinks]).toEqual([8, 8, 0, 0, 1])
     }, 20000)
 
+    it.fails('deletes the fresh session when queueing the command or the prompt throws', async () => {
+      const openTasks = (name: string) => {
+        closeDatabase()
+        const config = loadConfig()
+        config.database.path = join(root, `${name}.db`)
+        initDatabase(config)
+        initEventStore(getDatabase())
+        const sessions = new SessionManager({
+          getCurrentModelContext: () => 200000,
+          getProviders: () => [],
+        } as unknown as ConstructorParameters<typeof SessionManager>[0])
+        const tasks = createTasksService({
+          sessionManager: sessions,
+          config: loadConfig(),
+          broadcast: () => {},
+          configDir: join(root, 'config'),
+        })
+        const sessionCount = () =>
+          (getDatabase().prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n
+        return { sessions, tasks, sessionCount }
+      }
+      const leaked = async (prompt: string) => {
+        const { sessions, tasks, sessionCount } = openTasks(prompt.startsWith('/') ? 'queue-command' : 'queue-prompt')
+        sessions.setQueueAdmissionGuard(() => false)
+        const projectId = createProject(prompt, join(root, prompt.startsWith('/') ? 'cmd' : 'prompt')).id
+        const task = tasks.create(projectId, { prompt }, { actor: 'human' })
+        await tasks.move(projectId, task.id, 'in_progress', { actor: 'human' }).catch(() => undefined)
+        return [sessionCount(), tasks.pendingFreshSessionDeletes()]
+      }
+
+      const commandLeak = await leaked('/fixme crash src/a.ts')
+      const promptLeak = await leaked('Write the notes')
+      const { sessions, tasks, sessionCount } = openTasks('queue-capacity')
+      let rejectQueue = true
+      sessions.setQueueAdmissionGuard(() => !rejectQueue)
+      for (let index = 0; index < 8; index += 1) {
+        const projectId = createProject(`Queue ${index}`, join(root, `queue-${index}`)).id
+        const task = tasks.create(projectId, { prompt: 'Write the notes' }, { actor: 'human' })
+        await tasks.move(projectId, task.id, 'in_progress', { actor: 'human' }).catch(() => undefined)
+      }
+      const orphansAfterEight = sessionCount()
+      const backlogAfterEight = tasks.pendingFreshSessionDeletes()
+      rejectQueue = false
+      const nextProjectId = createProject('Queue next', join(root, 'queue-next')).id
+      const nextTask = tasks.create(nextProjectId, { prompt: 'Write the notes' }, { actor: 'human' })
+      await tasks.move(nextProjectId, nextTask.id, 'in_progress', { actor: 'human' })
+      const next = tasks.get(nextProjectId, nextTask.id)!
+
+      expect([
+        commandLeak[0],
+        commandLeak[1],
+        promptLeak[0],
+        promptLeak[1],
+        orphansAfterEight,
+        backlogAfterEight,
+        sessionCount(),
+        next.sessionIds.length,
+      ]).toEqual([0, 0, 0, 0, 0, 0, 1, 1])
+      expect(next.activeSessionId).toBe(next.sessionIds[0])
+    })
+
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
       const task = create('/fixme crash src/a.ts')
       const result = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
