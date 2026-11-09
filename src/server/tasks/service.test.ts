@@ -1361,6 +1361,88 @@ describe('project tasks service', () => {
       )
     }, 20000)
 
+    it.fails(
+      'does not create a fresh session once compensation capacity is full',
+      async () => {
+        closeDatabase()
+        const dbPath = join(root, 'capacity-lock.db')
+        const config = loadConfig()
+        config.database.path = dbPath
+        initDatabase(config)
+        initEventStore(getDatabase())
+        const sessions = new SessionManager({
+          getCurrentModelContext: () => 200000,
+          getProviders: () => [],
+        } as unknown as ConstructorParameters<typeof SessionManager>[0])
+        let entered = 0
+        let markEntered = () => {}
+        const eightEntered = new Promise<void>((resolve) => {
+          markEntered = resolve
+        })
+        let releaseAttempts = () => {}
+        const attemptsReleased = new Promise<void>((resolve) => {
+          releaseAttempts = resolve
+        })
+        let releaseLock = () => {}
+        const lockClosed = new Promise<void>((resolve) => {
+          releaseLock = resolve
+        })
+        let failStarts = true
+        const tasks = createTasksService({
+          sessionManager: sessions,
+          config: loadConfig(),
+          broadcast: () => {},
+          configDir: join(root, 'config'),
+          launchWorkflow: async (): Promise<'start_failed' | 'started'> => {
+            entered += 1
+            if (entered === 8) markEntered()
+            await attemptsReleased
+            return failStarts ? 'start_failed' : 'started'
+          },
+        })
+        const cards = Array.from({ length: 9 }, (_, index) => {
+          const projectId = createProject(`Capacity ${index}`, join(root, `capacity-${index}`)).id
+          const task = tasks.create(projectId, { prompt: '/default' }, { actor: 'human' })
+          return { projectId, taskId: task.id }
+        })
+        const sessionRows = () => getDatabase().prepare('SELECT id FROM sessions').all() as Array<{ id: string }>
+        const moves = Promise.allSettled(
+          cards.map((card) => tasks.move(card.projectId, card.taskId, 'in_progress', { actor: 'human' })),
+        )
+        await eightEntered
+        let stable = 0
+        let lastEntered = -1
+        while (stable < 500) {
+          stable = entered === lastEntered ? stable + 25 : 0
+          lastEntered = entered
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        const locker = new Database(dbPath)
+        locker.pragma('busy_timeout = 0')
+        locker.exec('BEGIN IMMEDIATE')
+        setTimeout(() => {
+          locker.exec('ROLLBACK')
+          locker.close()
+          releaseLock()
+        }, 2500)
+        releaseAttempts()
+        await moves
+        const createdDuringLock = sessionRows().length
+        const backlogDuring = tasks.pendingFreshSessionDeletes()
+        await lockClosed
+        failStarts = false
+        await tasks.retryQueuedLaunches()
+        const loaded = cards.map((card) => tasks.get(card.projectId, card.taskId)!)
+        const linked = new Set(loaded.flatMap((task) => task.sessionIds))
+        const orphansAfter = sessionRows().filter((row) => !linked.has(row.id)).length
+        const backlogAfter = tasks.pendingFreshSessionDeletes()
+        const maxLinks = loaded.reduce((max, task) => Math.max(max, task.sessionIds.length), 0)
+
+        expect([createdDuringLock, backlogDuring, orphansAfter, backlogAfter, maxLinks]).toEqual([8, 8, 0, 0, 1])
+      },
+      20000,
+    )
+
     it('expands a command prompt and queues the expanded text instead of the slash line', async () => {
       const task = create('/fixme crash src/a.ts')
       const result = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
