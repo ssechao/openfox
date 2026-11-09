@@ -186,6 +186,7 @@ export interface TasksService {
   runScheduled(now?: Date): Promise<void>
   /** Launch the next queued task in each project once a worker slot is free. */
   retryQueuedLaunches(): Promise<void>
+  pendingFreshSessionDeletes(): number
 }
 
 export interface CreateTaskServiceInput {
@@ -811,9 +812,54 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     return dbListTasks(projectId).filter((t) => t.status === 'in_progress' && t.runState === 'running').length
   }
 
+  const FRESH_DELETE_BUDGET_MS = 2000
+  const MAX_FRESH_DELETE_BACKLOG = 8
+  const freshDeleteBacklog: string[] = []
+
+  function rememberFreshDelete(sessionId: string): void {
+    if (freshDeleteBacklog.includes(sessionId) || freshDeleteBacklog.length >= MAX_FRESH_DELETE_BACKLOG) return
+    freshDeleteBacklog.push(sessionId)
+  }
+
+  function forgetFreshDelete(sessionId: string): void {
+    const index = freshDeleteBacklog.indexOf(sessionId)
+    if (index >= 0) freshDeleteBacklog.splice(index, 1)
+  }
+
+  function compensateFreshSessions(): void | Promise<void> {
+    if (freshDeleteBacklog.length === 0) return
+    return drainFreshDeletes()
+  }
+
+  async function drainFreshDeletes(): Promise<void> {
+    for (const sessionId of [...freshDeleteBacklog]) {
+      try {
+        const deleted = runBusy(() => {
+          if (!sessionManager.getSession(sessionId)) return
+          sessionManager.deleteSession(sessionId)
+        }, FRESH_DELETE_BUDGET_MS)
+        if (isThenable(deleted)) await deleted
+        forgetFreshDelete(sessionId)
+      } catch (error) {
+        if (!isSqliteBusy(error)) forgetFreshDelete(sessionId)
+      }
+    }
+  }
+
   async function deleteFreshSession(sessionId: string): Promise<void> {
-    const deleted = runBusy(() => sessionManager.deleteSession(sessionId), 2000)
-    if (isThenable(deleted)) await deleted
+    rememberFreshDelete(sessionId)
+    try {
+      const deleted = runBusy(() => sessionManager.deleteSession(sessionId), FRESH_DELETE_BUDGET_MS)
+      if (isThenable(deleted)) await deleted
+      forgetFreshDelete(sessionId)
+    } catch (error) {
+      if (!isSqliteBusy(error)) forgetFreshDelete(sessionId)
+      throw error
+    }
+  }
+
+  function pendingFreshSessionDeletes(): number {
+    return freshDeleteBacklog.length
   }
 
   /**
@@ -829,6 +875,8 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     from: TaskStatus | 'queued',
     targetSessionId?: string,
   ) {
+    const pendingDeletes = compensateFreshSessions()
+    if (isThenable(pendingDeletes)) await pendingDeletes
     let session: Session
     let created = false
     if (targetSessionId) {
@@ -910,6 +958,8 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
   }
 
   async function maybeAutoLaunch(projectId: string): Promise<TasksUpdatePayload['autoLaunched'] | undefined> {
+    const pendingDeletes = compensateFreshSessions()
+    if (isThenable(pendingDeletes)) await pendingDeletes
     const settings = dbGetTaskSettings(projectId)
     if (settings.queuePaused) return undefined
     if (activeCount(projectId) >= settings.slotLimit) return undefined
@@ -931,6 +981,8 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     } catch (error) {
       const rolled = runBusy(() => dbSetTaskRunState(next.id, 'queued'), 2000)
       if (isThenable(rolled)) await rolled
+      const compensated = compensateFreshSessions()
+      if (isThenable(compensated)) await compensated
       if (isWorkerAdmissionRefusal(error) && !error.freshSession) {
         dbAddTaskLink(next.id, error.sessionId, false)
       }
@@ -1041,6 +1093,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     counts,
     runScheduled,
     retryQueuedLaunches,
+    pendingFreshSessionDeletes,
   }
 }
 
