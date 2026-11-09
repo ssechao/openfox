@@ -58,8 +58,8 @@ function isSqliteBusy(error: unknown): boolean {
   return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'))
 }
 
-function runBusy<T>(operation: () => T): T | Promise<T> {
-  const deadline = Date.now() + 200
+function runBusy<T>(operation: () => T, budgetMs = 200): T | Promise<T> {
+  const deadline = Date.now() + budgetMs
   let delay = 5
   const attempt = (): T | Promise<T> => {
     try {
@@ -788,7 +788,13 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       } else {
         if (task.status !== 'in_progress' || task.runState !== 'running') continue
         if (task.activeSessionId && sessionManager.getSession(task.activeSessionId)) continue
-        if (task.activeSessionId) dbRemoveTaskLinks(task.id, task.activeSessionId)
+        if (!task.activeSessionId) {
+          dbSetTaskRunState(task.id, 'queued')
+          changed = true
+          freedSlot = true
+          continue
+        }
+        dbRemoveTaskLinks(task.id, task.activeSessionId)
         changed = true
       }
 
@@ -918,7 +924,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     try {
       seeded = await seedSession(projectId, next, 'queued', target)
     } catch (error) {
-      const rolled = runBusy(() => dbSetTaskRunState(next.id, 'queued'))
+      const rolled = runBusy(() => dbSetTaskRunState(next.id, 'queued'), 2000)
       if (isThenable(rolled)) await rolled
       if (isWorkerAdmissionRefusal(error) && !error.freshSession) {
         dbAddTaskLink(next.id, error.sessionId, false)

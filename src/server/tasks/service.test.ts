@@ -1121,7 +1121,7 @@ describe('project tasks service', () => {
       expect(tasks.get(nextProjectId, nextTask.id)).toMatchObject({ status: 'in_progress', runState: 'running' })
     })
 
-    it.fails('keeps a card queued when the rollback stays locked after the running write', async () => {
+    it('keeps a card queued when the rollback stays locked after the running write', async () => {
       closeDatabase()
       const dbPath = join(root, 'rollback-lock.db')
       const config = loadConfig()
