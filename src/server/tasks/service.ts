@@ -814,52 +814,66 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
 
   const FRESH_DELETE_BUDGET_MS = 2000
   const MAX_FRESH_DELETE_BACKLOG = 8
-  const freshDeleteBacklog: string[] = []
+  const freshDeleteSlots: Array<{ id?: string; pending: boolean }> = []
 
-  function rememberFreshDelete(sessionId: string): void {
-    if (freshDeleteBacklog.includes(sessionId) || freshDeleteBacklog.length >= MAX_FRESH_DELETE_BACKLOG) return
-    freshDeleteBacklog.push(sessionId)
+  function reserveFreshDelete(): { id?: string; pending: boolean } | undefined {
+    if (freshDeleteSlots.length >= MAX_FRESH_DELETE_BACKLOG) return undefined
+    const slot: { id?: string; pending: boolean } = { pending: false }
+    freshDeleteSlots.push(slot)
+    return slot
   }
 
-  function forgetFreshDelete(sessionId: string): void {
-    const index = freshDeleteBacklog.indexOf(sessionId)
-    if (index >= 0) freshDeleteBacklog.splice(index, 1)
+  function releaseFreshDelete(slot: { id?: string; pending: boolean }): void {
+    const index = freshDeleteSlots.indexOf(slot)
+    if (index >= 0) freshDeleteSlots.splice(index, 1)
+  }
+
+  function freshDeleteSlot(sessionId: string): { id?: string; pending: boolean } | undefined {
+    return freshDeleteSlots.find((slot) => slot.id === sessionId)
   }
 
   function compensateFreshSessions(): void | Promise<void> {
-    if (freshDeleteBacklog.length === 0) return
+    if (!freshDeleteSlots.some((slot) => slot.pending)) return
     return drainFreshDeletes()
   }
 
   async function drainFreshDeletes(): Promise<void> {
-    for (const sessionId of [...freshDeleteBacklog]) {
+    for (const slot of [...freshDeleteSlots]) {
+      const sessionId = slot.id
+      if (!slot.pending || !sessionId) continue
       try {
         const deleted = runBusy(() => {
           if (!sessionManager.getSession(sessionId)) return
           sessionManager.deleteSession(sessionId)
         }, FRESH_DELETE_BUDGET_MS)
         if (isThenable(deleted)) await deleted
-        forgetFreshDelete(sessionId)
+        releaseFreshDelete(slot)
       } catch (error) {
-        if (!isSqliteBusy(error)) forgetFreshDelete(sessionId)
+        if (!isSqliteBusy(error)) releaseFreshDelete(slot)
       }
     }
   }
 
   async function deleteFreshSession(sessionId: string): Promise<void> {
-    rememberFreshDelete(sessionId)
+    const slot = freshDeleteSlot(sessionId)
+    if (slot) slot.pending = true
     try {
       const deleted = runBusy(() => sessionManager.deleteSession(sessionId), FRESH_DELETE_BUDGET_MS)
       if (isThenable(deleted)) await deleted
-      forgetFreshDelete(sessionId)
+      if (slot) releaseFreshDelete(slot)
     } catch (error) {
-      if (!isSqliteBusy(error)) forgetFreshDelete(sessionId)
+      if (!isSqliteBusy(error) && slot) releaseFreshDelete(slot)
       throw error
     }
   }
 
+  function keepFreshSession(sessionId: string): void {
+    const slot = freshDeleteSlot(sessionId)
+    if (slot && !slot.pending) releaseFreshDelete(slot)
+  }
+
   function pendingFreshSessionDeletes(): number {
-    return freshDeleteBacklog.length
+    return freshDeleteSlots.filter((slot) => slot.pending).length
   }
 
   /**
@@ -887,10 +901,18 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       }
       session = existing
     } else {
+      const slot = reserveFreshDelete()
+      if (!slot) throw new WorkerAdmissionRefusal('full', `task:${task.id}`, true)
       const defaults = parseDefaultModelSelection(config.defaultModelSelection)
       const providerId = task.providerId ?? defaults.providerId ?? null
       const model = task.model ?? defaults.model ?? null
-      session = sessionManager.createSession(projectId, undefined, providerId, model)
+      try {
+        session = sessionManager.createSession(projectId, undefined, providerId, model)
+      } catch (error) {
+        releaseFreshDelete(slot)
+        throw error
+      }
+      slot.id = session.id
       created = true
     }
     const attachments = task.attachments.length > 0 ? task.attachments : undefined
@@ -933,6 +955,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           throw new WorkerAdmissionRefusal(admission, session.id, created)
         }
         commitSession()
+        if (created) keepFreshSession(session.id)
         return { session }
       } else {
         commitSession()
@@ -954,6 +977,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       commitSession()
       sessionManager.queueMessage(session.id, 'asap', task.prompt, attachments)
     }
+    if (created) keepFreshSession(session.id)
     return { session }
   }
 
