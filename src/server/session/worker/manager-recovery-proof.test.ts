@@ -300,7 +300,7 @@ async function retireThenStop(options: {
     expect(events.some((event) => event.type === 'running.changed')).toBe(true)
     expect(manager.activeWorker('sess-1')).toBeNull()
   })
-  manager.requestStop('sess-1')
+  manager.requestStop('sess-1', 'rest_stop')
   const capturedAt = manager.lastCrashReport()!.inventory.capturedAt
   resolveProof({
     checkedAt: capturedAt + 2_000,

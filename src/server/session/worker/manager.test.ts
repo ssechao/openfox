@@ -1605,7 +1605,7 @@ describe('SessionWorkerManager', () => {
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
       expect(manager.requestTurn('sess-2', successorStart)).toBe('waiting')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(2_000)
 
       expect(settled).toHaveBeenCalledOnce()
@@ -1643,7 +1643,7 @@ describe('SessionWorkerManager', () => {
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
       expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(2_000)
 
       expect(manager.activeWorker('sess-1')?.pid).toBe(42)
@@ -1687,7 +1687,7 @@ describe('SessionWorkerManager', () => {
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
       expect(manager.requestTurn('sess-2', waitingStart)).toBe('waiting')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(2_000)
 
       expect(manager.activeWorker('sess-1')?.pid).toBe(42)
@@ -1741,7 +1741,7 @@ describe('SessionWorkerManager', () => {
     const manager = createIdentityStopManager(namedDb, spawnWorker)
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(2_000)
 
       expect(signalPid).not.toHaveBeenCalled()
@@ -1787,7 +1787,7 @@ describe('SessionWorkerManager', () => {
     const manager = createIdentityStopManager(namedDb, spawnWorker, () => cleanup)
     try {
       expect(manager.requestTurn('sess-1', () => manager.launch('sess-1', settled))).toBe('started')
-      expect(manager.requestStop('sess-1')).toBe(true)
+      expect(manager.requestStop('sess-1', 'rest_stop')).toBe(true)
       await vi.advanceTimersByTimeAsync(2_000)
 
       expect(settled).not.toHaveBeenCalled()

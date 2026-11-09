@@ -2040,10 +2040,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }
       if (!result.consumed) {
         if (result.admission === 'start_failed') {
-          return res.status(503).json({
-            error: 'Session worker failed to start',
-            code: 'WORKER_LAUNCH_FAILED',
-            admission: result.admission,
+          return retryAutomatic({
+            status: 503,
+            body: {
+              error: 'Session worker failed to start',
+              code: 'WORKER_LAUNCH_FAILED',
+              admission: result.admission,
+            },
           })
         }
         const status = result.admission === 'full' ? 429 : 503
