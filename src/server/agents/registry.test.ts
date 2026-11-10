@@ -116,6 +116,17 @@ describe('loadDefaultAgents', () => {
     expect(prompt).toContain('finish after reporting the requested status')
     expect(prompt).toContain('only the actions explicitly requested')
   })
+
+  it.fails('instructs Manager to select foreign projects explicitly without starting them before M3', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect(prompt).toContain('explicit projectid')
+    expect(prompt).toContain('foreign')
+    expect(prompt).toContain('in_progress')
+    expect(prompt).toContain('m3')
+  })
 })
 
 describe('loadAllAgents', () => {

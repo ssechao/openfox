@@ -483,6 +483,50 @@ describe('gateway IPC integration', () => {
     expect(messages).not.toContain('Project tasks service not initialized')
   }, 60_000)
 
+  it.fails(
+    'carries an explicit foreign projectId through a real external Manager worker',
+    async () => {
+      const foreignProjectDir = join(root, `foreign-project-${randomUUID()}`)
+      await mkdir(foreignProjectDir, { recursive: true })
+      const createProjectResponse = await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'gateway-ipc-foreign', workdir: foreignProjectDir }),
+      })
+      expect(createProjectResponse.status).toBe(201)
+      const foreignProjectId = ((await createProjectResponse.json()) as { project: { id: string } }).project.id
+      const foreignTaskTitle = `foreign-worker-project-task-${randomUUID()}`
+      const createTask = await fetch(`${base}/api/projects/${foreignProjectId}/tasks`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: foreignTaskTitle }),
+      })
+      expect(createTask.status).toBe(201)
+
+      const sessionId = await createSession('gateway-cross-project-tasks')
+      const switchMode = await fetch(`${base}/api/sessions/${sessionId}/mode`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: 'manager' }),
+      })
+      expect(switchMode.status).toBe(200)
+      await sendMessage(sessionId, `M1.1 list project_tasks for projectId "${foreignProjectId}"`)
+
+      const messages = await waitFor(async () => {
+        const view = await getSession(sessionId)
+        return !view.session.isRunning ? JSON.stringify(view.messages) : null
+      }, 'foreign project_tasks turn completion')
+      const worker = getDatabase()
+        .prepare('SELECT worker_id AS workerId, worker_generation AS workerGeneration FROM sessions WHERE id = ?')
+        .get(sessionId) as { workerId: string | null; workerGeneration: number }
+
+      expect(worker.workerId).toBeTruthy()
+      expect(worker.workerGeneration).toBeGreaterThan(0)
+      expect(messages).toContain(foreignTaskTitle)
+    },
+    60_000,
+  )
+
   it('routes a WebSocket answer through the gateway broker to an external worker', async () => {
     const sessionId = await createSession('gateway-answer')
     const ws = await connectWebSocket()
