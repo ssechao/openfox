@@ -48,6 +48,17 @@ vi.mock('./read.js', () => ({
     execute: readExecuteMock,
   },
 }))
+vi.mock('./describe-image.js', () => ({
+  describeImageTool: {
+    name: 'describe_image',
+    definition: {
+      type: 'function',
+      function: { name: 'describe_image', description: 'Describe Image', parameters: {} },
+    },
+    execute: vi.fn(async () => ({ success: true, output: 'image', durationMs: 1, truncated: false })),
+  },
+}))
+
 vi.mock('./write.js', () => ({
   writeFileTool: {
     name: 'write_file',
@@ -153,16 +164,36 @@ vi.mock('./sub-agent.js', () => ({
   },
 }))
 
-vi.mock('../agents/registry.js', () => ({
-  loadAllAgentsDefault: vi.fn(),
-  findAgentById: vi.fn(),
-  getSubAgents: vi.fn(),
-}))
+vi.mock('../agents/registry.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../agents/registry.js')>()
+  return {
+    ...actual,
+    loadAllAgentsDefault: vi.fn(),
+    findAgentById: vi.fn(),
+    getSubAgents: vi.fn(),
+  }
+})
+
+vi.mock('./project-tasks.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./project-tasks.js')>()
+  return {
+    ...actual,
+    projectTasksTool: {
+      name: 'project_tasks',
+      definition: {
+        type: 'function',
+        function: { name: 'project_tasks', description: 'Project Tasks', parameters: {} },
+      },
+      execute: vi.fn(async () => ({ success: true, output: 'tasks', durationMs: 1, truncated: false })),
+    },
+  }
+})
 
 import { AskUserInterrupt } from './ask.js'
 import { PathAccessDeniedError } from './path-security.js'
 import { createToolRegistry, getToolRegistryForAgent, createRegistryFromTools } from './index.js'
 import type { AgentDefinition } from '../agents/types.js'
+import { loadDefaultAgents } from '../agents/registry.js'
 
 const builderDef: AgentDefinition = {
   metadata: {
@@ -241,6 +272,58 @@ const plannerDef: AgentDefinition = {
 }
 
 describe('tool registries', () => {
+  it('enforces the Manager builtin allowlist while preserving top-level definitions', async () => {
+    const manager = (await loadDefaultAgents()).find((agent) => agent.metadata.id === 'manager')
+    expect(manager).toBeDefined()
+    if (!manager) return
+
+    const registry = getToolRegistryForAgent(manager)
+    const builderRegistry = getToolRegistryForAgent(builderDef)
+    expect(registry.definitions.map((definition) => definition.function.name).sort()).toEqual(
+      builderRegistry.definitions.map((definition) => definition.function.name).sort(),
+    )
+    expect(manager.metadata.allowedTools).toEqual([
+      'read_file',
+      'describe_image',
+      'web_fetch',
+      'web_search',
+      'ask_user',
+      'session_metadata',
+      'load_skill',
+      'project_tasks',
+    ])
+
+    const context = { workdir: '/tmp/project', sessionId: 'session-1', sessionManager: {} as never }
+    const allowedCalls: Array<[string, Record<string, unknown>]> = [
+      ['read_file', { path: 'test.ts' }],
+      ['describe_image', { path: 'image.png' }],
+      ['web_fetch', { url: 'https://example.com' }],
+      ['web_search', { query: 'test' }],
+      ['ask_user', { question: 'Continue?' }],
+      ['session_metadata', { action: 'get', key: 'criteria' }],
+      ['load_skill', { skillId: 'test' }],
+      ['project_tasks', { action: 'list' }],
+      ['step_done', {}],
+    ]
+    for (const [name, args] of allowedCalls) {
+      await expect(registry.execute(name, args, context)).resolves.toMatchObject({ success: true })
+    }
+
+    for (const name of [
+      'write_file',
+      'edit_file',
+      'run_command',
+      'background_process',
+      'dev_server',
+      'mcp_config',
+      'workspace',
+      'call_sub_agent',
+      'return_value',
+    ]) {
+      await expect(registry.execute(name, {}, context)).resolves.toMatchObject({ success: false })
+    }
+  })
+
   it('getToolRegistryForAgent returns correct tools for top-level agent', () => {
     const registry = getToolRegistryForAgent(builderDef)
     const toolNames = registry.tools.map((t) => t.name)

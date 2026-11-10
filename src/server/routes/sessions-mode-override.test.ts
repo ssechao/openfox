@@ -15,7 +15,8 @@ import { loadConfig } from '../config.js'
 import { createProject } from '../db/projects.js'
 import { initEventStore } from '../events/index.js'
 import { SessionManager } from '../session/manager.js'
-import { setAgentModelOverride } from '../agents/model-overrides.js'
+import { getAgentModelOverride, setAgentModelOverride } from '../agents/model-overrides.js'
+import { getTopLevelAgents, loadDefaultAgents } from '../agents/registry.js'
 import { getSession, updateSessionProvider } from '../db/sessions.js'
 
 const mockProviderManager = {
@@ -36,6 +37,41 @@ const mockProviderManager = {
   getModelSettings: () => undefined,
   getDefaultModelSelection: () => 'test-provider/global-model',
 }
+
+const managerRoundTripCases = [
+  {
+    label: 'default preference across Planner to Manager to Planner',
+    providerId: null,
+    providerModel: null,
+    providerManual: false,
+    effective: { providerId: 'test-provider', model: 'global-model' },
+    modes: ['planner', 'manager', 'planner'],
+  },
+  {
+    label: 'manual preference across Planner to Manager to Planner',
+    providerId: 'manual-provider',
+    providerModel: 'manual-model',
+    providerManual: true,
+    effective: { providerId: 'manual-provider', model: 'manual-model' },
+    modes: ['planner', 'manager', 'planner'],
+  },
+  {
+    label: 'default preference across Builder to Manager to Builder',
+    providerId: null,
+    providerModel: null,
+    providerManual: false,
+    effective: { providerId: 'test-provider', model: 'global-model' },
+    modes: ['builder', 'manager', 'builder'],
+  },
+  {
+    label: 'manual preference across Builder to Manager to Builder',
+    providerId: 'manual-provider',
+    providerModel: 'manual-model',
+    providerManual: true,
+    effective: { providerId: 'manual-provider', model: 'manual-model' },
+    modes: ['builder', 'manager', 'builder'],
+  },
+]
 
 describe('PUT /api/sessions/:id/mode — pure mode switch (never writes provider)', () => {
   let server: Server
@@ -68,6 +104,11 @@ describe('PUT /api/sessions/:id/mode — pure mode switch (never writes provider
 
       const { mode } = req.body
       if (!mode) return res.status(400).json({ error: 'mode is required' })
+
+      const topLevelAgents = getTopLevelAgents(await loadDefaultAgents())
+      if (!topLevelAgents.some((agent) => agent.metadata.id === mode)) {
+        return res.status(400).json({ error: 'Invalid mode' })
+      }
 
       sessionManager.setMode(sid, mode)
       const updated = sessionManager.getSession(sid)
@@ -185,6 +226,84 @@ describe('PUT /api/sessions/:id/mode — pure mode switch (never writes provider
       body: JSON.stringify({ mode: 'builder' }),
     })
     expect(res.status).toBe(200)
+  })
+
+  it.each(managerRoundTripCases)('preserves $label', async (testCase) => {
+    updateSessionProvider(sessionId, testCase.providerId, testCase.providerModel, testCase.providerManual)
+    sessionManager.setSessionProviderActive(sessionId, true)
+
+    for (const mode of testCase.modes) {
+      const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/mode`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      })
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as { session: { mode: string } }
+      expect(body.session.mode).toBe(mode)
+
+      const session = sessionManager.getSession(sessionId)
+      expect(session).toMatchObject({
+        mode,
+        providerId: testCase.providerId,
+        providerModel: testCase.providerModel,
+        providerManual: testCase.providerManual,
+        providerManualActive: true,
+      })
+      expect(sessionManager.resolveEffectiveProviderModel(sessionId)).toEqual(testCase.effective)
+    }
+  })
+
+  it('uses a Planner override only while Planner is active during a Manager round-trip', async () => {
+    setAgentModelOverride('planner', { providerId: 'planner-provider', model: 'planner-model' })
+    updateSessionProvider(sessionId, 'manual-provider', 'manual-model', true)
+    sessionManager.setSessionProviderActive(sessionId, true)
+
+    const transitions = [
+      {
+        mode: 'builder',
+        active: true,
+        effective: { providerId: 'manual-provider', model: 'manual-model' },
+      },
+      {
+        mode: 'planner',
+        active: false,
+        effective: { providerId: 'planner-provider', model: 'planner-model' },
+      },
+      {
+        mode: 'manager',
+        active: true,
+        effective: { providerId: 'manual-provider', model: 'manual-model' },
+      },
+      {
+        mode: 'builder',
+        active: true,
+        effective: { providerId: 'manual-provider', model: 'manual-model' },
+      },
+    ]
+
+    for (const transition of transitions) {
+      const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/mode`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: transition.mode }),
+      })
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as { session: { mode: string } }
+      expect(body.session.mode).toBe(transition.mode)
+
+      const session = sessionManager.getSession(sessionId)
+      expect(session).toMatchObject({
+        mode: transition.mode,
+        providerId: 'manual-provider',
+        providerModel: 'manual-model',
+        providerManual: true,
+        providerManualActive: transition.active,
+      })
+      expect(sessionManager.resolveEffectiveProviderModel(sessionId, transition.mode)).toEqual(transition.effective)
+    }
+
+    expect(getAgentModelOverride('manager')).toBeUndefined()
   })
 })
 

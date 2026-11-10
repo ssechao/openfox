@@ -73,6 +73,49 @@ describe('loadDefaultAgents', () => {
     expect(builder.metadata.subagent).toBe(false)
     expect(verifier.metadata.subagent).toBe(true)
   })
+
+  it('should load Manager as a top-level coordination agent', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+
+    expect(manager).toBeDefined()
+    expect(getTopLevelAgents(agents)).toContain(manager)
+    expect(manager?.metadata).toEqual({
+      id: 'manager',
+      name: 'Manager',
+      description: 'Manages project tasks and coordinates specialized sessions',
+      subagent: false,
+      color: '#0d9488',
+      allowedTools: [
+        'read_file',
+        'describe_image',
+        'web_fetch',
+        'web_search',
+        'ask_user',
+        'session_metadata',
+        'load_skill',
+        'project_tasks',
+      ],
+    })
+
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+    expect(prompt).toContain('kanban')
+    expect(prompt).toContain('criteria')
+    expect(prompt).toContain('workflows')
+    expect(prompt).toContain('sessions')
+    expect(prompt).toContain('do not write or modify code')
+    expect(prompt).toContain('aether is the exclusive channel')
+    expect(prompt).toContain('never stop a session during its turn')
+    expect(prompt).toContain('explicit go')
+    expect(prompt).toContain('production deployment')
+    expect(prompt).toContain('restart')
+    expect(prompt).toContain('destructive action')
+    expect(prompt).toContain('while')
+    expect(prompt).toContain('sleep')
+    expect(prompt).toContain('automatic wake')
+    expect(prompt).toContain('finish after reporting the requested status')
+    expect(prompt).toContain('only the actions explicitly requested')
+  })
 })
 
 describe('loadAllAgents', () => {
