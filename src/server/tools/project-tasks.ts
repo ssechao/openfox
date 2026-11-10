@@ -28,9 +28,17 @@ import { TEXT_MIME_EXACT, TEXT_MIME_PREFIXES } from '../../shared/constants.js'
  */
 
 let tasksService: TasksService | null = null
+let projectTasksExecutor:
+  ((args: ProjectTasksArgs, context: import('./types.js').ToolContext) => Promise<ToolResult>) | null = null
 
 export function setTasksService(service: TasksService): void {
   tasksService = service
+}
+
+export function setProjectTasksExecutor(
+  executor: ((args: ProjectTasksArgs, context: import('./types.js').ToolContext) => Promise<ToolResult>) | null,
+): void {
+  projectTasksExecutor = executor
 }
 
 function getTasksService(): TasksService {
@@ -49,7 +57,7 @@ const LIST_STATUSES = ['todo', 'in_progress', 'done', 'all'] as const
 const LIST_DEFAULT_LIMIT = 10
 const LIST_MAX_LIMIT = 25
 
-interface ProjectTasksArgs {
+export interface ProjectTasksArgs {
   action: TaskAction
   taskId?: string
   prompt?: string
@@ -156,6 +164,7 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
 
     const session = context.sessionManager.getSession(context.sessionId)
     if (!session) return helpers.error('Session not found')
+    if (projectTasksExecutor) return projectTasksExecutor(args, context)
     const projectId = session.projectId
     const svc = getTasksService()
     const actor = { actor: 'agent' as const, actorName: 'agent' }

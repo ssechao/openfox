@@ -65,6 +65,7 @@ import type {
   BackgroundRequestMessage,
   GatewayToWorkerMessage,
   McpRequestMessage,
+  ProjectTasksRequestMessage,
   WorkerIpcIdentity,
   WorkerMcpTool,
   WorkerToGatewayMessage,
@@ -157,6 +158,7 @@ export interface SessionWorkerManagerDeps {
   eventStore?: () => ReturnType<typeof getEventStore>
   getMcpTools?: () => WorkerMcpTool[]
   executeMcp?: (request: McpRequestMessage, signal: AbortSignal) => Promise<ToolResult>
+  executeProjectTasks?: (request: ProjectTasksRequestMessage) => Promise<ToolResult>
   resumeInterruptedSession?: (sessionId: string) => void | Promise<unknown>
   onSlotFreed?: () => void
 }
@@ -581,6 +583,8 @@ export class SessionWorkerManager {
         this.mcpBroker?.handleCancel(msg)
       } else if (msg.type === 'background.request') {
         void this.handleBackgroundRequest(worker, msg)
+      } else if (msg.type === 'project_tasks.request') {
+        void this.handleProjectTasksRequest(worker, msg)
       } else if (msg.type === 'asap.drain.request') {
         this.asapBroker.handleRequest(msg)
       } else if (msg.type === 'asap.drain.ack') {
@@ -654,6 +658,30 @@ export class SessionWorkerManager {
       ...worker.token,
       sessionId: worker.sessionId,
       type: 'background.response',
+      requestId: msg.requestId,
+      result,
+    })
+  }
+
+  private async handleProjectTasksRequest(worker: ActiveWorker, msg: ProjectTasksRequestMessage): Promise<void> {
+    let result: ToolResult
+    try {
+      result = this.deps.executeProjectTasks
+        ? await this.deps.executeProjectTasks(msg)
+        : { success: false, error: 'Project tasks executor unavailable', durationMs: 0, truncated: false }
+    } catch (error) {
+      result = {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: 0,
+        truncated: false,
+      }
+    }
+    if (this.active.get(worker.sessionId) !== worker) return
+    this.sendTo(worker, {
+      ...worker.token,
+      sessionId: worker.sessionId,
+      type: 'project_tasks.response',
       requestId: msg.requestId,
       result,
     })

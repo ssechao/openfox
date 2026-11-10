@@ -239,6 +239,13 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
     }
   }
 
+  if (/Use project_tasks to list the project task board/i.test(prompt)) {
+    return {
+      tools: [{ name: 'project_tasks', arguments: { action: 'list', status: 'all' } }],
+      response: 'Listed the project task board.',
+    }
+  }
+
   const mcpMatch = prompt.match(/Call the MCP tool (\S+)/i)
   if (mcpMatch) {
     return {

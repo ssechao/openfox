@@ -461,6 +461,28 @@ describe('gateway IPC integration', () => {
     expect(messages).not.toMatch(/Unknown tool|tool.*not.*found/i)
   }, 60_000)
 
+  it('executes gateway-owned project_tasks through a real external worker', async () => {
+    const taskTitle = `worker-project-task-${randomUUID()}`
+    const createTask = await fetch(`${base}/api/projects/${projectId}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: taskTitle }),
+    })
+    expect(createTask.status).toBe(201)
+
+    const sessionId = await createSession('gateway-project-tasks')
+    await sendMessage(sessionId, 'Use project_tasks to list the project task board')
+
+    const messages = await waitFor(async () => {
+      const view = await getSession(sessionId)
+      const serialized = JSON.stringify(view.messages)
+      return !view.session.isRunning ? serialized : null
+    }, 'project_tasks turn completion')
+
+    expect(messages).toContain(taskTitle)
+    expect(messages).not.toContain('Project tasks service not initialized')
+  }, 60_000)
+
   it('routes a WebSocket answer through the gateway broker to an external worker', async () => {
     const sessionId = await createSession('gateway-answer')
     const ws = await connectWebSocket()
