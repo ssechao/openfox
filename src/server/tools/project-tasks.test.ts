@@ -85,7 +85,7 @@ describe('project_tasks tool', () => {
     expect(Array.isArray(parsed.gates)).toBe(true)
   })
 
-  it.fails('lets a Manager list a foreign project selected by explicit projectId', async () => {
+  it('lets a Manager list a foreign project selected by explicit projectId', async () => {
     const foreignRoot = join(root, 'foreign-manager-list')
     await mkdir(foreignRoot, { recursive: true })
     const foreignProjectId = createProject('Foreign Manager List', foreignRoot).id
@@ -99,7 +99,7 @@ describe('project_tasks tool', () => {
     expect(parsed.tasks.map((task) => task.prompt)).toEqual(['Foreign project task'])
   })
 
-  it.fails.each(['planner', 'builder'])('%s rejects every foreign project action before the service', async (mode) => {
+  it.each(['planner', 'builder'])('%s rejects every foreign project action before the service', async (mode) => {
     const foreignRoot = join(root, `foreign-${mode}`)
     await mkdir(foreignRoot, { recursive: true })
     const foreignProjectId = createProject(`Foreign ${mode}`, foreignRoot).id
@@ -148,7 +148,7 @@ describe('project_tasks tool', () => {
     expect(snapshot(projectId).map((task) => task.id)).toContain(ownTask.id)
   })
 
-  it.fails('rejects a Manager foreign move to in_progress without changing task ownership', async () => {
+  it('rejects a Manager foreign move to in_progress without changing task ownership', async () => {
     const foreignRoot = join(root, 'foreign-manager-in-progress')
     await mkdir(foreignRoot, { recursive: true })
     const foreignProjectId = createProject('Foreign Manager In Progress', foreignRoot).id
@@ -167,7 +167,7 @@ describe('project_tasks tool', () => {
     expect(service.get(foreignProjectId, foreignTask.id)).toEqual(before)
   })
 
-  it.fails('keeps normal todo and done transitions for Manager foreign tasks', async () => {
+  it('keeps normal todo and done transitions for Manager foreign tasks', async () => {
     const foreignRoot = join(root, 'foreign-manager-normal-moves')
     await mkdir(foreignRoot, { recursive: true })
     const foreignProjectId = createProject('Foreign Manager Normal Moves', foreignRoot).id

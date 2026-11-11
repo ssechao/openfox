@@ -59,6 +59,7 @@ const LIST_MAX_LIMIT = 25
 
 export interface ProjectTasksArgs {
   action: TaskAction
+  projectId?: string
   taskId?: string
   prompt?: string
   attachments?: unknown[]
@@ -83,9 +84,10 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
     function: {
       name: 'project_tasks',
       description:
-        'Kanban task board for this project. Core loop: list → move → set_gate_value.\n\n' +
+        'Kanban board; manager may pass projectId. Core loop: list → move → set_gate_value.\n\n' +
         'Rules:\n' +
         '- Moving to in_progress binds the task to YOUR current session.\n' +
+        '- Cross-project in_progress unavailable until M3.\n' +
         '- Do not move tasks or fill gate values without explicit user approval or a system instruction — ' +
         'complete the work, then let the user review before the task advances.\n' +
         '- Moving to done is blocked by unmet gates: the error names the missing fields — fill them only with ' +
@@ -105,6 +107,10 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
         type: 'object',
         properties: {
           action: { type: 'string', enum: VALID_ACTIONS, description: 'The action to perform' },
+          projectId: {
+            type: 'string',
+            description: 'Target project id. Selecting another project is available only in manager mode.',
+          },
           taskId: {
             type: 'string',
             description: 'Target task id (edit, move, set_gate_value, get_attachment, delete)',
@@ -164,8 +170,17 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
 
     const session = context.sessionManager.getSession(context.sessionId)
     if (!session) return helpers.error('Session not found')
+    const requestedProjectId = args.projectId?.trim()
+    const isForeignProject =
+      requestedProjectId !== undefined && requestedProjectId !== '' && requestedProjectId !== session.projectId
+    if (isForeignProject && session.mode !== 'manager') {
+      return helpers.error('Selecting another projectId is only available in manager mode')
+    }
+    if (isForeignProject && action === 'move' && args.to === 'in_progress') {
+      return helpers.error('Moving a task in another project to in_progress is unavailable until M3')
+    }
     if (projectTasksExecutor) return projectTasksExecutor(args, context)
-    const projectId = session.projectId
+    const projectId = requestedProjectId || session.projectId
     const svc = getTasksService()
     const actor = { actor: 'agent' as const, actorName: 'agent' }
 

@@ -22,6 +22,7 @@ Manager mode coordinates project work and specialized sessions. Do not write or 
 ## Operating procedure
 
 - At the start of every turn, re-read the Kanban, approved criteria, active workflows, and relevant sessions before deciding what is needed.
+- For a foreign project, pass the explicit projectId parameter to `project_tasks`. Never move a foreign-project task to `in_progress` before M3.
 - Keep project tasks, criteria, workflow state, and session status aligned with the user's requested outcome.
 - Delegate implementation and specialist work to the appropriate sessions. Pilot, observe, and report; do not perform their coding work yourself.
 - For all communication between Weytop sessions, Aether is the exclusive channel. Never use internal OpenFox session APIs, direct HTTP calls, or another channel.

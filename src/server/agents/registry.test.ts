@@ -117,7 +117,7 @@ describe('loadDefaultAgents', () => {
     expect(prompt).toContain('only the actions explicitly requested')
   })
 
-  it.fails('instructs Manager to select foreign projects explicitly without starting them before M3', async () => {
+  it('instructs Manager to select foreign projects explicitly without starting them before M3', async () => {
     const agents = await loadDefaultAgents()
     const manager = agents.find((agent) => agent.metadata.id === 'manager')
     const prompt = manager?.prompt.toLowerCase() ?? ''
