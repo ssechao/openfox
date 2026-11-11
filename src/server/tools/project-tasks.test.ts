@@ -99,6 +99,16 @@ describe('project_tasks tool', () => {
     expect(parsed.tasks.map((task) => task.prompt)).toEqual(['Foreign project task'])
   })
 
+  it('rejects an unknown explicit projectId before the task service', async () => {
+    const list = vi.spyOn(service, 'list')
+
+    const result = await execute('list', { projectId: 'missing-project', status: 'all' }, projectId, 'manager')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('Project not found')
+    expect(list).not.toHaveBeenCalled()
+  })
+
   it.each(['planner', 'builder'])('%s rejects every foreign project action before the service', async (mode) => {
     const foreignRoot = join(root, `foreign-${mode}`)
     await mkdir(foreignRoot, { recursive: true })

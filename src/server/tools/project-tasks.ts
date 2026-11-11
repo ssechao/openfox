@@ -2,6 +2,7 @@ import { createTool, validateActionWithPermission, type ToolHelpers } from './to
 import type { TasksService } from '../tasks/service.js'
 import { isTaskGateError, isTaskConflictError } from '../tasks/service.js'
 import { getGateConfig } from '../db/tasks.js'
+import { getProject } from '../db/projects.js'
 import { OUTPUT_LIMITS } from './types.js'
 import { decodeDataUrl } from '../utils/data-url.js'
 import { hydrateAttachmentData } from '../events/blob-codec.js'
@@ -180,6 +181,9 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
       return helpers.error('Moving a task in another project to in_progress is unavailable until M3')
     }
     if (projectTasksExecutor) return projectTasksExecutor(args, context)
+    if (requestedProjectId && !getProject(requestedProjectId)) {
+      return helpers.error(`Project not found: ${requestedProjectId}`)
+    }
     const projectId = requestedProjectId || session.projectId
     const svc = getTasksService()
     const actor = { actor: 'agent' as const, actorName: 'agent' }
