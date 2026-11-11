@@ -9,7 +9,7 @@ import type { FileReadEntry } from '../../shared/types.js'
 
 export class FileNotReadError extends Error {
   constructor(path: string) {
-    super(`File "${path}" must be read before writing. Use read_file first.`)
+    super(`File "${path}" must be read before writing. Use read_file first: read_file({"path":"${path}"})`)
     this.name = 'FileNotReadError'
   }
 }
@@ -17,7 +17,8 @@ export class FileNotReadError extends Error {
 export class FileChangedExternallyError extends Error {
   constructor(path: string) {
     super(
-      `File "${path}" was modified externally and must be read before writing. Use read_file to see current contents.`,
+      `File "${path}" was modified externally (changed after it was read) and must be read before writing again. ` +
+        `Use read_file({"path":"${path}"}) to see the current contents.`,
     )
     this.name = 'FileChangedExternallyError'
   }
@@ -72,6 +73,11 @@ export async function validateFileForWrite(
   // Normalize path for consistent comparison
   const normalizedPath = resolve(filePath)
 
+  // Path shown in LLM-facing error messages: relative to baseDir (the agent's
+  // workdir) when available, so it matches the path the agent actually used,
+  // not the resolved absolute filesystem path.
+  const displayPath = baseDir ? relative(baseDir, normalizedPath) : filePath
+
   // Check if file exists on disk
   const currentHash = await computeFileHash(normalizedPath)
 
@@ -88,7 +94,7 @@ export async function validateFileForWrite(
     if (readEntry.hash !== currentHash) {
       return {
         valid: false,
-        error: new FileChangedExternallyError(filePath),
+        error: new FileChangedExternallyError(displayPath),
       }
     }
     return { valid: true }
@@ -110,7 +116,7 @@ export async function validateFileForWrite(
 
   return {
     valid: false,
-    error: new FileNotReadError(filePath),
+    error: new FileNotReadError(displayPath),
   }
 }
 

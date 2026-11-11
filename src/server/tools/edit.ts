@@ -80,7 +80,9 @@ export const editFileTool = createTool<EditFileArgs>(
     function: {
       name: 'edit_file',
       description:
-        'Replace specific text in a file. Use this for surgical edits. The old_string must match exactly (including whitespace and indentation).',
+        'Replace specific text in a file. Use this for surgical edits. The old_string must match exactly (including whitespace and indentation). ' +
+        'Requires read_file on the same path in an earlier round of the current turn: reads from previous turns or workers are not kept, ' +
+        'and a re-read is required after a workspace, branch, commit or external change.',
       parameters: {
         type: 'object',
         properties: {

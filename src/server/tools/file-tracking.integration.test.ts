@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { writeFile, mkdir, rm } from 'node:fs/promises'
+import { writeFile, mkdir, rm, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readFileTool } from './read.js'
@@ -348,6 +348,61 @@ describe('file tracking integration', () => {
       // so it is a "not read" failure, not an external modification.
       expect(writeResult.error).toContain('Use read_file first')
       expect(writeResult.error).not.toContain('modified externally')
+    })
+  })
+
+  describe('edit_file read contract', () => {
+    it('R1: edit_file description states the exact read_file contract', () => {
+      expect(editFileTool.definition.function.description).toBe(
+        'Replace specific text in a file. Use this for surgical edits. The old_string must match exactly (including whitespace and indentation). ' +
+          'Requires read_file on the same path in an earlier round of the current turn: reads from previous turns or workers are not kept, ' +
+          'and a re-read is required after a workspace, branch, commit or external change.',
+      )
+    })
+
+    it('R2: a second SessionManager on the same DB/session refuses edit_file with an actionable JSON error', async () => {
+      const filePath = join(testDir, 'restart.txt')
+      await writeFile(filePath, 'hello world')
+      await readFileTool.execute({ path: 'restart.txt' }, context)
+
+      const secondManager = new SessionManager(mockProviderManager as any)
+      const secondContext = createTestContext(secondManager, sessionId, testDir)
+
+      const result = await editFileTool.execute(
+        { path: 'restart.txt', old_string: 'hello', new_string: 'hi' },
+        secondContext,
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('read_file')
+      expect(result.error).toContain('{"path":"restart.txt"}')
+      expect(await readFile(filePath, 'utf8')).toBe('hello world')
+    })
+
+    it('R3: external change after read refuses edit_file asking for a re-read, file unchanged, retry succeeds after re-read', async () => {
+      const filePath = join(testDir, 'external-edit.txt')
+      await writeFile(filePath, 'hello world')
+      await readFileTool.execute({ path: 'external-edit.txt' }, context)
+      await writeFile(filePath, 'hello changed externally')
+
+      const refused = await editFileTool.execute(
+        { path: 'external-edit.txt', old_string: 'hello', new_string: 'hi' },
+        context,
+      )
+
+      expect(refused.success).toBe(false)
+      expect(refused.error).toContain('changed after it was read')
+      expect(refused.error).toContain('read_file')
+      expect(await readFile(filePath, 'utf8')).toBe('hello changed externally')
+
+      await readFileTool.execute({ path: 'external-edit.txt' }, context)
+      const retried = await editFileTool.execute(
+        { path: 'external-edit.txt', old_string: 'hello', new_string: 'hi' },
+        context,
+      )
+
+      expect(retried.success).toBe(true)
+      expect(await readFile(filePath, 'utf8')).toBe('hi changed externally')
     })
   })
 })
