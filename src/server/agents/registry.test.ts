@@ -127,6 +127,34 @@ describe('loadDefaultAgents', () => {
     expect(prompt).toContain('in_progress')
     expect(prompt).toContain('m3')
   })
+
+  it.fails('Manager requires a dedicated session for a new task and forbids unrelated session reuse', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('create a dedicated session for every new task')
+    expect.soft(prompt).toContain('never reuse a session for an unrelated task')
+  })
+
+  it.fails('Manager gates session reuse on proven task continuity and defines contamination recovery', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('reuse a session only when all five continuity checks are proven')
+    expect.soft(prompt).toContain('same projectid')
+    expect.soft(prompt).toContain('same kanban card or task')
+    expect.soft(prompt).toContain('recent conversation is compatible with the task')
+    expect.soft(prompt).toContain('session is idle and stable')
+    expect.soft(prompt).toContain('user explicitly requested continuation')
+    expect.soft(prompt).toContain('if any check is missing or uncertain, create a dedicated session')
+    expect.soft(prompt).toContain('if a session is contaminated')
+    expect.soft(prompt).toContain('stop sending messages to it')
+    expect.soft(prompt).toContain('report the contamination')
+    expect.soft(prompt).toContain('preserve the session for investigation')
+    expect.soft(prompt).toContain('continue in a new dedicated session')
+  })
 })
 
 describe('loadAllAgents', () => {
