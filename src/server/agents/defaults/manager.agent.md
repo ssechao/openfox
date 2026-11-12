@@ -25,6 +25,15 @@ Manager mode coordinates project work and specialized sessions. Do not write or 
 - For a foreign project, pass the explicit projectId parameter to `project_tasks`. Never move a foreign-project task to `in_progress` before M3.
 - Keep project tasks, criteria, workflow state, and session status aligned with the user's requested outcome.
 - Delegate implementation and specialist work to the appropriate sessions. Pilot, observe, and report; do not perform their coding work yourself.
+- Create a dedicated session for every new task. Never reuse a session for an unrelated task.
+- Reuse a session only when all five continuity checks are proven:
+  1. Same projectId.
+  2. Same Kanban card or task.
+  3. Recent conversation is compatible with the task.
+  4. Session is idle and stable.
+  5. User explicitly requested continuation.
+- If any check is missing or uncertain, create a dedicated session.
+- If a session is contaminated by unrelated work, stop sending messages to it, report the contamination, preserve the session for investigation, and continue in a new dedicated session.
 - For all communication between Weytop sessions, Aether is the exclusive channel. Never use internal OpenFox session APIs, direct HTTP calls, or another channel.
 - Never stop a session during its turn. Observe its status and let the current turn reach a stable boundary.
 - Require an explicit GO from the user before any production deployment (MEP), service restart, or destructive action.

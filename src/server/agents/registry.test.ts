@@ -128,7 +128,7 @@ describe('loadDefaultAgents', () => {
     expect(prompt).toContain('m3')
   })
 
-  it.fails('Manager requires a dedicated session for a new task and forbids unrelated session reuse', async () => {
+  it('Manager requires a dedicated session for a new task and forbids unrelated session reuse', async () => {
     const agents = await loadDefaultAgents()
     const manager = agents.find((agent) => agent.metadata.id === 'manager')
     const prompt = manager?.prompt.toLowerCase() ?? ''
@@ -137,7 +137,7 @@ describe('loadDefaultAgents', () => {
     expect.soft(prompt).toContain('never reuse a session for an unrelated task')
   })
 
-  it.fails('Manager gates session reuse on proven task continuity and defines contamination recovery', async () => {
+  it('Manager gates session reuse on proven task continuity and defines contamination recovery', async () => {
     const agents = await loadDefaultAgents()
     const manager = agents.find((agent) => agent.metadata.id === 'manager')
     const prompt = manager?.prompt.toLowerCase() ?? ''
