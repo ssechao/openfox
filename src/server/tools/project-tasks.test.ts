@@ -177,6 +177,20 @@ describe('project_tasks tool', () => {
     expect(service.get(foreignProjectId, foreignTask.id)).toEqual(before)
   })
 
+  it.fails('manager cannot move a task to in_progress even in its own project', async () => {
+    const task = service.create(projectId, { prompt: 'Launch in a dedicated session' }, { actor: 'human' })
+
+    const result = await execute('move', { taskId: task.id, to: 'in_progress' }, projectId, 'manager')
+    const current = service.get(projectId, task.id)
+
+    expect.soft(result.success).toBe(false)
+    expect.soft(result.error).toContain('dedicated session launcher')
+    expect.soft(result.error).toContain('ask the user to launch')
+    expect.soft(current?.status).toBe('todo')
+    expect.soft(current?.activeSessionId).toBeUndefined()
+    expect.soft(current?.sessionIds).not.toContain('sess-agent')
+  })
+
   it('keeps normal todo and done transitions for Manager foreign tasks', async () => {
     const foreignRoot = join(root, 'foreign-manager-normal-moves')
     await mkdir(foreignRoot, { recursive: true })
