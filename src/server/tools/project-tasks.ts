@@ -87,8 +87,7 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
       description:
         'Kanban board; manager may pass projectId. Core loop: list → move → set_gate_value.\n\n' +
         'Rules:\n' +
-        '- Moving to in_progress binds the task to YOUR current session.\n' +
-        '- Cross-project in_progress unavailable until M3.\n' +
+        '- in_progress: Builder binds its session; Manager uses launcher/handoff; foreign projects unavailable until M3.\n' +
         '- Do not move tasks or fill gate values without explicit user approval or a system instruction — ' +
         'complete the work, then let the user review before the task advances.\n' +
         '- Moving to done is blocked by unmet gates: the error names the missing fields — fill them only with ' +
@@ -177,8 +176,15 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
     if (isForeignProject && session.mode !== 'manager') {
       return helpers.error('Selecting another projectId is only available in manager mode')
     }
-    if (isForeignProject && action === 'move' && args.to === 'in_progress') {
-      return helpers.error('Moving a task in another project to in_progress is unavailable until M3')
+    if (session.mode === 'manager' && action === 'move' && args.to === 'in_progress') {
+      if (isForeignProject) {
+        return helpers.error(
+          'Moving a task in another project to in_progress is unavailable until M3. Use a dedicated session launcher or ask the user to launch the prepared task.',
+        )
+      }
+      return helpers.error(
+        'Manager cannot move a task to in_progress because that would bind it to the Manager session. Use a dedicated session launcher or ask the user to launch the prepared task.',
+      )
     }
     if (projectTasksExecutor) return projectTasksExecutor(args, context)
     if (requestedProjectId && !getProject(requestedProjectId)) {
