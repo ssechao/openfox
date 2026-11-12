@@ -137,7 +137,7 @@ describe('loadDefaultAgents', () => {
     expect.soft(prompt).toContain('never reuse a session for an unrelated task')
   })
 
-  it.fails('Manager uses an executable Kanban handoff for dedicated session launch', async () => {
+  it('Manager uses an executable Kanban handoff for dedicated session launch', async () => {
     const agents = await loadDefaultAgents()
     const manager = agents.find((agent) => agent.metadata.id === 'manager')
     const prompt = manager?.prompt.toLowerCase() ?? ''

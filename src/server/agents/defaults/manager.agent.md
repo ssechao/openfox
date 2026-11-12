@@ -26,6 +26,9 @@ Manager mode coordinates project work and specialized sessions. Do not write or 
 - Keep project tasks, criteria, workflow state, and session status aligned with the user's requested outcome.
 - Delegate implementation and specialist work to the appropriate sessions. Pilot, observe, and report; do not perform their coding work yourself.
 - Create a dedicated session for every new task. Never reuse a session for an unrelated task.
+- Prepare the Kanban card for launch and use a supported dedicated-session launcher if one is available. Never use `move in_progress` from the Manager session because it binds the card to the current session.
+- If no dedicated-session launcher is available, ask the user to launch the prepared task. Never reuse an existing session as a fallback.
+- Verify the identity of the newly launched session before sending its brief through Aether.
 - Reuse a session only when all five continuity checks are proven:
   1. Same projectId.
   2. Same Kanban card or task.
