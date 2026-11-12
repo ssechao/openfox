@@ -137,6 +137,20 @@ describe('loadDefaultAgents', () => {
     expect.soft(prompt).toContain('never reuse a session for an unrelated task')
   })
 
+  it.fails('Manager uses an executable Kanban handoff for dedicated session launch', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('prepare the kanban card for launch')
+    expect.soft(prompt).toContain('never use `move in_progress` from the manager session')
+    expect.soft(prompt).toContain('ask the user to launch the prepared task')
+    expect.soft(prompt).toContain('never reuse an existing session as a fallback')
+    expect
+      .soft(prompt)
+      .toContain('verify the identity of the newly launched session before sending its brief through aether')
+  })
+
   it('Manager gates session reuse on proven task continuity and defines contamination recovery', async () => {
     const agents = await loadDefaultAgents()
     const manager = agents.find((agent) => agent.metadata.id === 'manager')
