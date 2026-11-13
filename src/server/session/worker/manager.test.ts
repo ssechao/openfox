@@ -531,7 +531,7 @@ describe('SessionWorkerManager', () => {
         expect(cleanupChildren).toHaveBeenCalledTimes(1)
         expect(settled).toHaveBeenCalledWith({ crashed: false })
         expect(kill).not.toHaveBeenCalledWith('SIGKILL')
-        expect(appended).not.toContain('tool.result')
+        expect(appended).toContain('tool.result')
         expect(manager.activeWorker('sess-1')).toBeNull()
         expect(queuedStart).toHaveBeenCalledOnce()
         expect(queueMessage).not.toHaveBeenCalled()
