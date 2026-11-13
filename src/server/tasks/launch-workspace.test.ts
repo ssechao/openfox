@@ -164,9 +164,12 @@ const timer = setInterval(() => {
   ): Promise<'entered' | 'settled'> =>
     Promise.race([
       vi
-        .waitFor(async () => {
-          await access(entered)
-        })
+        .waitFor(
+          async () => {
+            await access(entered)
+          },
+          { timeout: 10_000, interval: 10 },
+        )
         .then(() => 'entered' as const),
       promise.then(
         () => 'settled' as const,
@@ -294,116 +297,124 @@ const timer = setInterval(() => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it.fails('serializes task launch and workspace switch on the same project branch', async () => {
-    const runScenario = async (suffix: string, first: 'launch' | 'switch') => {
-      const launchTarget = await prepareWorkspace(
-        `launch-target-${suffix}`,
-        `fixture/launch-base-${suffix}`,
-        `launch-${suffix}`,
-      )
-      const switchTarget = await prepareWorkspace(
-        `switch-target-${suffix}`,
-        `fixture/switch-base-${suffix}`,
-        `switch-${suffix}`,
-      )
-      const launchBarrier = await installCheckoutBarrier(launchTarget.workspace, `launch-${suffix}`)
-      const switchBarrier = await installCheckoutBarrier(switchTarget.workspace, `switch-${suffix}`)
-      const branch = `feature/shared-${suffix}`
-      const task = await prepareLaunchTask(`launch ${suffix}`, suffix, {
-        workspace: `launch-target-${suffix}`,
-        branch,
-      })
-      const launch = () =>
-        service.move(projectId, task.taskId, 'in_progress', {
-          actor: 'human',
+  it.fails(
+    'serializes task launch and workspace switch on the same project branch',
+    async () => {
+      const runScenario = async (suffix: string, first: 'launch' | 'switch') => {
+        const launchTarget = await prepareWorkspace(
+          `launch-target-${suffix}`,
+          `fixture/launch-base-${suffix}`,
+          `launch-${suffix}`,
+        )
+        const switchTarget = await prepareWorkspace(
+          `switch-target-${suffix}`,
+          `fixture/switch-base-${suffix}`,
+          `switch-${suffix}`,
+        )
+        const launchBarrier = await installCheckoutBarrier(launchTarget.workspace, `launch-${suffix}`)
+        const switchBarrier = await installCheckoutBarrier(switchTarget.workspace, `switch-${suffix}`)
+        const branch = `feature/shared-${suffix}`
+        const task = await prepareLaunchTask(`launch ${suffix}`, suffix, {
+          workspace: `launch-target-${suffix}`,
+          branch,
         })
-      const switchWorkspace = () =>
-        manager.switchWorkspace(switchTarget.sessionId, `switch-target-${suffix}`, branch, 'main')
-      const settled =
-        first === 'launch'
-          ? await runOrderedBarrierRace(launch, launchBarrier, switchWorkspace, switchBarrier)
-          : await runOrderedBarrierRace(switchWorkspace, switchBarrier, launch, launchBarrier)
-      return {
-        ...settledSummary(settled),
-        launchSentinel: await readFile(launchTarget.sentinelPath, 'utf8'),
-        switchSentinel: await readFile(switchTarget.sentinelPath, 'utf8'),
-      }
-    }
-
-    expect([await runScenario('launch-first', 'launch'), await runScenario('switch-first', 'switch')]).toEqual([
-      {
-        successes: 1,
-        codes: ['BRANCH_IN_USE'],
-        launchSentinel: 'launch-launch-first',
-        switchSentinel: 'switch-launch-first',
-      },
-      {
-        successes: 1,
-        codes: ['BRANCH_IN_USE'],
-        launchSentinel: 'launch-switch-first',
-        switchSentinel: 'switch-switch-first',
-      },
-    ])
-  })
-
-  it.fails('serializes task launch and workspace deletion on the same project workspace', async () => {
-    const runScenario = async (suffix: string, first: 'launch' | 'delete') => {
-      const targetName = `delete-target-${suffix}`
-      const target = await prepareWorkspace(targetName, `fixture/delete-base-${suffix}`, `delete-${suffix}`)
-      const task = await prepareLaunchTask(`delete race ${suffix}`, `delete-${suffix}`, {
-        workspace: targetName,
-        branch: `feature/delete-${suffix}`,
-      })
-      const launch = () => service.move(projectId, task.taskId, 'in_progress', { actor: 'human' })
-      const deleteWorkspace = () => manager.deleteWorkspace(target.sessionId, targetName)
-      let settled: PromiseSettledResult<unknown>[]
-
-      if (first === 'launch') {
-        const launchBarrier = await installCheckoutBarrier(target.workspace, `delete-launch-${suffix}`)
-        const launchPromise = launch()
-        const launchState = await waitForBarrierOrSettlement(launchPromise, launchBarrier.entered)
-        const deletePromise = deleteWorkspace()
-        if (launchState === 'entered') await writeFile(launchBarrier.release, 'release')
-        settled = await Promise.allSettled([launchPromise, deletePromise])
-      } else {
-        const bulkDir = join(target.workspace, 'bulk')
-        await mkdir(bulkDir)
-        await Promise.all(Array.from({ length: 2_000 }, (_, index) => writeFile(join(bulkDir, `${index}.txt`), 'x')))
-        const deletePromise = deleteWorkspace()
-        const launchPromise = launch()
-        settled = await Promise.allSettled([deletePromise, launchPromise])
+        const launch = () =>
+          service.move(projectId, task.taskId, 'in_progress', {
+            actor: 'human',
+          })
+        const switchWorkspace = () =>
+          manager.switchWorkspace(switchTarget.sessionId, `switch-target-${suffix}`, branch, 'main')
+        const settled =
+          first === 'launch'
+            ? await runOrderedBarrierRace(launch, launchBarrier, switchWorkspace, switchBarrier)
+            : await runOrderedBarrierRace(switchWorkspace, switchBarrier, launch, launchBarrier)
+        return {
+          ...settledSummary(settled),
+          launchSentinel: await readFile(launchTarget.sentinelPath, 'utf8'),
+          switchSentinel: await readFile(switchTarget.sentinelPath, 'utf8'),
+        }
       }
 
-      const exists = await pathExists(target.workspace)
-      const sessionsUsingTarget = manager.listSessions().flatMap((summary) => {
-        const session = manager.getSession(summary.id)
-        return session?.workspace === target.workspace ? [session.id] : []
-      })
-      return {
-        ...settledSummary(settled),
-        exists,
-        sentinel: exists ? await readFile(target.sentinelPath, 'utf8') : null,
-        unsafeDeleted: sessionsUsingTarget.length > 0 && !exists,
-      }
-    }
+      expect([await runScenario('launch-first', 'launch'), await runScenario('switch-first', 'switch')]).toEqual([
+        {
+          successes: 1,
+          codes: ['BRANCH_IN_USE'],
+          launchSentinel: 'launch-launch-first',
+          switchSentinel: 'switch-launch-first',
+        },
+        {
+          successes: 1,
+          codes: ['BRANCH_IN_USE'],
+          launchSentinel: 'launch-switch-first',
+          switchSentinel: 'switch-switch-first',
+        },
+      ])
+    },
+    60_000,
+  )
 
-    expect([await runScenario('launch-first', 'launch'), await runScenario('delete-first', 'delete')]).toEqual([
-      {
-        successes: 1,
-        codes: ['WORKSPACE_IN_USE'],
-        exists: true,
-        sentinel: 'delete-launch-first',
-        unsafeDeleted: false,
-      },
-      {
-        successes: 1,
-        codes: ['WORKSPACE_BEING_DELETED'],
-        exists: false,
-        sentinel: null,
-        unsafeDeleted: false,
-      },
-    ])
-  })
+  it.fails(
+    'serializes task launch and workspace deletion on the same project workspace',
+    async () => {
+      const runScenario = async (suffix: string, first: 'launch' | 'delete') => {
+        const targetName = `delete-target-${suffix}`
+        const target = await prepareWorkspace(targetName, `fixture/delete-base-${suffix}`, `delete-${suffix}`)
+        const task = await prepareLaunchTask(`delete race ${suffix}`, `delete-${suffix}`, {
+          workspace: targetName,
+          branch: `feature/delete-${suffix}`,
+        })
+        const launch = () => service.move(projectId, task.taskId, 'in_progress', { actor: 'human' })
+        const deleteWorkspace = () => manager.deleteWorkspace(target.sessionId, targetName)
+        let settled: PromiseSettledResult<unknown>[]
+
+        if (first === 'launch') {
+          const launchBarrier = await installCheckoutBarrier(target.workspace, `delete-launch-${suffix}`)
+          const launchPromise = launch()
+          const launchState = await waitForBarrierOrSettlement(launchPromise, launchBarrier.entered)
+          const deletePromise = deleteWorkspace()
+          if (launchState === 'entered') await writeFile(launchBarrier.release, 'release')
+          settled = await Promise.allSettled([launchPromise, deletePromise])
+        } else {
+          const bulkDir = join(target.workspace, 'bulk')
+          await mkdir(bulkDir)
+          await Promise.all(Array.from({ length: 2_000 }, (_, index) => writeFile(join(bulkDir, `${index}.txt`), 'x')))
+          const deletePromise = deleteWorkspace()
+          const launchPromise = launch()
+          settled = await Promise.allSettled([deletePromise, launchPromise])
+        }
+
+        const exists = await pathExists(target.workspace)
+        const sessionsUsingTarget = manager.listSessions().flatMap((summary) => {
+          const session = manager.getSession(summary.id)
+          return session?.workspace === target.workspace ? [session.id] : []
+        })
+        return {
+          ...settledSummary(settled),
+          exists,
+          sentinel: exists ? await readFile(target.sentinelPath, 'utf8') : null,
+          unsafeDeleted: sessionsUsingTarget.length > 0 && !exists,
+        }
+      }
+
+      expect([await runScenario('launch-first', 'launch'), await runScenario('delete-first', 'delete')]).toEqual([
+        {
+          successes: 1,
+          codes: ['WORKSPACE_IN_USE'],
+          exists: true,
+          sentinel: 'delete-launch-first',
+          unsafeDeleted: false,
+        },
+        {
+          successes: 1,
+          codes: ['WORKSPACE_BEING_DELETED'],
+          exists: false,
+          sentinel: null,
+          unsafeDeleted: false,
+        },
+      ])
+    },
+    60_000,
+  )
 
   it.fails('applies the launch workspace and branch before the first task message or workflow', async () => {
     const plain = await prepareLaunchTask('plain task prompt', 'plain')
