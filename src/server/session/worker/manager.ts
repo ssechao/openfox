@@ -88,7 +88,6 @@ const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
 const WORKER_IDENTITY_PROOF_TIMEOUT_MS = 500
 const WORKER_ORPHAN_PROOF_DELAY_MS = 2_000
 const WORKER_ORPHAN_PROOF_TOLERANCE_MS = 500
-const WORKER_DONE_CAPTURE_TIMEOUT_MS = 50
 const WORKER_LOG_MAX_LINE_BYTES = 64 * 1024
 const WORKER_LOG_REMAINDER_BYTES = WORKER_LOG_MAX_LINE_BYTES - 128
 const WORKER_LOG_RATE_LIMIT = 100
@@ -111,6 +110,8 @@ interface ActiveWorker {
   doneReceived: boolean
   doneReceivedPromise: Promise<void>
   resolveDoneReceived: () => void
+  ipcTerminatedPromise: Promise<void>
+  resolveIpcTerminated: () => void
   doneOk: boolean
   doneError?: string
   stopRequestedAt?: number
@@ -426,6 +427,10 @@ export class SessionWorkerManager {
     const doneReceivedPromise = new Promise<void>((resolve) => {
       resolveDoneReceived = resolve
     })
+    let resolveIpcTerminated = () => {}
+    const ipcTerminatedPromise = new Promise<void>((resolve) => {
+      resolveIpcTerminated = resolve
+    })
     const worker: ActiveWorker = {
       sessionId,
       token,
@@ -435,6 +440,8 @@ export class SessionWorkerManager {
       doneReceived: false,
       doneReceivedPromise,
       resolveDoneReceived,
+      ipcTerminatedPromise,
+      resolveIpcTerminated,
       doneOk: false,
       exitObserved: false,
       signalErrors: [],
@@ -545,6 +552,9 @@ export class SessionWorkerManager {
     child.stdout?.on('data', (chunk: Buffer) => relayOutput('stdout', chunk))
     child.stderr?.on('data', (chunk: Buffer) => relayOutput('stderr', chunk))
     child.once('close', flushOutput)
+    const ipcChild = child as ChildProcess
+    ipcChild.once('disconnect', worker.resolveIpcTerminated)
+    child.once('close', worker.resolveIpcTerminated)
 
     child.on('message', (raw) => {
       if (this.active.get(sessionId) !== worker) return
@@ -994,6 +1004,18 @@ export class SessionWorkerManager {
     }
   }
 
+  private async waitForDoneOrIpcTermination(worker: ActiveWorker, deadlineAt: number): Promise<void> {
+    try {
+      await this.waitUntil(
+        Promise.race([worker.doneReceivedPromise, worker.ipcTerminatedPromise]),
+        deadlineAt,
+        'Worker IPC settlement exceeded recovery deadline',
+      )
+    } catch {
+      return
+    }
+  }
+
   private beginWorkerInventoryCapture(
     worker: ActiveWorker,
     capturedAt: number,
@@ -1336,33 +1358,24 @@ export class SessionWorkerManager {
   private async settle(worker: ActiveWorker, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
     const { sessionId, token } = worker
     const db = this.deps.db()
-    const doneInFlight = !worker.doneReceived && exitCode === 0 && signal === null
-    if (doneInFlight) {
-      let timer: NodeJS.Timeout | undefined
-      await Promise.race([
-        worker.doneReceivedPromise,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, WORKER_DONE_CAPTURE_TIMEOUT_MS)
-        }),
-      ])
-      if (timer) clearTimeout(timer)
+    if (worker.gatewayShutdown) {
+      this.retire(worker, { crashed: false })
+      return
     }
+    const recoveryStartedAt = worker.stopRequestedAt ?? Date.now()
+    const recoveryDeadlineAt = worker.recoveryDeadlineAt ?? recoveryStartedAt + WORKER_RECOVERY_TIMEOUT_MS
+    const doneInFlight = !worker.doneReceived && exitCode === 0 && signal === null
+    if (doneInFlight) await this.waitForDoneOrIpcTermination(worker, recoveryDeadlineAt)
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
     const gatewayEscalatedStop =
       worker.stopRequestedAt !== undefined &&
       worker.stopEscalatedAt !== undefined &&
       (signal === 'SIGTERM' || signal === 'SIGKILL')
     const expectedExit = clean || gatewayEscalatedStop
-    if (worker.gatewayShutdown) {
-      this.retire(worker, { crashed: false })
-      return
-    }
     if (!expectedExit) {
       if (worker.stopRequestedAt === undefined) this.pendingInterruptions.add(sessionId)
       this.scheduler.cancel(sessionId)
     }
-    const recoveryStartedAt = worker.stopRequestedAt ?? Date.now()
-    const recoveryDeadlineAt = worker.recoveryDeadlineAt ?? recoveryStartedAt + WORKER_RECOVERY_TIMEOUT_MS
 
     const gatewayEventStore = this.deps.eventStore?.() ?? getEventStore()
     let tokenClearError: string | undefined

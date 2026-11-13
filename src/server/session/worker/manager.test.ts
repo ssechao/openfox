@@ -667,75 +667,69 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails(
-    'a done(ok) delivered after the old 50 ms window but before IPC disconnect keeps exit0/null clean and preserves the zero-orphan alert',
-    async () => {
-      vi.useFakeTimers()
-      const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-delayed-done-${crypto.randomUUID()}.db`))
-      openDbs.push(db)
-      const child = Object.assign(new EventEmitter(), {
-        pid: 42,
-        exitCode: null,
-        signalCode: null,
-        stderr: new EventEmitter(),
-        send: vi.fn(() => true),
-        kill: vi.fn(() => true),
-      }) as unknown as ChildProcess
-      const settled = vi.fn()
-      const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
-      const manager = new SessionWorkerManager({
-        db: () => namedDb,
-        config,
-        sessionManager: {
-          setRunning: () => {},
-          getActiveWorkflowExecution: () => null,
-          addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
-        } as unknown as SessionManager,
-        isEnabled: () => true,
-        broadcastForSession: () => {},
-        processSupervisor: { spawnWorker: () => child } as never,
-        captureInventory: (pid) => ({
-          capturedAt: Date.now(),
-          worker: { pid, startedAt: 'linux:42', pgid: 42 },
-          children: [],
-          groups: [],
-          reservations: [],
-          errors: ['inventory scan timed out'],
-        }),
-        cleanupChildren: async () => [],
-        eventStore: () =>
-          ({
-            invalidateExternalSession: () => {},
-            getEvents: () => [],
-            append: () => {},
-          }) as never,
+  it('a done(ok) delivered after the old 50 ms window but before IPC disconnect keeps exit0/null clean and preserves the zero-orphan alert', async () => {
+    vi.useFakeTimers()
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-delayed-done-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const child = Object.assign(new EventEmitter(), {
+      pid: 42,
+      exitCode: null,
+      signalCode: null,
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess
+    const settled = vi.fn()
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    const manager = new SessionWorkerManager({
+      db: () => namedDb,
+      config,
+      sessionManager: {
+        setRunning: () => {},
+        getActiveWorkflowExecution: () => null,
+        addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+      } as unknown as SessionManager,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+      captureInventory: (pid) => ({
+        capturedAt: Date.now(),
+        worker: { pid, startedAt: 'linux:42', pgid: 42 },
+        children: [],
+        groups: [],
+        reservations: [],
+        errors: ['inventory scan timed out'],
+      }),
+      cleanupChildren: async () => [],
+      eventStore: () =>
+        ({
+          invalidateExternalSession: () => {},
+          getEvents: () => [],
+          append: () => {},
+        }) as never,
+    })
+
+    try {
+      manager.launch('sess-1', settled)
+      const token = manager.activeWorker('sess-1')!.token
+      child.emit('exit', 0, null)
+      setTimeout(() => child.emit('message', { ...token, type: 'done', ok: true }), 51)
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(errorLog).toHaveBeenCalledWith(
+        'Worker zero-orphan proof failed',
+        expect.objectContaining({ sessionId: 'sess-1' }),
+      )
+      expect(errorLog).not.toHaveBeenCalledWith('Session worker died', expect.objectContaining({ sessionId: 'sess-1' }))
+      expect(settled).toHaveBeenCalledWith({ crashed: false })
+      expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
+        interrupted_at: null,
       })
-
-      try {
-        manager.launch('sess-1', settled)
-        const token = manager.activeWorker('sess-1')!.token
-        child.emit('exit', 0, null)
-        setTimeout(() => child.emit('message', { ...token, type: 'done', ok: true }), 51)
-        await vi.advanceTimersByTimeAsync(2_000)
-
-        expect(errorLog).toHaveBeenCalledWith(
-          'Worker zero-orphan proof failed',
-          expect.objectContaining({ sessionId: 'sess-1' }),
-        )
-        expect(errorLog).not.toHaveBeenCalledWith(
-          'Session worker died',
-          expect.objectContaining({ sessionId: 'sess-1' }),
-        )
-        expect(settled).toHaveBeenCalledWith({ crashed: false })
-        expect(namedDb.prepare(`SELECT interrupted_at FROM sessions WHERE id = 'sess-1'`).get()).toEqual({
-          interrupted_at: null,
-        })
-      } finally {
-        errorLog.mockRestore()
-        vi.useRealTimers()
-      }
-    },
-  )
+    } finally {
+      errorLog.mockRestore()
+      vi.useRealTimers()
+    }
+  })
 
   it('an exit0/null whose IPC channel closes without any done message remains a crash and leaves the session interrupted', async () => {
     vi.useFakeTimers()
