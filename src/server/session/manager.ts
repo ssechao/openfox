@@ -75,6 +75,7 @@ import {
 } from '../git/workspace.js'
 import { resolve } from 'node:path'
 import {
+  OpenFoxError,
   SessionNotFoundError,
   SessionQueueFullError,
   SessionWorkerQueueFullError,
@@ -177,7 +178,8 @@ export class SessionManager {
   // window instead of the main session.
   private activeSubAgents = new Map<string, { subAgentId: string; subAgentType: string }>()
   private switchLocks = new Map<string, Promise<unknown>>()
-  private workspaceCreationLocks = new Map<string, Promise<void>>()
+  private workspaceMutationLocks = new Map<string, Promise<unknown>>()
+  private workspaceDeletionIntents = new Map<string, Set<string>>()
   // Cooperative pause: in-memory only (a pause is only meaningful for a live,
   // running turn — it never survives a process restart).
   private pauseStates = new Map<string, PauseState>()
@@ -2277,6 +2279,20 @@ export class SessionManager {
     return getOrCreateLspManager(sessionId, effectiveWorkdir)
   }
 
+  private withWorkspaceMutationLock<T>(projectId: string, mutation: () => Promise<T>): Promise<T> {
+    const previous = this.workspaceMutationLocks.get(projectId) ?? Promise.resolve()
+    const next = previous.then(mutation)
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.workspaceMutationLocks.set(projectId, settled)
+    void settled.then(() => {
+      if (this.workspaceMutationLocks.get(projectId) === settled) this.workspaceMutationLocks.delete(projectId)
+    })
+    return next
+  }
+
   private async applyBranchIfNeeded(
     projectDir: string,
     projectName: string,
@@ -2346,7 +2362,33 @@ export class SessionManager {
     target: string,
     branch?: string,
     sourceBranch?: string,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; exclusive?: boolean },
+  ): Promise<Session> {
+    if (target !== 'original') validateWorkspaceName(target)
+    const session = this.requireSession(sessionId)
+    const deletionPendingAtRequest =
+      target !== 'original' && (this.workspaceDeletionIntents.get(session.projectId)?.has(target) ?? false)
+    return this.withWorkspaceMutationLock(session.projectId, () =>
+      this.switchWorkspaceWithinProjectLock(
+        sessionId,
+        target,
+        branch,
+        sourceBranch,
+        options,
+        deletionPendingAtRequest,
+        options?.exclusive === true,
+      ),
+    )
+  }
+
+  private async switchWorkspaceWithinProjectLock(
+    sessionId: string,
+    target: string,
+    branch?: string,
+    sourceBranch?: string,
+    options?: { signal?: AbortSignal; exclusive?: boolean },
+    deletionPendingAtRequest = false,
+    requireExclusive = false,
   ): Promise<Session> {
     if (target !== 'original') validateWorkspaceName(target)
 
@@ -2357,6 +2399,74 @@ export class SessionManager {
       const session = this.requireSession(sessionId)
       const project = getProject(session.projectId)
       if (!project) throw new Error(`Project not found: ${session.projectId}`)
+
+      let workspaceAlreadyExists = false
+      let requestedBranch = branch
+      if (target !== 'original') {
+        if (deletionPendingAtRequest || (this.workspaceDeletionIntents.get(session.projectId)?.has(target) ?? false)) {
+          throw new OpenFoxError(
+            serverT({
+              en: `Workspace "${target}" is being deleted`,
+              fr: `Le workspace « ${target} » est en cours de suppression`,
+            }),
+            'WORKSPACE_BEING_DELETED',
+          )
+        }
+        const wsDir = await getWorkspacesDir(project.name, project.workdir)
+        const targetPath = resolve(wsDir, target)
+        const activeWorkspaceSessions: Array<{ id: string; path: string; branch: string }> = []
+        const branchesByWorkspace = new Map<string, string | null>()
+        for (const candidate of this.listSessions()) {
+          if (candidate.id === sessionId || candidate.projectId !== session.projectId || !candidate.workspace) continue
+          let activeBranch = branchesByWorkspace.get(candidate.workspace)
+          if (activeBranch === undefined) {
+            activeBranch = await getGitBranch(candidate.workspace)
+            branchesByWorkspace.set(candidate.workspace, activeBranch)
+          }
+          if (!activeBranch) continue
+          activeWorkspaceSessions.push({ id: candidate.id, path: candidate.workspace, branch: activeBranch })
+        }
+        if (requireExclusive) {
+          const conflictingSessionIds = activeWorkspaceSessions
+            .filter((candidate) => candidate.path === targetPath)
+            .map((candidate) => candidate.id)
+          if (conflictingSessionIds.length > 0) {
+            throw new WorkspaceInUseError(
+              serverT(
+                {
+                  en: 'Workspace "{{workspace}}" is in use by another session',
+                  fr: 'Le workspace « {{workspace}} » est utilisé par une autre session',
+                },
+                { workspace: target },
+              ),
+              conflictingSessionIds,
+            )
+          }
+        }
+        workspaceAlreadyExists = await workspaceExists(project.name, target, project.workdir)
+        if (!requestedBranch) {
+          requestedBranch = workspaceAlreadyExists
+            ? ((await getGitBranch(targetPath)) ?? undefined)
+            : ((await getGitBranch(this.getEffectiveWorkdir(sessionId))) ?? session.branch ?? undefined)
+        }
+        if (requestedBranch) {
+          const conflictingWorkspace = activeWorkspaceSessions.find(
+            (candidate) => candidate.path !== targetPath && candidate.branch === requestedBranch,
+          )
+          if (conflictingWorkspace) {
+            throw new OpenFoxError(
+              serverT(
+                {
+                  en: 'Branch "{{branch}}" is already active in workspace "{{workspace}}"',
+                  fr: 'La branche « {{branch}} » est déjà active dans le workspace « {{workspace}} »',
+                },
+                { branch: requestedBranch, workspace: conflictingWorkspace.path.split('/').pop() ?? target },
+              ),
+              'BRANCH_IN_USE',
+            )
+          }
+        }
+      }
 
       const isBranchChangeOnly =
         target !== 'original' && session.workspace?.split('/').pop() === target && branch !== undefined
@@ -2395,27 +2505,10 @@ export class SessionManager {
       if (target === 'original') {
         updateSessionWorkdir(sessionId, project.workdir, null)
       } else if (!isBranchChangeOnly) {
-        const createLockKey = `${project.name}:${target}`
-        const existingCreateLock = this.workspaceCreationLocks.get(createLockKey)
-        if (existingCreateLock) await existingCreateLock
-
-        const createLockPromise = (async () => {
-          const exists = await workspaceExists(project.name, target, project.workdir)
-          if (!exists) {
-            // Inherit the session's current branch so a fresh workspace does
-            // not silently drop it onto the clone's default (main/develop).
-            const inheritedBranch =
-              branch ?? (await getGitBranch(this.getEffectiveWorkdir(sessionId))) ?? session.branch ?? undefined
-            await ensureWorkspace(project.workdir, target, project.name, inheritedBranch, sourceBranch, options)
-          } else if (branch) {
-            await this.applyBranchIfNeeded(project.workdir, project.name, target, branch, sourceBranch)
-          }
-        })()
-        this.workspaceCreationLocks.set(createLockKey, createLockPromise)
-        try {
-          await createLockPromise
-        } finally {
-          this.workspaceCreationLocks.delete(createLockKey)
+        if (!workspaceAlreadyExists) {
+          await ensureWorkspace(project.workdir, target, project.name, requestedBranch, sourceBranch, options)
+        } else if (requestedBranch) {
+          await this.applyBranchIfNeeded(project.workdir, project.name, target, requestedBranch, sourceBranch)
         }
         const wsDir = await getWorkspacesDir(project.name, project.workdir)
         const wsPath = resolve(wsDir, target)
@@ -2509,6 +2602,38 @@ export class SessionManager {
   ): Promise<Session> {
     if (target === 'original') throw new Error('Cannot delete the original workspace')
     validateWorkspaceName(target)
+    const session = this.requireSession(sessionId)
+    const projectId = session.projectId
+    const intents = this.workspaceDeletionIntents.get(projectId) ?? new Set<string>()
+    if (intents.has(target)) {
+      throw new OpenFoxError(
+        serverT({
+          en: `Workspace "${target}" is being deleted`,
+          fr: `Le workspace « ${target} » est en cours de suppression`,
+        }),
+        'WORKSPACE_BEING_DELETED',
+      )
+    }
+    intents.add(target)
+    this.workspaceDeletionIntents.set(projectId, intents)
+    try {
+      return await this.withWorkspaceMutationLock(projectId, () =>
+        this.deleteWorkspaceWithinProjectLock(sessionId, target, force, options),
+      )
+    } finally {
+      intents.delete(target)
+      if (intents.size === 0) this.workspaceDeletionIntents.delete(projectId)
+    }
+  }
+
+  private async deleteWorkspaceWithinProjectLock(
+    sessionId: string,
+    target: string,
+    force = false,
+    options?: { signal?: AbortSignal },
+  ): Promise<Session> {
+    if (target === 'original') throw new Error('Cannot delete the original workspace')
+    validateWorkspaceName(target)
 
     const session = this.requireSession(sessionId)
     const project = getProject(session.projectId)
@@ -2523,7 +2648,7 @@ export class SessionManager {
         // Switch all conflicting sessions to original first
         for (const other of otherSessionsUsingIt) {
           try {
-            await this.switchWorkspace(other.id, 'original', undefined, undefined, options)
+            await this.switchWorkspaceWithinProjectLock(other.id, 'original', undefined, undefined, options)
           } catch (err) {
             throw new Error(
               `Failed to switch session ${other.id} to original: ${err instanceof Error ? err.message : String(err)}`,
@@ -2542,7 +2667,7 @@ export class SessionManager {
     // If currently in the workspace being deleted, switch to original first
     const currentWsName = session.workspace?.split('/').pop()
     if (currentWsName === target) {
-      await this.switchWorkspace(sessionId, 'original', undefined, undefined, options)
+      await this.switchWorkspaceWithinProjectLock(sessionId, 'original', undefined, undefined, options)
     }
 
     const wsDir = await getWorkspacesDir(project.name, project.workdir)

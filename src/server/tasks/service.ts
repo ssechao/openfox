@@ -1041,6 +1041,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
   ) {
     const pendingDeletes = compensateFreshSessions()
     if (isThenable(pendingDeletes)) await pendingDeletes
+    const managerLaunch = Boolean(task.launchedBy)
     let session: Session
     let created = false
     if (targetSessionId) {
@@ -1054,8 +1055,8 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       const slot = reserveFreshDelete()
       if (!slot) throw new WorkerAdmissionRefusal('full', `task:${task.id}`, true)
       const defaults = parseDefaultModelSelection(config.defaultModelSelection)
-      const providerId = task.providerId ?? defaults.providerId ?? null
-      const model = task.model ?? defaults.model ?? null
+      const providerId = managerLaunch ? (task.providerId ?? null) : (task.providerId ?? defaults.providerId ?? null)
+      const model = managerLaunch ? (task.model ?? null) : (task.model ?? defaults.model ?? null)
       try {
         session = sessionManager.createSession(projectId, undefined, providerId, model)
       } catch (error) {
@@ -1074,8 +1075,37 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
 
     async function finishSeededSession() {
       const attachments = task.attachments.length > 0 ? task.attachments : undefined
+      const projectDir = getProject(projectId)?.workdir
+      if (managerLaunch) {
+        const agentId = task.agentId
+        const providerId = task.providerId
+        const model = task.model
+        const workspace = task.workspace
+        const branch = task.branch
+        const sourceBranch = task.sourceBranch
+        const agents = projectDir ? await loadAllAgents(configDir, projectDir) : []
+        const provider = (config.providers ?? []).find((candidate) => candidate.id === providerId)
+        if (
+          !agentId ||
+          !agents.some((agent) => agent.metadata.id === agentId && !agent.metadata.subagent) ||
+          !providerId ||
+          !provider ||
+          !model ||
+          !provider.models.some((candidate) => candidate.id === model) ||
+          !workspace ||
+          !branch ||
+          !sourceBranch ||
+          session.providerId !== providerId ||
+          session.providerModel !== model
+        ) {
+          throw new WorkerAdmissionRefusal('start_failed', session.id, created)
+        }
+        sessionManager.setMode(session.id, agentId)
+        session = await sessionManager.switchWorkspace(session.id, workspace, branch, sourceBranch, { exclusive: true })
+      }
+
       const commitSession = () => {
-        if (task.agentId) {
+        if (task.agentId && !managerLaunch) {
           try {
             sessionManager.setMode(session.id, task.agentId)
           } catch {
@@ -1085,7 +1115,6 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         emitReminder(session.id, reminderForInProgress(task, session.id, from))
       }
 
-      const projectDir = getProject(projectId)?.workdir
       let slash: SlashLaunch
       try {
         slash = await resolveSlashLaunch(configDir, projectDir, task.prompt)
@@ -1116,7 +1145,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         }
       } else if (slash?.kind === 'command') {
         commitSession()
-        if (slash.agentMode) {
+        if (slash.agentMode && !managerLaunch) {
           try {
             sessionManager.setMode(session.id, slash.agentMode)
           } catch {
