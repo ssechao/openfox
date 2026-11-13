@@ -25,6 +25,7 @@ import type {
   Session,
 } from '../../shared/types.js'
 import type { SessionManager } from '../session/manager.js'
+import { SessionWorkerQueueFullError } from '../utils/errors.js'
 import type { TasksUpdatePayload } from '../../shared/protocol.js'
 import type { Attachment, WorkflowLaunchScope } from '../../shared/types.js'
 import { parseDefaultModelSelection } from '../provider-manager.js'
@@ -105,6 +106,8 @@ import {
   listDueScheduledTasks as dbListDueScheduledTasks,
   setTaskSchedule as dbSetTaskSchedule,
   clearTaskSchedule as dbClearTaskSchedule,
+  setTaskLaunchSpec as dbSetTaskLaunchSpec,
+  type TaskLaunchSpecValues,
 } from '../db/tasks.js'
 import type { TaskGateConfig, TaskActor, TaskSchedule } from '../../shared/types.js'
 import { serverT } from '../i18n.js'
@@ -150,6 +153,15 @@ export interface LaunchSpec {
 
 export type LaunchValidation = { ok: true; spec: LaunchSpec } | { ok: false; code: LaunchRefusalCode; message: string }
 
+export type LaunchExecution =
+  | { ok: false; code: LaunchRefusalCode; message: string }
+  | {
+      ok: true
+      task: ProjectTask
+      sessionId?: string
+      queued?: TaskQueuedInfo
+    }
+
 export interface TaskActorInfo {
   actor: TaskActor
   actorName?: string
@@ -188,6 +200,7 @@ export interface TasksService {
   list(projectId: string): ProjectTask[]
   get(projectId: string, taskId: string): ProjectTask | null
   validateLaunch(request: LaunchRequest): Promise<LaunchValidation>
+  launch(request: LaunchRequest, expectedVersion?: number): Promise<LaunchExecution>
   create(projectId: string, input: CreateTaskServiceInput, actor: TaskActorInfo): ProjectTask
   update(
     projectId: string,
@@ -457,15 +470,72 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     return task
   }
 
+  function taskConflict(task: ProjectTask): TaskConflictError {
+    const error = new Error(
+      serverT({ en: 'Task changed, refresh and retry', fr: 'Tâche modifiée, actualisez et réessayez' }),
+    ) as TaskConflictError
+    error.code = 'CONFLICT'
+    error.task = task
+    return error
+  }
+
   function assertNotStale(task: ProjectTask, expectedVersion?: number): void {
     if (expectedVersion !== undefined && task.version !== expectedVersion) {
-      const err = new Error(
-        serverT({ en: 'Task changed, refresh and retry', fr: 'Tâche modifiée, actualisez et réessayez' }),
-      ) as TaskConflictError
-      err.code = 'CONFLICT'
-      err.task = task
-      throw err
+      throw taskConflict(task)
     }
+  }
+
+  function taskLaunchSpecValues(task: ProjectTask): TaskLaunchSpecValues {
+    return {
+      agentId: task.agentId ?? null,
+      providerId: task.providerId ?? null,
+      model: task.model ?? null,
+      workspace: task.workspace ?? null,
+      branch: task.branch ?? null,
+      sourceBranch: task.sourceBranch ?? null,
+      launchedBy: task.launchedBy ?? null,
+    }
+  }
+
+  async function launch(request: LaunchRequest, expectedVersion?: number): Promise<LaunchExecution> {
+    return withLock(request.projectId, async () => {
+      const task = assertOwned(request.projectId, request.taskId)
+      assertNotStale(task, expectedVersion)
+      const validation = await validateLaunch(request)
+      if (!validation.ok) return validation
+      const previousSpec = taskLaunchSpecValues(task)
+      const written = dbSetTaskLaunchSpec(
+        task.id,
+        {
+          agentId: validation.spec.agentId,
+          providerId: validation.spec.providerId,
+          model: validation.spec.model,
+          workspace: validation.spec.workspace,
+          branch: validation.spec.branch,
+          sourceBranch: validation.spec.sourceBranch,
+          launchedBy: validation.spec.launchedBy,
+        },
+        task.version,
+      )
+      if (!written) throw taskConflict(assertOwned(request.projectId, request.taskId))
+      try {
+        const result = await moveLocked(request.projectId, request.taskId, 'in_progress', {
+          actor: 'manager',
+          actorName: validation.spec.launchedBy,
+        })
+        return {
+          ok: true,
+          task: result.task,
+          ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+          ...(result.queued ? { queued: result.queued } : {}),
+        }
+      } catch (error) {
+        const current = assertOwned(request.projectId, request.taskId)
+        const restored = dbSetTaskLaunchSpec(request.taskId, previousSpec, current.version)
+        if (!restored) throw taskConflict(assertOwned(request.projectId, request.taskId))
+        throw error
+      }
+    })
   }
 
   function create(projectId: string, input: CreateTaskServiceInput, actor: TaskActorInfo) {
@@ -558,6 +628,16 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
   async function moveLocked(projectId: string, taskId: string, to: TaskDestination, opts: MoveOptions) {
     const task = assertOwned(projectId, taskId)
     assertNotStale(task, opts.expectedVersion)
+    const auditDetail = (detail: string) =>
+      opts.actor === 'manager'
+        ? serverT(
+            {
+              en: 'Launched by manager {{sessionId}}',
+              fr: 'Lancée par le manager {{sessionId}}',
+            },
+            { sessionId: opts.actorName ?? '' },
+          )
+        : detail
 
     const from = task.status
     if (from === to) {
@@ -608,7 +688,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           dbSetTaskRunState(taskId, 'running')
           if (task.schedule) dbClearTaskSchedule(taskId)
           dbAddTaskLink(taskId, seeded.session.id, true)
-          dbAddAuditEntry(taskId, opts.actor, 'move', `Moved to In Progress (running)`, opts.actorName)
+          dbAddAuditEntry(taskId, opts.actor, 'move', auditDetail('Moved to In Progress (running)'), opts.actorName)
           sessionId = seeded.session.id
         } catch (error) {
           if (!isWorkerAdmissionRefusal(error)) throw error
@@ -622,7 +702,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
               taskId,
               opts.actor,
               'move',
-              'Moved to In Progress (queued): waiting for a worker',
+              auditDetail('Moved to In Progress (queued): waiting for a worker'),
               opts.actorName,
             )
             queued = {
@@ -648,7 +728,9 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
           taskId,
           opts.actor,
           'move',
-          poolBlocked ? 'Moved to In Progress (queued): waiting for a worker' : 'Moved to In Progress (queued)',
+          auditDetail(
+            poolBlocked ? 'Moved to In Progress (queued): waiting for a worker' : 'Moved to In Progress (queued)',
+          ),
           opts.actorName,
         )
         queued = {
@@ -1070,6 +1152,9 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       return await finishSeededSession()
     } catch (error) {
       if (created) await deleteFreshSession(session.id)
+      if (error instanceof SessionWorkerQueueFullError) {
+        throw new WorkerAdmissionRefusal('full', session.id, created)
+      }
       throw error
     }
 
@@ -1286,6 +1371,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     list,
     get,
     validateLaunch,
+    launch,
     create,
     update,
     duplicate,

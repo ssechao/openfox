@@ -629,7 +629,7 @@ export type ToolName =
 export type TaskStatus = 'todo' | 'in_progress' | 'done'
 /** Active state of an in-progress task: launched, queued, or idle after its session was deleted. */
 export type TaskRunState = 'running' | 'queued' | 'idle'
-export type TaskActor = 'human' | 'agent' | 'system'
+export type TaskActor = 'human' | 'agent' | 'manager' | 'system'
 
 export interface TaskQueuedInfo {
   reason: 'slot_limit' | 'queue_paused' | 'admission_refused'
