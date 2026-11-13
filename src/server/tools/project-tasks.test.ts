@@ -199,7 +199,7 @@ describe('project_tasks tool', () => {
       const { promisify } = await import('node:util')
       const { updateProject } = await import('../db/projects.js')
       const { getDatabase } = await import('../db/index.js')
-      const { initEventStore } = await import('../events/index.js')
+      const { getEventStore, initEventStore } = await import('../events/index.js')
       const { SessionManager } = await import('../session/manager.js')
       const { setSetting, SETTINGS_KEYS } = await import('../db/settings.js')
       const execFileAsync = promisify(execFile)
@@ -253,7 +253,11 @@ describe('project_tasks tool', () => {
       exactManager.setMode(planner.id, 'planner')
       exactManager.setMode(builder.id, 'builder')
       exactManager.setMode(managerSession.id, 'manager')
-      await expect.poll(() => exactManager.getSession(managerSession.id)?.branch).toBe('main')
+      await Promise.all(
+        [planner.id, builder.id, managerSession.id].map((sessionId) =>
+          expect.poll(() => exactManager.getSession(sessionId)?.branch).toBe('main'),
+        ),
+      )
       const exactService = createTasksService({
         sessionManager: exactManager,
         config: exactConfig,
@@ -268,8 +272,24 @@ describe('project_tasks tool', () => {
         projectId,
         sessionManager: exactManager,
       })
+      const stateSnapshot = async () => {
+        const sessions = exactManager
+          .listSessions()
+          .map((summary) => exactManager.getSession(summary.id))
+          .filter((session) => session !== null)
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .map((session) => structuredClone(session))
+        const events = sessions.map((session) => ({
+          sessionId: session.id,
+          events: structuredClone(getEventStore().getEvents(session.id)),
+        }))
+        const status = await execFileAsync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: root })
+        const refs = await execFileAsync('git', ['for-each-ref', '--format=%(refname):%(objectname)'], { cwd: root })
+        return { sessions, events, git: { status: status.stdout, refs: refs.stdout } }
+      }
       const taskEn = exactService.create(projectId, { prompt: 'Launch EN' }, { actor: 'human' })
-      const beforeRefusals = structuredClone(exactService.get(projectId, taskEn.id))
+      const taskBeforePlanner = structuredClone(exactService.get(projectId, taskEn.id))
+      const stateBeforePlanner = await stateSnapshot()
       const argsEn = {
         action: 'launch',
         projectId,
@@ -283,8 +303,14 @@ describe('project_tasks tool', () => {
         expectedVersion: taskEn.version,
       }
       const plannerResult = await projectTasksTool.execute(argsEn, contextFor(planner.id))
+      const taskAfterPlanner = structuredClone(exactService.get(projectId, taskEn.id))
+      const stateAfterPlanner = await stateSnapshot()
+      const taskBeforeBuilder = structuredClone(exactService.get(projectId, taskEn.id))
+      const stateBeforeBuilder = await stateSnapshot()
       const builderResult = await projectTasksTool.execute(argsEn, contextFor(builder.id))
-      const afterRefusals = structuredClone(exactService.get(projectId, taskEn.id))
+      const taskAfterBuilder = structuredClone(exactService.get(projectId, taskEn.id))
+      const stateAfterBuilder = await stateSnapshot()
+      const sessionIdsBeforeEnglish = new Set(exactManager.listSessions().map((session) => session.id))
       setSetting(SETTINGS_KEYS.DISPLAY_LOCALE, 'en')
       const englishResult = await projectTasksTool.execute(argsEn, contextFor(managerSession.id))
       const englishContract =
@@ -292,6 +318,10 @@ describe('project_tasks tool', () => {
           ? (JSON.parse(englishResult.output) as { runState: string; sessionId: string | null; version: number })
           : null
       const englishTask = exactService.get(projectId, taskEn.id)
+      const freshSessionIds = exactManager
+        .listSessions()
+        .map((session) => session.id)
+        .filter((sessionId) => !sessionIdsBeforeEnglish.has(sessionId))
       const taskFr = exactService.create(projectId, { prompt: 'Launch FR' }, { actor: 'human' })
       setSetting(SETTINGS_KEYS.DISPLAY_LOCALE, 'fr')
       const frenchResult = await projectTasksTool.execute(
@@ -312,51 +342,66 @@ describe('project_tasks tool', () => {
         planner: {
           success: plannerResult.success,
           code: plannerResult.error?.includes('NOT_MANAGER') ? 'NOT_MANAGER' : plannerResult.error,
+          task: taskAfterPlanner,
+          state: stateAfterPlanner,
         },
         builder: {
           success: builderResult.success,
           code: builderResult.error?.includes('NOT_MANAGER') ? 'NOT_MANAGER' : builderResult.error,
+          task: taskAfterBuilder,
+          state: stateAfterBuilder,
         },
-        refusalsHadNoEffect: afterRefusals,
         manager: {
           success: englishResult.success,
           contract: englishContract
             ? {
                 runState: englishContract.runState,
-                sessionId: englishContract.sessionId ? 'present' : null,
                 version: typeof englishContract.version,
               }
             : null,
-          activeSessionIsFresh:
-            englishTask?.activeSessionId !== undefined && englishTask.activeSessionId !== managerSession.id,
-          managerIsUnlinked: !englishTask?.sessionIds.includes(managerSession.id),
-          links: englishTask?.sessionIds.length ?? 0,
+          freshSessionCount: freshSessionIds.length,
+          contractEqualsActive: englishContract?.sessionId === englishTask?.activeSessionId,
+          activeEqualsOnlyFresh: freshSessionIds.length === 1 && englishTask?.activeSessionId === freshSessionIds[0],
+          activeExcludesCallers:
+            englishTask?.activeSessionId !== managerSession.id &&
+            englishTask?.activeSessionId !== planner.id &&
+            englishTask?.activeSessionId !== builder.id,
+          linksMatchActive:
+            englishTask?.sessionIds.length === 1 && englishTask.sessionIds[0] === englishTask.activeSessionId,
         },
         audit: {
           en: englishAudit?.detail,
           enActor: englishAudit?.actor,
-          frLocalized:
-            frenchAudit?.detail !== undefined &&
-            frenchAudit.detail !== englishAudit?.detail &&
-            frenchAudit.detail.includes(managerSession.id),
+          fr: frenchAudit?.detail,
           frActor: frenchAudit?.actor,
           frenchLaunchSucceeded: frenchResult.success,
         },
       }).toEqual({
-        planner: { success: false, code: 'NOT_MANAGER' },
-        builder: { success: false, code: 'NOT_MANAGER' },
-        refusalsHadNoEffect: beforeRefusals,
+        planner: {
+          success: false,
+          code: 'NOT_MANAGER',
+          task: taskBeforePlanner,
+          state: stateBeforePlanner,
+        },
+        builder: {
+          success: false,
+          code: 'NOT_MANAGER',
+          task: taskBeforeBuilder,
+          state: stateBeforeBuilder,
+        },
         manager: {
           success: true,
-          contract: { runState: 'running', sessionId: 'present', version: 'number' },
-          activeSessionIsFresh: true,
-          managerIsUnlinked: true,
-          links: 1,
+          contract: { runState: 'running', version: 'number' },
+          freshSessionCount: 1,
+          contractEqualsActive: true,
+          activeEqualsOnlyFresh: true,
+          activeExcludesCallers: true,
+          linksMatchActive: true,
         },
         audit: {
           en: 'Launched by manager ' + managerSession.id,
           enActor: 'manager',
-          frLocalized: true,
+          fr: 'Lancée par le manager ' + managerSession.id,
           frActor: 'manager',
           frenchLaunchSucceeded: true,
         },
