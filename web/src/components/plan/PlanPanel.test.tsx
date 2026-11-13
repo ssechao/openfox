@@ -310,15 +310,12 @@ describe('PlanPanel — resume affordance after interruption', () => {
     }
   })
 
-  it.fails(
-    'renders SessionResumeButton when the session is interrupted so the user always has a way to resume, not just an error message',
-    () => {
-      const html = renderToStaticMarkup(<PlanPanel />)
+  it('renders SessionResumeButton when the session is interrupted so the user always has a way to resume, not just an error message', () => {
+    const html = renderToStaticMarkup(<PlanPanel />)
 
-      expect(html).toContain('data-testid="session-resume-button"')
-      expect(html).toContain('data-session-id="s1"')
-    },
-  )
+    expect(html).toContain('data-testid="session-resume-button"')
+    expect(html).toContain('data-session-id="s1"')
+  })
 })
 
 describe('PlanPanel — next-task card lives in the feed, not the composer', () => {

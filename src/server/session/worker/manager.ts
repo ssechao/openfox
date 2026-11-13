@@ -88,6 +88,7 @@ const WORKER_PRE_SIGNAL_CAPTURE_TIMEOUT_MS = 500
 const WORKER_IDENTITY_PROOF_TIMEOUT_MS = 500
 const WORKER_ORPHAN_PROOF_DELAY_MS = 2_000
 const WORKER_ORPHAN_PROOF_TOLERANCE_MS = 500
+const WORKER_DONE_CAPTURE_TIMEOUT_MS = 50
 const WORKER_LOG_MAX_LINE_BYTES = 64 * 1024
 const WORKER_LOG_REMAINDER_BYTES = WORKER_LOG_MAX_LINE_BYTES - 128
 const WORKER_LOG_RATE_LIMIT = 100
@@ -108,6 +109,8 @@ interface ActiveWorker {
   inventoryPromise?: Promise<ExclusiveProcessInventory>
   orphanCheckPromise?: Promise<OrphanInventoryCheck>
   doneReceived: boolean
+  doneReceivedPromise: Promise<void>
+  resolveDoneReceived: () => void
   doneOk: boolean
   doneError?: string
   stopRequestedAt?: number
@@ -419,6 +422,10 @@ export class SessionWorkerManager {
       this.deps.processSupervisor || child.pid === undefined
         ? { status: 'absent' as const }
         : readProcessInventory(child.pid)
+    let resolveDoneReceived = () => {}
+    const doneReceivedPromise = new Promise<void>((resolve) => {
+      resolveDoneReceived = resolve
+    })
     const worker: ActiveWorker = {
       sessionId,
       token,
@@ -426,6 +433,8 @@ export class SessionWorkerManager {
       childrenPath,
       ...(workerInventoryRead.status === 'found' ? { workerInventory: workerInventoryRead.process } : {}),
       doneReceived: false,
+      doneReceivedPromise,
+      resolveDoneReceived,
       doneOk: false,
       exitObserved: false,
       signalErrors: [],
@@ -597,6 +606,7 @@ export class SessionWorkerManager {
         worker.doneReceived = true
         worker.doneOk = msg.ok
         if (msg.error) worker.doneError = msg.error
+        worker.resolveDoneReceived()
       }
     })
 
@@ -1326,12 +1336,28 @@ export class SessionWorkerManager {
   private async settle(worker: ActiveWorker, exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> {
     const { sessionId, token } = worker
     const db = this.deps.db()
+    const doneInFlight = !worker.doneReceived && exitCode === 0 && signal === null
+    if (doneInFlight) {
+      let timer: NodeJS.Timeout | undefined
+      await Promise.race([
+        worker.doneReceivedPromise,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, WORKER_DONE_CAPTURE_TIMEOUT_MS)
+        }),
+      ])
+      if (timer) clearTimeout(timer)
+    }
     const clean = worker.doneReceived && worker.doneOk && exitCode === 0 && signal === null
+    const gatewayEscalatedStop =
+      worker.stopRequestedAt !== undefined &&
+      worker.stopEscalatedAt !== undefined &&
+      (signal === 'SIGTERM' || signal === 'SIGKILL')
+    const expectedExit = clean || gatewayEscalatedStop
     if (worker.gatewayShutdown) {
       this.retire(worker, { crashed: false })
       return
     }
-    if (!clean) {
+    if (!expectedExit) {
       if (worker.stopRequestedAt === undefined) this.pendingInterruptions.add(sessionId)
       this.scheduler.cancel(sessionId)
     }
@@ -1340,7 +1366,7 @@ export class SessionWorkerManager {
 
     const gatewayEventStore = this.deps.eventStore?.() ?? getEventStore()
     let tokenClearError: string | undefined
-    if (clean) {
+    if (expectedExit) {
       try {
         if (typeof gatewayEventStore.runRecoverable === 'function') {
           await gatewayEventStore.runRecoverable(sessionId, 'worker.token.clear', () =>
@@ -1354,12 +1380,32 @@ export class SessionWorkerManager {
         logger.error('Worker token recovery deadline exceeded', { sessionId, error: tokenClearError })
       }
     }
-    this.deps.healthAggregator?.expireWorker(token, clean ? 'exit' : 'crash')
+    this.deps.healthAggregator?.expireWorker(token, expectedExit ? 'exit' : 'crash')
 
-    if (worker.stopRequestedAt !== undefined && worker.stopEscalatedAt === undefined && clean) {
+    if (worker.stopRequestedAt !== undefined && expectedExit) {
+      if (gatewayEscalatedStop) this.prepareInterruptedEvents(sessionId)
       const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
+      const verification = gatewayEscalatedStop
+        ? this.beginWorkerInventoryVerification(worker, inventory, recoveryDeadlineAt)
+        : undefined
       const cleanup = await this.cleanupWorkerChildren(sessionId, worker.childrenPath, recoveryDeadlineAt)
       if (!isLatestWorkerGeneration(db, sessionId, token)) return
+      if (verification) {
+        const report: WorkerCrashReport = {
+          sessionId,
+          workerId: token.workerId,
+          generation: token.generation,
+          pid: worker.child.pid ?? -1,
+          exitCode,
+          signal,
+          interruptedAt: new Date(worker.stopRequestedAt).toISOString(),
+          killedChildren: cleanup.killedChildren,
+          inventory,
+          ...(cleanup.cleanupError ? { cleanupError: cleanup.cleanupError } : {}),
+        }
+        this.lastCrash = report
+        this.verifyWorkerInventory(report, verification)
+      }
       const recoveryErrors = [
         ...inventory.errors,
         ...(cleanup.cleanupError ? [cleanup.cleanupError] : []),
@@ -1376,6 +1422,24 @@ export class SessionWorkerManager {
     }
 
     if (clean) {
+      if (doneInFlight) {
+        const inventory = await this.beginWorkerInventoryCapture(worker, recoveryStartedAt, recoveryDeadlineAt)
+        const verification = this.beginWorkerInventoryVerification(worker, inventory, recoveryDeadlineAt)
+        this.verifyWorkerInventory(
+          {
+            sessionId,
+            workerId: token.workerId,
+            generation: token.generation,
+            pid: worker.child.pid ?? -1,
+            exitCode,
+            signal,
+            interruptedAt: new Date(inventory.capturedAt).toISOString(),
+            killedChildren: [],
+            inventory,
+          },
+          verification,
+        )
+      }
       removeChildrenFile(worker.childrenPath)
       const eventStore = this.deps.eventStore?.() ?? getEventStore()
       eventStore.invalidateExternalSession(sessionId)
