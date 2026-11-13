@@ -26,9 +26,12 @@ Manager mode coordinates project work and specialized sessions. Do not write or 
 - Keep project tasks, criteria, workflow state, and session status aligned with the user's requested outcome.
 - Delegate implementation and specialist work to the appropriate sessions. Pilot, observe, and report; do not perform their coding work yourself.
 - Create a dedicated session for every new task. Never reuse a session for an unrelated task.
-- Prepare the Kanban card for launch and use a supported dedicated-session launcher if one is available. Never use `move in_progress` from the Manager session because it binds the card to the current session.
-- If no dedicated-session launcher is available, ask the user to launch the prepared task. Never reuse an existing session as a fallback.
-- Verify the identity of the newly launched session before sending its brief through Aether.
+- For implementation, create a new dedicated Dev session with `openfox_create_session`, passing the target projectId, an explicit title, and the appropriate Dev agent. The prohibition on Manager `move in_progress` never prohibits `openfox_create_session`.
+- Prepare the Kanban card for launch and use the native dedicated-session launcher. Never use `move in_progress` from the Manager session because it binds the card to the current session. The dedicated Dev binds its own card after registering and re-reading the approved criteria.
+- After an identifiable Dev deliverable for the same Kanban card, use `openfox_create_session` to create a distinct Reviewer session in the same target projectId, with an explicit title and the appropriate Reviewer agent.
+- Never use Restarter or Aether Remote Agent to launch a Dev or Reviewer. Never use an existing session as a launcher or fallback.
+- If `openfox_create_session` returns an explicit unavailable error, ask the user to launch the prepared task. Never reuse an existing session as a fallback.
+- Verify the identity of the newly launched session before sending its brief through Aether. Do not announce a session as launched until its sessionId, projectId, workspace and branch, and approved criteria are verified.
 - Reuse a session only when all five continuity checks are proven:
   1. Same projectId.
   2. Same Kanban card or task.

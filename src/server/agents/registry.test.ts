@@ -170,58 +170,49 @@ describe('loadDefaultAgents', () => {
     expect.soft(prompt).toContain('continue in a new dedicated session')
   })
 
-  it.fails(
-    'Manager creates a dedicated Dev session natively in the target project and delegates card binding',
-    async () => {
-      const agents = await loadDefaultAgents()
-      const manager = agents.find((agent) => agent.metadata.id === 'manager')
-      const prompt = manager?.prompt.toLowerCase() ?? ''
+  it('Manager creates a dedicated Dev session natively in the target project and delegates card binding', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
 
-      expect.soft(prompt).toContain('openfox_create_session')
-      expect.soft(prompt).toContain('target projectid')
-      expect.soft(prompt).toContain('explicit title')
-      expect.soft(prompt).toContain('appropriate dev agent')
-      expect.soft(prompt).toContain('new dedicated dev session')
-      expect.soft(prompt).toContain('the dedicated dev binds its own card')
-    },
-  )
+    expect.soft(prompt).toContain('openfox_create_session')
+    expect.soft(prompt).toContain('target projectid')
+    expect.soft(prompt).toContain('explicit title')
+    expect.soft(prompt).toContain('appropriate dev agent')
+    expect.soft(prompt).toContain('new dedicated dev session')
+    expect.soft(prompt).toContain('the dedicated dev binds its own card')
+  })
 
-  it.fails(
-    'Manager creates a distinct Reviewer session natively in the target project after an identifiable Dev deliverable',
-    async () => {
-      const agents = await loadDefaultAgents()
-      const manager = agents.find((agent) => agent.metadata.id === 'manager')
-      const prompt = manager?.prompt.toLowerCase() ?? ''
+  it('Manager creates a distinct Reviewer session natively in the target project after an identifiable Dev deliverable', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
 
-      expect.soft(prompt).toContain('after an identifiable dev deliverable')
-      expect.soft(prompt).toContain('openfox_create_session')
-      expect.soft(prompt).toContain('distinct reviewer session')
-      expect.soft(prompt).toContain('same target projectid')
-      expect.soft(prompt).toContain('same kanban card')
-      expect.soft(prompt).toContain('explicit title')
-      expect.soft(prompt).toContain('appropriate reviewer agent')
-    },
-  )
+    expect.soft(prompt).toContain('after an identifiable dev deliverable')
+    expect.soft(prompt).toContain('openfox_create_session')
+    expect.soft(prompt).toContain('distinct reviewer session')
+    expect.soft(prompt).toContain('same target projectid')
+    expect.soft(prompt).toContain('same kanban card')
+    expect.soft(prompt).toContain('explicit title')
+    expect.soft(prompt).toContain('appropriate reviewer agent')
+  })
 
-  it.fails(
-    'Manager never uses operational or existing sessions as a launch fallback and only announces verified launches',
-    async () => {
-      const agents = await loadDefaultAgents()
-      const manager = agents.find((agent) => agent.metadata.id === 'manager')
-      const prompt = manager?.prompt.toLowerCase() ?? ''
+  it('Manager never uses operational or existing sessions as a launch fallback and only announces verified launches', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
 
-      expect.soft(prompt).toContain('never use restarter')
-      expect.soft(prompt).toContain('aether remote agent')
-      expect.soft(prompt).toContain('never use an existing session as a launcher or fallback')
-      expect.soft(prompt).toContain('do not announce a session as launched until')
-      expect.soft(prompt).toContain('sessionid')
-      expect.soft(prompt).toContain('projectid')
-      expect.soft(prompt).toContain('workspace and branch')
-      expect.soft(prompt).toContain('approved criteria')
-      expect.soft(prompt).toContain('reuse a session only when all five continuity checks are proven')
-      expect.soft(prompt).toContain('brief through aether')
-    },
-  )
+    expect.soft(prompt).toContain('never use restarter')
+    expect.soft(prompt).toContain('aether remote agent')
+    expect.soft(prompt).toContain('never use an existing session as a launcher or fallback')
+    expect.soft(prompt).toContain('do not announce a session as launched until')
+    expect.soft(prompt).toContain('sessionid')
+    expect.soft(prompt).toContain('projectid')
+    expect.soft(prompt).toContain('workspace and branch')
+    expect.soft(prompt).toContain('approved criteria')
+    expect.soft(prompt).toContain('reuse a session only when all five continuity checks are proven')
+    expect.soft(prompt).toContain('brief through aether')
+  })
 })
 
 describe('loadAllAgents', () => {
