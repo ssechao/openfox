@@ -32,6 +32,30 @@ afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true })
 })
 
+function getPromptClause(prompt: string, marker: string): string {
+  const clause = prompt.split('\n').find((line) => line.includes(marker))
+  expect(clause).toBeDefined()
+  return clause ?? ''
+}
+
+function expectNativeReviewerClause(prompt: string): void {
+  const clause = getPromptClause(prompt, 'after an identifiable dev deliverable')
+  expect(clause).toContain('openfox_create_session')
+  expect(clause).toContain('distinct reviewer session')
+  expect(clause).toContain('same target projectid')
+  expect(clause).toContain('same kanban card')
+  expect(clause).toContain('explicit title')
+  expect(clause).toContain('appropriate reviewer agent')
+}
+
+function expectVerifiedLaunchClause(prompt: string): void {
+  const clause = getPromptClause(prompt, 'do not announce a session as launched until')
+  expect(clause).toContain('sessionid')
+  expect(clause).toContain('projectid')
+  expect(clause).toContain('workspace and branch')
+  expect(clause).toContain('approved criteria')
+}
+
 describe('loadDefaultAgents', () => {
   it('should load all built-in agent definitions', async () => {
     const agents = await loadDefaultAgents()
@@ -188,13 +212,15 @@ describe('loadDefaultAgents', () => {
     const manager = agents.find((agent) => agent.metadata.id === 'manager')
     const prompt = manager?.prompt.toLowerCase() ?? ''
 
-    expect.soft(prompt).toContain('after an identifiable dev deliverable')
-    expect.soft(prompt).toContain('openfox_create_session')
-    expect.soft(prompt).toContain('distinct reviewer session')
-    expect.soft(prompt).toContain('same target projectid')
-    expect.soft(prompt).toContain('same kanban card')
-    expect.soft(prompt).toContain('explicit title')
-    expect.soft(prompt).toContain('appropriate reviewer agent')
+    expectNativeReviewerClause(prompt)
+
+    const reviewerClause = getPromptClause(prompt, 'after an identifiable dev deliverable')
+    const peerCreatedReviewer = prompt.replace(
+      reviewerClause,
+      reviewerClause.replace('use `openfox_create_session` to create', 'ask a peer to create'),
+    )
+    expect(peerCreatedReviewer).not.toBe(prompt)
+    expect(() => expectNativeReviewerClause(peerCreatedReviewer)).toThrow()
   })
 
   it('Manager never uses operational or existing sessions as a launch fallback and only announces verified launches', async () => {
@@ -205,13 +231,20 @@ describe('loadDefaultAgents', () => {
     expect.soft(prompt).toContain('never use restarter')
     expect.soft(prompt).toContain('aether remote agent')
     expect.soft(prompt).toContain('never use an existing session as a launcher or fallback')
-    expect.soft(prompt).toContain('do not announce a session as launched until')
-    expect.soft(prompt).toContain('sessionid')
-    expect.soft(prompt).toContain('projectid')
-    expect.soft(prompt).toContain('workspace and branch')
-    expect.soft(prompt).toContain('approved criteria')
+    expectVerifiedLaunchClause(prompt)
     expect.soft(prompt).toContain('reuse a session only when all five continuity checks are proven')
     expect.soft(prompt).toContain('brief through aether')
+
+    const launchClause = getPromptClause(prompt, 'do not announce a session as launched until')
+    const incompleteAnnouncement = prompt.replace(
+      launchClause,
+      launchClause.replace(
+        'sessionid, projectid, workspace and branch, and approved criteria',
+        'sessionid, workspace and branch',
+      ),
+    )
+    expect(incompleteAnnouncement).not.toBe(prompt)
+    expect(() => expectVerifiedLaunchClause(incompleteAnnouncement)).toThrow()
   })
 })
 
