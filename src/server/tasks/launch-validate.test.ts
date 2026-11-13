@@ -12,40 +12,15 @@ import { createProject } from '../db/projects.js'
 import { addTaskLink, createTask as dbCreateTask, getTask as dbGetTask, setTaskStatus } from '../db/tasks.js'
 import { initEventStore } from '../events/index.js'
 import { SessionManager } from '../session/manager.js'
-import { createTasksService, type TasksService } from './service.js'
+import {
+  createTasksService,
+  type LaunchRefusalCode,
+  type LaunchRequest,
+  type LaunchSpec,
+  type TasksService,
+} from './service.js'
 
-type LaunchRefusalCodeShape =
-  | 'NOT_MANAGER'
-  | 'PROJECT_MISMATCH'
-  | 'TASK_NOT_TODO'
-  | 'TASK_ALREADY_BOUND'
-  | 'UNKNOWN_AGENT'
-  | 'UNKNOWN_PROVIDER'
-  | 'UNKNOWN_MODEL'
-  | 'INVALID_WORKSPACE_NAME'
-  | 'INVALID_BRANCH_NAME'
-  | 'INVALID_SOURCE_BRANCH'
-
-interface LaunchRequestShape {
-  requesterSessionId: string
-  projectId: string
-  taskId: string
-  agentId: string
-  providerId: string
-  model: string
-  workspace: string
-  branch: string
-  sourceBranch: string
-}
-
-type LaunchSpecShape = Omit<LaunchRequestShape, 'requesterSessionId'> & {
-  launchedBy: string
-}
-
-type LaunchValidationShape =
-  { ok: true; spec: LaunchSpecShape } | { ok: false; code: LaunchRefusalCodeShape; message: string }
-
-type LaunchFields = Pick<LaunchSpecShape, 'workspace' | 'branch' | 'sourceBranch' | 'launchedBy'>
+type LaunchFields = Pick<LaunchSpec, 'workspace' | 'branch' | 'sourceBranch' | 'launchedBy'>
 
 const execFileAsync = promisify(execFile)
 
@@ -100,14 +75,9 @@ describe('validateLaunch', () => {
   let requesterSessionId: string
   let sessionEvents: string[]
 
-  const launchService = () =>
-    service as TasksService & {
-      validateLaunch: (request: LaunchRequestShape) => Promise<LaunchValidationShape>
-    }
+  const validate = (request: LaunchRequest) => service.validateLaunch(request)
 
-  const validate = (request: LaunchRequestShape) => launchService().validateLaunch(request)
-
-  const request = (overrides: Partial<LaunchRequestShape> = {}): LaunchRequestShape => ({
+  const request = (overrides: Partial<LaunchRequest> = {}): LaunchRequest => ({
     requesterSessionId,
     projectId,
     taskId,
@@ -120,13 +90,13 @@ describe('validateLaunch', () => {
     ...overrides,
   })
 
-  const without = (field: keyof LaunchRequestShape): LaunchRequestShape => {
-    const value: Partial<LaunchRequestShape> = request()
+  const without = (field: keyof LaunchRequest): LaunchRequest => {
+    const value: Partial<LaunchRequest> = request()
     delete value[field]
-    return value as LaunchRequestShape
+    return value as LaunchRequest
   }
 
-  const expectRefusal = async (value: LaunchRequestShape, code: LaunchRefusalCodeShape) => {
+  const expectRefusal = async (value: LaunchRequest, code: LaunchRefusalCode) => {
     await expect(validate(value)).resolves.toMatchObject({
       ok: false,
       code,
@@ -210,7 +180,7 @@ describe('validateLaunch', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it.fails('persists additive launch specification columns without regressing legacy tasks', () => {
+  it('persists additive launch specification columns without regressing legacy tasks', () => {
     const columns = (getDatabase().prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>).map(
       (column) => column.name,
     )
@@ -251,7 +221,7 @@ describe('validateLaunch', () => {
     })
   })
 
-  it.fails('rejects callers and tasks that are not eligible for launch with exact codes', async () => {
+  it('rejects callers and tasks that are not eligible for launch with exact codes', async () => {
     const builderSession = sessionManager.createSession(projectId, 'Builder requester')
     sessionManager.setMode(builderSession.id, 'builder')
     await vi.waitFor(() => expect(sessionManager.getSession(builderSession.id)?.branch).toBe('main'))
@@ -278,7 +248,7 @@ describe('validateLaunch', () => {
     await expectRefusal(request({ taskId: boundTask.id }), 'TASK_ALREADY_BOUND')
   })
 
-  it.fails('rejects unknown launch selections without falling back to defaults', async () => {
+  it('rejects unknown launch selections without falling back to defaults', async () => {
     await expectRefusal(request({ agentId: '' }), 'UNKNOWN_AGENT')
     await expectRefusal(without('agentId'), 'UNKNOWN_AGENT')
     await expectRefusal(request({ agentId: 'missing-agent' }), 'UNKNOWN_AGENT')
@@ -291,7 +261,7 @@ describe('validateLaunch', () => {
     await expectRefusal(request({ model: 'missing-model' }), 'UNKNOWN_MODEL')
   })
 
-  it.fails('validates workspace inputs and returns the complete nominal launch specification', async () => {
+  it('validates workspace inputs and returns the complete nominal launch specification', async () => {
     await expectRefusal(request({ workspace: '' }), 'INVALID_WORKSPACE_NAME')
     await expectRefusal(without('workspace'), 'INVALID_WORKSPACE_NAME')
     await expectRefusal(request({ workspace: 'invalid/workspace' }), 'INVALID_WORKSPACE_NAME')
@@ -332,7 +302,7 @@ describe('validateLaunch', () => {
     })
   })
 
-  it.fails('validates launch requests without mutating sessions tasks or git state', async () => {
+  it('validates launch requests without mutating sessions tasks or git state', async () => {
     const builderSession = sessionManager.createSession(projectId, 'Builder requester')
     sessionManager.setMode(builderSession.id, 'builder')
     await vi.waitFor(() => expect(sessionManager.getSession(builderSession.id)?.branch).toBe('main'))
@@ -343,8 +313,8 @@ describe('validateLaunch', () => {
     addTaskLink(boundTask.id, 'bound-session', true)
 
     const cases: Array<{
-      value: LaunchRequestShape
-      expected: { ok: boolean; code?: LaunchRefusalCodeShape }
+      value: LaunchRequest
+      expected: { ok: boolean; code?: LaunchRefusalCode }
     }> = [
       { value: request({ requesterSessionId: builderSession.id }), expected: { ok: false, code: 'NOT_MANAGER' } },
       { value: request({ taskId: 'missing-task' }), expected: { ok: false, code: 'PROJECT_MISMATCH' } },

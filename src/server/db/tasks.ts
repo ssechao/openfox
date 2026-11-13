@@ -41,6 +41,10 @@ interface TaskRow {
   agent_id: string | null
   provider_id: string | null
   model: string | null
+  workspace: string | null
+  branch: string | null
+  source_branch: string | null
+  launched_by: string | null
   schedule: string | null
   next_run_at: string | null
   created_at: string
@@ -96,6 +100,10 @@ export interface CreateTaskInput {
   agentId?: string
   providerId?: string
   model?: string
+  workspace?: string
+  branch?: string
+  sourceBranch?: string
+  launchedBy?: string
   schedule?: TaskSchedule
 }
 
@@ -114,8 +122,8 @@ export function createTask(projectId: string, input: CreateTaskInput): ProjectTa
     .get(projectId) as { pos: number }
 
   db.prepare(
-    `INSERT INTO tasks (id, project_id, prompt, attachments, status, run_state, position, version, agent_id, provider_id, model, schedule, next_run_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'todo', NULL, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, project_id, prompt, attachments, status, run_state, position, version, agent_id, provider_id, model, workspace, branch, source_branch, launched_by, schedule, next_run_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'todo', NULL, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     projectId,
@@ -125,6 +133,10 @@ export function createTask(projectId: string, input: CreateTaskInput): ProjectTa
     input.agentId ?? null,
     input.providerId ?? null,
     input.model ?? null,
+    input.workspace ?? null,
+    input.branch ?? null,
+    input.sourceBranch ?? null,
+    input.launchedBy ?? null,
     input.schedule ? JSON.stringify(input.schedule) : null,
     input.schedule ? scheduleNextRun(input.schedule) : null,
     now,
@@ -505,6 +517,10 @@ function hydrateTask(row: TaskRow): ProjectTask {
     ...(row.agent_id ? { agentId: row.agent_id } : {}),
     ...(row.provider_id ? { providerId: row.provider_id } : {}),
     ...(row.model ? { model: row.model } : {}),
+    ...(row.workspace ? { workspace: row.workspace } : {}),
+    ...(row.branch ? { branch: row.branch } : {}),
+    ...(row.source_branch ? { sourceBranch: row.source_branch } : {}),
+    ...(row.launched_by ? { launchedBy: row.launched_by } : {}),
     ...(schedule ? { schedule } : {}),
     sessionIds,
     ...(activeLink ? { activeSessionId: activeLink.session_id } : {}),

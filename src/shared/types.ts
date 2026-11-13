@@ -711,6 +711,10 @@ export interface ProjectTask {
   agentId?: string
   providerId?: string
   model?: string
+  workspace?: string
+  branch?: string
+  sourceBranch?: string
+  launchedBy?: string
   /** Linked sessions, active working session first, then historical attempts. */
   sessionIds: string[]
   activeSessionId?: string

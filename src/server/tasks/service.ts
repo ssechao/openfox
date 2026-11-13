@@ -29,6 +29,8 @@ import type { TasksUpdatePayload } from '../../shared/protocol.js'
 import type { Attachment, WorkflowLaunchScope } from '../../shared/types.js'
 import { parseDefaultModelSelection } from '../provider-manager.js'
 import type { AdmissionResult } from '../session/worker/scheduler.js'
+import { loadAllAgents } from '../agents/registry.js'
+import { runGit, validateWorkspaceName } from '../git/workspace.js'
 import { logger } from '../utils/logger.js'
 
 export class WorkerAdmissionRefusal extends Error {
@@ -110,6 +112,44 @@ import { nextOccurrence } from './recurrence.js'
 
 export type TaskDestination = 'todo' | 'in_progress' | 'done'
 
+export type LaunchRefusalCode =
+  | 'NOT_MANAGER'
+  | 'PROJECT_MISMATCH'
+  | 'TASK_NOT_TODO'
+  | 'TASK_ALREADY_BOUND'
+  | 'UNKNOWN_AGENT'
+  | 'UNKNOWN_PROVIDER'
+  | 'UNKNOWN_MODEL'
+  | 'INVALID_WORKSPACE_NAME'
+  | 'INVALID_BRANCH_NAME'
+  | 'INVALID_SOURCE_BRANCH'
+
+export interface LaunchRequest {
+  requesterSessionId: string
+  projectId: string
+  taskId: string
+  agentId: string
+  providerId: string
+  model: string
+  workspace: string
+  branch: string
+  sourceBranch: string
+}
+
+export interface LaunchSpec {
+  projectId: string
+  taskId: string
+  agentId: string
+  providerId: string
+  model: string
+  workspace: string
+  branch: string
+  sourceBranch: string
+  launchedBy: string
+}
+
+export type LaunchValidation = { ok: true; spec: LaunchSpec } | { ok: false; code: LaunchRefusalCode; message: string }
+
 export interface TaskActorInfo {
   actor: TaskActor
   actorName?: string
@@ -147,6 +187,7 @@ export interface TasksService {
   snapshot(projectId: string): { tasks: ProjectTask[]; settings: ProjectTaskSettings; counts: ProjectTaskCounts }
   list(projectId: string): ProjectTask[]
   get(projectId: string, taskId: string): ProjectTask | null
+  validateLaunch(request: LaunchRequest): Promise<LaunchValidation>
   create(projectId: string, input: CreateTaskServiceInput, actor: TaskActorInfo): ProjectTask
   update(
     projectId: string,
@@ -248,6 +289,26 @@ function withLock<T>(projectId: string, fn: () => Promise<T> | T): Promise<T> {
   return next
 }
 
+async function gitSucceeds(cwd: string, args: string[]): Promise<boolean> {
+  try {
+    await runGit(cwd, args)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function validBranchName(cwd: string, branch: string): Promise<boolean> {
+  return branch.length > 0 && gitSucceeds(cwd, ['check-ref-format', '--branch', branch])
+}
+
+async function sourceBranchExists(cwd: string, sourceBranch: string): Promise<boolean> {
+  const branch = sourceBranch.replace(/^origin\//, '')
+  if (!(await validBranchName(cwd, branch))) return false
+  if (await gitSucceeds(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])) return true
+  return gitSucceeds(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])
+}
+
 // ============================================================================
 // Service factory
 // ============================================================================
@@ -297,6 +358,95 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
   function get(projectId: string, taskId: string) {
     const task = dbGetTask(taskId)
     return task && task.projectId === projectId ? task : null
+  }
+
+  async function validateLaunch(request: LaunchRequest): Promise<LaunchValidation> {
+    const trim = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+    const normalized: LaunchRequest = {
+      requesterSessionId: trim(request.requesterSessionId),
+      projectId: trim(request.projectId),
+      taskId: trim(request.taskId),
+      agentId: trim(request.agentId),
+      providerId: trim(request.providerId),
+      model: trim(request.model),
+      workspace: trim(request.workspace),
+      branch: trim(request.branch),
+      sourceBranch: trim(request.sourceBranch),
+    }
+    const refuse = (code: LaunchRefusalCode, en: string, fr: string): LaunchValidation => ({
+      ok: false,
+      code,
+      message: serverT({ en, fr }),
+    })
+
+    const requester = sessionManager.getSession(normalized.requesterSessionId)
+    if (!requester || requester.mode !== 'manager') {
+      return refuse('NOT_MANAGER', 'Launch requires a Manager session', 'Le lancement requiert une session Manager')
+    }
+
+    const project = getProject(normalized.projectId)
+    const task = dbGetTask(normalized.taskId)
+    if (!project || !task || task.projectId !== normalized.projectId) {
+      return refuse(
+        'PROJECT_MISMATCH',
+        'Task does not belong to the requested project',
+        'La tâche n’appartient pas au projet demandé',
+      )
+    }
+    if (task.status !== 'todo') {
+      return refuse('TASK_NOT_TODO', 'Task must be in To Do', 'La tâche doit être dans À faire')
+    }
+    if (task.activeSessionId) {
+      return refuse(
+        'TASK_ALREADY_BOUND',
+        'Task already has an active session',
+        'La tâche possède déjà une session active',
+      )
+    }
+
+    const agents = await loadAllAgents(configDir, project.workdir)
+    if (!agents.some((agent) => agent.metadata.id === normalized.agentId && !agent.metadata.subagent)) {
+      return refuse('UNKNOWN_AGENT', 'Unknown top-level agent', 'Agent principal inconnu')
+    }
+
+    const provider = (config.providers ?? []).find((candidate) => candidate.id === normalized.providerId)
+    if (!provider) {
+      return refuse('UNKNOWN_PROVIDER', 'Unknown provider', 'Fournisseur inconnu')
+    }
+    if (!provider.models.some((candidate) => candidate.id === normalized.model)) {
+      return refuse('UNKNOWN_MODEL', 'Unknown model for provider', 'Modèle inconnu pour ce fournisseur')
+    }
+
+    try {
+      validateWorkspaceName(normalized.workspace)
+    } catch {
+      return refuse('INVALID_WORKSPACE_NAME', 'Invalid workspace name', 'Nom d’espace de travail invalide')
+    }
+    if (!(await validBranchName(project.workdir, normalized.branch))) {
+      return refuse('INVALID_BRANCH_NAME', 'Invalid branch name', 'Nom de branche invalide')
+    }
+    if (!(await sourceBranchExists(project.workdir, normalized.sourceBranch))) {
+      return refuse(
+        'INVALID_SOURCE_BRANCH',
+        'Source branch not found in local refs; fetch origin before retrying',
+        'Branche source introuvable dans les références locales ; récupérez origin avant de réessayer',
+      )
+    }
+
+    return {
+      ok: true,
+      spec: {
+        projectId: normalized.projectId,
+        taskId: normalized.taskId,
+        agentId: normalized.agentId,
+        providerId: normalized.providerId,
+        model: normalized.model,
+        workspace: normalized.workspace,
+        branch: normalized.branch,
+        sourceBranch: normalized.sourceBranch,
+        launchedBy: normalized.requesterSessionId,
+      },
+    }
   }
 
   function assertOwned(projectId: string, taskId: string): ProjectTask {
@@ -1106,6 +1256,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     snapshot,
     list,
     get,
+    validateLaunch,
     create,
     update,
     duplicate,
