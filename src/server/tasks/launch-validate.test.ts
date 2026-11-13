@@ -4,13 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import Database from 'better-sqlite3'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Config, ProjectTask, Provider } from '../../shared/types.js'
 import { loadConfig } from '../config.js'
 import { closeDatabase, getDatabase, initDatabase } from '../db/index.js'
 import { createProject } from '../db/projects.js'
 import { addTaskLink, createTask as dbCreateTask, getTask as dbGetTask, setTaskStatus } from '../db/tasks.js'
-import type { SessionManager } from '../session/manager.js'
+import { initEventStore } from '../events/index.js'
+import { SessionManager } from '../session/manager.js'
 import { createTasksService, type TasksService } from './service.js'
 
 type LaunchRefusalCodeShape =
@@ -46,26 +47,6 @@ type LaunchValidationShape =
 
 type LaunchFields = Pick<LaunchSpecShape, 'workspace' | 'branch' | 'sourceBranch' | 'launchedBy'>
 
-interface TestSession {
-  id: string
-  projectId: string
-  mode: string
-  messages: unknown[]
-  providerId?: string
-  providerModel?: string
-}
-
-interface TestSessionManager {
-  sessions: Map<string, TestSession>
-  createdSessions: TestSession[]
-  getSession: (id: string) => TestSession | null
-  createSession: (projectId: string) => TestSession
-  setMode: (sessionId: string, mode: string) => void
-  addMessage: () => void
-  queueMessage: () => void
-  deleteSession: (sessionId: string) => void
-}
-
 const execFileAsync = promisify(execFile)
 
 function testProvider(id: string, model: string): Provider {
@@ -77,36 +58,6 @@ function testProvider(id: string, model: string): Provider {
     models: [{ id: model, contextWindow: 32_000, source: 'user' }],
     isActive: false,
     createdAt: '2026-01-01T00:00:00.000Z',
-  }
-}
-
-function makeSessionManager(): TestSessionManager {
-  const sessions = new Map<string, TestSession>()
-  const createdSessions: TestSession[] = []
-  return {
-    sessions,
-    createdSessions,
-    getSession: (id) => sessions.get(id) ?? null,
-    createSession: (projectId) => {
-      const session = {
-        id: `created-${createdSessions.length + 1}`,
-        projectId,
-        mode: 'planner',
-        messages: [],
-      }
-      createdSessions.push(session)
-      sessions.set(session.id, session)
-      return session
-    },
-    setMode: (sessionId, mode) => {
-      const session = sessions.get(sessionId)
-      if (session) session.mode = mode
-    },
-    addMessage: () => undefined,
-    queueMessage: () => undefined,
-    deleteSession: (sessionId) => {
-      sessions.delete(sessionId)
-    },
   }
 }
 
@@ -145,7 +96,9 @@ describe('validateLaunch', () => {
   let taskId: string
   let config: Config
   let service: TasksService
-  let sessionManager: TestSessionManager
+  let sessionManager: SessionManager
+  let requesterSessionId: string
+  let sessionEvents: string[]
 
   const launchService = () =>
     service as TasksService & {
@@ -155,7 +108,7 @@ describe('validateLaunch', () => {
   const validate = (request: LaunchRequestShape) => launchService().validateLaunch(request)
 
   const request = (overrides: Partial<LaunchRequestShape> = {}): LaunchRequestShape => ({
-    requesterSessionId: 'requester-1',
+    requesterSessionId,
     projectId,
     taskId,
     agentId: 'manager',
@@ -186,6 +139,15 @@ describe('validateLaunch', () => {
     return stdout.trim()
   }
 
+  const sessionSnapshot = () =>
+    sessionManager
+      .listSessions()
+      .flatMap((summary) => {
+        const session = sessionManager.getSession(summary.id)
+        return session ? [session] : []
+      })
+      .sort((left, right) => left.id.localeCompare(right.id))
+
   beforeEach(async () => {
     closeDatabase()
     root = await mkdtemp(join(tmpdir(), 'openfox-launch-validate-'))
@@ -208,18 +170,30 @@ describe('validateLaunch', () => {
     ]
     config.defaultModelSelection = 'fallback-provider/fallback-model'
     initDatabase(config)
+    initEventStore(getDatabase())
 
     projectId = createProject('Launch Validation', projectDir).id
     taskId = dbCreateTask(projectId, { prompt: 'Launch me' }).id
-    sessionManager = makeSessionManager()
-    sessionManager.sessions.set('requester-1', {
-      id: 'requester-1',
+    sessionManager = new SessionManager({
+      getCurrentModelContext: () => 32_000,
+      getProviders: () => config.providers ?? [],
+      getDefaultModelSelection: () => config.defaultModelSelection,
+      getCurrentModel: () => 'fallback-model',
+      getActiveProviderId: () => 'fallback-provider',
+      resolveModelEffort: () => undefined,
+      getModelSettings: () => undefined,
+    } as unknown as ConstructorParameters<typeof SessionManager>[0])
+    const requesterSession = sessionManager.createSession(
       projectId,
-      mode: 'manager',
-      messages: [],
-      providerId: 'fallback-provider',
-      providerModel: 'fallback-model',
-    })
+      'Manager requester',
+      'fallback-provider',
+      'fallback-model',
+    )
+    requesterSessionId = requesterSession.id
+    sessionManager.setMode(requesterSessionId, 'manager')
+    await vi.waitFor(() => expect(sessionManager.getSession(requesterSessionId)?.branch).toBe('main'))
+    sessionEvents = []
+    sessionManager.subscribe((event) => sessionEvents.push(event.type))
 
     const configDir = join(root, 'config')
     await mkdir(configDir, { recursive: true })
@@ -278,12 +252,9 @@ describe('validateLaunch', () => {
   })
 
   it.fails('rejects callers and tasks that are not eligible for launch with exact codes', async () => {
-    sessionManager.sessions.set('builder-1', {
-      id: 'builder-1',
-      projectId,
-      mode: 'builder',
-      messages: [],
-    })
+    const builderSession = sessionManager.createSession(projectId, 'Builder requester')
+    sessionManager.setMode(builderSession.id, 'builder')
+    await vi.waitFor(() => expect(sessionManager.getSession(builderSession.id)?.branch).toBe('main'))
     const otherProjectDir = join(root, 'other-project')
     await mkdir(otherProjectDir)
     const otherProject = createProject('Other Project', otherProjectDir)
@@ -296,7 +267,7 @@ describe('validateLaunch', () => {
     await expectRefusal(request({ requesterSessionId: '' }), 'NOT_MANAGER')
     await expectRefusal(without('requesterSessionId'), 'NOT_MANAGER')
     await expectRefusal(request({ requesterSessionId: 'missing-session' }), 'NOT_MANAGER')
-    await expectRefusal(request({ requesterSessionId: 'builder-1' }), 'NOT_MANAGER')
+    await expectRefusal(request({ requesterSessionId: builderSession.id }), 'NOT_MANAGER')
     await expectRefusal(request({ projectId: '' }), 'PROJECT_MISMATCH')
     await expectRefusal(without('projectId'), 'PROJECT_MISMATCH')
     await expectRefusal(request({ taskId: '' }), 'PROJECT_MISMATCH')
@@ -334,7 +305,7 @@ describe('validateLaunch', () => {
     await expect(
       validate(
         request({
-          requesterSessionId: ' requester-1 ',
+          requesterSessionId: ` ${requesterSessionId} `,
           projectId: ` ${projectId} `,
           taskId: ` ${taskId} `,
           agentId: ' manager ',
@@ -356,18 +327,16 @@ describe('validateLaunch', () => {
         workspace: 'workspace-test',
         branch: 'feature/launch-test',
         sourceBranch: 'main',
-        launchedBy: 'requester-1',
+        launchedBy: requesterSessionId,
       },
     })
   })
 
   it.fails('validates launch requests without mutating sessions tasks or git state', async () => {
-    sessionManager.sessions.set('builder-1', {
-      id: 'builder-1',
-      projectId,
-      mode: 'builder',
-      messages: [],
-    })
+    const builderSession = sessionManager.createSession(projectId, 'Builder requester')
+    sessionManager.setMode(builderSession.id, 'builder')
+    await vi.waitFor(() => expect(sessionManager.getSession(builderSession.id)?.branch).toBe('main'))
+    sessionEvents.length = 0
     const activeTask = dbCreateTask(projectId, { prompt: 'Active task' })
     setTaskStatus(activeTask.id, 'done')
     const boundTask = dbCreateTask(projectId, { prompt: 'Bound task' })
@@ -377,7 +346,7 @@ describe('validateLaunch', () => {
       value: LaunchRequestShape
       expected: { ok: boolean; code?: LaunchRefusalCodeShape }
     }> = [
-      { value: request({ requesterSessionId: 'builder-1' }), expected: { ok: false, code: 'NOT_MANAGER' } },
+      { value: request({ requesterSessionId: builderSession.id }), expected: { ok: false, code: 'NOT_MANAGER' } },
       { value: request({ taskId: 'missing-task' }), expected: { ok: false, code: 'PROJECT_MISMATCH' } },
       { value: request({ taskId: activeTask.id }), expected: { ok: false, code: 'TASK_NOT_TODO' } },
       { value: request({ taskId: boundTask.id }), expected: { ok: false, code: 'TASK_ALREADY_BOUND' } },
@@ -392,7 +361,8 @@ describe('validateLaunch', () => {
 
     for (const testCase of cases) {
       const before = {
-        sessionCount: sessionManager.sessions.size,
+        sessions: sessionSnapshot(),
+        sessionEvents: [...sessionEvents],
         tasks: getDatabase().prepare('SELECT * FROM tasks ORDER BY id').all(),
         status: await git('status', '--porcelain=v1'),
         refs: await git('show-ref', '--head'),
@@ -400,7 +370,8 @@ describe('validateLaunch', () => {
       const result = await validate(testCase.value)
       expect(result).toMatchObject(testCase.expected)
       const after = {
-        sessionCount: sessionManager.sessions.size,
+        sessions: sessionSnapshot(),
+        sessionEvents: [...sessionEvents],
         tasks: getDatabase().prepare('SELECT * FROM tasks ORDER BY id').all(),
         status: await git('status', '--porcelain=v1'),
         refs: await git('show-ref', '--head'),
