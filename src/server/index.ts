@@ -680,7 +680,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // created later in this function — see the assignments below.
   const { createTasksService } = await import('./tasks/service.js')
   const { registerTaskRoutes } = await import('./routes/tasks.js')
-  const { setTasksService } = await import('./tools/index.js')
+  const { projectTasksTool, setTasksService } = await import('./tools/project-tasks.js')
   const tasksService = createTasksService({
     sessionManager,
     config,
@@ -4247,6 +4247,19 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         durationMs: Date.now() - startedAt,
         truncated: false,
       }
+    },
+    executeProjectTasks: async (request) => {
+      const session = sessionManager.getSession(request.sessionId)
+      if (!session) {
+        return { success: false, error: 'Session not found', durationMs: 0, truncated: false }
+      }
+      return projectTasksTool.execute(Object.fromEntries(Object.entries(request.args)), {
+        workdir: session.workspace ?? session.workdir,
+        sessionId: session.id,
+        projectId: session.projectId,
+        sessionManager,
+        ...(request.permittedActions ? { permittedActions: { project_tasks: request.permittedActions } } : {}),
+      })
     },
     resumeInterruptedSession: (sessionId) => resumeInterruptedSession(sessionId, { automatic: true }),
   })

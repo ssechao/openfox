@@ -31,6 +31,11 @@ interface WsMessage {
   payload?: { code?: string; content?: string; updates?: { isStreaming?: boolean } }
 }
 
+// Widened so Stop's own detection + IPC round-trip cannot plausibly out-run
+// the step's natural completion under host contention (see stop-race.workflow
+// and the 'aborts a workflow…' test below).
+const STOP_RACE_WINDOW_MS = 6_000
+
 async function holdDatabaseLock(path: string, holdMs: number): Promise<{ exited: Promise<number | null> }> {
   const source = [
     `const Database = require(${JSON.stringify(betterSqlite3)})`,
@@ -84,6 +89,37 @@ describe('gateway IPC integration', () => {
             type: 'shell',
             phase: 'build',
             command: `printf started > ${JSON.stringify(join(root, 'workflow-started'))}; sleep 2; printf late > ${JSON.stringify(join(root, 'late-effect'))}`,
+            transitions: [{ when: { type: 'always' }, goto: '$done' }],
+          },
+        ],
+      }),
+    )
+    // Dedicated fixture for the Stop/pre-empt race below, isolated from
+    // 'slow-effect' (and its markers) so a shell this test's own Stop fails
+    // to pre-empt can never bleed into another test sharing the same path.
+    // Its 'late-effect' marker must only ever appear if the kill genuinely
+    // failed, never because the test's own detection + /stop round-trip was
+    // merely slow under host contention: STOP_RACE_WINDOW_MS sizes this
+    // window generously above that round-trip (see the 'aborts a workflow…'
+    // test below).
+    await writeFile(
+      join(workflowDir, 'stop-race.workflow.json'),
+      JSON.stringify({
+        metadata: {
+          id: 'stop-race',
+          name: 'Stop race',
+          description: 'Writes a late marker unless Stop pre-empts it in time',
+          version: '1.0.0',
+        },
+        entryStep: 'effect',
+        settings: { maxIterations: 2 },
+        steps: [
+          {
+            id: 'effect',
+            name: 'Effect',
+            type: 'shell',
+            phase: 'build',
+            command: `printf started > ${JSON.stringify(join(root, 'stop-race-started'))}; sleep ${STOP_RACE_WINDOW_MS / 1000}; printf late > ${JSON.stringify(join(root, 'stop-race-late'))}`,
             transitions: [{ when: { type: 'always' }, goto: '$done' }],
           },
         ],
@@ -461,6 +497,80 @@ describe('gateway IPC integration', () => {
     expect(messages).not.toMatch(/Unknown tool|tool.*not.*found/i)
   }, 60_000)
 
+  it('executes gateway-owned project_tasks through a real external worker', async () => {
+    const taskTitle = `worker-project-task-${randomUUID()}`
+    const createTask = await fetch(`${base}/api/projects/${projectId}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: taskTitle }),
+    })
+    expect(createTask.status).toBe(201)
+
+    const sessionId = await createSession('gateway-project-tasks')
+    await sendMessage(sessionId, 'Use project_tasks to list the project task board')
+
+    const messages = await waitFor(async () => {
+      const view = await getSession(sessionId)
+      const serialized = JSON.stringify(view.messages)
+      return !view.session.isRunning ? serialized : null
+    }, 'project_tasks turn completion')
+
+    expect(messages).toContain(taskTitle)
+    expect(messages).not.toContain('Project tasks service not initialized')
+  }, 60_000)
+
+  it('carries an explicit foreign projectId through a real external Manager worker', async () => {
+    const foreignProjectDir = join(root, `foreign-project-${randomUUID()}`)
+    await mkdir(foreignProjectDir, { recursive: true })
+    const createProjectResponse = await fetch(`${base}/api/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'gateway-ipc-foreign', workdir: foreignProjectDir }),
+    })
+    expect(createProjectResponse.status).toBe(201)
+    const foreignProjectId = ((await createProjectResponse.json()) as { project: { id: string } }).project.id
+    const foreignTaskTitle = `foreign-worker-project-task-${randomUUID()}`
+    const createTask = await fetch(`${base}/api/projects/${foreignProjectId}/tasks`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: foreignTaskTitle }),
+    })
+    expect(createTask.status).toBe(201)
+
+    const sessionId = await createSession('gateway-cross-project-tasks')
+    const switchMode = await fetch(`${base}/api/sessions/${sessionId}/mode`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'manager' }),
+    })
+    expect(switchMode.status).toBe(200)
+    await sendMessage(sessionId, `M1.1 list project_tasks for projectId "${foreignProjectId}"`)
+
+    // Proof of a real external worker must be captured while it is still
+    // active (same /api/test/worker idiom as 'runs two normal messages…'
+    // below): reading sessions.worker_id from the DB after the turn settles
+    // races with SessionWorkerManager.settle()/clearWorkerToken(), which runs
+    // on the gateway's child 'exit' handler and can already have cleared the
+    // column under host contention by the time a delayed poll observes
+    // isRunning=false (see manager.ts settle(), clearWorkerToken calls).
+    const worker = await waitFor(async () => {
+      const response = await fetch(`${base}/api/test/worker`)
+      const body = (await response.json()) as {
+        activeWorkers: Array<{ sessionId: string; token: { workerId: string; generation: number } }>
+      }
+      return body.activeWorkers.find((entry) => entry.sessionId === sessionId) ?? null
+    }, 'foreign project_tasks worker allocation')
+
+    expect(worker.token.workerId).toBeTruthy()
+    expect(worker.token.generation).toBeGreaterThan(0)
+
+    const messages = await waitFor(async () => {
+      const view = await getSession(sessionId)
+      return !view.session.isRunning ? JSON.stringify(view.messages) : null
+    }, 'foreign project_tasks turn completion')
+    expect(messages).toContain(foreignTaskTitle)
+  }, 60_000)
+
   it('routes a WebSocket answer through the gateway broker to an external worker', async () => {
     const sessionId = await createSession('gateway-answer')
     const ws = await connectWebSocket()
@@ -512,7 +622,7 @@ describe('gateway IPC integration', () => {
         JSON.stringify({
           id: 'launch-stop',
           type: 'runner.launch',
-          payload: { sessionId, workflowId: 'slow-effect', scope: 'project' },
+          payload: { sessionId, workflowId: 'stop-race', scope: 'project' },
         }),
       )
       await expect(launchResponse).resolves.toMatchObject({ type: 'ack' })
@@ -524,7 +634,7 @@ describe('gateway IPC integration', () => {
       }, 'workflow worker allocation')
       await waitFor(
         async () =>
-          access(join(root, 'workflow-started'))
+          access(join(root, 'stop-race-started'))
             .then(() => true)
             .catch(() => null),
         'workflow start',
@@ -532,14 +642,25 @@ describe('gateway IPC integration', () => {
 
       const stop = await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
       expect(stop.status).toBe(200)
+      // No arbitrary margin after this point: launchWorkflowRun (runner/launch.ts)
+      // only clears isRunning in its `.finally()`, which runs after
+      // runOrchestrator resolves — itself gated on the executor's current
+      // 'shell' step settling (parallel.ts runShellChild -> executeShellCommand),
+      // which cannot resolve until the spawned process has actually exited
+      // (shell.ts onAbort -> terminateProcessTree). isRunning=false is
+      // therefore already the proof that this step's process — killed by the
+      // Stop or finished on its own — has fully ended; sleeping afterward adds
+      // no information and only masked a race before Stop/IPC even reached
+      // the worker (the fixture's window, widened above, is what fixes that).
       await waitFor(async () => {
         const view = await getSession(sessionId)
         return !view.session.isRunning ? true : null
       }, 'workflow stop')
-      await new Promise((resolve) => setTimeout(resolve, 2_500))
-      await expect(access(join(root, 'late-effect'))).rejects.toThrow()
+      await expect(access(join(root, 'stop-race-late'))).rejects.toThrow()
     } finally {
       ws.close()
+      await rm(join(root, 'stop-race-started'), { force: true })
+      await rm(join(root, 'stop-race-late'), { force: true })
     }
   }, 60_000)
 

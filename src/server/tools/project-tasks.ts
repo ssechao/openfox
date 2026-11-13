@@ -2,6 +2,7 @@ import { createTool, validateActionWithPermission, type ToolHelpers } from './to
 import type { TasksService } from '../tasks/service.js'
 import { isTaskGateError, isTaskConflictError } from '../tasks/service.js'
 import { getGateConfig } from '../db/tasks.js'
+import { getProject } from '../db/projects.js'
 import { OUTPUT_LIMITS } from './types.js'
 import { decodeDataUrl } from '../utils/data-url.js'
 import { hydrateAttachmentData } from '../events/blob-codec.js'
@@ -28,9 +29,17 @@ import { TEXT_MIME_EXACT, TEXT_MIME_PREFIXES } from '../../shared/constants.js'
  */
 
 let tasksService: TasksService | null = null
+let projectTasksExecutor:
+  ((args: ProjectTasksArgs, context: import('./types.js').ToolContext) => Promise<ToolResult>) | null = null
 
 export function setTasksService(service: TasksService): void {
   tasksService = service
+}
+
+export function setProjectTasksExecutor(
+  executor: ((args: ProjectTasksArgs, context: import('./types.js').ToolContext) => Promise<ToolResult>) | null,
+): void {
+  projectTasksExecutor = executor
 }
 
 function getTasksService(): TasksService {
@@ -49,8 +58,9 @@ const LIST_STATUSES = ['todo', 'in_progress', 'done', 'all'] as const
 const LIST_DEFAULT_LIMIT = 10
 const LIST_MAX_LIMIT = 25
 
-interface ProjectTasksArgs {
+export interface ProjectTasksArgs {
   action: TaskAction
+  projectId?: string
   taskId?: string
   prompt?: string
   attachments?: unknown[]
@@ -75,9 +85,9 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
     function: {
       name: 'project_tasks',
       description:
-        'Kanban task board for this project. Core loop: list → move → set_gate_value.\n\n' +
+        'Kanban board; manager may pass projectId. Core loop: list → move → set_gate_value.\n\n' +
         'Rules:\n' +
-        '- Moving to in_progress binds the task to YOUR current session.\n' +
+        '- in_progress: Builder binds its session; Manager uses launcher/handoff; foreign projects unavailable until M3.\n' +
         '- Do not move tasks or fill gate values without explicit user approval or a system instruction — ' +
         'complete the work, then let the user review before the task advances.\n' +
         '- Moving to done is blocked by unmet gates: the error names the missing fields — fill them only with ' +
@@ -97,6 +107,10 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
         type: 'object',
         properties: {
           action: { type: 'string', enum: VALID_ACTIONS, description: 'The action to perform' },
+          projectId: {
+            type: 'string',
+            description: 'Target project id. Selecting another project is available only in manager mode.',
+          },
           taskId: {
             type: 'string',
             description: 'Target task id (edit, move, set_gate_value, get_attachment, delete)',
@@ -156,7 +170,27 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
 
     const session = context.sessionManager.getSession(context.sessionId)
     if (!session) return helpers.error('Session not found')
-    const projectId = session.projectId
+    const requestedProjectId = args.projectId?.trim()
+    const isForeignProject =
+      requestedProjectId !== undefined && requestedProjectId !== '' && requestedProjectId !== session.projectId
+    if (isForeignProject && session.mode !== 'manager') {
+      return helpers.error('Selecting another projectId is only available in manager mode')
+    }
+    if (session.mode === 'manager' && action === 'move' && args.to === 'in_progress') {
+      if (isForeignProject) {
+        return helpers.error(
+          'Moving a task in another project to in_progress is unavailable until M3. Use a dedicated session launcher or ask the user to launch the prepared task.',
+        )
+      }
+      return helpers.error(
+        'Manager cannot move a task to in_progress because that would bind it to the Manager session. Use a dedicated session launcher or ask the user to launch the prepared task.',
+      )
+    }
+    if (projectTasksExecutor) return projectTasksExecutor(args, context)
+    if (requestedProjectId && !getProject(requestedProjectId)) {
+      return helpers.error(`Project not found: ${requestedProjectId}`)
+    }
+    const projectId = requestedProjectId || session.projectId
     const svc = getTasksService()
     const actor = { actor: 'agent' as const, actorName: 'agent' }
 

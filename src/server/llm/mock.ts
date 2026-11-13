@@ -239,6 +239,26 @@ function getPromptAwareToolResponse(prompt: string): MockMatchResult | null {
     }
   }
 
+  const managerCrossProjectMatch = prompt.match(/M1\.1 list project_tasks for projectId "([^"]+)"/i)
+  if (managerCrossProjectMatch) {
+    return {
+      tools: [
+        {
+          name: 'project_tasks',
+          arguments: { action: 'list', status: 'all', projectId: managerCrossProjectMatch[1]! },
+        },
+      ],
+      response: 'Listed the selected project task board.',
+    }
+  }
+
+  if (/Use project_tasks to list the project task board/i.test(prompt)) {
+    return {
+      tools: [{ name: 'project_tasks', arguments: { action: 'list', status: 'all' } }],
+      response: 'Listed the project task board.',
+    }
+  }
+
   const mcpMatch = prompt.match(/Call the MCP tool (\S+)/i)
   if (mcpMatch) {
     return {

@@ -18,6 +18,7 @@ import { WorkflowsModal } from '../settings/WorkflowsModal'
 import { QuickActionModal } from '../QuickActionModal'
 import { MessageSearchModal } from './MessageSearchModal'
 import { ChatInput } from './ChatInput'
+import { SessionResumeButton } from '../session/SessionResumeButton'
 import { FeedTaskPreview } from '../tasks/FeedTaskPreview'
 import { WorkflowParamModal } from './WorkflowParamModal'
 import { extractTemplateParams } from '../../lib/parse-slash-command'
@@ -375,6 +376,10 @@ export function PlanPanel({
             ) : undefined
           }
         />
+
+        {session?.interruptedAt && targetSessionId && (
+          <SessionResumeButton sessionId={targetSessionId} interruptedAt={session.interruptedAt} />
+        )}
 
         <ChatInput
           input={input}

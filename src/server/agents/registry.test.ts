@@ -32,6 +32,30 @@ afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true })
 })
 
+function getPromptClause(prompt: string, marker: string): string {
+  const clause = prompt.split('\n').find((line) => line.includes(marker))
+  expect(clause).toBeDefined()
+  return clause ?? ''
+}
+
+function expectNativeReviewerClause(prompt: string): void {
+  const clause = getPromptClause(prompt, 'after an identifiable dev deliverable')
+  expect(clause).toContain('openfox_create_session')
+  expect(clause).toContain('distinct reviewer session')
+  expect(clause).toContain('same target projectid')
+  expect(clause).toContain('same kanban card')
+  expect(clause).toContain('explicit title')
+  expect(clause).toContain('appropriate reviewer agent')
+}
+
+function expectVerifiedLaunchClause(prompt: string): void {
+  const clause = getPromptClause(prompt, 'do not announce a session as launched until')
+  expect(clause).toContain('sessionid')
+  expect(clause).toContain('projectid')
+  expect(clause).toContain('workspace and branch')
+  expect(clause).toContain('approved criteria')
+}
+
 describe('loadDefaultAgents', () => {
   it('should load all built-in agent definitions', async () => {
     const agents = await loadDefaultAgents()
@@ -115,6 +139,112 @@ describe('loadDefaultAgents', () => {
     expect(prompt).toContain('automatic wake')
     expect(prompt).toContain('finish after reporting the requested status')
     expect(prompt).toContain('only the actions explicitly requested')
+  })
+
+  it('instructs Manager to select foreign projects explicitly without starting them before M3', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect(prompt).toContain('explicit projectid')
+    expect(prompt).toContain('foreign')
+    expect(prompt).toContain('in_progress')
+    expect(prompt).toContain('m3')
+  })
+
+  it('Manager requires a dedicated session for a new task and forbids unrelated session reuse', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('create a dedicated session for every new task')
+    expect.soft(prompt).toContain('never reuse a session for an unrelated task')
+  })
+
+  it('Manager uses an executable Kanban handoff for dedicated session launch', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('prepare the kanban card for launch')
+    expect.soft(prompt).toContain('never use `move in_progress` from the manager session')
+    expect.soft(prompt).toContain('ask the user to launch the prepared task')
+    expect.soft(prompt).toContain('never reuse an existing session as a fallback')
+    expect
+      .soft(prompt)
+      .toContain('verify the identity of the newly launched session before sending its brief through aether')
+  })
+
+  it('Manager gates session reuse on proven task continuity and defines contamination recovery', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('reuse a session only when all five continuity checks are proven')
+    expect.soft(prompt).toContain('same projectid')
+    expect.soft(prompt).toContain('same kanban card or task')
+    expect.soft(prompt).toContain('recent conversation is compatible with the task')
+    expect.soft(prompt).toContain('session is idle and stable')
+    expect.soft(prompt).toContain('user explicitly requested continuation')
+    expect.soft(prompt).toContain('if any check is missing or uncertain, create a dedicated session')
+    expect.soft(prompt).toContain('if a session is contaminated')
+    expect.soft(prompt).toContain('stop sending messages to it')
+    expect.soft(prompt).toContain('report the contamination')
+    expect.soft(prompt).toContain('preserve the session for investigation')
+    expect.soft(prompt).toContain('continue in a new dedicated session')
+  })
+
+  it('Manager creates a dedicated Dev session natively in the target project and delegates card binding', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('openfox_create_session')
+    expect.soft(prompt).toContain('target projectid')
+    expect.soft(prompt).toContain('explicit title')
+    expect.soft(prompt).toContain('appropriate dev agent')
+    expect.soft(prompt).toContain('new dedicated dev session')
+    expect.soft(prompt).toContain('the dedicated dev binds its own card')
+  })
+
+  it('Manager creates a distinct Reviewer session natively in the target project after an identifiable Dev deliverable', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expectNativeReviewerClause(prompt)
+
+    const reviewerClause = getPromptClause(prompt, 'after an identifiable dev deliverable')
+    const peerCreatedReviewer = prompt.replace(
+      reviewerClause,
+      reviewerClause.replace('use `openfox_create_session` to create', 'ask a peer to create'),
+    )
+    expect(peerCreatedReviewer).not.toBe(prompt)
+    expect(() => expectNativeReviewerClause(peerCreatedReviewer)).toThrow()
+  })
+
+  it('Manager never uses operational or existing sessions as a launch fallback and only announces verified launches', async () => {
+    const agents = await loadDefaultAgents()
+    const manager = agents.find((agent) => agent.metadata.id === 'manager')
+    const prompt = manager?.prompt.toLowerCase() ?? ''
+
+    expect.soft(prompt).toContain('never use restarter')
+    expect.soft(prompt).toContain('aether remote agent')
+    expect.soft(prompt).toContain('never use an existing session as a launcher or fallback')
+    expectVerifiedLaunchClause(prompt)
+    expect.soft(prompt).toContain('reuse a session only when all five continuity checks are proven')
+    expect.soft(prompt).toContain('brief through aether')
+
+    const launchClause = getPromptClause(prompt, 'do not announce a session as launched until')
+    const incompleteAnnouncement = prompt.replace(
+      launchClause,
+      launchClause.replace(
+        'sessionid, projectid, workspace and branch, and approved criteria',
+        'sessionid, workspace and branch',
+      ),
+    )
+    expect(incompleteAnnouncement).not.toBe(prompt)
+    expect(() => expectVerifiedLaunchClause(incompleteAnnouncement)).toThrow()
   })
 })
 

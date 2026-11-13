@@ -1,7 +1,7 @@
 import { mkdtemp, rm, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadConfig } from '../config.js'
 import { closeDatabase, initDatabase } from '../db/index.js'
 import { createProject } from '../db/projects.js'
@@ -10,18 +10,18 @@ import { projectTasksTool, setTasksService } from './project-tasks.js'
 import { OUTPUT_LIMITS } from './types.js'
 import type { ToolContext } from './types.js'
 
-function makeContext(projectId: string): ToolContext {
+function makeContext(projectId: string, mode = 'builder'): ToolContext {
   return {
     workdir: '/tmp',
     sessionId: 'sess-agent',
     sessionManager: {
-      getSession: (id: string) => (id === 'sess-agent' ? { id, projectId } : null),
+      getSession: (id: string) => (id === 'sess-agent' ? { id, projectId, mode } : null),
     } as unknown as ToolContext['sessionManager'],
   }
 }
 
-async function execute(action: string, args: Record<string, unknown>, projectId: string) {
-  const ctx = makeContext(projectId)
+async function execute(action: string, args: Record<string, unknown>, projectId: string, mode = 'builder') {
+  const ctx = makeContext(projectId, mode)
   const result = await projectTasksTool.execute({ action, ...args }, ctx)
   return result
 }
@@ -63,6 +63,7 @@ describe('project_tasks tool', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     closeDatabase()
     await rm(root, { recursive: true, force: true })
   })
@@ -82,6 +83,139 @@ describe('project_tasks tool', () => {
     const parsed = JSON.parse(result.output!) as { tasks: unknown[]; gates: unknown[] }
     expect(parsed.tasks).toHaveLength(1)
     expect(Array.isArray(parsed.gates)).toBe(true)
+  })
+
+  it('lets a Manager list a foreign project selected by explicit projectId', async () => {
+    const foreignRoot = join(root, 'foreign-manager-list')
+    await mkdir(foreignRoot, { recursive: true })
+    const foreignProjectId = createProject('Foreign Manager List', foreignRoot).id
+    service.create(projectId, { prompt: 'Current project task' }, { actor: 'human' })
+    service.create(foreignProjectId, { prompt: 'Foreign project task' }, { actor: 'human' })
+
+    const result = await execute('list', { projectId: foreignProjectId, status: 'all' }, projectId, 'manager')
+
+    expect(result.success).toBe(true)
+    const parsed = JSON.parse(result.output!) as { tasks: { prompt: string }[] }
+    expect(parsed.tasks.map((task) => task.prompt)).toEqual(['Foreign project task'])
+  })
+
+  it('rejects an unknown explicit projectId before the task service', async () => {
+    const list = vi.spyOn(service, 'list')
+
+    const result = await execute('list', { projectId: 'missing-project', status: 'all' }, projectId, 'manager')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('Project not found')
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it.each(['planner', 'builder'])('%s rejects every foreign project action before the service', async (mode) => {
+    const foreignRoot = join(root, `foreign-${mode}`)
+    await mkdir(foreignRoot, { recursive: true })
+    const foreignProjectId = createProject(`Foreign ${mode}`, foreignRoot).id
+    const foreignTask = service.create(foreignProjectId, { prompt: 'Foreign protected task' }, { actor: 'human' })
+    const ownTask = service.create(projectId, { prompt: 'Own protected task' }, { actor: 'human' })
+    const snapshot = (targetProjectId: string) =>
+      service.list(targetProjectId).map((task) => ({
+        id: task.id,
+        prompt: task.prompt,
+        status: task.status,
+        sessionIds: task.sessionIds,
+        activeSessionId: task.activeSessionId,
+      }))
+    const ownBefore = snapshot(projectId)
+    const foreignBefore = snapshot(foreignProjectId)
+    const spies = [
+      vi.spyOn(service, 'list'),
+      vi.spyOn(service, 'create'),
+      vi.spyOn(service, 'update'),
+      vi.spyOn(service, 'move'),
+      vi.spyOn(service, 'setGateValue'),
+      vi.spyOn(service, 'get'),
+      vi.spyOn(service, 'remove'),
+    ]
+    const actions: Array<{ action: string; args: Record<string, unknown> }> = [
+      { action: 'list', args: { status: 'all' } },
+      { action: 'create', args: { prompt: 'Unauthorized create' } },
+      { action: 'edit', args: { taskId: foreignTask.id, prompt: 'Unauthorized edit' } },
+      { action: 'move', args: { taskId: foreignTask.id, to: 'todo' } },
+      { action: 'set_gate_value', args: { taskId: foreignTask.id, gateId: 'proof', value: 'x' } },
+      { action: 'get_attachment', args: { taskId: foreignTask.id, attachmentId: 'attachment' } },
+      { action: 'delete', args: { taskId: foreignTask.id } },
+    ]
+
+    const results = await Promise.all(
+      actions.map(({ action, args }) => execute(action, { projectId: foreignProjectId, ...args }, projectId, mode)),
+    )
+
+    expect(results.every((result) => !result.success && result.error?.includes('only available in manager mode'))).toBe(
+      true,
+    )
+    expect(spies.every((spy) => spy.mock.calls.length === 0)).toBe(true)
+    for (const spy of spies) spy.mockRestore()
+    expect(snapshot(projectId)).toEqual(ownBefore)
+    expect(snapshot(foreignProjectId)).toEqual(foreignBefore)
+    expect(snapshot(projectId).map((task) => task.id)).toContain(ownTask.id)
+  })
+
+  it('rejects a Manager foreign move to in_progress without changing task ownership', async () => {
+    const foreignRoot = join(root, 'foreign-manager-in-progress')
+    await mkdir(foreignRoot, { recursive: true })
+    const foreignProjectId = createProject('Foreign Manager In Progress', foreignRoot).id
+    const foreignTask = service.create(foreignProjectId, { prompt: 'Do not bind' }, { actor: 'human' })
+    const before = JSON.parse(JSON.stringify(service.get(foreignProjectId, foreignTask.id)))
+
+    const result = await execute(
+      'move',
+      { projectId: foreignProjectId, taskId: foreignTask.id, to: 'in_progress' },
+      projectId,
+      'manager',
+    )
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('unavailable until M3')
+    expect(service.get(foreignProjectId, foreignTask.id)).toEqual(before)
+  })
+
+  it('manager cannot move a task to in_progress even in its own project', async () => {
+    const task = service.create(projectId, { prompt: 'Launch in a dedicated session' }, { actor: 'human' })
+
+    const result = await execute('move', { taskId: task.id, to: 'in_progress' }, projectId, 'manager')
+    const current = service.get(projectId, task.id)
+
+    expect.soft(result.success).toBe(false)
+    expect.soft(result.error).toContain('dedicated session launcher')
+    expect.soft(result.error).toContain('ask the user to launch')
+    expect.soft(current?.status).toBe('todo')
+    expect.soft(current?.activeSessionId).toBeUndefined()
+    expect.soft(current?.sessionIds).not.toContain('sess-agent')
+  })
+
+  it('keeps normal todo and done transitions for Manager foreign tasks', async () => {
+    const foreignRoot = join(root, 'foreign-manager-normal-moves')
+    await mkdir(foreignRoot, { recursive: true })
+    const foreignProjectId = createProject('Foreign Manager Normal Moves', foreignRoot).id
+    const foreignTask = service.create(foreignProjectId, { prompt: 'Normal moves' }, { actor: 'human' })
+    await service.move(foreignProjectId, foreignTask.id, 'in_progress', { actor: 'human' })
+
+    const todo = await execute(
+      'move',
+      { projectId: foreignProjectId, taskId: foreignTask.id, to: 'todo' },
+      projectId,
+      'manager',
+    )
+    expect(todo.success).toBe(true)
+    expect(JSON.parse(todo.output!) as { status: string }).toMatchObject({ status: 'todo' })
+
+    await service.move(foreignProjectId, foreignTask.id, 'in_progress', { actor: 'human' })
+    const done = await execute(
+      'move',
+      { projectId: foreignProjectId, taskId: foreignTask.id, to: 'done' },
+      projectId,
+      'manager',
+    )
+    expect(done.success).toBe(true)
+    expect(JSON.parse(done.output!) as { status: string }).toMatchObject({ status: 'done' })
   })
 
   it('agent move binds the current session and surfaces the active session', async () => {

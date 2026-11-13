@@ -37,6 +37,8 @@ import { setBackgroundProcessBackend } from '../../tools/background-process/back
 import { linkAbortSignal } from './abort-link.js'
 import { storedEventToServerMessage } from '../../ws/protocol.js'
 import { setRequestInvariantReporter } from '../../llm/request-invariant.js'
+import { setProjectTasksExecutor } from '../../tools/project-tasks.js'
+import { WorkerProjectTasksClient } from './project-tasks-client.js'
 
 const workerEnv = (() => {
   const workerId = process.env['OPENFOX_WORKER_ID']
@@ -69,6 +71,7 @@ let mcpClient: WorkerMcpClient | null = null
 let interactiveClient: WorkerInteractiveClient | null = null
 let backgroundClient: WorkerBackgroundClient | null = null
 let asapClient: WorkerAsapClient | null = null
+let projectTasksClient: WorkerProjectTasksClient | null = null
 
 process.on('message', (raw) => {
   const msg = raw as GatewayToWorkerMessage
@@ -80,6 +83,7 @@ process.on('message', (raw) => {
     interactiveClient = new WorkerInteractiveClient(identity, send)
     backgroundClient = new WorkerBackgroundClient(identity, send)
     asapClient = new WorkerAsapClient(identity, send)
+    projectTasksClient = new WorkerProjectTasksClient(identity, send)
     setAsapQueueDrain((sessionId) => {
       if (!asapClient || sessionId !== identity.sessionId) {
         return { messages: [], queueState: [], commit() {}, abort() {} }
@@ -87,6 +91,9 @@ process.on('message', (raw) => {
       return asapClient.drain()
     })
     setBackgroundProcessBackend((_sessionId, defaultCwd, args) => backgroundClient!.execute(defaultCwd, args))
+    setProjectTasksExecutor((args, context) =>
+      projectTasksClient!.execute(args, context.permittedActions?.['project_tasks']),
+    )
     setMcpTools(mcpClient.createTools(msg.mcpTools ?? []))
     void runTurn(msg.sessionId, msg.config, msg.command ?? { kind: 'chat' })
   } else if (msg.type === 'abort') {
@@ -94,12 +101,14 @@ process.on('message', (raw) => {
     interactiveClient?.close('Session stopped by user')
     backgroundClient?.close('Session stopped by user')
     asapClient?.close('Session stopped by user')
+    projectTasksClient?.close('Session stopped by user')
     controller.abort()
   } else {
     mcpClient?.handleMessage(msg)
     interactiveClient?.handleMessage(msg)
     backgroundClient?.handleMessage(msg)
     asapClient?.handleMessage(msg)
+    projectTasksClient?.handleMessage(msg)
   }
 })
 
@@ -116,6 +125,8 @@ async function runTurn(
     interactiveClient?.close('Worker turn finished')
     backgroundClient?.close('Worker turn finished')
     asapClient?.close('Worker turn finished')
+    projectTasksClient?.close('Worker turn finished')
+    setProjectTasksExecutor(null)
     setAsapQueueDrain(null)
     send({ ...token, type: 'done', ok, ...(error ? { error } : {}) }, () => process.exit(ok ? 0 : 1))
     // Safety net if the IPC channel is already gone.

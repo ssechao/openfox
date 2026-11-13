@@ -1,4 +1,4 @@
-import type { Config } from '../../../shared/types.js'
+import type { Config, ToolResult } from '../../../shared/types.js'
 import type { ChoiceOption, QueuedMessage, ServerMessage } from '../../../shared/protocol.js'
 import type { DiagnosticsData } from '../../../shared/diagnostics.js'
 import type { LLMToolDefinition } from '../../llm/types.js'
@@ -6,6 +6,7 @@ import type { WorkerToken } from './token.js'
 import type { WorkflowLaunchPayload } from '../../runner/launch.js'
 import type { RequestInvariantLog } from '../../llm/request-invariant.js'
 import type { BackgroundActionResult, BackgroundProcessToolArgs } from '../../tools/background-process/actions.js'
+import type { ProjectTasksArgs } from '../../tools/project-tasks.js'
 
 export type { WorkerToken }
 
@@ -49,6 +50,19 @@ export type BackgroundResponseMessage = WorkerIpcIdentity & {
   type: 'background.response'
   requestId: string
   result: BackgroundActionResult
+}
+
+export type ProjectTasksRequestMessage = WorkerIpcIdentity & {
+  type: 'project_tasks.request'
+  requestId: string
+  args: ProjectTasksArgs
+  permittedActions?: string[]
+}
+
+export type ProjectTasksResponseMessage = WorkerIpcIdentity & {
+  type: 'project_tasks.response'
+  requestId: string
+  result: ToolResult
 }
 
 export type AsapDrainRequestMessage = WorkerIpcIdentity & {
@@ -152,6 +166,7 @@ export type GatewayToWorkerMessage =
   | WorkerMcpResponseMessage
   | WorkerInteractiveResponseMessage
   | BackgroundResponseMessage
+  | ProjectTasksResponseMessage
   | AsapDrainResponseMessage
 
 export type WorkerToGatewayMessage =
@@ -163,6 +178,7 @@ export type WorkerToGatewayMessage =
   | McpRequestMessage
   | McpCancelMessage
   | BackgroundRequestMessage
+  | ProjectTasksRequestMessage
   | AsapDrainRequestMessage
   | AsapDrainAckMessage
   | AsapDrainAbortMessage

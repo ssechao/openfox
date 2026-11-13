@@ -1,15 +1,27 @@
 // @vitest-environment happy-dom
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createRoot } from 'react-dom/client'
 
-const { mockHiddenCountBox } = vi.hoisted(() => ({ mockHiddenCountBox: { value: 0 } }))
+const { mockHiddenCountBox, mockSessionBox } = vi.hoisted(() => ({
+  mockHiddenCountBox: { value: 0 },
+  mockSessionBox: {
+    value: { id: 's1', projectId: 'proj-1', criteria: [], metadata: {}, metadataEntries: {} } as {
+      id: string
+      projectId: string
+      criteria: unknown[]
+      metadata: Record<string, unknown>
+      metadataEntries: Record<string, unknown>
+      interruptedAt?: string
+    },
+  },
+}))
 
 vi.mock('../../stores/session', () => ({
   useSessionStore: (selector: (state: unknown) => unknown) =>
     selector({
-      currentSession: { id: 's1', projectId: 'proj-1', criteria: [], metadata: {}, metadataEntries: {} },
+      currentSession: mockSessionBox.value,
       messages: [],
       hiddenCount: mockHiddenCountBox.value,
       queuedMessages: [],
@@ -73,6 +85,12 @@ vi.mock('../../lib/focusChatTextarea', () => ({
 vi.mock('./ChatInput', () => ({
   default: () => <div>ChatInput</div>,
   ChatInput: () => <div>ChatInput</div>,
+}))
+
+vi.mock('../session/SessionResumeButton', () => ({
+  SessionResumeButton: ({ sessionId }: { sessionId: string }) => (
+    <div data-testid="session-resume-button" data-session-id={sessionId} />
+  ),
 }))
 
 vi.mock('../layout/SessionLayout', () => ({
@@ -267,6 +285,36 @@ describe('PlanPanel — message search navigation', () => {
     expect(scrollIntoViewMock).toHaveBeenCalledTimes(1)
     expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' })
     expect(scrollByMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('PlanPanel — resume affordance after interruption', () => {
+  beforeEach(() => {
+    mockSessionBox.value = {
+      id: 's1',
+      projectId: 'proj-1',
+      criteria: [],
+      metadata: {},
+      metadataEntries: {},
+      interruptedAt: '2026-11-12T17:12:20.829Z',
+    }
+  })
+
+  afterEach(() => {
+    mockSessionBox.value = {
+      id: 's1',
+      projectId: 'proj-1',
+      criteria: [],
+      metadata: {},
+      metadataEntries: {},
+    }
+  })
+
+  it('renders SessionResumeButton when the session is interrupted so the user always has a way to resume, not just an error message', () => {
+    const html = renderToStaticMarkup(<PlanPanel />)
+
+    expect(html).toContain('data-testid="session-resume-button"')
+    expect(html).toContain('data-session-id="s1"')
   })
 })
 
