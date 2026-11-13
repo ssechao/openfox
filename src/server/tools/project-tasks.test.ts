@@ -406,6 +406,129 @@ describe('project_tasks tool', () => {
     })
   }, 60_000)
 
+  it.fails(
+    'launch refuses an unknown project with the exact validateLaunch code and no effect',
+    async () => {
+      const { execFile } = await import('node:child_process')
+      const { writeFile } = await import('node:fs/promises')
+      const { promisify } = await import('node:util')
+      const { getDatabase } = await import('../db/index.js')
+      const { getEventStore, initEventStore } = await import('../events/index.js')
+      const { SessionManager } = await import('../session/manager.js')
+      const execFileAsync = promisify(execFile)
+      await writeFile(join(root, 'README.md'), 'fixture\n')
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: root })
+      await execFileAsync('git', ['config', 'user.email', 'tests@openfox.local'], { cwd: root })
+      await execFileAsync('git', ['config', 'user.name', 'OpenFox Tests'], { cwd: root })
+      await execFileAsync('git', ['add', 'README.md'], { cwd: root })
+      await execFileAsync('git', ['commit', '-m', 'fixture'], { cwd: root })
+      initEventStore(getDatabase())
+      const exactConfig = loadConfig()
+      exactConfig.providers = [
+        {
+          id: 'provider-default',
+          name: 'Provider Default',
+          url: 'http://localhost:8000/v1',
+          backend: 'openai',
+          models: [{ id: 'model-default', contextWindow: 32_000, source: 'user' }],
+          isActive: true,
+          createdAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]
+      exactConfig.defaultModelSelection = 'provider-default/model-default'
+      const exactManager = new SessionManager({
+        getCurrentModelContext: () => 32_000,
+        getProviders: () => exactConfig.providers ?? [],
+        getDefaultModelSelection: () => exactConfig.defaultModelSelection,
+        getCurrentModel: () => 'model-default',
+        getActiveProviderId: () => 'provider-default',
+        resolveModelEffort: () => undefined,
+        getModelSettings: () => undefined,
+      } as unknown as ConstructorParameters<typeof SessionManager>[0])
+      const planner = exactManager.createSession(projectId, 'Planner', 'provider-default', 'model-default')
+      const builder = exactManager.createSession(projectId, 'Builder', 'provider-default', 'model-default')
+      const managerSession = exactManager.createSession(projectId, 'Manager', 'provider-default', 'model-default')
+      exactManager.setMode(planner.id, 'planner')
+      exactManager.setMode(builder.id, 'builder')
+      exactManager.setMode(managerSession.id, 'manager')
+      await Promise.all(
+        [planner.id, builder.id, managerSession.id].map((sessionId) =>
+          expect.poll(() => exactManager.getSession(sessionId)?.branch).toBe('main'),
+        ),
+      )
+      const exactService = createTasksService({
+        sessionManager: exactManager,
+        config: exactConfig,
+        broadcast: () => undefined,
+        configDir: root,
+      })
+      setTasksService(exactService)
+      const sentinel = exactService.create(projectId, { prompt: 'Sentinel task' }, { actor: 'human' })
+      const contextFor = (sessionId: string): ToolContext => ({
+        workdir: root,
+        sessionId,
+        projectId,
+        sessionManager: exactManager,
+      })
+      const snapshot = async () => {
+        const sessions = exactManager
+          .listSessions()
+          .map((summary) => exactManager.getSession(summary.id))
+          .filter((session) => session !== null)
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .map((session) => structuredClone(session))
+        const events = sessions.map((session) => ({
+          sessionId: session.id,
+          events: structuredClone(getEventStore().getEvents(session.id)),
+        }))
+        const status = await execFileAsync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: root })
+        const refs = await execFileAsync('git', ['for-each-ref', '--format=%(refname):%(objectname)'], { cwd: root })
+        return {
+          task: structuredClone(exactService.get(projectId, sentinel.id)),
+          sessions,
+          events,
+          git: { status: status.stdout, refs: refs.stdout },
+        }
+      }
+      const args = {
+        action: 'launch',
+        projectId: 'missing-project',
+        taskId: 'missing-task',
+        agentId: 'builder',
+        providerId: 'provider-default',
+        model: 'model-default',
+        workspace: 'missing-project-launch',
+        branch: 'feature/missing-project-launch',
+        sourceBranch: 'main',
+        expectedVersion: 1,
+      }
+      const managerBefore = await snapshot()
+      const managerResult = await projectTasksTool.execute(args, contextFor(managerSession.id))
+      const managerAfter = await snapshot()
+      const plannerBefore = await snapshot()
+      const plannerResult = await projectTasksTool.execute(args, contextFor(planner.id))
+      const plannerAfter = await snapshot()
+      const builderBefore = await snapshot()
+      const builderResult = await projectTasksTool.execute(args, contextFor(builder.id))
+      const builderAfter = await snapshot()
+      const refusal = (result: Awaited<ReturnType<typeof projectTasksTool.execute>>, code: string) => ({
+        success: result.success,
+        code: result.error?.includes(code) ? code : result.error,
+      })
+
+      expect({
+        manager: { refusal: refusal(managerResult, 'PROJECT_MISMATCH'), state: managerAfter },
+        planner: { refusal: refusal(plannerResult, 'NOT_MANAGER'), state: plannerAfter },
+        builder: { refusal: refusal(builderResult, 'NOT_MANAGER'), state: builderAfter },
+      }).toEqual({
+        manager: { refusal: { success: false, code: 'PROJECT_MISMATCH' }, state: managerBefore },
+        planner: { refusal: { success: false, code: 'NOT_MANAGER' }, state: plannerBefore },
+        builder: { refusal: { success: false, code: 'NOT_MANAGER' }, state: builderBefore },
+      })
+    },
+    60_000,
+  )
+
   it('keeps normal todo and done transitions for Manager foreign tasks', async () => {
     const foreignRoot = join(root, 'foreign-manager-normal-moves')
     await mkdir(foreignRoot, { recursive: true })
