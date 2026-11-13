@@ -209,6 +209,43 @@ export function updateTask(
   return getTask(id)
 }
 
+export interface TaskLaunchSpecValues {
+  agentId: string | null
+  providerId: string | null
+  model: string | null
+  workspace: string | null
+  branch: string | null
+  sourceBranch: string | null
+  launchedBy: string | null
+}
+
+export function setTaskLaunchSpec(
+  id: string,
+  values: TaskLaunchSpecValues,
+  expectedVersion: number,
+): ProjectTask | null {
+  const result = getDatabase()
+    .prepare(
+      `UPDATE tasks
+       SET agent_id = ?, provider_id = ?, model = ?, workspace = ?, branch = ?, source_branch = ?, launched_by = ?,
+           version = version + 1, updated_at = ?
+       WHERE id = ? AND version = ?`,
+    )
+    .run(
+      values.agentId,
+      values.providerId,
+      values.model,
+      values.workspace,
+      values.branch,
+      values.sourceBranch,
+      values.launchedBy,
+      new Date().toISOString(),
+      id,
+      expectedVersion,
+    )
+  return result.changes === 1 ? getTask(id) : null
+}
+
 export function setTaskStatus(id: string, status: TaskStatus): void {
   const db = getDatabase()
   const now = new Date().toISOString()

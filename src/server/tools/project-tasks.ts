@@ -1,5 +1,5 @@
 import { createTool, validateActionWithPermission, type ToolHelpers } from './tool-helpers.js'
-import type { TasksService } from '../tasks/service.js'
+import type { LaunchRequest, TasksService } from '../tasks/service.js'
 import { isTaskGateError, isTaskConflictError } from '../tasks/service.js'
 import { getGateConfig } from '../db/tasks.js'
 import { getProject } from '../db/projects.js'
@@ -9,6 +9,7 @@ import { hydrateAttachmentData } from '../events/blob-codec.js'
 import { isPdfBuffer, extractPdfText, processPdfContent, formatPdfErrorMessage } from './pdf-utils.js'
 import type { Attachment, ToolResult } from '../../shared/types.js'
 import { TEXT_MIME_EXACT, TEXT_MIME_PREFIXES } from '../../shared/constants.js'
+import { OpenFoxError } from '../utils/errors.js'
 
 /**
  * project_tasks — agent participation on the project task board.
@@ -49,9 +50,18 @@ function getTasksService(): TasksService {
   return tasksService
 }
 
-type TaskAction = 'list' | 'create' | 'edit' | 'move' | 'set_gate_value' | 'delete' | 'get_attachment'
+type TaskAction = 'list' | 'create' | 'edit' | 'move' | 'launch' | 'set_gate_value' | 'delete' | 'get_attachment'
 
-const VALID_ACTIONS: TaskAction[] = ['list', 'create', 'edit', 'move', 'set_gate_value', 'delete', 'get_attachment']
+const VALID_ACTIONS: TaskAction[] = [
+  'list',
+  'create',
+  'edit',
+  'move',
+  'launch',
+  'set_gate_value',
+  'delete',
+  'get_attachment',
+]
 
 const LIST_STATUSES = ['todo', 'in_progress', 'done', 'all'] as const
 
@@ -67,6 +77,9 @@ export interface ProjectTasksArgs {
   agentId?: string
   providerId?: string
   model?: string
+  workspace?: string
+  branch?: string
+  sourceBranch?: string
   to?: 'todo' | 'in_progress' | 'done'
   reason?: string
   gateId?: string
@@ -85,24 +98,21 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
     function: {
       name: 'project_tasks',
       description:
-        'Kanban board; manager may pass projectId. Core loop: list → move → set_gate_value.\n\n' +
+        'Project task board; Manager may pass projectId.\n\n' +
         'Rules:\n' +
-        '- in_progress: Builder binds its session; Manager uses launcher/handoff; foreign projects unavailable until M3.\n' +
-        '- Do not move tasks or fill gate values without explicit user approval or a system instruction — ' +
-        'complete the work, then let the user review before the task advances.\n' +
-        '- Moving to done is blocked by unmet gates: the error names the missing fields — fill them only with ' +
-        'user approval, then retry the move.\n' +
-        '- Stale writes fail with CONFLICT — re-list and retry.\n\n' +
+        '- In Progress: Builder binds its session; Manager uses launch with explicit projectId.\n' +
+        '- Do not move tasks or fill gates without user approval or a system instruction.\n' +
+        '- Done requires its gates; fill them with set_gate_value, then retry.\n' +
+        '- CONFLICT means re-list and retry.\n\n' +
         'Actions:\n' +
-        '- list: tasks (status, gate values, queue position, bound session, audit trail); defaults to open tasks, ' +
-        'filter via status (todo | in_progress | done | all); paginated — limit 10 max 25, page with offset\n' +
-        '- create: add a task to To Do (prompt required)\n' +
-        '- edit: update prompt/attachments/agent/model (taskId + fields)\n' +
-        '- move: change column (to: todo | in_progress | done; optional reason)\n' +
-        '- set_gate_value: fill a gate field (taskId, gateId, value)\n' +
-        '- get_attachment: read a task attachment (taskId, attachmentId from attachmentList) — text inline, ' +
-        'images as image data, PDFs as extracted text\n' +
-        '- delete: remove a task (taskId)',
+        '- list: paginated tasks, gates, queue positions, sessions, and audit (status, limit, offset)\n' +
+        '- create: add a To Do task (prompt required)\n' +
+        '- edit: update prompt, attachments, agent, provider, or model\n' +
+        '- move: change column (todo | in_progress | done)\n' +
+        '- launch: Manager starts a To Do task in a fresh session with explicit selections\n' +
+        '- set_gate_value: fill a gate (taskId, gateId, value)\n' +
+        '- get_attachment: read task text, image, or PDF content\n' +
+        '- delete: remove a task',
       parameters: {
         type: 'object',
         properties: {
@@ -113,7 +123,7 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
           },
           taskId: {
             type: 'string',
-            description: 'Target task id (edit, move, set_gate_value, get_attachment, delete)',
+            description: 'Target task id (edit, move, launch, set_gate_value, get_attachment, delete)',
           },
           attachmentId: {
             type: 'string',
@@ -136,6 +146,9 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
           agentId: { type: 'string', description: 'Selected agent id' },
           providerId: { type: 'string', description: 'Provider id used when a session is spawned' },
           model: { type: 'string', description: 'Model label used when a session is spawned' },
+          workspace: { type: 'string', description: 'Workspace selected for action=launch' },
+          branch: { type: 'string', description: 'Branch selected for action=launch' },
+          sourceBranch: { type: 'string', description: 'Source branch used to create the launch workspace' },
           to: { type: 'string', enum: ['todo', 'in_progress', 'done'], description: 'Destination column for move' },
           reason: { type: 'string', description: 'Optional short reason (recorded in the audit trail) for reverts' },
           gateId: { type: 'string', description: 'Gate field id for set_gate_value' },
@@ -173,7 +186,7 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
     const requestedProjectId = args.projectId?.trim()
     const isForeignProject =
       requestedProjectId !== undefined && requestedProjectId !== '' && requestedProjectId !== session.projectId
-    if (isForeignProject && session.mode !== 'manager') {
+    if (isForeignProject && session.mode !== 'manager' && action !== 'launch') {
       return helpers.error('Selecting another projectId is only available in manager mode')
     }
     if (session.mode === 'manager' && action === 'move' && args.to === 'in_progress') {
@@ -261,6 +274,40 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
           return helpers.success(JSON.stringify(taskForAgent(result.task), null, 2))
         }
 
+        case 'launch': {
+          const request: LaunchRequest = {
+            requesterSessionId: context.sessionId,
+            projectId: requestedProjectId ?? '',
+            taskId: args.taskId ?? '',
+            agentId: args.agentId ?? '',
+            providerId: args.providerId ?? '',
+            model: args.model ?? '',
+            workspace: args.workspace ?? '',
+            branch: args.branch ?? '',
+            sourceBranch: args.sourceBranch ?? '',
+          }
+          const validation = await svc.validateLaunch(request)
+          if (!validation.ok) return helpers.error(`${validation.code}: ${validation.message}`)
+          const result = await svc.launch(request, args.expectedVersion)
+          if (!result.ok) return helpers.error(`${result.code}: ${result.message}`)
+          const runState = result.task.runState
+          if (runState !== 'running' && runState !== 'queued') {
+            return helpers.error('START_FAILED: Task did not enter a launch state')
+          }
+          return helpers.success(
+            JSON.stringify(
+              {
+                runState,
+                sessionId: result.sessionId ?? null,
+                ...(result.queued ? { position: result.queued.position } : {}),
+                version: result.task.version,
+              },
+              null,
+              2,
+            ),
+          )
+        }
+
         case 'move': {
           if (!args.taskId) return helpers.error('Parameter "taskId" is required for action=move')
           if (!args.to)
@@ -333,8 +380,15 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
       }
       if (isTaskConflictError(error)) {
         return helpers.error(
-          'Task changed, refresh and retry. Another actor modified this task since your last read. Re-list and retry with the latest updatedAt.',
+          'CONFLICT: Task changed, refresh and retry. Another actor modified this task since your last read. Re-list and retry with the latest updatedAt.',
         )
+      }
+      if (error instanceof OpenFoxError) {
+        return helpers.error(`${error.code}: ${error.message}`)
+      }
+      if (error instanceof Error) {
+        const code = (error as Error & { code?: unknown }).code
+        if (typeof code === 'string') return helpers.error(`${code}: ${error.message}`)
       }
       throw error
     }

@@ -436,23 +436,15 @@ describe('manager task launch', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it.fails(
-    'manager launch matches human move admission for plain prompts',
-    async () => {
-      await expectParity('plain launch prompt', 'plain')
-    },
-    60_000,
-  )
+  it('manager launch matches human move admission for plain prompts', async () => {
+    await expectParity('plain launch prompt', 'plain')
+  }, 60_000)
 
-  it.fails(
-    'manager launch matches human move admission for default workflows',
-    async () => {
-      await expectParity('/default', 'workflow')
-    },
-    60_000,
-  )
+  it('manager launch matches human move admission for default workflows', async () => {
+    await expectParity('/default', 'workflow')
+  }, 60_000)
 
-  it.fails('late worker admission refusal queues without a session for manager and human launches', async () => {
+  it('late worker admission refusal queues without a session for manager and human launches', async () => {
     configureScenario('full')
     const managerProjectId = await targetProject('late-full-manager')
     const humanProjectId = await targetProject('late-full-human')
@@ -466,7 +458,7 @@ describe('manager task launch', () => {
     })
   })
 
-  it.fails('manager launch preserves explicit selection and rejects stale versions atomically', async () => {
+  it('manager launch preserves explicit selection and rejects stale versions atomically', async () => {
     configureScenario('started')
     const projectId = await targetProject('explicit-selection')
     const task = service.create(projectId, { prompt: 'exact selection' }, { actor: 'human' })
