@@ -579,6 +579,10 @@ function runMigrations(db: Database.Database): void {
       agent_id TEXT,
       provider_id TEXT,
       model TEXT,
+      workspace TEXT,
+      branch TEXT,
+      source_branch TEXT,
+      launched_by TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -597,6 +601,12 @@ function runMigrations(db: Database.Database): void {
   if (!taskColumnNames.includes('next_run_at')) {
     logger.info('Migrating tasks table: adding next_run_at column')
     db.exec(`ALTER TABLE tasks ADD COLUMN next_run_at TEXT`)
+  }
+  for (const column of ['workspace', 'branch', 'source_branch', 'launched_by']) {
+    if (!taskColumnNames.includes(column)) {
+      logger.info(`Migrating tasks table: adding ${column} column`)
+      db.exec(`ALTER TABLE tasks ADD COLUMN ${column} TEXT`)
+    }
   }
 
   db.exec(`
