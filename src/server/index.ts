@@ -64,7 +64,7 @@ import { createWorkflowRoutes } from './routes/workflows.js'
 import { listAvailableWorkflows } from './workflows/registry.js'
 import { createOpenFoxMcpRouter, extractSessionToken } from './mcp/server/endpoint.js'
 import { buildOpenFoxMcpBootstrap } from './mcp/server/bootstrap.js'
-import { createOpenFoxCallerIdentityAuthority } from './mcp/server/caller-identity.js'
+import { createOpenFoxCallerIdentityAuthority, createOpenFoxEndpointBinding } from './mcp/server/caller-identity.js'
 import type { OpenFoxMcpToolDeps } from './mcp/server/types.js'
 import { createDevServerRoutes } from './routes/dev-server.js'
 import { createWorkspaceConfigRoutes } from './routes/workspace-config.js'
@@ -304,22 +304,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const mcpManager = new McpManager({
     openFoxCallerIdentity: {
       issueProof: callerIdentityAuthority.issueProof,
-      isOwnEndpoint: (input) => {
-        const bootstrap = currentMcpBootstrap()
-        if (input.kind === 'direct') {
-          return input.url === bootstrap.url
-        }
-        const proxyConfig = config.mcpServers?.[input.serverName]
-        const commandParts = [proxyConfig?.command, ...(proxyConfig?.args ?? [])].filter(
-          (part): part is string => typeof part === 'string',
-        )
-        return (
-          input.serverName === 'mcp-lazy' &&
-          input.targetServerName === bootstrap.name &&
-          proxyConfig?.transport === 'stdio' &&
-          commandParts.some((part) => part === 'mcp-lazy' || part.endsWith('/mcp-lazy'))
-        )
-      },
+      isOwnEndpoint: createOpenFoxEndpointBinding({
+        selfEndpointUrl: () => currentMcpBootstrap().url,
+        proxyServerName: 'mcp-lazy',
+        proxyTargetName: currentMcpBootstrap().name,
+        getProxyConfig: (serverName) => config.mcpServers?.[serverName],
+        resolveProxyTargetUrl: () => undefined,
+      }),
     },
     onToolsDiscovered: async (name, tools) => {
       try {

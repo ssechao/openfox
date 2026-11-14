@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import type { OpenFoxCallerIdentityIssueInput } from '../types.js'
+import type { McpServerConfig, OpenFoxCallerIdentityIssueInput, OpenFoxEndpointBindingInput } from '../types.js'
 
 export const OPENFOX_CALLER_IDENTITY_TTL_MS = 30_000
 
@@ -21,6 +21,34 @@ interface AuthorityOptions {
 
 function validText(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
+}
+
+export interface OpenFoxEndpointBindingOptions {
+  selfEndpointUrl(): string
+  proxyServerName: string
+  proxyTargetName: string
+  getProxyConfig(serverName: string): McpServerConfig | undefined
+  resolveProxyTargetUrl(serverName: string, targetServerName: string): string | undefined
+}
+
+export function createOpenFoxEndpointBinding(
+  options: OpenFoxEndpointBindingOptions,
+): (input: OpenFoxEndpointBindingInput) => boolean {
+  return (input) => {
+    if (input.kind === 'direct') {
+      return input.url === options.selfEndpointUrl()
+    }
+    const proxyConfig = options.getProxyConfig(input.serverName)
+    const commandParts = [proxyConfig?.command, ...(proxyConfig?.args ?? [])].filter(
+      (part): part is string => typeof part === 'string',
+    )
+    return (
+      input.serverName === options.proxyServerName &&
+      input.targetServerName === options.proxyTargetName &&
+      proxyConfig?.transport === 'stdio' &&
+      commandParts.some((part) => part === 'mcp-lazy' || part.endsWith('/mcp-lazy'))
+    )
+  }
 }
 
 export function createOpenFoxCallerIdentityAuthority(options: AuthorityOptions = {}): OpenFoxCallerIdentityAuthority {
