@@ -7,9 +7,11 @@ import { runBootAutoContinuations, type BootAutoContinueDeps } from '../auto-con
 import { executeTools } from '../../chat/execute-tools.js'
 import { attachToolResultToMessage } from '../../events/apply-events.js'
 import { sessionResumeAllowed, settleOneUnknownToolOutcome, syntheticUnknownToolResult } from './settle-unknown.js'
-import type { ToolCall } from '../../../shared/types.js'
+import type { ToolCall, ToolResult } from '../../../shared/types.js'
 import type { ToolRegistry } from '../../tools/types.js'
 import type { TurnMetrics } from '../../chat/stream-pure.js'
+import { WorkerMcpBroker } from './mcp-broker.js'
+import type { McpRequestMessage, WorkerIpcIdentity, WorkerMcpResponseMessage } from './protocol.js'
 
 vi.mock('../../agents/registry.js', () => ({
   loadAllAgentsDefault: vi.fn(),
@@ -183,6 +185,80 @@ describe('automatic unknown tool outcomes', () => {
     expect(execute).toHaveBeenCalledOnce()
     expect(result.reconciliationRequired).toBe(false)
     expect(result.toolMessages[0]?.content).toBe('ran')
+  })
+
+  it.fails('uncertain broker deadline persists explicit first result for LLM and UI without retry', async () => {
+    vi.useFakeTimers()
+    try {
+      const identity: WorkerIpcIdentity = { sessionId: 's-1', workerId: 'worker-1', generation: 1 }
+      const request: McpRequestMessage = {
+        ...identity,
+        type: 'mcp.request',
+        requestId: 'request-1',
+        serverName: 'server',
+        toolName: 'write_record',
+        name: 'server_write_record',
+        args: { value: 'x' },
+        messageId: 'a1',
+        toolCallId: 'call-1',
+        deadlineMs: 2_000,
+      }
+      const store = memoryStore([
+        stored(1, 'running.changed', { isRunning: true }),
+        stored(2, 'message.start', { messageId: 'a1', role: 'assistant' }),
+        stored(3, 'tool.call', {
+          messageId: 'a1',
+          toolCall: { id: 'call-1', name: request.name, arguments: request.args },
+        }),
+      ])
+      const sent: WorkerMcpResponseMessage[] = []
+      const execute = vi.fn(() => new Promise<never>(() => {}))
+      const broker = new WorkerMcpBroker({
+        execute,
+        isCurrent: () => true,
+        send: (message) => sent.push(message),
+        reconcile: (pending) =>
+          settleOneUnknownToolOutcome(store.events, pending, (event) => store.append(pending.sessionId, event)),
+      })
+
+      broker.handleRequest(request)
+      await vi.advanceTimersByTimeAsync(request.deadlineMs)
+      broker.handleRequest(request)
+
+      const results = store.events.filter((event) => event.type === 'tool.result')
+      expect(results).toHaveLength(1)
+      expect(results[0]?.data).toMatchObject({
+        toolCallId: request.toolCallId,
+        result: {
+          success: false,
+          error: expect.stringContaining('ÉCHEC INCERTAIN'),
+          durationMs: request.deadlineMs,
+          metadata: { reconciliationRequired: true },
+        },
+      })
+      const persisted = results[0]?.data as Extract<TurnEvent, { type: 'tool.result' }>['data']
+      expect(persisted.result.error).toContain(request.name)
+      expect(persisted.result.error).toContain('2 s')
+
+      const folded = buildContextMessagesFromStoredEvents(store.events)
+      const toolContent = folded.find((message) => message.role === 'tool')?.content
+      expect(toolContent).toContain('ÉCHEC INCERTAIN')
+      expect(toolContent).toContain(request.name)
+      expect(toolContent).toContain('2 s')
+
+      const attached: {
+        toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown>; result?: ToolResult }>
+      } = {
+        toolCalls: [{ id: request.toolCallId, name: request.name, arguments: request.args }],
+      }
+      attachToolResultToMessage(attached, request.toolCallId, persisted.result)
+      expect(attached.toolCalls[0]?.result?.error).toContain('ÉCHEC INCERTAIN')
+      expect(attached.toolCalls[0]?.result?.error).toContain(request.name)
+      expect(execute).toHaveBeenCalledOnce()
+      expect(sent.filter((message) => message.type === 'mcp.response.end')).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('settles only the timed-out call and leaves its sibling open', () => {
