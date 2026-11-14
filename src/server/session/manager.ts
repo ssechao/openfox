@@ -30,6 +30,8 @@ import {
   deleteSession as dbDeleteSession,
   updateSessionMetadata,
   updateSessionProvider,
+  updateSessionLaunchProviderSelection,
+  clearSessionLaunchProviderSelection,
   updateSessionProviderActive,
   updateSessionPinnedEffort,
   updateSessionDangerLevel,
@@ -213,7 +215,18 @@ export class SessionManager {
     preferredFallback?: import('../llm/client.js').LLMClientWithModel,
   ): import('../llm/client.js').LLMClientWithModel {
     const fallback = preferredFallback ?? this.providerManager.getLLMClient()
-    const pinnedEffort = dbGetSession(sessionId)?.providerPinnedEffort ?? undefined
+    const session = dbGetSession(sessionId)
+    const pinnedEffort = session?.providerPinnedEffort ?? undefined
+    if (session?.providerLaunchAgentId === agentId && session.providerId && session.providerModel) {
+      const client = this.providerManager.createClient(session.providerId, session.providerModel, pinnedEffort)
+      if (!client) {
+        throw new OpenFoxError(
+          `Launch provider selection is unavailable: ${session.providerId}/${session.providerModel}`,
+          'LAUNCH_PROVIDER_UNAVAILABLE',
+        )
+      }
+      return client
+    }
     const resolved = resolveLLMClientForAgent(agentId, fallback, this.providerManager, pinnedEffort)
     if (resolved.warning) {
       logger.warn('Agent model override unavailable, falling back', {
@@ -247,6 +260,14 @@ export class SessionManager {
   ): { providerId: string | null; model: string | null; reasoningEffort?: string } {
     const dbSession = dbGetSession(sessionId)
     const pinnedEffort = dbSession?.providerPinnedEffort ?? undefined
+    const mode = agentId ?? dbSession?.mode ?? undefined
+    if (mode && dbSession?.providerLaunchAgentId === mode && dbSession.providerId && dbSession.providerModel) {
+      return {
+        providerId: dbSession.providerId,
+        model: dbSession.providerModel,
+        ...(pinnedEffort ? { reasoningEffort: pinnedEffort } : {}),
+      }
+    }
     // An explicit manual pick that is currently ACTIVE wins over any agent
     // override. Selecting an override agent deactivates it (the agent's override
     // is the label truth); a fresh pick or a non-override agent reactivates it.
@@ -265,7 +286,6 @@ export class SessionManager {
         ...(effort ? { reasoningEffort: effort } : {}),
       }
     }
-    const mode = agentId ?? dbSession?.mode ?? undefined
     const override = mode ? getAgentModelOverride(mode) : undefined
     if (override) {
       const effort = pinnedEffort ?? override.reasoningEffort
@@ -929,6 +949,7 @@ export class SessionManager {
       return session
     }
 
+    clearSessionLaunchProviderSelection(sessionId)
     logger.debug('Changing session mode', { sessionId, from: fromMode, to: toMode })
 
     emitModeChanged(sessionId, toMode, false)
@@ -953,7 +974,11 @@ export class SessionManager {
     providerModel: string,
   ): Session {
     this.setMode(sessionId, toMode)
-    return this.setSessionProvider(sessionId, providerId, providerModel, true)
+    updateSessionLaunchProviderSelection(sessionId, toMode, providerId, providerModel)
+    this.unknownProviderWarned.delete(sessionId)
+    const updatedSession = this.requireSession(sessionId)
+    this.emit({ type: 'session_updated', session: updatedSession })
+    return updatedSession
   }
 
   /**

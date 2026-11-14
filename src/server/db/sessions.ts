@@ -155,17 +155,41 @@ export function updateSessionProvider(
   if (providerManual !== undefined) {
     db.prepare(
       `
-      UPDATE sessions SET provider_id = ?, provider_model = ?, provider_reasoning_effort = ?, provider_manual = ?, updated_at = ? WHERE id = ?
+      UPDATE sessions SET provider_id = ?, provider_model = ?, provider_reasoning_effort = ?, provider_manual = ?, provider_launch_agent_id = NULL, updated_at = ? WHERE id = ?
     `,
     ).run(providerId, providerModel, resolvedEffort, providerManual ? 1 : 0, now, id)
   } else {
     // Preserve the existing manual flag (e.g. model-name normalization).
     db.prepare(
       `
-      UPDATE sessions SET provider_id = ?, provider_model = ?, provider_reasoning_effort = ?, updated_at = ? WHERE id = ?
+      UPDATE sessions SET provider_id = ?, provider_model = ?, provider_reasoning_effort = ?, provider_launch_agent_id = NULL, updated_at = ? WHERE id = ?
     `,
     ).run(providerId, providerModel, resolvedEffort, now, id)
   }
+}
+
+export function updateSessionLaunchProviderSelection(
+  id: string,
+  agentId: string,
+  providerId: string,
+  providerModel: string,
+): void {
+  const now = new Date().toISOString()
+  getDatabase()
+    .prepare(
+      `UPDATE sessions
+       SET provider_id = ?, provider_model = ?, provider_reasoning_effort = NULL,
+           provider_pinned_effort = NULL, provider_manual = 1, provider_manual_active = 1,
+           provider_launch_agent_id = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(providerId, providerModel, agentId, now, id)
+}
+
+export function clearSessionLaunchProviderSelection(id: string): void {
+  getDatabase()
+    .prepare('UPDATE sessions SET provider_launch_agent_id = NULL, updated_at = ? WHERE id = ?')
+    .run(new Date().toISOString(), id)
 }
 
 export function updateSessionProviderActive(id: string, active: boolean): void {
@@ -603,6 +627,7 @@ function mapSessionBase(row: SessionRow | SessionSummaryRow): {
   interruptedAt?: string | null
   providerId: string | null
   providerModel: string | null
+  providerLaunchAgentId?: string | null
   providerReasoningEffort?: string | null
   providerPinnedEffort?: string | null
   providerManual: boolean
@@ -622,6 +647,9 @@ function mapSessionBase(row: SessionRow | SessionSummaryRow): {
     interruptedAt: row.interrupted_at ?? null,
     providerId: row.provider_id ?? null,
     providerModel: row.provider_model ?? null,
+    ...('provider_launch_agent_id' in row
+      ? { providerLaunchAgentId: (row as SessionRow).provider_launch_agent_id ?? null }
+      : {}),
     ...('provider_reasoning_effort' in row
       ? { providerReasoningEffort: (row as SessionRow).provider_reasoning_effort ?? null }
       : {}),
@@ -692,6 +720,7 @@ interface SessionRow {
   summary: string | null
   provider_id: string | null
   provider_model: string | null
+  provider_launch_agent_id: string | null
   provider_reasoning_effort: string | null
   provider_pinned_effort: string | null
   provider_manual: number
@@ -726,6 +755,7 @@ interface SessionSummaryRow {
   title: string | null
   provider_id: string | null
   provider_model: string | null
+  provider_launch_agent_id?: string | null
   message_count: number
   recent_user_prompts?: string | null
 }

@@ -30,7 +30,6 @@ import { computeSessionStats } from '../../shared/stats.js'
 import { formatGitDiffFiles, formatGitReviewDiff } from '../git/diff.js'
 import { aggregateParallel, mapPool, runChild, runShellChild, runSubAgentChild, type RunChildDeps } from './parallel.js'
 import { resolveTemplate, type TemplateContext } from './template.js'
-import { resolveLLMClientForAgent, buildAgentOverrideStatsIdentity } from '../agents/model-overrides.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
 import { runBackgroundAction } from '../tools/background-process/backend.js'
@@ -665,31 +664,47 @@ export async function executeWorkflow(
 
         let stepDoneCalled = false
 
-        // Resolve the step's model: a per-agent override (e.g. builder-3.8-27b
-        // pinned to qwen) wins over the session client — mirrors the sub-agent
-        // path. Without an override the session client is used as before.
         const stepAgentId = agentStep.agentId ?? resolveDefaultAgentId()
         const effectiveProviderManager = sessionManager.getProviderManager?.()
-        let stepLlmClient = llmClient
+        const stepLlmClient =
+          typeof sessionManager.createClientForAgent === 'function'
+            ? sessionManager.createClientForAgent(sessionId, stepAgentId, llmClient)
+            : llmClient
+        const providerSession = sessionManager.requireSession(sessionId)
         let stepStatsIdentity = options.statsIdentity
         let stepGetSessionLLMClient = options.getSessionLLMClient
-        if (effectiveProviderManager) {
-          const pinnedEffort = session.providerPinnedEffort ?? undefined
-          const resolved = resolveLLMClientForAgent(stepAgentId, llmClient, effectiveProviderManager, pinnedEffort)
-          if (resolved.usedOverride && resolved.override) {
-            stepLlmClient = resolved.client
-            stepStatsIdentity = buildAgentOverrideStatsIdentity(
-              effectiveProviderManager,
-              resolved.client,
-              resolved.override,
-            )
-            // Keep retries on the override client instead of the session client
+        if (
+          providerSession.providerLaunchAgentId === stepAgentId &&
+          providerSession.providerId &&
+          providerSession.providerModel
+        ) {
+          const provider = effectiveProviderManager
+            ?.getProviders()
+            .find((candidate) => candidate.id === providerSession.providerId)
+          const reasoningEffort = stepLlmClient.getReasoningEffort?.()
+          stepStatsIdentity = {
+            providerId: providerSession.providerId,
+            providerName: provider?.name ?? providerSession.providerId,
+            backend: provider?.backend ?? stepLlmClient.getBackend(),
+            model: providerSession.providerModel,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
+          }
+          stepGetSessionLLMClient = undefined
+        } else if (effectiveProviderManager && stepLlmClient !== llmClient) {
+          const model = stepLlmClient.getModel()
+          const provider = effectiveProviderManager
+            .getProviders()
+            .find((candidate) => candidate.models.some((candidateModel) => candidateModel.id === model))
+          if (provider) {
+            const reasoningEffort = stepLlmClient.getReasoningEffort?.()
+            stepStatsIdentity = {
+              providerId: provider.id,
+              providerName: provider.name,
+              backend: provider.backend,
+              model,
+              ...(reasoningEffort ? { reasoningEffort } : {}),
+            }
             stepGetSessionLLMClient = undefined
-          } else if (resolved.warning) {
-            logger.warn('Agent step model override unavailable, falling back', {
-              agentId: stepAgentId,
-              warning: resolved.warning,
-            })
           }
         }
 

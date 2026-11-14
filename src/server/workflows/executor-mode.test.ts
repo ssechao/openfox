@@ -100,6 +100,7 @@ vi.mock('../git/diff.js', () => ({
 
 import { executeWorkflow, userStepChoices } from './executor.js'
 import { runAgentTurn } from '../chat/orchestrator.js'
+import { resolveLLMClientForAgent } from '../agents/model-overrides.js'
 
 describe('userStepChoices', () => {
   it('maps step_result transitions to choices and appends a Continue choice for always', () => {
@@ -197,6 +198,17 @@ describe('executeWorkflow mode changes', () => {
       })),
       setMode,
       setPhase,
+      createClientForAgent: vi.fn(function (
+        this: { getProviderManager?: () => unknown },
+        _sessionId: string,
+        agentId: string,
+        fallback: unknown,
+      ) {
+        const providerManager = this.getProviderManager?.()
+        if (!providerManager) return fallback
+        return vi.mocked(resolveLLMClientForAgent)(agentId, fallback as never, providerManager as never, undefined)
+          ?.client
+      }),
       getEffectiveWorkdir: vi.fn().mockReturnValue('/tmp/test'),
       getProjectWorkdir: vi.fn().mockReturnValue('/tmp/test'),
       addMessage: vi.fn(),
@@ -823,13 +835,19 @@ describe('executeWorkflow mode changes', () => {
   })
 
   it('runs agent steps on the per-agent override client when one is configured', async () => {
-    const { resolveLLMClientForAgent } = await import('../agents/model-overrides.js')
     const { runAgentTurn } = await import('../chat/orchestrator.js')
 
     const overrideClient = { getModel: () => 'qwen3.8-27b' }
     const mockProviderManager = {
       createClient: vi.fn(() => overrideClient),
-      getProviders: vi.fn(() => [{ id: '5090', name: '5090', backend: 'vllm' }]),
+      getProviders: vi.fn(() => [
+        {
+          id: '5090',
+          name: '5090',
+          backend: 'vllm',
+          models: [{ id: 'qwen3.8-27b' }],
+        },
+      ]),
     }
     const sessionManagerWithPm = {
       ...mockSessionManager,

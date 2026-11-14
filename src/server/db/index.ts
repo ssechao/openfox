@@ -423,6 +423,11 @@ function runMigrations(db: Database.Database): void {
     db.exec(`ALTER TABLE sessions ADD COLUMN provider_model TEXT`)
   }
 
+  if (!columnNames.includes('provider_launch_agent_id')) {
+    logger.info('Migrating sessions table: adding provider_launch_agent_id column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN provider_launch_agent_id TEXT`)
+  }
+
   // Migration: mark whether the session's provider/model was explicitly picked
   // by the user (sticky, suppresses agent overrides). Legacy rows default to 0 —
   // indistinguishable from inherited defaults, reset on the next explicit pick.

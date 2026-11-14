@@ -109,6 +109,7 @@ export interface Session {
   pauseState?: PauseState // Cooperative pause state (default 'none' when absent)
   providerId?: string | null // Per-session provider override
   providerModel?: string | null // Per-session model override
+  providerLaunchAgentId?: string | null // Agent whose Manager launch pins providerId/providerModel
   providerReasoningEffort?: string | null // Per-session reasoning effort override (with providerModel)
   /** Per-session pinned reasoning effort ("Keep current" on an agent/workflow switch):
    *  overrides the effort of agent overrides without replacing the provider/model. */
