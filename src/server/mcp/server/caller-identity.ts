@@ -31,23 +31,49 @@ export interface OpenFoxEndpointBindingOptions {
   resolveProxyTargetUrl(serverName: string, targetServerName: string): string | undefined
 }
 
+function normalizeEndpointUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = new URL(value)
+    if (
+      (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return undefined
+    }
+    const pathname = parsed.pathname.replace(/\/+$/, '') || '/'
+    return `${parsed.protocol}//${parsed.host}${pathname}`
+  } catch {
+    return undefined
+  }
+}
+
 export function createOpenFoxEndpointBinding(
   options: OpenFoxEndpointBindingOptions,
 ): (input: OpenFoxEndpointBindingInput) => boolean {
   return (input) => {
+    const selfEndpointUrl = normalizeEndpointUrl(options.selfEndpointUrl())
+    if (!selfEndpointUrl) return false
     if (input.kind === 'direct') {
-      return input.url === options.selfEndpointUrl()
+      return normalizeEndpointUrl(input.url) === selfEndpointUrl
     }
     const proxyConfig = options.getProxyConfig(input.serverName)
     const commandParts = [proxyConfig?.command, ...(proxyConfig?.args ?? [])].filter(
       (part): part is string => typeof part === 'string',
     )
-    return (
-      input.serverName === options.proxyServerName &&
-      input.targetServerName === options.proxyTargetName &&
-      proxyConfig?.transport === 'stdio' &&
-      commandParts.some((part) => part === 'mcp-lazy' || part.endsWith('/mcp-lazy'))
-    )
+    if (
+      input.serverName !== options.proxyServerName ||
+      input.targetServerName !== options.proxyTargetName ||
+      proxyConfig?.transport !== 'stdio' ||
+      !commandParts.some((part) => part === 'mcp-lazy' || part.endsWith('/mcp-lazy'))
+    ) {
+      return false
+    }
+    const targetUrl = options.resolveProxyTargetUrl(input.serverName, input.targetServerName)
+    return normalizeEndpointUrl(targetUrl) === selfEndpointUrl
   }
 }
 

@@ -699,108 +699,104 @@ describe('openfox MCP endpoint', () => {
     }
   }, 30000)
 
-  it.fails(
-    'delete_session never sends a self proof to a proxy target with a different downstream URL',
-    async () => {
-      const authority = createOpenFoxCallerIdentityAuthority({ secret: Buffer.alloc(32, 17) })
-      const harness = makeDeleteHarness({ verifyCallerIdentity: authority.verify })
-      harness.addSession('caller')
-      harness.addSession('peer')
-      harness.addSession('nominal-peer')
-      const self = await startRouter({
-        resolveDeps: () => harness.deps,
-        isAuthRequired: () => true,
-        isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
-      })
-      const captured: Array<Record<string, unknown>> = []
-      const thirdParty = await startCaptureEndpoint(captured)
-      const escapedProxy = await createStdioForwardProxy(thirdParty.url)
-      const nominalProxy = await createStdioForwardProxy(self.url, 'sekrit')
-      const escapedGateway = new McpManager({
-        openFoxCallerIdentity: {
-          issueProof: authority.issueProof,
-          isOwnEndpoint: createOpenFoxEndpointBinding({
-            selfEndpointUrl: () => self.url,
-            proxyServerName: 'mcp-lazy',
-            proxyTargetName: 'openfox',
-            getProxyConfig: () => escapedProxy.config,
-            resolveProxyTargetUrl: () => thirdParty.url,
-          }),
-        },
-      })
-      const nominalGateway = new McpManager({
-        openFoxCallerIdentity: {
-          issueProof: authority.issueProof,
-          isOwnEndpoint: createOpenFoxEndpointBinding({
-            selfEndpointUrl: () => self.url,
-            proxyServerName: 'mcp-lazy',
-            proxyTargetName: 'openfox',
-            getProxyConfig: () => nominalProxy.config,
-            resolveProxyTargetUrl: () => self.url,
-          }),
-        },
-      })
-      let replayClient: Client | undefined
-      try {
-        await escapedGateway.addServer('mcp-lazy', escapedProxy.config)
-        const escapedTool = createMcpTools(escapedGateway).find(
-          (candidate) => candidate.name === 'mcp-lazy_mcp_execute_tool',
-        )
-        expect(escapedTool).toBeDefined()
-        await escapedTool!.execute(
-          {
-            server_name: 'openfox',
-            tool_name: 'openfox_delete_session',
-            arguments: {
-              sessionId: 'peer',
-              openfox_session_id: 'forged-caller',
-              openfox_session_proof: 'forged-proof',
-            },
+  it('delete_session never sends a self proof to a proxy target with a different downstream URL', async () => {
+    const authority = createOpenFoxCallerIdentityAuthority({ secret: Buffer.alloc(32, 17) })
+    const harness = makeDeleteHarness({ verifyCallerIdentity: authority.verify })
+    harness.addSession('caller')
+    harness.addSession('peer')
+    harness.addSession('nominal-peer')
+    const self = await startRouter({
+      resolveDeps: () => harness.deps,
+      isAuthRequired: () => true,
+      isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
+    })
+    const captured: Array<Record<string, unknown>> = []
+    const thirdParty = await startCaptureEndpoint(captured)
+    const escapedProxy = await createStdioForwardProxy(thirdParty.url)
+    const nominalProxy = await createStdioForwardProxy(self.url, 'sekrit')
+    const escapedGateway = new McpManager({
+      openFoxCallerIdentity: {
+        issueProof: authority.issueProof,
+        isOwnEndpoint: createOpenFoxEndpointBinding({
+          selfEndpointUrl: () => self.url,
+          proxyServerName: 'mcp-lazy',
+          proxyTargetName: 'openfox',
+          getProxyConfig: () => escapedProxy.config,
+          resolveProxyTargetUrl: () => thirdParty.url,
+        }),
+      },
+    })
+    const nominalGateway = new McpManager({
+      openFoxCallerIdentity: {
+        issueProof: authority.issueProof,
+        isOwnEndpoint: createOpenFoxEndpointBinding({
+          selfEndpointUrl: () => self.url,
+          proxyServerName: 'mcp-lazy',
+          proxyTargetName: 'openfox',
+          getProxyConfig: () => nominalProxy.config,
+          resolveProxyTargetUrl: () => self.url,
+        }),
+      },
+    })
+    let replayClient: Client | undefined
+    try {
+      await escapedGateway.addServer('mcp-lazy', escapedProxy.config)
+      const escapedTool = createMcpTools(escapedGateway).find(
+        (candidate) => candidate.name === 'mcp-lazy_mcp_execute_tool',
+      )
+      expect(escapedTool).toBeDefined()
+      await escapedTool!.execute(
+        {
+          server_name: 'openfox',
+          tool_name: 'openfox_delete_session',
+          arguments: {
+            sessionId: 'peer',
+            openfox_session_id: 'forged-caller',
+            openfox_session_proof: 'forged-proof',
           },
-          toolContext('caller'),
-        )
+        },
+        toolContext('caller'),
+      )
 
-        expect(captured).toHaveLength(1)
-        const escaped = captured[0]!
-        replayClient = await connectClient(self.url, { 'x-session-token': 'sekrit' })
-        const replay = await replayClient.callTool({
-          name: 'openfox_delete_session',
-          arguments: escaped,
-        })
-        await replayClient.close()
-        replayClient = undefined
+      expect(captured).toHaveLength(1)
+      const escaped = captured[0]!
+      replayClient = await connectClient(self.url, { 'x-session-token': 'sekrit' })
+      const replay = await replayClient.callTool({
+        name: 'openfox_delete_session',
+        arguments: escaped,
+      })
+      await replayClient.close()
+      replayClient = undefined
 
-        await nominalGateway.addServer('mcp-lazy', nominalProxy.config)
-        const nominalTool = createMcpTools(nominalGateway).find(
-          (candidate) => candidate.name === 'mcp-lazy_mcp_execute_tool',
-        )
-        const nominal = await nominalTool!.execute(
-          {
-            server_name: 'openfox',
-            tool_name: 'openfox_delete_session',
-            arguments: { sessionId: 'nominal-peer' },
-          },
-          toolContext('caller'),
-        )
+      await nominalGateway.addServer('mcp-lazy', nominalProxy.config)
+      const nominalTool = createMcpTools(nominalGateway).find(
+        (candidate) => candidate.name === 'mcp-lazy_mcp_execute_tool',
+      )
+      const nominal = await nominalTool!.execute(
+        {
+          server_name: 'openfox',
+          tool_name: 'openfox_delete_session',
+          arguments: { sessionId: 'nominal-peer' },
+        },
+        toolContext('caller'),
+      )
 
-        expect(nominal.success).toBe(true)
-        expect(escaped).not.toHaveProperty('openfox_session_id')
-        expect(escaped).not.toHaveProperty('openfox_session_proof')
-        expect(replay.isError).toBe(true)
-        expect(harness.deleted).toEqual(['nominal-peer'])
-        expect(harness.sessions.has('peer')).toBe(true)
-      } finally {
-        await replayClient?.close().catch(() => undefined)
-        await escapedGateway.disconnectAll()
-        await nominalGateway.disconnectAll()
-        await escapedProxy.close()
-        await nominalProxy.close()
-        await thirdParty.close()
-        await self.close()
-      }
-    },
-    30000,
-  )
+      expect(nominal.success).toBe(true)
+      expect(escaped).not.toHaveProperty('openfox_session_id')
+      expect(escaped).not.toHaveProperty('openfox_session_proof')
+      expect(replay.isError).toBe(true)
+      expect(harness.deleted).toEqual(['nominal-peer'])
+      expect(harness.sessions.has('peer')).toBe(true)
+    } finally {
+      await replayClient?.close().catch(() => undefined)
+      await escapedGateway.disconnectAll()
+      await nominalGateway.disconnectAll()
+      await escapedProxy.close()
+      await nominalProxy.close()
+      await thirdParty.close()
+      await self.close()
+    }
+  }, 30000)
 
   it('returns 503 when the tool dependencies are not ready yet', async () => {
     const started = await startRouter({
