@@ -187,7 +187,7 @@ describe('automatic unknown tool outcomes', () => {
     expect(result.toolMessages[0]?.content).toBe('ran')
   })
 
-  it.fails('uncertain broker deadline persists explicit first result for LLM and UI without retry', async () => {
+  it('uncertain broker deadline persists explicit first result for LLM and UI without retry', async () => {
     vi.useFakeTimers()
     try {
       const identity: WorkerIpcIdentity = { sessionId: 's-1', workerId: 'worker-1', generation: 1 }
@@ -217,8 +217,17 @@ describe('automatic unknown tool outcomes', () => {
         execute,
         isCurrent: () => true,
         send: (message) => sent.push(message),
-        reconcile: (pending) =>
-          settleOneUnknownToolOutcome(store.events, pending, (event) => store.append(pending.sessionId, event)),
+        reconcile: (pending, durationMs) =>
+          settleOneUnknownToolOutcome(
+            store.events,
+            {
+              messageId: pending.messageId,
+              toolCallId: pending.toolCallId,
+              name: pending.name,
+              ...(durationMs === undefined ? {} : { durationMs }),
+            },
+            (event) => store.append(pending.sessionId, event),
+          ),
       })
 
       broker.handleRequest(request)

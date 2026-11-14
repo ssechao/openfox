@@ -183,7 +183,7 @@ describe('WorkerMcpBroker', () => {
 
     expect(execute).toHaveBeenCalledOnce()
     expect(reconcile).toHaveBeenCalledOnce()
-    expect(reconcile).toHaveBeenCalledWith(input)
+    expect(reconcile).toHaveBeenCalledWith(input, 1)
     expect(decode(sent.slice(-2))).toMatchObject({ success: false, error: expect.stringContaining('replay') })
   })
 
@@ -254,7 +254,7 @@ describe('WorkerMcpBroker', () => {
     broker.handleRequest(large)
     await vi.runAllTimersAsync()
 
-    expect(reconcile).toHaveBeenCalledWith(timed)
+    expect(reconcile).toHaveBeenCalledWith(timed, 10)
     expect(reconcile).toHaveBeenCalledWith(large)
     expect(sent.filter((message) => message.type === 'mcp.response.end')).toHaveLength(2)
     vi.useRealTimers()

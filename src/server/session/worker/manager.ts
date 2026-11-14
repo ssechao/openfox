@@ -199,7 +199,7 @@ export class SessionWorkerManager {
             const worker = this.active.get(message.sessionId)
             if (worker) this.sendTo(worker, message)
           },
-          reconcile: (request) => this.appendMcpReconciliation(request),
+          reconcile: (request, durationMs) => this.appendMcpReconciliation(request, durationMs),
         })
       : null
     this.asapBroker = new WorkerAsapBroker({
@@ -1184,11 +1184,20 @@ export class SessionWorkerManager {
     )
   }
 
-  private appendMcpReconciliation(request: McpRequestMessage): void {
+  private appendMcpReconciliation(request: McpRequestMessage, durationMs?: number): void {
     const eventStore = this.deps.eventStore?.() ?? getEventStore()
-    settleOneUnknownToolOutcome(eventStore.getEvents(request.sessionId), request, (event) => {
-      eventStore.append(request.sessionId, event)
-    })
+    settleOneUnknownToolOutcome(
+      eventStore.getEvents(request.sessionId),
+      {
+        messageId: request.messageId,
+        toolCallId: request.toolCallId,
+        name: request.name,
+        ...(durationMs === undefined ? {} : { durationMs }),
+      },
+      (event) => {
+        eventStore.append(request.sessionId, event)
+      },
+    )
   }
 
   private sendTo(worker: ActiveWorker, msg: GatewayToWorkerMessage): void {

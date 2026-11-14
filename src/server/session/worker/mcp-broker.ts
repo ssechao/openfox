@@ -36,7 +36,7 @@ interface WorkerMcpBrokerDeps {
   execute: (request: McpRequestMessage, signal: AbortSignal) => Promise<ToolResult>
   isCurrent: (identity: WorkerIpcIdentity) => boolean
   send: (message: WorkerMcpResponseMessage) => void
-  reconcile: (request: McpRequestMessage) => void
+  reconcile: (request: McpRequestMessage, durationMs?: number) => void
 }
 
 function workerKey(identity: WorkerIpcIdentity): string {
@@ -197,18 +197,21 @@ export class WorkerMcpBroker {
     return entry
   }
 
-  private markReconciliation(request: McpRequestMessage): void {
+  private markReconciliation(request: McpRequestMessage, durationMs?: number): void {
     const key = requestKey(request)
     if (this.reconciled.has(key)) return
     this.reconciled.add(key)
-    this.deps.reconcile(request)
+    if (durationMs === undefined) this.deps.reconcile(request)
+    else this.deps.reconcile(request, durationMs)
   }
 
   private sendResult(request: McpRequestMessage, result: ToolResult): void {
     if (!this.deps.isCurrent(identityOf(request))) return
     const readOnly = isReadOnlyRequest(request)
     const normalizedResult = readOnly ? withoutReconciliation(result) : result
-    if (normalizedResult.metadata?.['reconciliationRequired'] === true) this.markReconciliation(request)
+    if (normalizedResult.metadata?.['reconciliationRequired'] === true) {
+      this.markReconciliation(request, normalizedResult.durationMs)
+    }
     let bytes = Buffer.from(JSON.stringify(normalizedResult))
     if (bytes.length > MAX_MCP_RESPONSE_BYTES) {
       if (!readOnly) this.markReconciliation(request)

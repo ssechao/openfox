@@ -16,6 +16,18 @@ export function syntheticUnknownToolResult(): ToolResult {
   }
 }
 
+function uncertainMcpFailureResult(name: string, durationMs: number): ToolResult {
+  const durationSeconds = Math.ceil(durationMs / 1000)
+  return {
+    success: false,
+    outcomeUnknown: true,
+    error: `ÉCHEC INCERTAIN : l'appel ${name} a expiré après ${durationSeconds} s ; des effets externes ont pu se produire. Vérifie l'état réel avant de réessayer.`,
+    durationMs,
+    truncated: false,
+    metadata: { reconciliationRequired: true },
+  }
+}
+
 export function findPendingToolReconciliations(events: StoredEvent[]): PendingToolReconciliation[] {
   let turnStartedAt = -Infinity
   for (const event of events) {
@@ -63,14 +75,18 @@ export function findPendingToolReconciliations(events: StoredEvent[]): PendingTo
 
 export function settleOneUnknownToolOutcome(
   events: readonly StoredEvent[],
-  pending: { messageId: string; toolCallId: string },
+  pending: { messageId: string; toolCallId: string; name?: string; durationMs?: number },
   append: (event: TurnEvent) => void,
 ): void {
   const settled = events.some(
     (event) => event.type === 'tool.result' && (event.data as { toolCallId: string }).toolCallId === pending.toolCallId,
   )
   if (settled) return
-  append(createToolResultEvent(pending.messageId, pending.toolCallId, syntheticUnknownToolResult()))
+  const result =
+    pending.name && pending.durationMs !== undefined
+      ? uncertainMcpFailureResult(pending.name, pending.durationMs)
+      : syntheticUnknownToolResult()
+  append(createToolResultEvent(pending.messageId, pending.toolCallId, result))
 }
 
 export function sessionResumeAllowed(events: readonly StoredEvent[], interruptedAt: string): boolean {
