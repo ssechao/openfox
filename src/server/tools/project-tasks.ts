@@ -200,7 +200,7 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
       )
     }
     if (projectTasksExecutor) return projectTasksExecutor(args, context)
-    if (requestedProjectId && !getProject(requestedProjectId)) {
+    if (action !== 'launch' && requestedProjectId && !getProject(requestedProjectId)) {
       return helpers.error(`Project not found: ${requestedProjectId}`)
     }
     const projectId = requestedProjectId || session.projectId
