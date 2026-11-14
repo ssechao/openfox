@@ -260,7 +260,7 @@ describe('session id injection through a proxy server', () => {
     })
   })
 
-  it.fails('injects trusted OpenFox caller fields for openfox_compact_session', async () => {
+  it('injects trusted OpenFox caller fields for openfox_compact_session', async () => {
     const issueProof = vi.fn(() => 'trusted-proof')
     const manager = new McpManager({
       openFoxCallerIdentity: {

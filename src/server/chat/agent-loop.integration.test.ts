@@ -523,7 +523,7 @@ describe('agentLoop integration', () => {
     expect(batchContexts[batchContexts.length - 1].dangerLevel).toBe('dangerous')
   })
 
-  it.fails('manager sessions compact at 0.6 by default', async () => {
+  it('manager sessions compact at 0.6 by default', async () => {
     const { shouldCompact } = await import('../context/compactor.js')
 
     await runTopLevelAgentLoop(makeConfig({ mode: 'manager' }), turnMetrics)

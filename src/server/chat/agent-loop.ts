@@ -710,13 +710,11 @@ export async function runTopLevelAgentLoop(
     const compactionWindow = config.subAgentMetadata
       ? sessionManager.getCurrentModelContext(sessionId, config.mode)
       : contextStateForCompact.maxTokens
+    const compactionThreshold =
+      sessionManager.getModelCompactionThreshold(sessionId, config.mode) ??
+      (config.mode === 'manager' ? 0.6 : runtimeConfig.context.compactionThreshold)
     const overCompactionThreshold =
-      !compacting &&
-      shouldCompact(
-        compactionTokens,
-        compactionWindow,
-        sessionManager.getModelCompactionThreshold(sessionId, config.mode) ?? runtimeConfig.context.compactionThreshold,
-      )
+      !compacting && shouldCompact(compactionTokens, compactionWindow, compactionThreshold)
 
     if (result.finishReason === 'length') {
       const truncatedNotice = serverT({

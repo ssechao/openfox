@@ -145,7 +145,7 @@ function json(result: OpenFoxMcpToolResult): any {
 }
 
 describe('openfx MCP tools', () => {
-  it.fails('exposes the full session-centric tool set', () => {
+  it('exposes the full session-centric tool set', () => {
     const tools = createOpenFoxMcpTools(makeDeps())
     const names = tools
       .map((t) => t.name)
@@ -898,7 +898,7 @@ describe('openfx MCP tools', () => {
   })
 
   describe('openfox_compact_session', () => {
-    it.fails('openfox_compact_session MCP tool compacts an idle peer', async () => {
+    it('openfox_compact_session MCP tool compacts an idle peer', async () => {
       const caller = { ...makeSession(), id: 'caller' }
       const peer = { ...makeSession(), id: 'peer' }
       const compactSession = vi.fn(async () => ({ status: 'compacted' as const }))
@@ -929,7 +929,7 @@ describe('openfx MCP tools', () => {
       expect(json(result)).toEqual({ sessionId: 'peer', status: 'compacted' })
     })
 
-    it.fails('self compaction requested during own turn is scheduled for the next turn boundary', async () => {
+    it('self compaction requested during own turn is scheduled for the next turn boundary', async () => {
       const caller = { ...makeSession(), id: 'caller', isRunning: true }
       const compactSession = vi.fn(async () => ({ status: 'compaction_scheduled' as const }))
       const deps = makeDeps({
@@ -953,7 +953,7 @@ describe('openfx MCP tools', () => {
       expect(json(result)).toEqual({ sessionId: 'caller', status: 'compaction_scheduled' })
     })
 
-    it.fails('rejects an unproved openfox_compact_session caller identity', async () => {
+    it('rejects an unproved openfox_compact_session caller identity', async () => {
       const compactSession = vi.fn()
       const deps = makeDeps({ compactSession } as any)
 
@@ -968,7 +968,7 @@ describe('openfx MCP tools', () => {
       expect(compactSession).not.toHaveBeenCalled()
     })
 
-    it.fails('lets a Manager explicitly select another project for compaction', async () => {
+    it('lets a Manager explicitly select another project for compaction', async () => {
       const caller = { ...makeSession(), id: 'caller', mode: 'manager' }
       const peer = { ...makeSession(), id: 'peer', projectId: 'p-2' }
       const compactSession = vi.fn(async () => ({ status: 'compacted' as const }))

@@ -5,6 +5,7 @@ import type { SessionManager } from '../../session/manager.js'
 import type { InteractiveAnswerResult } from '../../session/worker/interactive-broker.js'
 import type { AdmissionResult } from '../../session/worker/scheduler.js'
 import type { OpenFoxCallerIdentityResult, OpenFoxCallerIdentityVerification } from './caller-identity.js'
+import type { ManualCompactionRequest, ManualCompactionResult } from '../../context/manual-compaction.js'
 
 export interface WorkflowListItem {
   id: string
@@ -32,6 +33,7 @@ export interface OpenFoxMcpToolDeps {
     sessionId: string,
     payload: WorkflowLaunchPayload,
   ): AdmissionResult | void | Promise<AdmissionResult | void>
+  compactSession?(request: ManualCompactionRequest): Promise<ManualCompactionResult>
   /** Full session stop: drain queue, abort execution, cancel pending interactions. */
   stopSession(sessionId: string): void
   /** Abort the active workflow run only (task/MCP-launched runs): a live run is aborted, a paused (waiting) user-step execution is cancelled. Returns what was stopped, or null when nothing is active. */

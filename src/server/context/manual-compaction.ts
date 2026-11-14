@@ -18,8 +18,17 @@ export interface ManualCompactionDependencies {
 }
 
 export async function requestManualCompaction(
-  _request: ManualCompactionRequest,
-  _dependencies: ManualCompactionDependencies,
+  request: ManualCompactionRequest,
+  dependencies: ManualCompactionDependencies,
 ): Promise<ManualCompactionResult> {
-  return { status: 'session_not_found' }
+  const session = dependencies.getSession(request.sessionId)
+  if (!session) return { status: 'session_not_found' }
+  if (session.interruptedAt) return { status: 'session_interrupted' }
+  if (session.isRunning) {
+    if (request.callerSessionId !== request.sessionId) return { status: 'session_busy' }
+    if (!dependencies.schedule(request.sessionId)) return { status: 'session_busy' }
+    return { status: 'compaction_scheduled' }
+  }
+  await dependencies.compactNow(request.sessionId)
+  return { status: 'compacted' }
 }

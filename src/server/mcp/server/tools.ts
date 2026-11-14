@@ -367,6 +367,66 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
       },
     },
     {
+      name: 'openfox_compact_session',
+      description:
+        "Compact an idle session immediately, or schedule the caller's own running session for the next turn boundary. Omit projectId to require the caller's project; Managers may explicitly select another project.",
+      inputSchema: {
+        sessionId: z.string().describe('Session to compact'),
+        projectId: z.string().optional().describe('Explicit project containing the target session'),
+        openfox_session_id: z.string().optional().describe('Reserved for the OpenFox host'),
+        openfox_session_proof: z.string().optional().describe('Reserved for the OpenFox host'),
+      },
+      handler: async (args) => {
+        const sessionId = args['sessionId']
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          return fail('sessionId is required')
+        }
+        const verification = deps.verifyCallerIdentity?.({
+          callerSessionId: typeof args['openfox_session_id'] === 'string' ? args['openfox_session_id'] : '',
+          proof: args['openfox_session_proof'],
+          toolName: 'openfox_compact_session',
+          targetSessionId: sessionId,
+        }) ?? { ok: false as const, error: 'trusted OpenFox caller identity is required' }
+        if (!verification.ok) return fail(verification.error)
+
+        const targetCheck = requireSession(sessionId)
+        if (!targetCheck.ok) return fail(targetCheck.error)
+        const callerCheck = requireSession(verification.callerSessionId)
+        if (!callerCheck.ok) return fail(`Caller ${callerCheck.error}`)
+
+        const target = targetCheck.session
+        const caller = callerCheck.session
+        const rawProjectId = args['projectId']
+        if (rawProjectId !== undefined && (typeof rawProjectId !== 'string' || rawProjectId.length === 0)) {
+          return fail('projectId must be a non-empty string')
+        }
+        const projectId = typeof rawProjectId === 'string' ? rawProjectId : undefined
+        if (projectId === undefined) {
+          if (target.projectId !== caller.projectId) {
+            return fail('Cannot compact a session from another project')
+          }
+        } else {
+          if (projectId !== target.projectId) {
+            return fail('PROJECT_MISMATCH: projectId does not match the target session project')
+          }
+          if (projectId !== caller.projectId && caller.mode !== 'manager') {
+            return fail('MANAGER_REQUIRED: selecting another project requires a Manager session')
+          }
+        }
+
+        if (!deps.compactSession) return fail('Compaction service is not ready')
+        const result = await deps.compactSession({
+          sessionId: target.id,
+          callerSessionId: caller.id,
+          ...(projectId ? { projectId } : {}),
+        })
+        if (result.status === 'session_busy') return fail('session_busy')
+        if (result.status === 'session_interrupted') return fail('session_interrupted')
+        if (result.status === 'session_not_found') return fail(`Session not found: ${target.id}`)
+        return ok({ sessionId: target.id, status: result.status })
+      },
+    },
+    {
       name: 'openfox_delete_session',
       description:
         "Delete an idle non-manager peer session. Omit projectId to require the caller's project; Managers may explicitly select another project.",

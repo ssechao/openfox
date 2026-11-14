@@ -58,37 +58,29 @@ describe('manual compaction REST API', () => {
     return session.id
   }
 
-  it.fails(
-    'POST /compact succeeds on an idle session',
-    async () => {
-      const sessionId = await createSession()
-      try {
-        const response = await fetch(`${base}/api/sessions/${sessionId}/compact`, { method: 'POST' })
-        expect(response.status).toBe(200)
-        expect(await response.json()).toMatchObject({ sessionId, status: 'compacted' })
-      } finally {
-        await fetch(`${base}/api/sessions/${sessionId}`, { method: 'DELETE' })
-      }
-    },
-    30_000,
-  )
+  it('POST /compact succeeds on an idle session', async () => {
+    const sessionId = await createSession()
+    try {
+      const response = await fetch(`${base}/api/sessions/${sessionId}/compact`, { method: 'POST' })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ sessionId, status: 'compacted' })
+    } finally {
+      await fetch(`${base}/api/sessions/${sessionId}`, { method: 'DELETE' })
+    }
+  }, 30_000)
 
-  it.fails(
-    'POST /compact refuses another session during its turn',
-    async () => {
-      const sessionId = await createSession()
-      const handle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
-      server.ctx.sessionManager.setRunning(sessionId, true)
-      try {
-        const response = await fetch(`${base}/api/sessions/${sessionId}/compact`, { method: 'POST' })
-        expect(response.status).toBe(409)
-        expect(await response.json()).toMatchObject({ code: 'session_busy' })
-      } finally {
-        server.ctx.sessionManager.setRunning(sessionId, false)
-        getSessionRuntimeRegistry().get(sessionId).release(handle)
-        await fetch(`${base}/api/sessions/${sessionId}`, { method: 'DELETE' })
-      }
-    },
-    30_000,
-  )
+  it('POST /compact refuses another session during its turn', async () => {
+    const sessionId = await createSession()
+    const handle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
+    server.ctx.sessionManager.setRunning(sessionId, true)
+    try {
+      const response = await fetch(`${base}/api/sessions/${sessionId}/compact`, { method: 'POST' })
+      expect(response.status).toBe(409)
+      expect(await response.json()).toMatchObject({ code: 'session_busy' })
+    } finally {
+      server.ctx.sessionManager.setRunning(sessionId, false)
+      getSessionRuntimeRegistry().get(sessionId).release(handle)
+      await fetch(`${base}/api/sessions/${sessionId}`, { method: 'DELETE' })
+    }
+  }, 30_000)
 })

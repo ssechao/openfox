@@ -66,6 +66,7 @@ import { createOpenFoxMcpRouter, extractSessionToken } from './mcp/server/endpoi
 import { buildOpenFoxMcpBootstrap } from './mcp/server/bootstrap.js'
 import { createOpenFoxCallerIdentityAuthority, createOpenFoxEndpointBinding } from './mcp/server/caller-identity.js'
 import type { OpenFoxMcpToolDeps } from './mcp/server/types.js'
+import type { ManualCompactionRequest, ManualCompactionResult } from './context/manual-compaction.js'
 import { createDevServerRoutes } from './routes/dev-server.js'
 import { createWorkspaceConfigRoutes } from './routes/workspace-config.js'
 import { createTerminalRoutes } from './routes/terminals.js'
@@ -409,6 +410,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   // never swallowed; tool deps are resolved lazily per request and filled in
   // once the WebSocket/queue plumbing exists below (requests only flow after start()).
   let mcpToolDeps: OpenFoxMcpToolDeps | null = null
+  let compactSession = async (_request: ManualCompactionRequest): Promise<ManualCompactionResult> => ({
+    status: 'session_not_found',
+  })
   const mcpAuth = {
     isAuthRequired: (): boolean => {
       const cfg = getAuthConfig()
@@ -1838,6 +1842,30 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       })
 
     res.json({ success: true })
+  })
+
+  app.post('/api/sessions/:id/compact', async (req, res) => {
+    try {
+      const sessionId = req.params.id
+      const result = await compactSession({ sessionId })
+      if (result.status === 'session_not_found') {
+        return res.status(404).json({ error: 'Session not found', code: result.status })
+      }
+      if (result.status === 'session_interrupted') {
+        return res.status(409).json({ error: 'Session is interrupted', code: result.status })
+      }
+      if (result.status === 'session_busy') {
+        return res.status(409).json({ error: 'Session is running', code: result.status })
+      }
+      if (result.status === 'compaction_scheduled') {
+        return res.status(202).json({ sessionId, status: result.status })
+      }
+      return res.status(200).json({ sessionId, status: result.status })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      logger.error('Manual compaction failed', { sessionId: req.params.id, error: reason })
+      return res.status(500).json({ error: reason, code: 'compaction_failed' })
+    }
   })
 
   // Delete queued message (cancel)
@@ -4062,6 +4090,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     (sessionId) => resumeQueuedSession(sessionId),
   )
   const wss = wssExports.wss
+  compactSession = (request) => wssExports.compactSession(request)
 
   // Wire the deferred per-session broadcaster now that the WS server exists.
   broadcastForSessionDeferred = (sessionId, msg) => wssExports.broadcastForSession(sessionId, msg)
@@ -4454,6 +4483,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   mcpToolDeps = {
     sessionManager,
     verifyCallerIdentity: callerIdentityAuthority.verify,
+    compactSession,
     listProjects: () => listProjects(),
     createProject: async (name, workdir) => {
       const { createProjectDirectory } = await import('./utils/project-creator.js')

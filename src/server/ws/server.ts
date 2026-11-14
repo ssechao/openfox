@@ -25,6 +25,11 @@ import { interruptLLMRetryWait, hasRecentLLMFailure } from '../chat/stream-pure.
 
 import { launchWorkflowRun, type TurnCleanupOutcome } from '../runner/launch.js'
 import { appendCompactionPrompt } from '../context/compactor.js'
+import {
+  requestManualCompaction,
+  type ManualCompactionRequest,
+  type ManualCompactionResult,
+} from '../context/manual-compaction.js'
 import { computeSessionHash, applyDynamicContext, computeUnifiedDiff } from '../chat/dynamic-context.js'
 import { provideAnswer } from '../tools/index.js'
 import { logger } from '../utils/logger.js'
@@ -620,6 +625,118 @@ export function createWebSocketServer(
     }
   }
 
+  const runGatewayCompaction = async (sessionId: string): Promise<void> => {
+    const handle = getSessionRuntimeRegistry().get(sessionId).acquire('compact')
+    try {
+      appendCompactionPrompt(sessionId, (event) => getEventStore().append(sessionId, event))
+      await runChatTurn({
+        sessionManager,
+        sessionId,
+        llmClient: llmForSession(sessionId),
+        getSessionLLMClient: () => llmForSession(sessionId),
+        statsIdentity: statsForSession(sessionId),
+        signal: handle.signal,
+        onMessage: (msg) => broadcastForSession(sessionId, msg),
+        initialCompacting: true,
+      })
+    } finally {
+      const runtime = getSessionRuntimeRegistry().peek(sessionId)
+      if (runtime?.release(handle)) {
+        sessionManager.setRunning(sessionId, false)
+        broadcastForSession(sessionId, createSessionRunningMessage(false))
+        broadcastForSession(sessionId, createContextStateMessage(sessionManager.getContextState(sessionId)))
+      }
+    }
+  }
+
+  const startWorkerCompaction = (
+    sessionId: string,
+  ): { admission: AdmissionResult; completion: Promise<void> } | undefined => {
+    const workerController = getWorkerController?.()
+    if (!workerController?.isEnabled()) return undefined
+
+    let resolveCompletion: (() => void) | undefined
+    let rejectCompletion: ((error: Error) => void) | undefined
+    const completion = new Promise<void>((resolve, reject) => {
+      resolveCompletion = resolve
+      rejectCompletion = reject
+    })
+    const admission = workerController.requestTurn(sessionId, () => {
+      let handle: ExecutionHandle
+      try {
+        handle = getSessionRuntimeRegistry().get(sessionId).acquire('compact')
+      } catch (error) {
+        workerController.releaseTurn(sessionId)
+        rejectCompletion?.(error instanceof Error ? error : new Error(String(error)))
+        return
+      }
+      try {
+        workerController.launch(
+          sessionId,
+          (outcome) => {
+            const runtime = getSessionRuntimeRegistry().peek(sessionId)
+            const stopped = runtime?.wasStopped(handle) ?? false
+            const released = runtime?.release(handle) ?? false
+            broadcastForSession(sessionId, createContextStateMessage(sessionManager.getContextState(sessionId)))
+            if (released && !stopped && !outcome.crashed) {
+              onCleanWorkerTurnSettled?.(sessionId)
+              resolveCompletion?.()
+            } else {
+              rejectCompletion?.(new Error(outcome.error ?? 'Compaction worker did not settle cleanly'))
+            }
+          },
+          { kind: 'compact' },
+        )
+      } catch (error) {
+        getSessionRuntimeRegistry().peek(sessionId)?.release(handle)
+        workerController.releaseTurn(sessionId)
+        rejectCompletion?.(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+    if (admission !== 'started' && admission !== 'waiting') {
+      rejectCompletion?.(new Error(`Compaction worker admission ${admission}`))
+    }
+    return { admission, completion }
+  }
+
+  const compactNow = async (sessionId: string): Promise<void> => {
+    const worker = startWorkerCompaction(sessionId)
+    if (worker) {
+      await worker.completion
+      return
+    }
+    await runGatewayCompaction(sessionId)
+  }
+
+  const scheduleCompaction = (sessionId: string): boolean => {
+    const worker = startWorkerCompaction(sessionId)
+    if (worker) {
+      if (worker.admission !== 'started' && worker.admission !== 'waiting') {
+        void worker.completion.catch(() => undefined)
+        return false
+      }
+      void worker.completion.catch((error) => {
+        logger.error('Scheduled compaction failed', { sessionId, error })
+      })
+      return true
+    }
+    const runtime = getSessionRuntimeRegistry().get(sessionId)
+    void runtime
+      .awaitSettled()
+      .then(() => runGatewayCompaction(sessionId))
+      .catch((error) => {
+        logger.error('Scheduled compaction failed', { sessionId, error })
+      })
+    return true
+  }
+
+  const compactSession = (request: ManualCompactionRequest): Promise<ManualCompactionResult> =>
+    requestManualCompaction(request, {
+      getSession: (sessionId) => sessionManager.getSession(sessionId) ?? undefined,
+      compactNow,
+      schedule: scheduleCompaction,
+    })
+
   // Global dev server event listeners — broadcast to all WS clients
   devServerManager.onOutput((workdir, chunk) => {
     broadcastAll(
@@ -859,6 +976,7 @@ export function createWebSocketServer(
     broadcastForSession,
     broadcastForProject,
     broadcastAll,
+    compactSession,
   }
 }
 
@@ -869,6 +987,7 @@ export interface WebSocketServerExports {
   broadcastForSession: (sessionId: string, msg: ServerMessage) => void
   broadcastForProject: (projectId: string, sessionId: string, msg: ServerMessage) => void
   broadcastAll: (msg: ServerMessage) => void
+  compactSession: (request: ManualCompactionRequest) => Promise<ManualCompactionResult>
 }
 
 async function handleClientMessage(
@@ -891,9 +1010,9 @@ async function handleClientMessage(
     sendFn: (sessionId: string, msg: ServerMessage) => void,
   ) => TurnCleanupOutcome,
   enqueueSendFn: (client: ClientConnection, data: string, seq: number) => void,
-  getMcpServers?: () => import('../mcp/types.js').McpServerState[],
-  getWorkerController?: () => WebSocketWorkerController | undefined,
-  onCleanWorkerTurnSettled?: (sessionId: string) => void,
+  getMcpServers: (() => import('../mcp/types.js').McpServerState[]) | undefined,
+  getWorkerController: (() => WebSocketWorkerController | undefined) | undefined,
+  onCleanWorkerTurnSettled: ((sessionId: string) => void) | undefined,
 ): Promise<void> {
   const send = (msg: ServerMessage) => {
     if (ws.readyState === WebSocket.OPEN) {

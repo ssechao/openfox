@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 describe('manual compaction orchestration', () => {
-  it.fails('compacts an idle session immediately', async () => {
+  it('compacts an idle session immediately', async () => {
     const { requestManualCompaction } = await import('./manual-compaction.js')
     const compactNow = vi.fn(async () => undefined)
     const schedule = vi.fn(() => true)
@@ -16,7 +16,7 @@ describe('manual compaction orchestration', () => {
     expect(schedule).not.toHaveBeenCalled()
   })
 
-  it.fails('refuses another session during its turn', async () => {
+  it('refuses another session during its turn', async () => {
     const { requestManualCompaction } = await import('./manual-compaction.js')
     const compactNow = vi.fn(async () => undefined)
     const schedule = vi.fn(() => true)
@@ -31,7 +31,7 @@ describe('manual compaction orchestration', () => {
     expect(schedule).not.toHaveBeenCalled()
   })
 
-  it.fails('schedules self compaction without running it in the current turn', async () => {
+  it('schedules self compaction without running it in the current turn', async () => {
     const { requestManualCompaction } = await import('./manual-compaction.js')
     const compactNow = vi.fn(async () => undefined)
     const schedule = vi.fn(() => true)
