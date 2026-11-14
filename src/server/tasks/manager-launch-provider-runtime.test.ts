@@ -267,14 +267,15 @@ describe('manager launch provider runtime pin', () => {
   it('launched explicit provider and model drive every same-agent workflow step client', async () => {
     const sessionId = await launch('runtime workflow')
     streamLLMPureMock.mockClear()
-    consumeStreamGeneratorMock.mockResolvedValue({
+    let stepDoneSequence = 0
+    consumeStreamGeneratorMock.mockImplementation(async () => ({
       content: '',
-      toolCalls: [{ id: 'step-done', name: 'step_done', arguments: {} }],
+      toolCalls: [{ id: 'step-done-' + ++stepDoneSequence, name: 'step_done', arguments: {} }],
       segments: [],
       usage: { promptTokens: 1, completionTokens: 1 },
       timing: { ttft: 1, completionTime: 1, tps: 1, prefillTps: 1 },
       aborted: false,
-    })
+    }))
     const workflow: WorkflowDefinition = {
       metadata: {
         id: 'provider-runtime',
