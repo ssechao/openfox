@@ -2203,6 +2203,19 @@ export class SessionManager {
     return getSessionState(sessionId)?.pendingToolReconciliations ?? []
   }
 
+  getSeenToolCallIds(sessionId: string): Set<string> {
+    const { snapshot, events } = getEventStore().getEventsSinceSnapshot(sessionId)
+    const seen = new Set<string>()
+    for (const message of snapshot?.messages ?? []) {
+      for (const toolCall of message.toolCalls ?? []) seen.add(toolCall.id)
+    }
+    for (const event of events) {
+      if (event.type === 'tool.call') seen.add((event.data as { toolCall: { id: string } }).toolCall.id)
+      else if (event.type === 'tool.result') seen.add((event.data as { toolCallId: string }).toolCallId)
+    }
+    return seen
+  }
+
   getContextState(sessionId: string): ContextState {
     const providerManager = this.providerManager
 

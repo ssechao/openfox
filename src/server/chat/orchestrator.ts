@@ -48,6 +48,7 @@ import type { RetryPatternConfig } from './auto-patterns.js'
 import { sanitizeRetryPatterns } from './auto-patterns.js'
 import { getConversationMessages, processEventsForConversation } from './conversation-history.js'
 import { isStaleWorkerGenerationError } from '../session/worker/index.js'
+import { EventStoreBusyTimeoutError } from '../events/store.js'
 
 // Re-export for runner orchestrator
 export {
@@ -194,7 +195,7 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
     try {
       eventStore.append(sessionId, event)
     } catch (error) {
-      if (isStaleWorkerGenerationError(error)) throw error
+      if (isStaleWorkerGenerationError(error) || error instanceof EventStoreBusyTimeoutError) throw error
     }
   }
 

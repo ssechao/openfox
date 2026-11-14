@@ -19,7 +19,7 @@ import {
 afterEach(cleanupDbLockFixtures)
 
 describe('turn event persistence', () => {
-  it.fails('a turn stops with an explicit error when a turn event cannot be persisted', async () => {
+  it('a turn stops with an explicit error when a turn event cannot be persisted', async () => {
     const fixture = await createHotfixFixture(100)
     appendUserMessage(fixture, 'Write the result.')
     const outputPath = join(fixture.directory, 'effect.txt')

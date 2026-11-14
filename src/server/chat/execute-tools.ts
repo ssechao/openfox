@@ -123,6 +123,23 @@ export function createInterruptedResult(startTime?: number): ToolResult {
   }
 }
 
+class DuplicateToolCallIdError extends Error {
+  readonly code = 'DUPLICATE_TOOL_CALL_ID'
+
+  constructor(readonly toolCallId: string) {
+    super(`DUPLICATE_TOOL_CALL_ID: tool call ${toolCallId} has already been seen in this session`)
+    this.name = 'DuplicateToolCallIdError'
+  }
+}
+
+function assertUniqueToolCallIds(sessionManager: SessionManager, sessionId: string, toolCalls: ToolCall[]): void {
+  const seen = sessionManager.getSeenToolCallIds?.(sessionId) ?? new Set<string>()
+  for (const toolCall of toolCalls) {
+    if (seen.has(toolCall.id)) throw new DuplicateToolCallIdError(toolCall.id)
+    seen.add(toolCall.id)
+  }
+}
+
 export async function executeTools(
   assistantMsgId: string,
   toolCalls: ToolCall[],
@@ -142,6 +159,7 @@ export async function executeTools(
   // so the feed displays the correct tool name (call_sub_agent)
   // instead of the hallucinated name (e.g. "explorer").
   await transformSubAgentAliases(toolCalls, ctx.toolRegistry, ctx.sessionManager.getProjectWorkdir(ctx.sessionId))
+  assertUniqueToolCallIds(ctx.sessionManager, ctx.sessionId, toolCalls)
 
   for (const toolCall of toolCalls) {
     append(createToolCallEvent(assistantMsgId, toolCall))

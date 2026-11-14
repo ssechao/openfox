@@ -62,7 +62,7 @@ async function expectDuplicateBatchRejected(
 }
 
 describe('tool call replay protection', () => {
-  it.fails('a call_id already resolved in the session is never executed again', async () => {
+  it('a call_id already resolved in the session is never executed again', async () => {
     const fixture = await createHotfixFixture()
     const effectPath = join(fixture.directory, 'resolved-effect.txt')
     const toolCall = writeCall('exec-X', effectPath)
@@ -87,7 +87,7 @@ describe('tool call replay protection', () => {
     expect.soft(stored).toHaveLength(1)
   })
 
-  it.fails('a call_id already called but never resolved is never executed again', async () => {
+  it('a call_id already called but never resolved is never executed again', async () => {
     const fixture = await createHotfixFixture()
     const effectPath = join(fixture.directory, 'unresolved-effect.txt')
     const toolCall = writeCall('exec-Z', effectPath)
@@ -105,7 +105,7 @@ describe('tool call replay protection', () => {
     expect.soft(stored).toHaveLength(1)
   })
 
-  it.fails('a call_id recorded in the last snapshot is never executed again', async () => {
+  it('a call_id recorded in the last snapshot is never executed again', async () => {
     const fixture = await createHotfixFixture()
     const effectPath = join(fixture.directory, 'snapshot-effect.txt')
     const toolCall = writeCall('exec-S', effectPath)
@@ -130,7 +130,7 @@ describe('tool call replay protection', () => {
     expect.soft(retainedCalls.filter((call) => call.id === toolCall.id)).toHaveLength(1)
   })
 
-  it.fails('a model response repeating the same call_id is refused before any execution', async () => {
+  it('a model response repeating the same call_id is refused before any execution', async () => {
     const fixture = await createHotfixFixture()
     const firstPath = join(fixture.directory, 'duplicate-batch-first.txt')
     const secondPath = join(fixture.directory, 'duplicate-batch-second.txt')
