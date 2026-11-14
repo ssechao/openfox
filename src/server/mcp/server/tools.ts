@@ -10,6 +10,7 @@ import type {
 import { REASONING_EFFORT_VALUES, isReasoningEffortValue } from '../../../shared/reasoning-effort.js'
 import { projectSessionStatus } from '../../routes/session-status.js'
 import type { WorkflowLaunchPayload } from '../../runner/launch.js'
+import { logger } from '../../utils/logger.js'
 import type { AdmissionResult } from '../../session/worker/scheduler.js'
 import type { OpenFoxMcpTool, OpenFoxMcpToolDeps, OpenFoxMcpToolResult } from './types.js'
 
@@ -367,9 +368,11 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
     },
     {
       name: 'openfox_delete_session',
-      description: "Delete an idle non-manager peer session from the caller's project.",
+      description:
+        "Delete an idle non-manager peer session. Omit projectId to require the caller's project; Managers may explicitly select another project.",
       inputSchema: {
         sessionId: z.string().describe('Session to delete'),
+        projectId: z.string().optional().describe('Explicit project containing the target session'),
         openfox_session_id: z.string().optional().describe('Reserved for the OpenFox host'),
         openfox_session_proof: z.string().optional().describe('Reserved for the OpenFox host'),
       },
@@ -393,8 +396,22 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
 
         const target = targetCheck.session
         const caller = callerCheck.session
-        if (target.projectId !== caller.projectId) {
-          return fail('Cannot delete a session from another project')
+        const rawProjectId = args['projectId']
+        if (rawProjectId !== undefined && (typeof rawProjectId !== 'string' || rawProjectId.length === 0)) {
+          return fail('projectId must be a non-empty string')
+        }
+        const projectId = typeof rawProjectId === 'string' ? rawProjectId : undefined
+        if (projectId === undefined) {
+          if (target.projectId !== caller.projectId) {
+            return fail('Cannot delete a session from another project')
+          }
+        } else {
+          if (projectId !== target.projectId) {
+            return fail('PROJECT_MISMATCH: projectId does not match the target session project')
+          }
+          if (projectId !== caller.projectId && caller.mode !== 'manager') {
+            return fail('MANAGER_REQUIRED: selecting another project requires a Manager session')
+          }
         }
         if (target.isRunning) {
           return fail('Cannot delete a running session')
@@ -407,6 +424,11 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
         }
 
         sessionManager.deleteSession(target.id)
+        logger.info('Deleted OpenFox session through MCP', {
+          callerSessionId: caller.id,
+          projectId: target.projectId,
+          targetSessionId: target.id,
+        })
         return ok({ deleted: true, sessionId: target.id })
       },
     },

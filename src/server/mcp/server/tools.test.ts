@@ -386,7 +386,7 @@ describe('openfx MCP tools', () => {
       expect(sessions.has(peer.id)).toBe(false)
     })
 
-    it.fails('delete_session lets a manager delete an idle session from an explicitly selected project', async () => {
+    it('delete_session lets a manager delete an idle session from an explicitly selected project', async () => {
       const caller = { ...makeSession(), id: 'caller', projectId: 'p-1', mode: 'manager' } as unknown as Session
       const peer = {
         ...makeSession(),
@@ -432,7 +432,7 @@ describe('openfx MCP tools', () => {
       }
     })
 
-    it.fails('delete_session refuses a projectId that does not match the target project', async () => {
+    it('delete_session refuses a projectId that does not match the target project', async () => {
       const caller = { ...makeSession(), id: 'caller', projectId: 'p-1', mode: 'manager' } as unknown as Session
       const peer = { ...makeSession(), id: 'peer', projectId: 'p-2', mode: 'builder' } as unknown as Session
       const sessions = new Map([
@@ -461,7 +461,7 @@ describe('openfx MCP tools', () => {
       expect(sessions.has(peer.id)).toBe(true)
     })
 
-    it.fails('delete_session refuses a non-manager selecting another project', async () => {
+    it('delete_session refuses a non-manager selecting another project', async () => {
       const caller = { ...makeSession(), id: 'caller', projectId: 'p-1', mode: 'builder' } as unknown as Session
       const peer = { ...makeSession(), id: 'peer', projectId: 'p-2', mode: 'builder' } as unknown as Session
       const sessions = new Map([
