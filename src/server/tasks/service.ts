@@ -124,6 +124,7 @@ export type LaunchRefusalCode =
   | 'UNKNOWN_PROVIDER'
   | 'UNKNOWN_MODEL'
   | 'INVALID_WORKSPACE_NAME'
+  | 'WORKSPACE_ORIGINAL_NOT_ALLOWED'
   | 'INVALID_BRANCH_NAME'
   | 'INVALID_SOURCE_BRANCH'
 
@@ -373,7 +374,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     return task && task.projectId === projectId ? task : null
   }
 
-  async function validateLaunch(request: LaunchRequest): Promise<LaunchValidation> {
+  async function validateLaunchRequest(request: LaunchRequest, queued = false): Promise<LaunchValidation> {
     const trim = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
     const normalized: LaunchRequest = {
       requesterSessionId: trim(request.requesterSessionId),
@@ -406,8 +407,9 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         'La tâche n’appartient pas au projet demandé',
       )
     }
-    if (task.status !== 'todo') {
-      return refuse('TASK_NOT_TODO', 'Task must be in To Do', 'La tâche doit être dans À faire')
+    const validState = queued ? task.status === 'in_progress' && task.runState === 'queued' : task.status === 'todo'
+    if (!validState) {
+      return refuse('TASK_NOT_TODO', 'Task is not eligible for launch', 'La tâche ne peut pas être lancée')
     }
     if (task.activeSessionId) {
       return refuse(
@@ -430,6 +432,13 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       return refuse('UNKNOWN_MODEL', 'Unknown model for provider', 'Modèle inconnu pour ce fournisseur')
     }
 
+    if (normalized.workspace === 'original') {
+      return refuse(
+        'WORKSPACE_ORIGINAL_NOT_ALLOWED',
+        'The original workspace cannot be used for a Manager launch',
+        'Le workspace original ne peut pas être utilisé pour un lancement Manager',
+      )
+    }
     try {
       validateWorkspaceName(normalized.workspace)
     } catch {
@@ -459,6 +468,24 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         sourceBranch: normalized.sourceBranch,
         launchedBy: normalized.requesterSessionId,
       },
+    }
+  }
+
+  async function validateLaunch(request: LaunchRequest): Promise<LaunchValidation> {
+    return validateLaunchRequest(request)
+  }
+
+  function storedLaunchRequest(task: ProjectTask): LaunchRequest {
+    return {
+      requesterSessionId: task.launchedBy ?? '',
+      projectId: task.projectId,
+      taskId: task.id,
+      agentId: task.agentId ?? '',
+      providerId: task.providerId ?? '',
+      model: task.model ?? '',
+      workspace: task.workspace ?? '',
+      branch: task.branch ?? '',
+      sourceBranch: task.sourceBranch ?? '',
     }
   }
 
@@ -1185,7 +1212,11 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         ) {
           throw new WorkerAdmissionRefusal('start_failed', session.id, created)
         }
-        sessionManager.setMode(session.id, agentId)
+        session = sessionManager.setModeWithProviderSelection(session.id, agentId, providerId, model)
+        const effectiveProvider = sessionManager.resolveEffectiveProviderModel(session.id)
+        if (effectiveProvider.providerId !== providerId || effectiveProvider.model !== model) {
+          throw new WorkerAdmissionRefusal('start_failed', session.id, created)
+        }
         session = await sessionManager.switchWorkspace(session.id, workspace, branch, sourceBranch, { exclusive: true })
       }
 
@@ -1252,49 +1283,84 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
     if (isThenable(pendingDeletes)) await pendingDeletes
     const settings = dbGetTaskSettings(projectId)
     if (settings.queuePaused) return undefined
-    if (activeCount(projectId) >= settings.slotLimit) return undefined
-    const queued = dbListTasks(projectId)
-      .filter((t) => t.status === 'in_progress' && t.runState === 'queued')
-      .sort((a, b) => a.position - b.position)
-    const next = queued[0]
-    if (!next) return undefined
 
-    const earmarks = dbListTaskLinks(next.id)
-    const target = reusableTarget(projectId, earmarks[0]?.session_id)
-    const admissionSessionId = target ?? `task:${next.id}`
-    if (canStartSession && !canStartSession(admissionSessionId)) return undefined
-    const marked = runBusy(() => dbSetTaskRunState(next.id, 'running'))
-    if (isThenable(marked)) await marked
-    let seeded: Awaited<ReturnType<typeof seedSession>>
-    try {
-      seeded = await seedSession(projectId, next, 'queued', target)
-    } catch (error) {
-      const rolled = runBusy(() => dbSetTaskRunState(next.id, 'queued'), 2000)
-      if (isThenable(rolled)) await rolled
-      const compensated = compensateFreshSessions()
-      if (isThenable(compensated)) await compensated
-      if (isWorkerAdmissionRefusal(error) && !error.freshSession) {
-        dbAddTaskLink(next.id, error.sessionId, false)
+    while (activeCount(projectId) < settings.slotLimit) {
+      const queued = dbListTasks(projectId)
+        .filter((task) => task.status === 'in_progress' && task.runState === 'queued')
+        .sort((left, right) => left.position - right.position)
+      const next = queued[0]
+      if (!next) return undefined
+
+      if (next.launchedBy) {
+        const validation = await validateLaunchRequest(storedLaunchRequest(next), true)
+        if (!validation.ok) {
+          dbSetTaskStatus(next.id, 'todo')
+          dbRemoveTaskLinks(next.id)
+          dbAddAuditEntry(
+            next.id,
+            'system',
+            'auto_launch_failed',
+            `Auto-launch failed: start_failed (${validation.code})`,
+            'system',
+          )
+          publish(projectId, next.id)
+          continue
+        }
       }
-      logger.warn(
-        isWorkerAdmissionRefusal(error) ? 'Task auto-launch worker admission refused' : 'Task auto-launch failed',
-        {
-          taskId: next.id,
-          ...(isWorkerAdmissionRefusal(error)
-            ? { sessionId: error.sessionId, admission: error.admission }
-            : { error: error instanceof Error ? error.message : String(error) }),
-        },
-      )
-      return undefined
+
+      const earmarks = dbListTaskLinks(next.id)
+      const target = reusableTarget(projectId, earmarks[0]?.session_id)
+      const admissionSessionId = target ?? `task:${next.id}`
+      if (canStartSession && !canStartSession(admissionSessionId)) return undefined
+      const marked = runBusy(() => dbSetTaskRunState(next.id, 'running'))
+      if (isThenable(marked)) await marked
+      let seeded: Awaited<ReturnType<typeof seedSession>>
+      try {
+        seeded = await seedSession(projectId, next, 'queued', target)
+      } catch (error) {
+        const compensated = compensateFreshSessions()
+        if (isThenable(compensated)) await compensated
+        const code =
+          typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : null
+        const terminalReason =
+          code && ['BRANCH_IN_USE', 'WORKSPACE_IN_USE', 'WORKSPACE_BEING_DELETED', 'VALIDATION_ERROR'].includes(code)
+            ? code
+            : null
+        logger.warn(
+          isWorkerAdmissionRefusal(error) ? 'Task auto-launch worker admission refused' : 'Task auto-launch failed',
+          {
+            taskId: next.id,
+            ...(isWorkerAdmissionRefusal(error)
+              ? { sessionId: error.sessionId, admission: error.admission }
+              : { error: error instanceof Error ? error.message : String(error) }),
+          },
+        )
+        if (terminalReason) {
+          dbSetTaskStatus(next.id, 'todo')
+          dbRemoveTaskLinks(next.id)
+          dbAddAuditEntry(next.id, 'system', 'auto_launch_failed', `Auto-launch failed: ${terminalReason}`, 'system')
+          publish(projectId, next.id)
+          continue
+        }
+        const rolled = runBusy(() => dbSetTaskRunState(next.id, 'queued'), 2000)
+        if (isThenable(rolled)) await rolled
+        if (isWorkerAdmissionRefusal(error) && !error.freshSession) {
+          dbAddTaskLink(next.id, error.sessionId, false)
+        }
+        return undefined
+      }
+      dbAddTaskLink(next.id, seeded.session.id, true)
+      dbAddAuditEntry(next.id, 'system', 'auto_launch', `Auto-launched into session ${seeded.session.id}`, 'system')
+      return {
+        taskId: next.id,
+        taskTitle: promptLabel(next.prompt),
+        sessionId: seeded.session.id,
+        projectId,
+      }
     }
-    dbAddTaskLink(next.id, seeded.session.id, true)
-    dbAddAuditEntry(next.id, 'system', 'auto_launch', `Auto-launched into session ${seeded.session.id}`, 'system')
-    return {
-      taskId: next.id,
-      taskTitle: promptLabel(next.prompt),
-      sessionId: seeded.session.id,
-      projectId,
-    }
+    return undefined
   }
 
   // ------------------------------------------------------------------

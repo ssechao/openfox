@@ -519,7 +519,7 @@ describe('manager task launch', () => {
     })
   })
 
-  it.fails('launch refuses the original workspace before any session or queue entry', async () => {
+  it('launch refuses the original workspace before any session or queue entry', async () => {
     const projectId = await targetProject('original-workspace')
     const task = service.create(projectId, { prompt: 'original workspace' }, { actor: 'human' })
     const snapshot = () => ({
@@ -554,45 +554,42 @@ describe('manager task launch', () => {
     })
   })
 
-  it.fails(
-    'launch keeps the explicit provider and model as the effective worker pair over the agent override',
-    async () => {
-      setAgentModelOverride('planner', {
-        providerId: 'provider-override',
-        model: 'model-override',
+  it('launch keeps the explicit provider and model as the effective worker pair over the agent override', async () => {
+    setAgentModelOverride('planner', {
+      providerId: 'provider-override',
+      model: 'model-override',
+    })
+    try {
+      const projectId = await targetProject('effective-provider')
+      updateProject(projectId, { defaultAgent: 'planner' })
+      const task = service.create(projectId, { prompt: 'effective provider' }, { actor: 'human' })
+      const result = await projectTasksTool.execute(
+        {
+          action: 'launch',
+          ...requestFor(projectId, task.id, 'effective-provider', task.version),
+          agentId: 'planner',
+        },
+        managerContext(),
+      )
+      const current = service.get(projectId, task.id)
+      const session = current?.activeSessionId ? manager.getSession(current.activeSessionId) : null
+      const effective = session ? manager.resolveEffectiveProviderModel(session.id) : null
+
+      expect({
+        success: result.success,
+        stored: session ? { providerId: session.providerId, model: session.providerModel } : null,
+        effective,
+      }).toEqual({
+        success: true,
+        stored: { providerId: 'provider-explicit', model: 'model-explicit' },
+        effective: { providerId: 'provider-explicit', model: 'model-explicit' },
       })
-      try {
-        const projectId = await targetProject('effective-provider')
-        updateProject(projectId, { defaultAgent: 'planner' })
-        const task = service.create(projectId, { prompt: 'effective provider' }, { actor: 'human' })
-        const result = await projectTasksTool.execute(
-          {
-            action: 'launch',
-            ...requestFor(projectId, task.id, 'effective-provider', task.version),
-            agentId: 'planner',
-          },
-          managerContext(),
-        )
-        const current = service.get(projectId, task.id)
-        const session = current?.activeSessionId ? manager.getSession(current.activeSessionId) : null
-        const effective = session ? manager.resolveEffectiveProviderModel(session.id) : null
+    } finally {
+      setAgentModelOverride('planner', null)
+    }
+  })
 
-        expect({
-          success: result.success,
-          stored: session ? { providerId: session.providerId, model: session.providerModel } : null,
-          effective,
-        }).toEqual({
-          success: true,
-          stored: { providerId: 'provider-explicit', model: 'model-explicit' },
-          effective: { providerId: 'provider-explicit', model: 'model-explicit' },
-        })
-      } finally {
-        setAgentModelOverride('planner', null)
-      }
-    },
-  )
-
-  it.fails('an invalid queued launch returns its card to todo and lets the next valid card launch', async () => {
+  it('an invalid queued launch returns its card to todo and lets the next valid card launch', async () => {
     const projectId = await targetProject('queued-invalid')
     preflightClosed = true
     const invalid = await prepareHumanTask(projectId, 'invalid queued launch', 'queued-invalid-a')
