@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Config } from '../../shared/types.js'
 import type { ServerHandle } from '../context.js'
+import { getSessionRuntimeRegistry } from './runtime.js'
 
 describe('manual compaction REST API', () => {
   let server: ServerHandle
@@ -57,17 +58,6 @@ describe('manual compaction REST API', () => {
     return session.id
   }
 
-  async function waitUntilRunning(sessionId: string): Promise<void> {
-    const deadline = Date.now() + 8_000
-    while (Date.now() < deadline) {
-      const response = await fetch(`${base}/api/sessions/${sessionId}`)
-      const session = (await response.json()) as { isRunning?: boolean }
-      if (session.isRunning) return
-      await new Promise((resolve) => setTimeout(resolve, 25))
-    }
-    throw new Error('session did not start')
-  }
-
   it.fails(
     'POST /compact succeeds on an idle session',
     async () => {
@@ -87,20 +77,15 @@ describe('manual compaction REST API', () => {
     'POST /compact refuses another session during its turn',
     async () => {
       const sessionId = await createSession()
+      const handle = getSessionRuntimeRegistry().get(sessionId).acquire('chat')
+      server.ctx.sessionManager.setRunning(sessionId, true)
       try {
-        const started = await fetch(`${base}/api/sessions/${sessionId}/message`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ content: 'RUNTIME-HOLD-TURN' }),
-        })
-        expect(started.status).toBe(200)
-        await waitUntilRunning(sessionId)
-
         const response = await fetch(`${base}/api/sessions/${sessionId}/compact`, { method: 'POST' })
         expect(response.status).toBe(409)
         expect(await response.json()).toMatchObject({ code: 'session_busy' })
       } finally {
-        await fetch(`${base}/api/sessions/${sessionId}/stop`, { method: 'POST' })
+        server.ctx.sessionManager.setRunning(sessionId, false)
+        getSessionRuntimeRegistry().get(sessionId).release(handle)
         await fetch(`${base}/api/sessions/${sessionId}`, { method: 'DELETE' })
       }
     },
