@@ -946,6 +946,16 @@ export class SessionManager {
     return updatedSession
   }
 
+  setModeWithProviderSelection(
+    sessionId: string,
+    toMode: SessionMode,
+    providerId: string,
+    providerModel: string,
+  ): Session {
+    this.setMode(sessionId, toMode)
+    return this.setSessionProvider(sessionId, providerId, providerModel, true)
+  }
+
   /**
    * Emit session_updated for the given session.
    * Used by REST handlers after updating sibling session branches.
