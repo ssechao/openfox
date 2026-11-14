@@ -7,6 +7,24 @@ export const MAX_MCP_REQUEST_BYTES = 256 * 1024
 export const MAX_MCP_RESPONSE_CHUNK_BYTES = 64 * 1024
 export const MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 export const MAX_MCP_DEADLINE_MS = 3_600_000
+export const DEFAULT_MCP_DEADLINE_MS = 300_000
+
+export function resolveMcpDeadlineMs(agentTimeout?: number): number {
+  return Math.min(MAX_MCP_DEADLINE_MS, Math.max(1, Math.trunc(agentTimeout ?? DEFAULT_MCP_DEADLINE_MS)))
+}
+
+export function maxMcpWaitTimeoutSeconds(agentTimeout?: number): number {
+  return Math.max(1, Math.floor(resolveMcpDeadlineMs(agentTimeout) / 1000) - 30)
+}
+
+const READ_ONLY_MCP_TOOL_NAMES = new Set([
+  'openfox_wait',
+  'openfox_session_status',
+  'openfox_sessions',
+  'openfox_session_detail',
+  'ht_list_peers',
+  'ht_get_contact_info',
+])
 
 interface InFlightRequest {
   request: McpRequestMessage
@@ -39,6 +57,31 @@ function identityOf(message: WorkerIpcIdentity): WorkerIpcIdentity {
 
 function failure(error: string): ToolResult {
   return { success: false, error, durationMs: 0, truncated: false }
+}
+
+function matchesReadOnlyMcpToolName(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  return [...READ_ONLY_MCP_TOOL_NAMES].some((name) => value === name || value.endsWith(`_${name}`))
+}
+
+function isReadOnlyRequest(request: McpRequestMessage): boolean {
+  if (matchesReadOnlyMcpToolName(request.toolName) || matchesReadOnlyMcpToolName(request.name)) return true
+  const proxy =
+    request.toolName === 'mcp_execute_tool' ||
+    request.toolName.endsWith('_mcp_execute_tool') ||
+    request.name === 'mcp_execute_tool' ||
+    request.name.endsWith('_mcp_execute_tool')
+  return proxy && matchesReadOnlyMcpToolName(request.args['tool_name'])
+}
+
+function withoutReconciliation(result: ToolResult): ToolResult {
+  if (result.metadata?.['reconciliationRequired'] !== true) return result
+  const normalized = { ...result }
+  const metadata = { ...result.metadata }
+  delete metadata['reconciliationRequired']
+  if (Object.keys(metadata).length === 0) delete normalized.metadata
+  else normalized.metadata = metadata
+  return normalized
 }
 
 export class WorkerMcpBroker {
@@ -91,10 +134,16 @@ export class WorkerMcpBroker {
       const entry = this.take(request)
       if (!entry) return
       entry.controller.abort(new Error('MCP request deadline exceeded'))
-      this.sendResult(request, {
-        ...failure('MCP request deadline exceeded; external effects may have occurred'),
-        metadata: { reconciliationRequired: true },
-      })
+      const result = {
+        ...failure(
+          isReadOnlyRequest(request)
+            ? 'MCP request deadline exceeded'
+            : 'MCP request deadline exceeded; external effects may have occurred',
+        ),
+        durationMs: request.deadlineMs,
+        ...(isReadOnlyRequest(request) ? {} : { metadata: { reconciliationRequired: true } }),
+      } satisfies ToolResult
+      this.sendResult(request, result)
     }, request.deadlineMs)
 
     this.inFlight.set(key, { request, controller, timer })
@@ -117,7 +166,7 @@ export class WorkerMcpBroker {
     const entry = this.take(message)
     if (!entry) return
     entry.controller.abort(new Error('MCP request cancelled'))
-    this.markReconciliation(entry.request)
+    if (!isReadOnlyRequest(entry.request)) this.markReconciliation(entry.request)
   }
 
   cancelWorker(identity: WorkerIpcIdentity): void {
@@ -131,7 +180,7 @@ export class WorkerMcpBroker {
       }
       this.take(entry.request)
       entry.controller.abort(new Error('MCP worker stopped'))
-      this.markReconciliation(entry.request)
+      if (!isReadOnlyRequest(entry.request)) this.markReconciliation(entry.request)
     }
   }
 
@@ -157,14 +206,20 @@ export class WorkerMcpBroker {
 
   private sendResult(request: McpRequestMessage, result: ToolResult): void {
     if (!this.deps.isCurrent(identityOf(request))) return
-    if (result.metadata?.['reconciliationRequired'] === true) this.markReconciliation(request)
-    let bytes = Buffer.from(JSON.stringify(result))
+    const readOnly = isReadOnlyRequest(request)
+    const normalizedResult = readOnly ? withoutReconciliation(result) : result
+    if (normalizedResult.metadata?.['reconciliationRequired'] === true) this.markReconciliation(request)
+    let bytes = Buffer.from(JSON.stringify(normalizedResult))
     if (bytes.length > MAX_MCP_RESPONSE_BYTES) {
-      this.markReconciliation(request)
+      if (!readOnly) this.markReconciliation(request)
       bytes = Buffer.from(
         JSON.stringify({
-          ...failure('MCP response exceeded the 8 MiB limit; external effects may have occurred'),
-          metadata: { reconciliationRequired: true },
+          ...failure(
+            readOnly
+              ? 'MCP response exceeded the 8 MiB limit'
+              : 'MCP response exceeded the 8 MiB limit; external effects may have occurred',
+          ),
+          ...(readOnly ? {} : { metadata: { reconciliationRequired: true } }),
         } satisfies ToolResult),
       )
     }

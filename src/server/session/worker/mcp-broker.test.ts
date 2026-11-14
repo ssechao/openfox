@@ -187,7 +187,7 @@ describe('WorkerMcpBroker', () => {
     expect(decode(sent.slice(-2))).toMatchObject({ success: false, error: expect.stringContaining('replay') })
   })
 
-  it.fails('read-only tool timeout never requires reconciliation', async () => {
+  it('read-only tool timeout never requires reconciliation', async () => {
     vi.useFakeTimers()
     try {
       const sent: WorkerMcpResponseMessage[] = []
@@ -207,8 +207,9 @@ describe('WorkerMcpBroker', () => {
       })
       const peers = request({
         requestId: 'peers-timeout',
-        name: 'llm-aether_ht_list_peers',
-        toolName: 'ht_list_peers',
+        name: 'mcp-lazy_mcp_execute_tool',
+        toolName: 'mcp_execute_tool',
+        args: { tool_name: 'ht_list_peers' },
         deadlineMs: 10,
       })
 

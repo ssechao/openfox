@@ -409,6 +409,30 @@ describe('McpManager', () => {
       }
     })
 
+    it('fixed read-only names time out without reconciliation, including proxied calls', async () => {
+      mockClientInstance.callTool.mockImplementation(() => new Promise(() => {}))
+      try {
+        await manager.addServer('readonly-server', { transport: 'stdio', command: 'node', timeout: 0.01 })
+
+        const direct = await manager.callTool('readonly-server', 'openfox_wait', {})
+        const proxied = await manager.callTool('readonly-server', 'mcp_execute_tool', {
+          server_name: 'llm-aether',
+          tool_name: 'ht_list_peers',
+          arguments: {},
+        })
+
+        expect(direct).toMatchObject({ success: false, error: expect.stringContaining('timed out') })
+        expect(proxied).toMatchObject({ success: false, error: expect.stringContaining('timed out') })
+        expect(direct.metadata).toBeUndefined()
+        expect(proxied.metadata).toBeUndefined()
+      } finally {
+        mockClientInstance.callTool.mockImplementation(async () => ({
+          content: [{ type: 'text', text: 'Sunny, 72°F' }],
+          isError: false,
+        }))
+      }
+    })
+
     it('should cancel one in-flight call through its AbortSignal', async () => {
       mockClientInstance.callTool.mockImplementation(() => new Promise(() => {}))
       try {

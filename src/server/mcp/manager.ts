@@ -20,6 +20,14 @@ const TOOL_CALL_TIMEOUT_MARGIN_SECONDS = 30
 /** Preserves the SDK's implicit 60s default when neither config nor tool arg sets a timeout. */
 const TOOL_CALL_TIMEOUT_DEFAULT_SECONDS = 60
 const TOOL_CALL_TIMEOUT_MAX_SECONDS = 3600
+const READ_ONLY_MCP_TOOL_NAMES = new Set([
+  'openfox_wait',
+  'openfox_session_status',
+  'openfox_sessions',
+  'openfox_session_detail',
+  'ht_list_peers',
+  'ht_get_contact_info',
+])
 
 /**
  * Effective SDK request timeout in seconds.
@@ -75,6 +83,17 @@ interface ServerEntry {
   state: McpServerState
   closing: boolean
   reconnectPromise: Promise<void> | null
+}
+
+function matchesReadOnlyMcpToolName(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  return [...READ_ONLY_MCP_TOOL_NAMES].some((name) => value === name || value.endsWith(`_${name}`))
+}
+
+function isReadOnlyMcpTool(toolName: string, args: Record<string, unknown>): boolean {
+  if (matchesReadOnlyMcpToolName(toolName)) return true
+  const proxy = toolName === 'mcp_execute_tool' || toolName.endsWith('_mcp_execute_tool')
+  return proxy && matchesReadOnlyMcpToolName(args['tool_name'])
 }
 
 export class McpManager {
@@ -428,7 +447,7 @@ export class McpManager {
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
-        metadata: { reconciliationRequired: true },
+        ...(isReadOnlyMcpTool(toolName, dispatchArgs) ? {} : { metadata: { reconciliationRequired: true as const } }),
       }
     } finally {
       options?.signal?.removeEventListener('abort', abortFromCaller)

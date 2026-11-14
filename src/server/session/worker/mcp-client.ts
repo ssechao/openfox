@@ -2,10 +2,10 @@ import type { ToolResult } from '../../../shared/types.js'
 import type { Tool, ToolContext } from '../../tools/types.js'
 import { applySessionIdInjection } from '../../mcp/session-id-injection.js'
 import {
-  MAX_MCP_DEADLINE_MS,
   MAX_MCP_REQUEST_BYTES,
   MAX_MCP_RESPONSE_CHUNK_BYTES,
   MAX_MCP_RESPONSE_BYTES,
+  resolveMcpDeadlineMs,
 } from './mcp-broker.js'
 import type {
   GatewayToWorkerMessage,
@@ -21,8 +21,6 @@ interface PendingRequest {
   totalBytes: number
   removeAbortListener: () => void
 }
-
-const DEFAULT_MCP_DEADLINE_MS = 300_000
 
 function failure(error: string, uncertain = false): ToolResult {
   return {
@@ -134,10 +132,7 @@ export class WorkerMcpClient {
     if (!injected.ok) return Promise.resolve(failure(injected.error))
 
     const requestId = crypto.randomUUID()
-    const deadlineMs = Math.min(
-      MAX_MCP_DEADLINE_MS,
-      Math.max(1, Math.trunc(context.agentTimeout ?? DEFAULT_MCP_DEADLINE_MS)),
-    )
+    const deadlineMs = resolveMcpDeadlineMs(context.agentTimeout)
     const request: McpRequestMessage = {
       ...this.identity,
       type: 'mcp.request',

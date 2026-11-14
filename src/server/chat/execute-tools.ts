@@ -15,6 +15,7 @@ import { PathAccessDeniedError, AskUserInterrupt } from '../tools/index.js'
 import { loadAllAgentsDefault, findAgentById } from '../agents/registry.js'
 import { serverT } from '../i18n.js'
 import { renderToolResultContent } from './tool-result-content.js'
+import { maxMcpWaitTimeoutSeconds } from '../session/worker/mcp-broker.js'
 
 export interface ToolBatchContext {
   toolRegistry: ToolRegistry
@@ -67,6 +68,10 @@ const READ_ONLY_TOOLS = new Set([
   'list_mcp_resource_templates',
   'read_mcp_resource',
 ])
+
+function isOpenFoxWaitTool(name: string): boolean {
+  return name === 'openfox_wait' || name.endsWith('_openfox_wait')
+}
 
 export function isEffectfulToolCall(toolCall: ToolCall): boolean {
   if (READ_ONLY_TOOLS.has(toolCall.name)) return false
@@ -289,6 +294,20 @@ export async function executeTools(
       toolContext.agentTimeout = ctx.agentTimeout
     }
 
+    const requestedTimeout = toolCall.arguments['timeout']
+    const maxWaitSeconds = ctx.agentTimeout === undefined ? undefined : maxMcpWaitTimeoutSeconds(ctx.agentTimeout)
+    const clampedWaitTimeout =
+      isOpenFoxWaitTool(toolCall.name) &&
+      typeof requestedTimeout === 'number' &&
+      Number.isFinite(requestedTimeout) &&
+      maxWaitSeconds !== undefined &&
+      requestedTimeout > maxWaitSeconds
+        ? { requested: requestedTimeout, applied: maxWaitSeconds }
+        : undefined
+    const executionArguments = clampedWaitTimeout
+      ? { ...toolCall.arguments, timeout: clampedWaitTimeout.applied }
+      : toolCall.arguments
+
     const startTime = Date.now()
     let toolResult: ToolResult
     // Preflight-rejected calls must never execute: their arguments were cut
@@ -303,9 +322,25 @@ export async function executeTools(
       }
     } else {
       try {
-        toolResult = await ctx.toolRegistry.execute(toolCall.name, toolCall.arguments, toolContext)
+        toolResult = await ctx.toolRegistry.execute(toolCall.name, executionArguments, toolContext)
       } catch (error) {
         toolResult = await handleToolExecutionError(error, ctx.sessionId, startTime)
+      }
+    }
+
+    if (clampedWaitTimeout) {
+      const notice = `openfox_wait timeout was clamped from ${clampedWaitTimeout.requested} s to ${clampedWaitTimeout.applied} s to remain below the worker deadline.`
+      toolResult = {
+        ...toolResult,
+        output: toolResult.output ? `${notice}\n${toolResult.output}` : notice,
+      }
+    }
+    if (toolResult.metadata?.['reconciliationRequired'] === true) {
+      const elapsedSeconds = Math.ceil(toolResult.durationMs / 1000)
+      const detail = toolResult.error ? ` Détail : ${toolResult.error}` : ''
+      toolResult = {
+        ...toolResult,
+        error: `ÉCHEC INCERTAIN : l'appel ${toolCall.name} a expiré après ${elapsedSeconds} s ; des effets externes ont pu se produire. Vérifie l'état réel avant de réessayer.${detail}`,
       }
     }
 

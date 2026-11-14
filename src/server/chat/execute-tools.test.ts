@@ -161,7 +161,7 @@ describe('executeTools', () => {
     expect(mockToolRegistry.execute).toHaveBeenCalledOnce()
   })
 
-  it.fails('uncertain failure result is explicit', async () => {
+  it('uncertain failure result is explicit', async () => {
     const append = vi.fn()
     mockToolRegistry.execute = vi.fn().mockResolvedValue({
       success: false,
@@ -182,7 +182,7 @@ describe('executeTools', () => {
     expect(result.toolMessages[0]?.content).toContain('mcp_write_record')
   })
 
-  it.fails('openfox_wait timeout is clamped below worker deadline', async () => {
+  it('openfox_wait timeout is clamped below worker deadline', async () => {
     const append = vi.fn()
     mockToolRegistry.execute = vi.fn().mockResolvedValue({
       success: true,

@@ -404,7 +404,7 @@ describe('agentLoop integration', () => {
     expect(chatDoneEvents.length).toBeGreaterThanOrEqual(1)
   })
 
-  it.fails('agent-loop continues after uncertain MCP failure', async () => {
+  it('agent-loop continues after uncertain MCP failure', async () => {
     const append = vi.fn()
     const toolCall: ToolCall = { id: 'call-1', name: 'write_file', arguments: { path: 'a.ts', content: 'x' } }
 
@@ -431,7 +431,7 @@ describe('agentLoop integration', () => {
     }
   })
 
-  it.fails('pending reconciliation does not block next turn', async () => {
+  it('pending reconciliation does not block next turn', async () => {
     const append = vi.fn()
     const pendingToolReconciliations = [
       { messageId: 'message-1', toolCallId: 'call-1', name: 'write_file', arguments: { path: 'a.ts' } },

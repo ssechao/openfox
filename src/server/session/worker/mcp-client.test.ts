@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GatewayToWorkerMessage, WorkerIpcIdentity, WorkerMcpTool, WorkerToGatewayMessage } from './protocol.js'
 import { WorkerMcpClient } from './mcp-client.js'
-import { MAX_MCP_REQUEST_BYTES } from './mcp-broker.js'
+import { MAX_MCP_DEADLINE_MS, MAX_MCP_REQUEST_BYTES, maxMcpWaitTimeoutSeconds } from './mcp-broker.js'
 
 const identity: WorkerIpcIdentity = { sessionId: 'session-1', workerId: 'worker-1', generation: 2 }
 const descriptor: WorkerMcpTool = {
@@ -66,6 +66,41 @@ describe('WorkerMcpClient', () => {
     })
 
     await expect(pending).resolves.toMatchObject({ success: true, output: 'ok' })
+  })
+
+  it('uses the broker deadline to bound an openfox_wait request on the real client path', async () => {
+    const sent: WorkerToGatewayMessage[] = []
+    const client = new WorkerMcpClient(identity, (message) => sent.push(message))
+    const waitDescriptor = {
+      ...descriptor,
+      name: 'openfox_openfox_wait',
+      toolName: 'openfox_wait',
+    }
+    const agentTimeout = MAX_MCP_DEADLINE_MS + 60_000
+    const timeout = maxMcpWaitTimeoutSeconds(agentTimeout)
+    const pending = client.createTools([waitDescriptor])[0]!.execute(
+      { sessionId: 'session-2', timeout },
+      {
+        sessionId: identity.sessionId,
+        workdir: '/tmp',
+        sessionManager: {} as never,
+        toolCallId: 'call-wait',
+        messageId: 'message-wait',
+        agentTimeout,
+      },
+    )
+
+    const request = sent[0]
+    expect(request).toMatchObject({
+      type: 'mcp.request',
+      toolName: 'openfox_wait',
+      args: { sessionId: 'session-2', timeout },
+      deadlineMs: MAX_MCP_DEADLINE_MS,
+    })
+    expect((timeout + 30) * 1000).toBe(MAX_MCP_DEADLINE_MS)
+
+    client.cancelAll()
+    await pending
   })
 
   it('injects the worker session id before sending a proxied MCP request', async () => {
