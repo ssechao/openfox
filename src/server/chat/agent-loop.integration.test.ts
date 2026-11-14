@@ -404,26 +404,67 @@ describe('agentLoop integration', () => {
     expect(chatDoneEvents.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('stops immediately when an effectful tool is refused for reconciliation', async () => {
+  it.fails('agent-loop continues after uncertain MCP failure', async () => {
     const append = vi.fn()
-    const toolCall: ToolCall = { id: 'call-1', name: 'step_done', arguments: {} }
+    const toolCall: ToolCall = { id: 'call-1', name: 'write_file', arguments: { path: 'a.ts', content: 'x' } }
 
-    ;(consumeStreamGenerator as any).mockResolvedValueOnce(
-      makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }),
-    )
-    ;(executeTools as any).mockResolvedValue({
-      toolMessages: [{ role: 'tool', content: 'reconciliation required', source: 'history', toolCallId: 'call-1' }],
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'Verified state', finishReason: 'stop' }))
+    ;(executeTools as any).mockResolvedValueOnce({
+      toolMessages: [{ role: 'tool', content: 'ÉCHEC INCERTAIN: write_file', source: 'history', toolCallId: 'call-1' }],
       stepDoneCalled: false,
       reconciliationRequired: true,
     })
 
-    const result = await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
+    try {
+      const result = await runTopLevelAgentLoop(makeConfig({ append }), turnMetrics)
 
-    expect(result.failed?.error).toContain('reconciliation')
-    expect(consumeStreamGenerator).toHaveBeenCalledTimes(1)
-    expect(append.mock.calls).toContainEqual([
-      expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'error' }) }),
-    ])
+      expect(result.failed).toBeUndefined()
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+      expect(append.mock.calls).not.toContainEqual([
+        expect.objectContaining({ type: 'chat.done', data: expect.objectContaining({ reason: 'error' }) }),
+      ])
+    } finally {
+      ;(consumeStreamGenerator as any).mockReset()
+      ;(executeTools as any).mockReset()
+    }
+  })
+
+  it.fails('pending reconciliation does not block next turn', async () => {
+    const append = vi.fn()
+    const pendingToolReconciliations = [
+      { messageId: 'message-1', toolCallId: 'call-1', name: 'write_file', arguments: { path: 'a.ts' } },
+    ]
+    const sessionManager = createMockSessionManager({
+      getPendingToolReconciliations: vi.fn().mockReturnValue(pendingToolReconciliations),
+    })
+    const toolCall: ToolCall = { id: 'call-2', name: 'read_file', arguments: { path: 'a.ts' } }
+
+    ;(consumeStreamGenerator as any)
+      .mockResolvedValueOnce(makeStreamResult({ toolCalls: [toolCall], finishReason: 'tool_calls' }))
+      .mockResolvedValueOnce(makeStreamResult({ content: 'State checked', finishReason: 'stop' }))
+    ;(executeTools as any).mockResolvedValueOnce({
+      toolMessages: [{ role: 'tool', content: 'current state', source: 'history', toolCallId: 'call-2' }],
+      stepDoneCalled: false,
+      reconciliationRequired: true,
+    })
+
+    try {
+      const result = await runTopLevelAgentLoop(makeConfig({ append, sessionManager }), turnMetrics)
+
+      expect(result.failed).toBeUndefined()
+      expect(consumeStreamGenerator).toHaveBeenCalledTimes(2)
+      expect(executeTools).toHaveBeenCalledWith(
+        expect.any(String),
+        [toolCall],
+        expect.objectContaining({ pendingToolReconciliations }),
+        append,
+      )
+    } finally {
+      ;(consumeStreamGenerator as any).mockReset()
+      ;(executeTools as any).mockReset()
+    }
   })
 
   it('continues loop when step_done is not called', async () => {

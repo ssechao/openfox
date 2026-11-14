@@ -161,6 +161,52 @@ describe('executeTools', () => {
     expect(mockToolRegistry.execute).toHaveBeenCalledOnce()
   })
 
+  it.fails('uncertain failure result is explicit', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn().mockResolvedValue({
+      success: false,
+      error: 'MCP request deadline exceeded; external effects may have occurred',
+      durationMs: 120_000,
+      truncated: false,
+      metadata: { reconciliationRequired: true },
+    })
+
+    const result = await executeTools(
+      'msg-1',
+      [{ id: 'call-1', name: 'mcp_write_record', arguments: { id: '42' } }],
+      makeCtx(),
+      append,
+    )
+
+    expect(result.toolMessages[0]?.content).toContain('ÉCHEC INCERTAIN')
+    expect(result.toolMessages[0]?.content).toContain('mcp_write_record')
+  })
+
+  it.fails('openfox_wait timeout is clamped below worker deadline', async () => {
+    const append = vi.fn()
+    mockToolRegistry.execute = vi.fn().mockResolvedValue({
+      success: true,
+      output: 'Session completed',
+      durationMs: 1,
+      truncated: false,
+    })
+
+    const result = await executeTools(
+      'msg-1',
+      [{ id: 'call-1', name: 'openfox_wait', arguments: { sessionId: 'session-2', timeout: 600 } }],
+      makeCtx({ agentTimeout: 300_000 }),
+      append,
+    )
+
+    expect(mockToolRegistry.execute).toHaveBeenCalledWith(
+      'openfox_wait',
+      { sessionId: 'session-2', timeout: 270 },
+      expect.objectContaining({ agentTimeout: 300_000 }),
+    )
+    expect(result.toolMessages[0]?.content).toContain('600')
+    expect(result.toolMessages[0]?.content).toContain('270')
+  })
+
   it('executes multiple tool calls in parallel and maintains order', async () => {
     const append = vi.fn()
     const executionOrder: number[] = []

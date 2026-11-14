@@ -187,6 +187,43 @@ describe('WorkerMcpBroker', () => {
     expect(decode(sent.slice(-2))).toMatchObject({ success: false, error: expect.stringContaining('replay') })
   })
 
+  it.fails('read-only tool timeout never requires reconciliation', async () => {
+    vi.useFakeTimers()
+    try {
+      const sent: WorkerMcpResponseMessage[] = []
+      const reconcile = vi.fn()
+      const pending = deferredResult()
+      const broker = new WorkerMcpBroker({
+        execute: vi.fn(() => pending.promise),
+        isCurrent: () => true,
+        send: (message) => sent.push(message),
+        reconcile,
+      })
+      const wait = request({
+        requestId: 'wait-timeout',
+        name: 'openfox_openfox_wait',
+        toolName: 'openfox_wait',
+        deadlineMs: 10,
+      })
+      const peers = request({
+        requestId: 'peers-timeout',
+        name: 'llm-aether_ht_list_peers',
+        toolName: 'ht_list_peers',
+        deadlineMs: 10,
+      })
+
+      broker.handleRequest(wait)
+      broker.handleRequest(peers)
+      await vi.advanceTimersByTimeAsync(10)
+
+      expect(reconcile).not.toHaveBeenCalled()
+      expect(decode(sent.filter((message) => message.requestId === wait.requestId)).metadata).toBeUndefined()
+      expect(decode(sent.filter((message) => message.requestId === peers.requestId)).metadata).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('marks deadline and oversized-response outcomes uncertain', async () => {
     vi.useFakeTimers()
     const sent: WorkerMcpResponseMessage[] = []
