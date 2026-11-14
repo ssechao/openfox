@@ -238,37 +238,33 @@ describe('manager launch provider runtime pin', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it.fails(
-    'launched explicit provider and model drive the real chat turn client over the same-agent override',
-    async () => {
-      const sessionId = await launch('runtime chat turn')
-      streamLLMPureMock.mockClear()
-      const append = (event: import('../events/types.js').TurnEvent) => getEventStore().append(sessionId, event)
+  it('launched explicit provider and model drive the real chat turn client over the same-agent override', async () => {
+    const sessionId = await launch('runtime chat turn')
+    streamLLMPureMock.mockClear()
+    const append = (event: import('../events/types.js').TurnEvent) => getEventStore().append(sessionId, event)
 
-      await runAgentTurn(
-        {
-          sessionManager: manager,
-          sessionId,
-          llmClient: fallbackClient,
-        },
-        new TurnMetrics(),
-        'agent-a',
-        append,
-      )
+    await runAgentTurn(
+      {
+        sessionManager: manager,
+        sessionId,
+        llmClient: fallbackClient,
+      },
+      new TurnMetrics(),
+      'agent-a',
+      append,
+    )
 
-      const pairs = usedPairs()
-      expect({
-        explicitCalls: pairs.filter(
-          (pair) => pair.providerId === 'provider-explicit' && pair.model === 'model-explicit',
-        ).length,
-        overrideCalls: pairs.filter(
-          (pair) => pair.providerId === 'provider-override-a' && pair.model === 'model-override-a',
-        ).length,
-      }).toEqual({ explicitCalls: 1, overrideCalls: 0 })
-    },
-  )
+    const pairs = usedPairs()
+    expect({
+      explicitCalls: pairs.filter((pair) => pair.providerId === 'provider-explicit' && pair.model === 'model-explicit')
+        .length,
+      overrideCalls: pairs.filter(
+        (pair) => pair.providerId === 'provider-override-a' && pair.model === 'model-override-a',
+      ).length,
+    }).toEqual({ explicitCalls: 1, overrideCalls: 0 })
+  })
 
-  it.fails('launched explicit provider and model drive every same-agent workflow step client', async () => {
+  it('launched explicit provider and model drive every same-agent workflow step client', async () => {
     const sessionId = await launch('runtime workflow')
     streamLLMPureMock.mockClear()
     consumeStreamGeneratorMock.mockResolvedValue({
@@ -338,7 +334,7 @@ describe('manager launch provider runtime pin', () => {
     })
   })
 
-  it.fails('a provider change after launch clears the launch pin and restores the existing resolution', async () => {
+  it('a provider change after launch clears the launch pin and restores the existing resolution', async () => {
     const sessionId = await launch('runtime provider change')
     const launched = manager.getSession(sessionId) as typeof manager extends never
       ? never
