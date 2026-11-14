@@ -88,6 +88,11 @@ function makeDeps(overrides: Partial<OpenFoxMcpToolDeps> = {}): OpenFoxMcpToolDe
       setPhase: vi.fn(),
       setMode: vi.fn((id: string, mode: string) => ({ ...session, id, mode })),
     } as any,
+    verifyCallerIdentity: vi.fn((input) =>
+      input.proof === 'test-proof' && input.callerSessionId
+        ? { ok: true as const, callerSessionId: input.callerSessionId }
+        : { ok: false as const, error: 'trusted OpenFox caller identity is required' },
+    ),
     listProjects: vi.fn(() => projects),
     topLevelAgentIds: vi.fn(async () => ['builder', 'planner']),
     listWorkflows: vi.fn(async () => [
@@ -372,6 +377,7 @@ describe('openfx MCP tools', () => {
       const result = await call(createOpenFoxMcpTools(deps), 'openfox_delete_session', {
         sessionId: peer.id,
         openfox_session_id: caller.id,
+        openfox_session_proof: 'test-proof',
       })
 
       expect(result.isError).toBeUndefined()
@@ -403,6 +409,7 @@ describe('openfx MCP tools', () => {
           await call(tools, 'openfox_delete_session', {
             sessionId: target.id,
             openfox_session_id: caller.id,
+            openfox_session_proof: 'test-proof',
           }),
         )
       }

@@ -10,7 +10,7 @@ import { logger } from '../utils/logger.js'
 import { McpOAuthProvider } from './oauth-provider.js'
 import { readMcpOAuthEntry } from './oauth-store.js'
 import { sanitizeToolSchema } from '../llm/schema-sanitizer.js'
-import { applySessionIdInjection } from './session-id-injection.js'
+import { applyOpenFoxCallerIdentityInjection, applySessionIdInjection } from './session-id-injection.js'
 
 /**
  * The server may answer up to a polling interval after its own deadline, so the SDK request
@@ -81,10 +81,12 @@ export class McpManager {
   private servers = new Map<string, ServerEntry>()
   private onServersChanged: (() => void) | undefined
   private onToolsDiscovered: ((serverName: string, tools: CachedToolInfo[]) => void) | undefined
+  private openFoxCallerIdentity: McpManagerOptions['openFoxCallerIdentity']
 
   constructor(options?: McpManagerOptions) {
     this.onServersChanged = options?.onServersChanged
     this.onToolsDiscovered = options?.onToolsDiscovered
+    this.openFoxCallerIdentity = options?.openFoxCallerIdentity
   }
 
   async addServer(name: string, config: McpServerConfig): Promise<void> {
@@ -367,7 +369,17 @@ export class McpManager {
         options.signal.reason instanceof Error ? options.signal.reason : new Error('MCP tool call cancelled')
       return { success: false, error: reason.message }
     }
-    const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, forwardedArgs)
+    const callerIdentityArgs = applyOpenFoxCallerIdentityInjection(
+      this.openFoxCallerIdentity,
+      serverName,
+      entry.config,
+      toolName,
+      forwardedArgs,
+      sessionId,
+    )
+    if (!callerIdentityArgs.ok) return { success: false, error: callerIdentityArgs.error }
+    const dispatchArgs = callerIdentityArgs.args
+    const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, dispatchArgs)
     const timeoutMs = timeoutSeconds * 1000
     const controller = new AbortController()
     let abortFromCaller = (): void => {}
@@ -395,7 +407,7 @@ export class McpManager {
       let result
       try {
         result = await Promise.race([
-          client.callTool({ name: toolName, arguments: forwardedArgs }, undefined, {
+          client.callTool({ name: toolName, arguments: dispatchArgs }, undefined, {
             timeout: timeoutMs,
             signal: controller.signal,
           }),

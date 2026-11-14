@@ -216,4 +216,111 @@ describe('session id injection through a proxy server', () => {
     expect(result.success).toBe(true)
     expect(forwardedArgs()['arguments']).toEqual({ peer_id: 'p', session_id: 'session-real' })
   })
+
+  it('injects trusted OpenFox caller fields independently of sessionIdInjection', async () => {
+    const issueProof = vi.fn(() => 'trusted-proof')
+    const manager = new McpManager({
+      openFoxCallerIdentity: {
+        issueProof,
+        isOwnEndpoint: (input) =>
+          input.kind === 'proxy' && input.serverName === 'mcp-lazy' && input.targetServerName === 'openfox',
+      },
+    })
+    await manager.addServer('mcp-lazy', { transport: 'stdio', command: 'mcp-lazy' })
+
+    const result = await manager.callTool(
+      'mcp-lazy',
+      'mcp_execute_tool',
+      {
+        server_name: 'openfox',
+        tool_name: 'openfox_delete_session',
+        arguments: {
+          sessionId: 'target',
+          openfox_session_id: 'forged',
+          openfox_session_proof: 'forged-proof',
+        },
+      },
+      'caller',
+    )
+
+    expect(result.success).toBe(true)
+    expect(issueProof).toHaveBeenCalledWith({
+      callerSessionId: 'caller',
+      toolName: 'openfox_delete_session',
+      targetSessionId: 'target',
+    })
+    expect(forwardedArgs()).toEqual({
+      server_name: 'openfox',
+      tool_name: 'openfox_delete_session',
+      arguments: {
+        sessionId: 'target',
+        openfox_session_id: 'caller',
+        openfox_session_proof: 'trusted-proof',
+      },
+    })
+  })
+
+  it('strips model-supplied caller fields when the endpoint is not host-bound', async () => {
+    const issueProof = vi.fn(() => 'trusted-proof')
+    const manager = new McpManager({
+      openFoxCallerIdentity: {
+        issueProof,
+        isOwnEndpoint: () => false,
+      },
+    })
+    await manager.addServer('mcp-lazy', { transport: 'stdio', command: 'mcp-lazy' })
+
+    const result = await manager.callTool(
+      'mcp-lazy',
+      'mcp_execute_tool',
+      {
+        server_name: 'other',
+        tool_name: 'openfox_delete_session',
+        arguments: {
+          sessionId: 'target',
+          openfox_session_id: 'forged',
+          openfox_session_proof: 'forged-proof',
+        },
+      },
+      'caller',
+    )
+
+    expect(result.success).toBe(true)
+    expect(issueProof).not.toHaveBeenCalled()
+    expect(forwardedArgs()).toEqual({
+      server_name: 'other',
+      tool_name: 'openfox_delete_session',
+      arguments: { sessionId: 'target' },
+    })
+  })
+
+  it('refuses a host-bound delete without a trusted caller or valid target', async () => {
+    const manager = new McpManager({
+      openFoxCallerIdentity: {
+        issueProof: vi.fn(() => 'trusted-proof'),
+        isOwnEndpoint: () => true,
+      },
+    })
+    await manager.addServer('mcp-lazy', { transport: 'stdio', command: 'mcp-lazy' })
+
+    const missingCaller = await manager.callTool('mcp-lazy', 'mcp_execute_tool', {
+      server_name: 'openfox',
+      tool_name: 'openfox_delete_session',
+      arguments: { sessionId: 'target', openfox_session_proof: 'forged' },
+    })
+    const missingTarget = await manager.callTool(
+      'mcp-lazy',
+      'mcp_execute_tool',
+      {
+        server_name: 'openfox',
+        tool_name: 'openfox_delete_session',
+        arguments: { openfox_session_id: 'forged', openfox_session_proof: 'forged' },
+      },
+      'caller',
+    )
+
+    expect(missingCaller).toMatchObject({ success: false, error: expect.stringMatching(/caller session/) })
+    expect(missingTarget).toMatchObject({ success: false, error: expect.stringMatching(/target sessionId/) })
+    expect(h.clients[0]!.callTool).not.toHaveBeenCalled()
+  })
 })

@@ -40,9 +40,28 @@ export interface McpToolInfo {
   estimatedTokens: number
 }
 
+export interface OpenFoxCallerIdentityIssueInput {
+  callerSessionId: string
+  toolName: string
+  targetSessionId: string
+}
+
+export interface OpenFoxEndpointBindingInput {
+  kind: 'direct' | 'proxy'
+  serverName: string
+  url?: string
+  targetServerName?: string
+}
+
+export interface OpenFoxCallerIdentityGateway {
+  issueProof(input: OpenFoxCallerIdentityIssueInput): string
+  isOwnEndpoint(input: OpenFoxEndpointBindingInput): boolean
+}
+
 export interface McpManagerOptions {
   onServersChanged?: () => void
   onToolsDiscovered?: (serverName: string, tools: CachedToolInfo[]) => void
+  openFoxCallerIdentity?: OpenFoxCallerIdentityGateway
 }
 
 export interface McpToolDefinition extends LLMToolDefinition {

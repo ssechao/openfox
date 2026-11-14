@@ -64,6 +64,7 @@ import { createWorkflowRoutes } from './routes/workflows.js'
 import { listAvailableWorkflows } from './workflows/registry.js'
 import { createOpenFoxMcpRouter, extractSessionToken } from './mcp/server/endpoint.js'
 import { buildOpenFoxMcpBootstrap } from './mcp/server/bootstrap.js'
+import { createOpenFoxCallerIdentityAuthority } from './mcp/server/caller-identity.js'
 import type { OpenFoxMcpToolDeps } from './mcp/server/types.js'
 import { createDevServerRoutes } from './routes/dev-server.js'
 import { createWorkspaceConfigRoutes } from './routes/workspace-config.js'
@@ -289,9 +290,37 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   )
 
   let toolRegistry = createToolRegistry()
+  let mcpActualPort: number | null = null
+  const callerIdentityAuthority = createOpenFoxCallerIdentityAuthority()
+  const currentMcpBootstrap = () =>
+    buildOpenFoxMcpBootstrap({
+      host: config.server.host ?? '127.0.0.1',
+      port: mcpActualPort ?? config.server.port,
+      authRequired: false,
+      sessionToken: null,
+    })
 
   // Initialize MCP manager and connect to configured servers
   const mcpManager = new McpManager({
+    openFoxCallerIdentity: {
+      issueProof: callerIdentityAuthority.issueProof,
+      isOwnEndpoint: (input) => {
+        const bootstrap = currentMcpBootstrap()
+        if (input.kind === 'direct') {
+          return input.url === bootstrap.url
+        }
+        const proxyConfig = config.mcpServers?.[input.serverName]
+        const commandParts = [proxyConfig?.command, ...(proxyConfig?.args ?? [])].filter(
+          (part): part is string => typeof part === 'string',
+        )
+        return (
+          input.serverName === 'mcp-lazy' &&
+          input.targetServerName === bootstrap.name &&
+          proxyConfig?.transport === 'stdio' &&
+          commandParts.some((part) => part === 'mcp-lazy' || part.endsWith('/mcp-lazy'))
+        )
+      },
+    },
     onToolsDiscovered: async (name, tools) => {
       try {
         const { loadGlobalConfig, saveGlobalConfig } = await import('../cli/config.js')
@@ -4433,6 +4462,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
   mcpToolDeps = {
     sessionManager,
+    verifyCallerIdentity: callerIdentityAuthority.verify,
     listProjects: () => listProjects(),
     createProject: async (name, workdir) => {
       const { createProjectDirectory } = await import('./utils/project-creator.js')
@@ -4504,7 +4534,6 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     },
   }
 
-  let mcpActualPort: number | null = null
   setMcpBootstrapForTools(async () => {
     const authRequired = mcpAuth.isAuthRequired()
     const sessionToken = authRequired ? await currentSessionToken() : null

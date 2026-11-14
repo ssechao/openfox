@@ -370,15 +370,25 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
       description: "Delete an idle non-manager peer session from the caller's project.",
       inputSchema: {
         sessionId: z.string().describe('Session to delete'),
+        openfox_session_id: z.string().optional().describe('Reserved for the OpenFox host'),
+        openfox_session_proof: z.string().optional().describe('Reserved for the OpenFox host'),
       },
       handler: async (args) => {
-        const targetCheck = requireSession(args['sessionId'])
-        if (!targetCheck.ok) return fail(targetCheck.error)
-        const callerSessionId = args['openfox_session_id']
-        if (typeof callerSessionId !== 'string' || callerSessionId.length === 0) {
-          return fail('openfox_session_id is required')
+        const sessionId = args['sessionId']
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          return fail('sessionId is required')
         }
-        const callerCheck = requireSession(callerSessionId)
+        const verification = deps.verifyCallerIdentity?.({
+          callerSessionId: typeof args['openfox_session_id'] === 'string' ? args['openfox_session_id'] : '',
+          proof: args['openfox_session_proof'],
+          toolName: 'openfox_delete_session',
+          targetSessionId: sessionId,
+        }) ?? { ok: false as const, error: 'trusted OpenFox caller identity is required' }
+        if (!verification.ok) return fail(verification.error)
+
+        const targetCheck = requireSession(sessionId)
+        if (!targetCheck.ok) return fail(targetCheck.error)
+        const callerCheck = requireSession(verification.callerSessionId)
         if (!callerCheck.ok) return fail(`Caller ${callerCheck.error}`)
 
         const target = targetCheck.session

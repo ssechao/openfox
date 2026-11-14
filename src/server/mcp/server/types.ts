@@ -4,6 +4,7 @@ import type { WorkflowLaunchPayload } from '../../runner/launch.js'
 import type { SessionManager } from '../../session/manager.js'
 import type { InteractiveAnswerResult } from '../../session/worker/interactive-broker.js'
 import type { AdmissionResult } from '../../session/worker/scheduler.js'
+import type { OpenFoxCallerIdentityResult, OpenFoxCallerIdentityVerification } from './caller-identity.js'
 
 export interface WorkflowListItem {
   id: string
@@ -40,6 +41,7 @@ export interface OpenFoxMcpToolDeps {
   confirmPath(callId: string, approved: boolean, alwaysAllow?: boolean): boolean
   pendingConfirmations(sessionId: string): PendingPathConfirmationPayload[]
   recentMessages(sessionId: string, limit: number): { messages: Message[]; hiddenCount: number }
+  verifyCallerIdentity?(input: OpenFoxCallerIdentityVerification): OpenFoxCallerIdentityResult
 }
 
 export interface OpenFoxMcpToolResult {

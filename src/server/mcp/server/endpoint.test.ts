@@ -345,231 +345,211 @@ describe('openfox MCP endpoint', () => {
     }
   }, 30000)
 
-  it.fails(
-    'delete_session uses trusted direct gateway identity over real HTTP',
-    async () => {
-      const authority = createTransportAuthority()
-      const harness = makeDeleteHarness(authority)
-      harness.addSession('caller')
-      harness.addSession('peer')
-      const started = await startRouter({
-        resolveDeps: () => harness.deps,
-        isAuthRequired: () => true,
-        isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
+  it('delete_session uses trusted direct gateway identity over real HTTP', async () => {
+    const authority = createTransportAuthority()
+    const harness = makeDeleteHarness(authority)
+    harness.addSession('caller')
+    harness.addSession('peer')
+    const started = await startRouter({
+      resolveDeps: () => harness.deps,
+      isAuthRequired: () => true,
+      isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
+    })
+    const gateway = createGateway(
+      authority,
+      (input) => input.kind === 'direct' && input.serverName === 'self-openfox' && input.url === started.url,
+    )
+    try {
+      await gateway.addServer('self-openfox', {
+        transport: 'http',
+        url: started.url,
+        headers: { 'x-session-token': 'sekrit' },
       })
-      const gateway = createGateway(
-        authority,
-        (input) => input.kind === 'direct' && input.serverName === 'self-openfox' && input.url === started.url,
-      )
-      try {
-        await gateway.addServer('self-openfox', {
-          transport: 'http',
-          url: started.url,
-          headers: { 'x-session-token': 'sekrit' },
-        })
-        expect(gateway.getServer('self-openfox')?.config.sessionIdInjection).toBeUndefined()
-        const tool = createMcpTools(gateway).find(
-          (candidate) => candidate.name === 'self-openfox_openfox_delete_session',
-        )
-        expect(tool).toBeDefined()
+      expect(gateway.getServer('self-openfox')?.config.sessionIdInjection).toBeUndefined()
+      const tool = createMcpTools(gateway).find((candidate) => candidate.name === 'self-openfox_openfox_delete_session')
+      expect(tool).toBeDefined()
 
-        const result = await tool!.execute(
-          {
+      const result = await tool!.execute(
+        {
+          sessionId: 'peer',
+          openfox_session_id: 'forged-caller',
+          openfox_session_proof: 'forged-proof',
+        },
+        toolContext('caller'),
+      )
+
+      expect(result.success).toBe(true)
+      expect(harness.deleted).toEqual(['peer'])
+      expect(authority.issueProof).toHaveBeenCalledWith({
+        callerSessionId: 'caller',
+        toolName: 'openfox_delete_session',
+        targetSessionId: 'peer',
+      })
+    } finally {
+      await gateway.disconnectAll()
+      await started.close()
+    }
+  }, 30000)
+
+  it('delete_session uses trusted proxy gateway identity without sessionIdInjection', async () => {
+    const authority = createTransportAuthority()
+    const harness = makeDeleteHarness(authority)
+    harness.addSession('caller')
+    harness.addSession('peer')
+    const started = await startRouter({
+      resolveDeps: () => harness.deps,
+      isAuthRequired: () => true,
+      isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
+    })
+    const proxy = await startProxy(started.url, { 'x-session-token': 'sekrit' })
+    const gateway = createGateway(
+      authority,
+      (input) =>
+        input.kind === 'proxy' &&
+        input.serverName === 'trusted-proxy' &&
+        input.targetServerName === 'openfox' &&
+        started.url.includes('/mcp'),
+    )
+    try {
+      await gateway.addServer('trusted-proxy', { transport: 'http', url: proxy.url })
+      expect(gateway.getServer('trusted-proxy')?.config.sessionIdInjection).toBeUndefined()
+      const tool = createMcpTools(gateway).find((candidate) => candidate.name === 'trusted-proxy_mcp_execute_tool')
+      expect(tool).toBeDefined()
+
+      const result = await tool!.execute(
+        {
+          server_name: 'openfox',
+          tool_name: 'openfox_delete_session',
+          arguments: {
             sessionId: 'peer',
+            openfox_session_id: 'forged-caller',
+            openfox_session_proof: 'forged-proof',
+          },
+        },
+        toolContext('caller'),
+      )
+
+      expect(result.success).toBe(true)
+      expect(harness.deleted).toEqual(['peer'])
+      expect(authority.issueProof).toHaveBeenCalledWith({
+        callerSessionId: 'caller',
+        toolName: 'openfox_delete_session',
+        targetSessionId: 'peer',
+      })
+    } finally {
+      await gateway.disconnectAll()
+      await proxy.close()
+      await started.close()
+    }
+  }, 30000)
+
+  it('delete_session rejects a global token without trusted caller proof', async () => {
+    const authority = createTransportAuthority()
+    const harness = makeDeleteHarness(authority)
+    harness.addSession('caller')
+    harness.addSession('peer')
+    const started = await startRouter({
+      resolveDeps: () => harness.deps,
+      isAuthRequired: () => true,
+      isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
+    })
+    const client = await connectClient(started.url, { 'x-session-token': 'sekrit' })
+    try {
+      const result = await client.callTool({
+        name: 'openfox_delete_session',
+        arguments: {
+          sessionId: 'peer',
+          openfox_session_id: 'caller',
+          openfox_session_proof: 'forged-proof',
+        },
+      })
+      await client.close()
+
+      expect(result.isError).toBe(true)
+      expect(mcpText(result)).toContain('trusted OpenFox caller identity is required')
+      expect(harness.deleted).toEqual([])
+      expect(harness.sessions.has('peer')).toBe(true)
+    } finally {
+      await client.close().catch(() => undefined)
+      await started.close()
+    }
+  }, 30000)
+
+  it('delete_session rechecks guards and replay state over real HTTP', async () => {
+    const authority = createTransportAuthority()
+    const harness = makeDeleteHarness(authority)
+    harness.addSession('caller')
+    harness.addSession('other-project', { projectId: 'p-2' })
+    harness.addSession('running', { isRunning: true })
+    harness.addSession('manager-peer', { mode: 'manager' })
+    harness.addSession('turns-running')
+    harness.addSession('turns-manager')
+    harness.addSession('replay')
+    const started = await startRouter({
+      resolveDeps: () => harness.deps,
+      isAuthRequired: () => true,
+      isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
+    })
+    const gateway = createGateway(
+      authority,
+      (input) => input.kind === 'direct' && input.serverName === 'self-openfox' && input.url === started.url,
+    )
+    authority.setAfterIssue((input) => {
+      if (input.targetSessionId === 'turns-running') {
+        harness.sessions.get('turns-running')!.isRunning = true
+      }
+      if (input.targetSessionId === 'turns-manager') {
+        harness.sessions.get('turns-manager')!.mode = 'manager'
+      }
+    })
+    try {
+      await gateway.addServer('self-openfox', {
+        transport: 'http',
+        url: started.url,
+        headers: { 'x-session-token': 'sekrit' },
+      })
+      const tool = createMcpTools(gateway).find((candidate) => candidate.name === 'self-openfox_openfox_delete_session')
+      expect(tool).toBeDefined()
+      const callDelete = (sessionId: string) =>
+        tool!.execute(
+          {
+            sessionId,
             openfox_session_id: 'forged-caller',
             openfox_session_proof: 'forged-proof',
           },
           toolContext('caller'),
         )
 
-        expect(result.success).toBe(true)
-        expect(harness.deleted).toEqual(['peer'])
-        expect(authority.issueProof).toHaveBeenCalledWith({
-          callerSessionId: 'caller',
-          toolName: 'openfox_delete_session',
-          targetSessionId: 'peer',
-        })
-      } finally {
-        await gateway.disconnectAll()
-        await started.close()
+      const refused = []
+      for (const sessionId of [
+        'other-project',
+        'running',
+        'caller',
+        'manager-peer',
+        'turns-running',
+        'turns-manager',
+      ]) {
+        refused.push(await callDelete(sessionId))
       }
-    },
-    30000,
-  )
+      const first = await callDelete('replay')
+      const duplicate = await callDelete('replay')
 
-  it.fails(
-    'delete_session uses trusted proxy gateway identity without sessionIdInjection',
-    async () => {
-      const authority = createTransportAuthority()
-      const harness = makeDeleteHarness(authority)
-      harness.addSession('caller')
-      harness.addSession('peer')
-      const started = await startRouter({
-        resolveDeps: () => harness.deps,
-        isAuthRequired: () => true,
-        isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
-      })
-      const proxy = await startProxy(started.url, { 'x-session-token': 'sekrit' })
-      const gateway = createGateway(
-        authority,
-        (input) =>
-          input.kind === 'proxy' &&
-          input.serverName === 'trusted-proxy' &&
-          input.targetServerName === 'openfox' &&
-          started.url.includes('/mcp'),
-      )
-      try {
-        await gateway.addServer('trusted-proxy', { transport: 'http', url: proxy.url })
-        expect(gateway.getServer('trusted-proxy')?.config.sessionIdInjection).toBeUndefined()
-        const tool = createMcpTools(gateway).find((candidate) => candidate.name === 'trusted-proxy_mcp_execute_tool')
-        expect(tool).toBeDefined()
-
-        const result = await tool!.execute(
-          {
-            server_name: 'openfox',
-            tool_name: 'openfox_delete_session',
-            arguments: {
-              sessionId: 'peer',
-              openfox_session_id: 'forged-caller',
-              openfox_session_proof: 'forged-proof',
-            },
-          },
-          toolContext('caller'),
-        )
-
-        expect(result.success).toBe(true)
-        expect(harness.deleted).toEqual(['peer'])
-        expect(authority.issueProof).toHaveBeenCalledWith({
-          callerSessionId: 'caller',
-          toolName: 'openfox_delete_session',
-          targetSessionId: 'peer',
-        })
-      } finally {
-        await gateway.disconnectAll()
-        await proxy.close()
-        await started.close()
-      }
-    },
-    30000,
-  )
-
-  it.fails(
-    'delete_session rejects a global token without trusted caller proof',
-    async () => {
-      const authority = createTransportAuthority()
-      const harness = makeDeleteHarness(authority)
-      harness.addSession('caller')
-      harness.addSession('peer')
-      const started = await startRouter({
-        resolveDeps: () => harness.deps,
-        isAuthRequired: () => true,
-        isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
-      })
-      const client = await connectClient(started.url, { 'x-session-token': 'sekrit' })
-      try {
-        const result = await client.callTool({
-          name: 'openfox_delete_session',
-          arguments: {
-            sessionId: 'peer',
-            openfox_session_id: 'caller',
-            openfox_session_proof: 'forged-proof',
-          },
-        })
-        await client.close()
-
-        expect(result.isError).toBe(true)
-        expect(mcpText(result)).toContain('trusted OpenFox caller identity is required')
-        expect(harness.deleted).toEqual([])
-        expect(harness.sessions.has('peer')).toBe(true)
-      } finally {
-        await client.close().catch(() => undefined)
-        await started.close()
-      }
-    },
-    30000,
-  )
-
-  it.fails(
-    'delete_session rechecks guards and replay state over real HTTP',
-    async () => {
-      const authority = createTransportAuthority()
-      const harness = makeDeleteHarness(authority)
-      harness.addSession('caller')
-      harness.addSession('other-project', { projectId: 'p-2' })
-      harness.addSession('running', { isRunning: true })
-      harness.addSession('manager-peer', { mode: 'manager' })
-      harness.addSession('turns-running')
-      harness.addSession('turns-manager')
-      harness.addSession('replay')
-      const started = await startRouter({
-        resolveDeps: () => harness.deps,
-        isAuthRequired: () => true,
-        isAuthorized: vi.fn(async (req: any) => req.headers['x-session-token'] === 'sekrit'),
-      })
-      const gateway = createGateway(
-        authority,
-        (input) => input.kind === 'direct' && input.serverName === 'self-openfox' && input.url === started.url,
-      )
-      authority.setAfterIssue((input) => {
-        if (input.targetSessionId === 'turns-running') {
-          harness.sessions.get('turns-running')!.isRunning = true
-        }
-        if (input.targetSessionId === 'turns-manager') {
-          harness.sessions.get('turns-manager')!.mode = 'manager'
-        }
-      })
-      try {
-        await gateway.addServer('self-openfox', {
-          transport: 'http',
-          url: started.url,
-          headers: { 'x-session-token': 'sekrit' },
-        })
-        const tool = createMcpTools(gateway).find(
-          (candidate) => candidate.name === 'self-openfox_openfox_delete_session',
-        )
-        expect(tool).toBeDefined()
-        const callDelete = (sessionId: string) =>
-          tool!.execute(
-            {
-              sessionId,
-              openfox_session_id: 'forged-caller',
-              openfox_session_proof: 'forged-proof',
-            },
-            toolContext('caller'),
-          )
-
-        const refused = []
-        for (const sessionId of [
-          'other-project',
-          'running',
-          'caller',
-          'manager-peer',
-          'turns-running',
-          'turns-manager',
-        ]) {
-          refused.push(await callDelete(sessionId))
-        }
-        const first = await callDelete('replay')
-        const duplicate = await callDelete('replay')
-
-        expect(refused.every((result) => result.success === false)).toBe(true)
-        expect(first.success).toBe(true)
-        expect(duplicate.success).toBe(false)
-        expect(duplicate.error).toMatch(/not found/i)
-        expect(harness.deleted).toEqual(['replay'])
-        expect(harness.sessions.get('turns-running')).toMatchObject({ isRunning: true })
-        expect(harness.sessions.get('turns-manager')).toMatchObject({ mode: 'manager' })
-        expect(harness.sessions.has('other-project')).toBe(true)
-        expect(harness.sessions.has('running')).toBe(true)
-        expect(harness.sessions.has('caller')).toBe(true)
-        expect(harness.sessions.has('manager-peer')).toBe(true)
-      } finally {
-        await gateway.disconnectAll()
-        await started.close()
-      }
-    },
-    30000,
-  )
+      expect(refused.every((result) => result.success === false)).toBe(true)
+      expect(first.success).toBe(true)
+      expect(duplicate.success).toBe(false)
+      expect(duplicate.error).toMatch(/not found/i)
+      expect(harness.deleted).toEqual(['replay'])
+      expect(harness.sessions.get('turns-running')).toMatchObject({ isRunning: true })
+      expect(harness.sessions.get('turns-manager')).toMatchObject({ mode: 'manager' })
+      expect(harness.sessions.has('other-project')).toBe(true)
+      expect(harness.sessions.has('running')).toBe(true)
+      expect(harness.sessions.has('caller')).toBe(true)
+      expect(harness.sessions.has('manager-peer')).toBe(true)
+    } finally {
+      await gateway.disconnectAll()
+      await started.close()
+    }
+  }, 30000)
 
   it('returns 503 when the tool dependencies are not ready yet', async () => {
     const started = await startRouter({
