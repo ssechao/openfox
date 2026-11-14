@@ -78,7 +78,7 @@ vi.mock('../runtime-config.js', () => ({
     mode: 'test',
     workdir: '/test',
     agent: {},
-    context: { compactionThreshold: 0.8 },
+    context: { compactionThreshold: 0.85 },
     llm: {
       baseUrl: 'http://localhost:11434',
       model: 'test-model',
@@ -521,6 +521,22 @@ describe('agentLoop integration', () => {
     expect(batchContexts.length).toBeGreaterThanOrEqual(2)
     expect(batchContexts[0].dangerLevel).toBe('normal')
     expect(batchContexts[batchContexts.length - 1].dangerLevel).toBe('dangerous')
+  })
+
+  it.fails('manager sessions compact at 0.6 by default', async () => {
+    const { shouldCompact } = await import('../context/compactor.js')
+
+    await runTopLevelAgentLoop(makeConfig({ mode: 'manager' }), turnMetrics)
+
+    expect(shouldCompact).toHaveBeenCalledWith(0, 200000, 0.6)
+  })
+
+  it('non-manager sessions keep 0.85', async () => {
+    const { shouldCompact } = await import('../context/compactor.js')
+
+    await runTopLevelAgentLoop(makeConfig({ mode: 'builder' }), turnMetrics)
+
+    expect(shouldCompact).toHaveBeenCalledWith(0, 200000, 0.85)
   })
 
   it('auto-compacts within the loop when threshold is exceeded, then continues normally', async () => {

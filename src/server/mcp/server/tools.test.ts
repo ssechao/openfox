@@ -145,7 +145,7 @@ function json(result: OpenFoxMcpToolResult): any {
 }
 
 describe('openfx MCP tools', () => {
-  it('exposes the full session-centric tool set', () => {
+  it.fails('exposes the full session-centric tool set', () => {
     const tools = createOpenFoxMcpTools(makeDeps())
     const names = tools
       .map((t) => t.name)
@@ -155,6 +155,7 @@ describe('openfx MCP tools', () => {
       [
         'openfox_answer',
         'openfox_confirm',
+        'openfox_compact_session',
         'openfox_continue',
         'openfox_create_project',
         'openfox_create_session',
@@ -893,6 +894,105 @@ describe('openfx MCP tools', () => {
       })
       expect(result.isError).toBe(true)
       expect(text(result)).toContain('not found')
+    })
+  })
+
+  describe('openfox_compact_session', () => {
+    it.fails('openfox_compact_session MCP tool compacts an idle peer', async () => {
+      const caller = { ...makeSession(), id: 'caller' }
+      const peer = { ...makeSession(), id: 'peer' }
+      const compactSession = vi.fn(async () => ({ status: 'compacted' as const }))
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => ({ caller, peer })[id as 'caller' | 'peer']),
+        } as any,
+        compactSession,
+      } as any)
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_compact_session', {
+        sessionId: 'peer',
+        openfox_session_id: 'caller',
+        openfox_session_proof: 'test-proof',
+      })
+
+      expect(deps.verifyCallerIdentity).toHaveBeenCalledWith({
+        callerSessionId: 'caller',
+        proof: 'test-proof',
+        toolName: 'openfox_compact_session',
+        targetSessionId: 'peer',
+      })
+      expect(compactSession).toHaveBeenCalledWith({
+        sessionId: 'peer',
+        callerSessionId: 'caller',
+      })
+      expect(json(result)).toEqual({ sessionId: 'peer', status: 'compacted' })
+    })
+
+    it.fails('self compaction requested during own turn is scheduled for the next turn boundary', async () => {
+      const caller = { ...makeSession(), id: 'caller', isRunning: true }
+      const compactSession = vi.fn(async () => ({ status: 'compaction_scheduled' as const }))
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => (id === 'caller' ? caller : undefined)),
+        } as any,
+        compactSession,
+      } as any)
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_compact_session', {
+        sessionId: 'caller',
+        openfox_session_id: 'caller',
+        openfox_session_proof: 'test-proof',
+      })
+
+      expect(compactSession).toHaveBeenCalledWith({
+        sessionId: 'caller',
+        callerSessionId: 'caller',
+      })
+      expect(json(result)).toEqual({ sessionId: 'caller', status: 'compaction_scheduled' })
+    })
+
+    it.fails('rejects an unproved openfox_compact_session caller identity', async () => {
+      const compactSession = vi.fn()
+      const deps = makeDeps({ compactSession } as any)
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_compact_session', {
+        sessionId: 's-1',
+        openfox_session_id: 'forged',
+        openfox_session_proof: 'forged-proof',
+      })
+
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('trusted OpenFox caller identity is required')
+      expect(compactSession).not.toHaveBeenCalled()
+    })
+
+    it.fails('lets a Manager explicitly select another project for compaction', async () => {
+      const caller = { ...makeSession(), id: 'caller', mode: 'manager' }
+      const peer = { ...makeSession(), id: 'peer', projectId: 'p-2' }
+      const compactSession = vi.fn(async () => ({ status: 'compacted' as const }))
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => ({ caller, peer })[id as 'caller' | 'peer']),
+        } as any,
+        compactSession,
+      } as any)
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_compact_session', {
+        sessionId: 'peer',
+        projectId: 'p-2',
+        openfox_session_id: 'caller',
+        openfox_session_proof: 'test-proof',
+      })
+
+      expect(compactSession).toHaveBeenCalledWith({
+        sessionId: 'peer',
+        callerSessionId: 'caller',
+        projectId: 'p-2',
+      })
+      expect(json(result)).toEqual({ sessionId: 'peer', status: 'compacted' })
     })
   })
 

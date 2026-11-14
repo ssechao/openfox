@@ -260,6 +260,49 @@ describe('session id injection through a proxy server', () => {
     })
   })
 
+  it.fails('injects trusted OpenFox caller fields for openfox_compact_session', async () => {
+    const issueProof = vi.fn(() => 'trusted-proof')
+    const manager = new McpManager({
+      openFoxCallerIdentity: {
+        issueProof,
+        isOwnEndpoint: (input) =>
+          input.kind === 'proxy' && input.serverName === 'mcp-lazy' && input.targetServerName === 'openfox',
+      },
+    })
+    await manager.addServer('mcp-lazy', { transport: 'stdio', command: 'mcp-lazy' })
+
+    const result = await manager.callTool(
+      'mcp-lazy',
+      'mcp_execute_tool',
+      {
+        server_name: 'openfox',
+        tool_name: 'openfox_compact_session',
+        arguments: {
+          sessionId: 'target',
+          openfox_session_id: 'forged',
+          openfox_session_proof: 'forged-proof',
+        },
+      },
+      'caller',
+    )
+
+    expect(result.success).toBe(true)
+    expect(issueProof).toHaveBeenCalledWith({
+      callerSessionId: 'caller',
+      toolName: 'openfox_compact_session',
+      targetSessionId: 'target',
+    })
+    expect(forwardedArgs()).toEqual({
+      server_name: 'openfox',
+      tool_name: 'openfox_compact_session',
+      arguments: {
+        sessionId: 'target',
+        openfox_session_id: 'caller',
+        openfox_session_proof: 'trusted-proof',
+      },
+    })
+  })
+
   it('strips model-supplied caller fields when the endpoint is not host-bound', async () => {
     const issueProof = vi.fn(() => 'trusted-proof')
     const manager = new McpManager({
