@@ -7,6 +7,7 @@ import type {
   WorkflowExecution,
   WorkflowLaunchScope,
 } from '../../../shared/types.js'
+import { REASONING_EFFORT_VALUES, isReasoningEffortValue } from '../../../shared/reasoning-effort.js'
 import { projectSessionStatus } from '../../routes/session-status.js'
 import type { WorkflowLaunchPayload } from '../../runner/launch.js'
 import type { AdmissionResult } from '../../session/worker/scheduler.js'
@@ -248,7 +249,7 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
     {
       name: 'openfox_create_session',
       description:
-        'Create a new OpenFox session in a project, optionally selecting an agent (e.g. planner or builder) as the session mode.',
+        'Create a new OpenFox session in a project, optionally selecting its agent, provider, model, reasoning effort, and danger level.',
       inputSchema: {
         projectId: z.string().describe('Project to create the session in'),
         title: z.string().optional().describe('Optional session title'),
@@ -256,36 +257,147 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
           .string()
           .optional()
           .describe('Optional agent to use as the session mode (validated against available top-level agents)'),
+        providerId: z.string().optional().describe('Optional provider id'),
+        model: z.string().optional().describe('Optional model id from the selected provider'),
+        reasoningEffort: z.enum(REASONING_EFFORT_VALUES).optional().describe('Optional session reasoning effort'),
+        dangerLevel: z.enum(['normal', 'dangerous']).optional().describe('Optional session danger level'),
       },
       handler: async (args) => {
         const projectId = args['projectId']
         if (typeof projectId !== 'string' || projectId.length === 0) {
           return fail('projectId is required')
         }
-        const title = typeof args['title'] === 'string' ? args['title'] : undefined
+
+        const rawTitle = args['title']
+        if (rawTitle !== undefined && typeof rawTitle !== 'string') {
+          return fail('title must be a string')
+        }
+        const title = typeof rawTitle === 'string' ? rawTitle : undefined
+
         const rawAgentId = args['agentId']
-        const agentId = typeof rawAgentId === 'string' && rawAgentId.trim().length > 0 ? rawAgentId : undefined
+        if (rawAgentId !== undefined && typeof rawAgentId !== 'string') {
+          return fail('agentId must be a string')
+        }
+        const agentId = typeof rawAgentId === 'string' && rawAgentId.trim().length > 0 ? rawAgentId.trim() : undefined
+
+        const rawProviderId = args['providerId']
+        if (rawProviderId !== undefined && (typeof rawProviderId !== 'string' || rawProviderId.trim().length === 0)) {
+          return fail('providerId must be a non-empty string')
+        }
+        const providerId = typeof rawProviderId === 'string' ? rawProviderId.trim() : undefined
+
+        const rawModel = args['model']
+        if (rawModel !== undefined && (typeof rawModel !== 'string' || rawModel.trim().length === 0)) {
+          return fail('model must be a non-empty string')
+        }
+        const model = typeof rawModel === 'string' ? rawModel.trim() : undefined
+
+        const rawReasoningEffort = args['reasoningEffort']
+        if (
+          rawReasoningEffort !== undefined &&
+          (typeof rawReasoningEffort !== 'string' || !isReasoningEffortValue(rawReasoningEffort))
+        ) {
+          return fail(`Unsupported reasoningEffort: ${String(rawReasoningEffort)}`)
+        }
+        const reasoningEffort = typeof rawReasoningEffort === 'string' ? rawReasoningEffort : undefined
+
+        const rawDangerLevel = args['dangerLevel']
+        const dangerLevel = rawDangerLevel === 'normal' || rawDangerLevel === 'dangerous' ? rawDangerLevel : undefined
+        if (rawDangerLevel !== undefined && dangerLevel === undefined) {
+          return fail(`Unsupported dangerLevel: ${String(rawDangerLevel)}`)
+        }
+
+        const project = sessionManager.getProject(projectId)
+        if (!project) {
+          return fail(`Project not found: ${projectId}`)
+        }
+
+        if (agentId) {
+          const topLevelIds = await deps.topLevelAgentIds(project.workdir)
+          if (!topLevelIds.includes(agentId)) {
+            return fail(`Invalid agentId "${agentId}". Must be one of: ${topLevelIds.join(', ') || '(none available)'}`)
+          }
+        }
+
+        if ((providerId && !model) || (!providerId && model)) {
+          return fail('providerId and model must be provided together')
+        }
+        if (reasoningEffort && (!providerId || !model)) {
+          return fail('reasoningEffort requires providerId and model')
+        }
+        if (providerId && model) {
+          const provider = sessionManager
+            .getProviderManager()
+            .getProviders()
+            .find((candidate) => candidate.id === providerId)
+          if (!provider) {
+            return fail(`Unknown providerId: ${providerId}`)
+          }
+          if (!provider.models.some((candidate) => candidate.id === model)) {
+            return fail(`Model "${model}" is not available for provider "${providerId}"`)
+          }
+        }
+
         try {
           const session = sessionManager.createSession(projectId, title, null, null)
+          let updated = session
           if (agentId) {
-            const project = sessionManager.getProject(projectId)
-            const topLevelIds = project ? await deps.topLevelAgentIds(project.workdir) : []
-            if (!topLevelIds.includes(agentId)) {
-              return fail(
-                `Invalid agentId "${agentId}". Must be one of: ${topLevelIds.join(', ') || '(none available)'}`,
-              )
-            }
-            sessionManager.setMode(session.id, agentId)
+            updated = sessionManager.setMode(session.id, agentId)
           }
+          if (providerId && model) {
+            updated = sessionManager.setSessionProvider(session.id, providerId, model, true, reasoningEffort)
+            sessionManager.setSessionProviderActive(session.id, true)
+          }
+          if (dangerLevel) {
+            updated = sessionManager.setDangerLevel(session.id, dangerLevel)
+          }
+          const finalSession = sessionManager.getSession(session.id) ?? updated
           return ok({
-            sessionId: session.id,
+            sessionId: finalSession.id,
             projectId,
-            title: session.metadata?.title ?? title ?? null,
-            mode: agentId ?? session.mode,
+            title: finalSession.metadata?.title ?? title ?? null,
+            mode: finalSession.mode,
+            providerModel: finalSession.providerModel ?? null,
+            dangerLevel: finalSession.dangerLevel ?? 'normal',
           })
         } catch (error) {
           return fail(error instanceof Error ? error.message : String(error))
         }
+      },
+    },
+    {
+      name: 'openfox_delete_session',
+      description: "Delete an idle non-manager peer session from the caller's project.",
+      inputSchema: {
+        sessionId: z.string().describe('Session to delete'),
+      },
+      handler: async (args) => {
+        const targetCheck = requireSession(args['sessionId'])
+        if (!targetCheck.ok) return fail(targetCheck.error)
+        const callerSessionId = args['openfox_session_id']
+        if (typeof callerSessionId !== 'string' || callerSessionId.length === 0) {
+          return fail('openfox_session_id is required')
+        }
+        const callerCheck = requireSession(callerSessionId)
+        if (!callerCheck.ok) return fail(`Caller ${callerCheck.error}`)
+
+        const target = targetCheck.session
+        const caller = callerCheck.session
+        if (target.projectId !== caller.projectId) {
+          return fail('Cannot delete a session from another project')
+        }
+        if (target.isRunning) {
+          return fail('Cannot delete a running session')
+        }
+        if (target.id === caller.id) {
+          return fail('The caller cannot delete itself')
+        }
+        if (target.mode === 'manager') {
+          return fail('Cannot delete a manager session')
+        }
+
+        sessionManager.deleteSession(target.id)
+        return ok({ deleted: true, sessionId: target.id })
       },
     },
     {

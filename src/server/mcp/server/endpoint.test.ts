@@ -106,6 +106,7 @@ describe('openfox MCP endpoint', () => {
           'openfox_create_project',
           'openfox_create_session',
           'openfox_delete_project',
+          'openfox_delete_session',
           'openfox_launch_workflow',
           'openfox_projects',
           'openfox_resume_workflow',
@@ -176,7 +177,7 @@ describe('openfox MCP endpoint', () => {
       // x-session-token header: full MCP round-trip
       const client = await connectClient(started.url, { 'x-session-token': 'sekrit' })
       const { tools } = await client.listTools()
-      expect(tools).toHaveLength(19)
+      expect(tools).toHaveLength(20)
       await client.close()
 
       // Bearer header: initialize must not 401

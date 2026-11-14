@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 const managerPromptUrl = new URL('./manager.agent.md', import.meta.url)
 
 describe('manager agent prompt', () => {
-  it.fails('mandate', async () => {
+  it('mandate', async () => {
     const prompt = await readFile(managerPromptUrl, 'utf8')
 
     expect(prompt).not.toContain('Finish after reporting')

@@ -194,7 +194,7 @@ describe('openfx MCP tools', () => {
       expect(body.isError).toBeUndefined()
     })
 
-    it.fails('create_session applies provider, model, effort and danger level', async () => {
+    it('create_session applies provider, model, effort and danger level', async () => {
       let session = {
         ...makeSession(),
         providerId: null,
@@ -249,7 +249,7 @@ describe('openfx MCP tools', () => {
       expect(json(result)).toMatchObject({ providerModel: 'model-1', dangerLevel: 'dangerous' })
     })
 
-    it.fails('create_session validates before creating', async () => {
+    it('create_session validates before creating', async () => {
       let sessionCount = 0
       const createSession = vi.fn(() => {
         sessionCount += 1
@@ -351,7 +351,7 @@ describe('openfx MCP tools', () => {
   })
 
   describe('openfox_delete_session', () => {
-    it.fails('delete_session deletes idle peer', async () => {
+    it('delete_session deletes idle peer', async () => {
       const caller = { ...makeSession(), id: 'caller', mode: 'manager' } as unknown as Session
       const peer = { ...makeSession(), id: 'peer', mode: 'builder', isRunning: false } as unknown as Session
       const sessions = new Map([
@@ -379,7 +379,7 @@ describe('openfx MCP tools', () => {
       expect(sessions.has(peer.id)).toBe(false)
     })
 
-    it.fails('delete_session refuses', async () => {
+    it('delete_session refuses', async () => {
       const caller = { ...makeSession(), id: 'caller', mode: 'builder' } as unknown as Session
       const targets = [
         { ...makeSession(), id: 'other-project', projectId: 'p-2', mode: 'builder' },
