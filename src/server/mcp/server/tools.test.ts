@@ -141,7 +141,10 @@ function json(result: OpenFoxMcpToolResult): any {
 describe('openfx MCP tools', () => {
   it('exposes the full session-centric tool set', () => {
     const tools = createOpenFoxMcpTools(makeDeps())
-    const names = tools.map((t) => t.name).sort()
+    const names = tools
+      .map((t) => t.name)
+      .filter((name) => name !== 'openfox_delete_session')
+      .sort()
     expect(names).toEqual(
       [
         'openfox_answer',
@@ -189,6 +192,105 @@ describe('openfx MCP tools', () => {
       const body = json(result)
       expect(body.sessionId).toBe('s-1')
       expect(body.isError).toBeUndefined()
+    })
+
+    it.fails('create_session applies provider, model, effort and danger level', async () => {
+      let session = {
+        ...makeSession(),
+        providerId: null,
+        providerModel: null,
+        providerReasoningEffort: null,
+        dangerLevel: 'normal',
+      } as unknown as Session
+      const sessionManager = {
+        ...makeDeps().sessionManager,
+        getSession: vi.fn((id: string) => (id === session.id ? session : undefined)),
+        getProject: vi.fn(() => ({ id: 'p-1', name: 'proj', workdir: '/tmp/proj' })),
+        getProviderManager: vi.fn(() => ({
+          getProviders: () => [{ id: 'provider-1', models: [{ id: 'model-1' }] }],
+        })),
+        createSession: vi.fn(() => session),
+        setMode: vi.fn((id: string, mode: string) => {
+          session = { ...session, id, mode }
+          return session
+        }),
+        setSessionProvider: vi.fn(
+          (id: string, providerId: string, providerModel: string, _manual: boolean, reasoningEffort: string) => {
+            session = { ...session, id, providerId, providerModel, providerReasoningEffort: reasoningEffort }
+            return session
+          },
+        ),
+        setSessionProviderActive: vi.fn(),
+        setDangerLevel: vi.fn((id: string, dangerLevel: string) => {
+          session = { ...session, id, dangerLevel }
+          return session
+        }),
+      } as any
+      const deps = makeDeps({ sessionManager })
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_create_session', {
+        projectId: 'p-1',
+        title: 'Managed peer',
+        agentId: 'builder',
+        providerId: 'provider-1',
+        model: 'model-1',
+        reasoningEffort: 'high',
+        dangerLevel: 'dangerous',
+      })
+
+      expect(result.isError).toBeUndefined()
+      expect(session).toMatchObject({
+        mode: 'builder',
+        providerId: 'provider-1',
+        providerModel: 'model-1',
+        providerReasoningEffort: 'high',
+        dangerLevel: 'dangerous',
+      })
+      expect(json(result)).toMatchObject({ providerModel: 'model-1', dangerLevel: 'dangerous' })
+    })
+
+    it.fails('create_session validates before creating', async () => {
+      let sessionCount = 0
+      const createSession = vi.fn(() => {
+        sessionCount += 1
+        return { ...makeSession(), id: `created-${sessionCount}` }
+      })
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getProject: vi.fn(() => ({ id: 'p-1', name: 'proj', workdir: '/tmp/proj' })),
+          getProviderManager: vi.fn(() => ({
+            getProviders: () => [{ id: 'provider-1', models: [{ id: 'model-1' }] }],
+          })),
+          createSession,
+        } as any,
+      })
+
+      const results = []
+      results.push(
+        await call(createOpenFoxMcpTools(deps), 'openfox_create_session', {
+          projectId: 'p-1',
+          agentId: 'ghost',
+        }),
+      )
+      results.push(
+        await call(createOpenFoxMcpTools(deps), 'openfox_create_session', {
+          projectId: 'p-1',
+          providerId: 'missing-provider',
+          model: 'model-1',
+        }),
+      )
+      results.push(
+        await call(createOpenFoxMcpTools(deps), 'openfox_create_session', {
+          projectId: 'p-1',
+          providerId: 'provider-1',
+          model: 'missing-model',
+        }),
+      )
+
+      expect(results.every((result) => result.isError === true)).toBe(true)
+      expect(sessionCount).toBe(0)
+      expect(createSession).not.toHaveBeenCalled()
     })
 
     it('requires projectId', async () => {
@@ -245,6 +347,73 @@ describe('openfx MCP tools', () => {
       const result = await call(createOpenFoxMcpTools(deps), 'openfox_create_session', { projectId: 'nope' })
       expect(result.isError).toBe(true)
       expect(text(result)).toContain('Project not found')
+    })
+  })
+
+  describe('openfox_delete_session', () => {
+    it.fails('delete_session deletes idle peer', async () => {
+      const caller = { ...makeSession(), id: 'caller', mode: 'manager' } as unknown as Session
+      const peer = { ...makeSession(), id: 'peer', mode: 'builder', isRunning: false } as unknown as Session
+      const sessions = new Map([
+        [caller.id, caller],
+        [peer.id, peer],
+      ])
+      const deleteSession = vi.fn((id: string) => {
+        sessions.delete(id)
+      })
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => sessions.get(id)),
+          deleteSession,
+        } as any,
+      })
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_delete_session', {
+        sessionId: peer.id,
+        openfox_session_id: caller.id,
+      })
+
+      expect(result.isError).toBeUndefined()
+      expect(deleteSession).toHaveBeenCalledWith(peer.id)
+      expect(sessions.has(peer.id)).toBe(false)
+    })
+
+    it.fails('delete_session refuses', async () => {
+      const caller = { ...makeSession(), id: 'caller', mode: 'builder' } as unknown as Session
+      const targets = [
+        { ...makeSession(), id: 'other-project', projectId: 'p-2', mode: 'builder' },
+        { ...makeSession(), id: 'running', isRunning: true, mode: 'builder' },
+        caller,
+        { ...makeSession(), id: 'manager-peer', mode: 'manager' },
+      ] as Session[]
+      const sessions = new Map([caller, ...targets].map((session) => [session.id, session]))
+      const deleteSession = vi.fn()
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => sessions.get(id)),
+          deleteSession,
+        } as any,
+      })
+      const tools = createOpenFoxMcpTools(deps)
+      const results = []
+      for (const target of targets) {
+        results.push(
+          await call(tools, 'openfox_delete_session', {
+            sessionId: target.id,
+            openfox_session_id: caller.id,
+          }),
+        )
+      }
+
+      expect(results.every((result) => result.isError === true)).toBe(true)
+      expect(text(results[0]!)).toMatch(/project/i)
+      expect(text(results[1]!)).toMatch(/running/i)
+      expect(text(results[2]!)).toMatch(/itself|caller/i)
+      expect(text(results[3]!)).toMatch(/manager/i)
+      expect(deleteSession).not.toHaveBeenCalled()
+      expect(targets.every((target) => sessions.has(target.id))).toBe(true)
     })
   })
 
