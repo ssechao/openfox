@@ -2,6 +2,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import type { Message, Project, Session } from '../../../shared/types.js'
 import type { PendingPathConfirmationPayload, PendingQuestionPayload } from '../../../shared/protocol.js'
+import { logger } from '../../utils/logger.js'
 import { createOpenFoxMcpTools, computeSettlement } from './tools.js'
 import type { OpenFoxMcpToolDeps, OpenFoxMcpToolResult } from './types.js'
 
@@ -383,6 +384,110 @@ describe('openfx MCP tools', () => {
       expect(result.isError).toBeUndefined()
       expect(deleteSession).toHaveBeenCalledWith(peer.id)
       expect(sessions.has(peer.id)).toBe(false)
+    })
+
+    it.fails('delete_session lets a manager delete an idle session from an explicitly selected project', async () => {
+      const caller = { ...makeSession(), id: 'caller', projectId: 'p-1', mode: 'manager' } as unknown as Session
+      const peer = {
+        ...makeSession(),
+        id: 'peer',
+        projectId: 'p-2',
+        mode: 'builder',
+        isRunning: false,
+      } as unknown as Session
+      const sessions = new Map([
+        [caller.id, caller],
+        [peer.id, peer],
+      ])
+      const deleteSession = vi.fn((id: string) => {
+        sessions.delete(id)
+      })
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => sessions.get(id)),
+          deleteSession,
+        } as any,
+      })
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+
+      try {
+        const result = await call(createOpenFoxMcpTools(deps), 'openfox_delete_session', {
+          sessionId: peer.id,
+          projectId: peer.projectId,
+          openfox_session_id: caller.id,
+          openfox_session_proof: 'test-proof',
+        })
+
+        expect(result.isError).toBeUndefined()
+        expect(deleteSession).toHaveBeenCalledWith(peer.id)
+        expect(sessions.has(peer.id)).toBe(false)
+        expect(info).toHaveBeenCalledWith('Deleted OpenFox session through MCP', {
+          callerSessionId: caller.id,
+          projectId: peer.projectId,
+          targetSessionId: peer.id,
+        })
+      } finally {
+        info.mockRestore()
+      }
+    })
+
+    it.fails('delete_session refuses a projectId that does not match the target project', async () => {
+      const caller = { ...makeSession(), id: 'caller', projectId: 'p-1', mode: 'manager' } as unknown as Session
+      const peer = { ...makeSession(), id: 'peer', projectId: 'p-2', mode: 'builder' } as unknown as Session
+      const sessions = new Map([
+        [caller.id, caller],
+        [peer.id, peer],
+      ])
+      const deleteSession = vi.fn()
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => sessions.get(id)),
+          deleteSession,
+        } as any,
+      })
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_delete_session', {
+        sessionId: peer.id,
+        projectId: 'p-3',
+        openfox_session_id: caller.id,
+        openfox_session_proof: 'test-proof',
+      })
+
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('PROJECT_MISMATCH')
+      expect(deleteSession).not.toHaveBeenCalled()
+      expect(sessions.has(peer.id)).toBe(true)
+    })
+
+    it.fails('delete_session refuses a non-manager selecting another project', async () => {
+      const caller = { ...makeSession(), id: 'caller', projectId: 'p-1', mode: 'builder' } as unknown as Session
+      const peer = { ...makeSession(), id: 'peer', projectId: 'p-2', mode: 'builder' } as unknown as Session
+      const sessions = new Map([
+        [caller.id, caller],
+        [peer.id, peer],
+      ])
+      const deleteSession = vi.fn()
+      const deps = makeDeps({
+        sessionManager: {
+          ...makeDeps().sessionManager,
+          getSession: vi.fn((id: string) => sessions.get(id)),
+          deleteSession,
+        } as any,
+      })
+
+      const result = await call(createOpenFoxMcpTools(deps), 'openfox_delete_session', {
+        sessionId: peer.id,
+        projectId: peer.projectId,
+        openfox_session_id: caller.id,
+        openfox_session_proof: 'test-proof',
+      })
+
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('MANAGER_REQUIRED')
+      expect(deleteSession).not.toHaveBeenCalled()
+      expect(sessions.has(peer.id)).toBe(true)
     })
 
     it('delete_session refuses', async () => {
