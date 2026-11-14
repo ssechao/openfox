@@ -9,6 +9,7 @@ import { loadConfig } from '../config.js'
 import { closeDatabase, getDatabase, initDatabase } from '../db/index.js'
 import { createProject, updateProject } from '../db/projects.js'
 import { initEventStore } from '../events/index.js'
+import { setAgentModelOverride } from '../agents/model-overrides.js'
 import { SessionManager } from '../session/manager.js'
 import { SessionTurnScheduler, type AdmissionResult } from '../session/worker/scheduler.js'
 import { projectTasksTool, setTasksService } from '../tools/project-tasks.js'
@@ -389,6 +390,7 @@ describe('manager task launch', () => {
     config.providers = [
       testProvider('provider-default', 'model-default', true),
       testProvider('provider-explicit', 'model-explicit'),
+      testProvider('provider-override', 'model-override'),
     ]
     config.defaultModelSelection = 'provider-default/model-default'
     config.defaultAgent = 'planner'
@@ -432,6 +434,8 @@ describe('manager task launch', () => {
   })
 
   afterEach(async () => {
+    setAgentModelOverride('agent-explicit', null)
+    setAgentModelOverride('planner', null)
     closeDatabase()
     await rm(root, { recursive: true, force: true })
   })
@@ -511,6 +515,124 @@ describe('manager task launch', () => {
         conflict: true,
         taskUnchanged: beforeTask,
         sessionsUnchanged: beforeSessions,
+      },
+    })
+  })
+
+  it.fails('launch refuses the original workspace before any session or queue entry', async () => {
+    const projectId = await targetProject('original-workspace')
+    const task = service.create(projectId, { prompt: 'original workspace' }, { actor: 'human' })
+    const snapshot = () => ({
+      task: structuredClone(service.get(projectId, task.id)),
+      sessions: manager
+        .listSessions()
+        .map((session) => session.id)
+        .sort(),
+      queues: manager
+        .listSessions()
+        .map((session) => ({ sessionId: session.id, queue: structuredClone(manager.getQueueState(session.id)) }))
+        .sort((left, right) => left.sessionId.localeCompare(right.sessionId)),
+    })
+    const before = snapshot()
+    const result = await projectTasksTool.execute(
+      {
+        action: 'launch',
+        ...requestFor(projectId, task.id, 'original-workspace', task.version),
+        workspace: 'original',
+      },
+      managerContext(),
+    )
+
+    expect({
+      success: result.success,
+      code: result.error?.includes('WORKSPACE_ORIGINAL_NOT_ALLOWED') ? 'WORKSPACE_ORIGINAL_NOT_ALLOWED' : result.error,
+      state: snapshot(),
+    }).toEqual({
+      success: false,
+      code: 'WORKSPACE_ORIGINAL_NOT_ALLOWED',
+      state: before,
+    })
+  })
+
+  it.fails(
+    'launch keeps the explicit provider and model as the effective worker pair over the agent override',
+    async () => {
+      setAgentModelOverride('planner', {
+        providerId: 'provider-override',
+        model: 'model-override',
+      })
+      try {
+        const projectId = await targetProject('effective-provider')
+        updateProject(projectId, { defaultAgent: 'planner' })
+        const task = service.create(projectId, { prompt: 'effective provider' }, { actor: 'human' })
+        const result = await projectTasksTool.execute(
+          {
+            action: 'launch',
+            ...requestFor(projectId, task.id, 'effective-provider', task.version),
+            agentId: 'planner',
+          },
+          managerContext(),
+        )
+        const current = service.get(projectId, task.id)
+        const session = current?.activeSessionId ? manager.getSession(current.activeSessionId) : null
+        const effective = session ? manager.resolveEffectiveProviderModel(session.id) : null
+
+        expect({
+          success: result.success,
+          stored: session ? { providerId: session.providerId, model: session.providerModel } : null,
+          effective,
+        }).toEqual({
+          success: true,
+          stored: { providerId: 'provider-explicit', model: 'model-explicit' },
+          effective: { providerId: 'provider-explicit', model: 'model-explicit' },
+        })
+      } finally {
+        setAgentModelOverride('planner', null)
+      }
+    },
+  )
+
+  it.fails('an invalid queued launch returns its card to todo and lets the next valid card launch', async () => {
+    const projectId = await targetProject('queued-invalid')
+    preflightClosed = true
+    const invalid = await prepareHumanTask(projectId, 'invalid queued launch', 'queued-invalid-a')
+    const valid = await prepareHumanTask(projectId, 'valid queued launch', 'queued-invalid-b')
+    await service.move(projectId, invalid.task.id, 'in_progress', { actor: 'human' })
+    await service.move(projectId, valid.task.id, 'in_progress', { actor: 'human' })
+    getDatabase()
+      .prepare('UPDATE tasks SET provider_id = ?, version = version + 1 WHERE id = ?')
+      .run('missing-provider', invalid.task.id)
+    preflightClosed = false
+
+    await service.retryQueuedLaunches()
+
+    const invalidAfter = service.get(projectId, invalid.task.id)
+    const validAfter = service.get(projectId, valid.task.id)
+    expect({
+      invalid: {
+        status: invalidAfter?.status ?? null,
+        runState: invalidAfter?.runState ?? null,
+        activeSessionId: invalidAfter?.activeSessionId ?? null,
+        audit: invalidAfter?.auditTrail.at(-1)?.detail ?? null,
+      },
+      valid: {
+        status: validAfter?.status ?? null,
+        runState: validAfter?.runState ?? null,
+        active: validAfter?.activeSessionId !== undefined,
+        links: validAfter?.sessionIds.length ?? 0,
+      },
+    }).toEqual({
+      invalid: {
+        status: 'todo',
+        runState: null,
+        activeSessionId: null,
+        audit: expect.stringContaining('start_failed'),
+      },
+      valid: {
+        status: 'in_progress',
+        runState: 'running',
+        active: true,
+        links: 1,
       },
     })
   })
