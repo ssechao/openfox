@@ -1403,97 +1403,94 @@ describe('chat orchestrator', () => {
     expect(kickoffEvent).toBeUndefined()
   })
 
-  it.fails(
-    'rebases the cached tool schemas at the turn boundary so a tool added after the cache is requestable',
-    async () => {
-      const eventStore = createEventStore()
-      getEventStoreMock.mockReturnValue(eventStore)
-      getCurrentContextWindowIdMock.mockReturnValue('window-1')
-      getAllInstructionsMock.mockResolvedValue({ content: 'Build carefully', files: [] })
-      getContextMessagesMock.mockReturnValue([{ role: 'user' as const, content: 'Do something' }])
-      getConversationMessagesMock.mockReturnValue([
-        { role: 'user' as const, content: 'Do something', source: 'history' as const },
-      ])
+  it('rebases the cached tool schemas at the turn boundary so a tool added after the cache is requestable', async () => {
+    const eventStore = createEventStore()
+    getEventStoreMock.mockReturnValue(eventStore)
+    getCurrentContextWindowIdMock.mockReturnValue('window-1')
+    getAllInstructionsMock.mockResolvedValue({ content: 'Build carefully', files: [] })
+    getContextMessagesMock.mockReturnValue([{ role: 'user' as const, content: 'Do something' }])
+    getConversationMessagesMock.mockReturnValue([
+      { role: 'user' as const, content: 'Do something', source: 'history' as const },
+    ])
 
-      const cachedTools = [
-        { type: 'function' as const, function: { name: 'read_file', description: 'Read', parameters: {} } },
-      ]
-      // Added to the registry after the cached prompt was built (server restart
-      // or MEP introducing a new openfox_* tool).
-      const liveTools = [
-        { type: 'function' as const, function: { name: 'read_file', description: 'Read', parameters: {} } },
-        {
-          type: 'function' as const,
-          function: { name: 'openfox_delete_session', description: 'Delete a session', parameters: {} },
-        },
-      ]
-      getToolRegistryForModeMock.mockReturnValue({ tools: liveTools, definitions: liveTools, execute: vi.fn() })
+    const cachedTools = [
+      { type: 'function' as const, function: { name: 'read_file', description: 'Read', parameters: {} } },
+    ]
+    // Added to the registry after the cached prompt was built (server restart
+    // or MEP introducing a new openfox_* tool).
+    const liveTools = [
+      { type: 'function' as const, function: { name: 'read_file', description: 'Read', parameters: {} } },
+      {
+        type: 'function' as const,
+        function: { name: 'openfox_delete_session', description: 'Delete a session', parameters: {} },
+      },
+    ]
+    getToolRegistryForModeMock.mockReturnValue({ tools: liveTools, definitions: liveTools, execute: vi.fn() })
 
-      let capturedTools: any[] = []
-      streamLLMPureMock.mockImplementation((options: any) => {
-        capturedTools = options.tools?.map((t: any) => t.function?.name) || []
-        return { kind: 'stream' }
-      })
-      consumeStreamGeneratorMock.mockResolvedValueOnce({
-        content: 'Done',
-        toolCalls: [],
-        segments: [{ type: 'text', content: 'Done' }],
-        usage: { promptTokens: 10, completionTokens: 3 },
-        timing: { ttft: 1, completionTime: 1, tps: 3, prefillTps: 10 },
-        aborted: false,
-      })
+    let capturedTools: any[] = []
+    streamLLMPureMock.mockImplementation((options: any) => {
+      capturedTools = options.tools?.map((t: any) => t.function?.name) || []
+      return { kind: 'stream' }
+    })
+    consumeStreamGeneratorMock.mockResolvedValueOnce({
+      content: 'Done',
+      toolCalls: [],
+      segments: [{ type: 'text', content: 'Done' }],
+      usage: { promptTokens: 10, completionTokens: 3 },
+      timing: { ttft: 1, completionTime: 1, tps: 3, prefillTps: 10 },
+      aborted: false,
+    })
 
-      const sessionManager = createSessionManager({
-        current: {
-          id: 'session-1',
-          projectId: 'project-1',
-          workdir: '/tmp/project',
-          mode: 'builder',
-          phase: 'build',
-          isRunning: true,
-          criteria: [{ id: 'c1', description: 'Test', status: { type: 'pending' }, attempts: [] }],
-          executionState: {},
-          messages: [{ id: 'user-1', role: 'user', content: 'Do something' }],
-        },
-      })
-      // Existing conversation with a warm prefix cache built before the tool
-      // was added. The fake session manager keeps the cache, so a rebase is
-      // observable on the following assembleRequest.
-      let cachedLayout: Record<string, any> | undefined = {
-        systemPrompt: 'stale system prompt',
-        tools: cachedTools,
-        hash: 'stale-hash',
-      }
-      ;(sessionManager.getCachedPrompt as ReturnType<typeof vi.fn>).mockImplementation(() => cachedLayout)
-      ;(sessionManager.setCachedPrompt as ReturnType<typeof vi.fn>).mockImplementation(
-        (_id: string, systemPrompt: string, tools: any[], hash: string, promptHash: string) => {
-          cachedLayout = { systemPrompt, tools, hash, promptHash }
-        },
-      )
+    const sessionManager = createSessionManager({
+      current: {
+        id: 'session-1',
+        projectId: 'project-1',
+        workdir: '/tmp/project',
+        mode: 'builder',
+        phase: 'build',
+        isRunning: true,
+        criteria: [{ id: 'c1', description: 'Test', status: { type: 'pending' }, attempts: [] }],
+        executionState: {},
+        messages: [{ id: 'user-1', role: 'user', content: 'Do something' }],
+      },
+    })
+    // Existing conversation with a warm prefix cache built before the tool
+    // was added. The fake session manager keeps the cache, so a rebase is
+    // observable on the following assembleRequest.
+    let cachedLayout: Record<string, any> | undefined = {
+      systemPrompt: 'stale system prompt',
+      tools: cachedTools,
+      hash: 'stale-hash',
+    }
+    ;(sessionManager.getCachedPrompt as ReturnType<typeof vi.fn>).mockImplementation(() => cachedLayout)
+    ;(sessionManager.setCachedPrompt as ReturnType<typeof vi.fn>).mockImplementation(
+      (_id: string, systemPrompt: string, tools: any[], hash: string, promptHash: string) => {
+        cachedLayout = { systemPrompt, tools, hash, promptHash }
+      },
+    )
 
-      await runAgentTurn(
-        {
-          sessionManager: sessionManager as never,
-          sessionId: 'session-1',
-          llmClient: { getModel: () => 'qwen3-32b' } as never,
-          onMessage: vi.fn(),
-        },
-        new TurnMetrics(),
-        'builder',
-        vi.fn(),
-      )
+    await runAgentTurn(
+      {
+        sessionManager: sessionManager as never,
+        sessionId: 'session-1',
+        llmClient: { getModel: () => 'qwen3-32b' } as never,
+        onMessage: vi.fn(),
+      },
+      new TurnMetrics(),
+      'builder',
+      vi.fn(),
+    )
 
-      // The provider dispatches on the request's own `tools`: shipping the
-      // stale cached list is what makes an announced tool uncallable.
-      expect(capturedTools).toEqual(['read_file', 'openfox_delete_session'])
-      // The cache itself is rebased, not just flagged for a manual rebase.
-      const rebasedTools = (sessionManager.setCachedPrompt as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]
-      expect(rebasedTools.map((t: any) => t.function.name)).toEqual(['read_file', 'openfox_delete_session'])
-      // Drift is resolved instead of left pending.
-      expect(sessionManager.setDynamicContextChanged).not.toHaveBeenCalledWith('session-1', true)
-      expect(sessionManager.setDynamicContextChanged).toHaveBeenCalledWith('session-1', false)
-    },
-  )
+    // The provider dispatches on the request's own `tools`: shipping the
+    // stale cached list is what makes an announced tool uncallable.
+    expect(capturedTools).toEqual(['read_file', 'openfox_delete_session'])
+    // The cache itself is rebased, not just flagged for a manual rebase.
+    const rebasedTools = (sessionManager.setCachedPrompt as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2]
+    expect(rebasedTools.map((t: any) => t.function.name)).toEqual(['read_file', 'openfox_delete_session'])
+    // Drift is announced AND resolved: the pending-rebase flag ends cleared,
+    // so the turn that follows starts from the rebased cache.
+    expect(sessionManager.setDynamicContextChanged).toHaveBeenLastCalledWith('session-1', false)
+  })
 
   it('injects a builder kickoff prompt for orchestrated builder turns', async () => {
     const eventStore = createEventStore()

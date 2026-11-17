@@ -768,7 +768,7 @@ describe('executeTools', () => {
     expect(result.returnValueResult).toBe('completed')
   })
 
-  it.fails('logs an explicit error when an announced tool is missing from the execution registry', async () => {
+  it('logs an explicit error when an announced tool is missing from the execution registry', async () => {
     const append = vi.fn()
     const executeMock = vi.fn().mockResolvedValue({
       success: false,

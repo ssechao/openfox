@@ -732,25 +732,28 @@ describe('SessionManager.switchWorkspace – execution context integrity (issue 
         expect(secondCall.systemPrompt).toBe(oldSystemPrompt)
         expect(secondCall.systemPrompt).toBe(firstCall.systemPrompt)
 
-        // Tool list reuse (deep equality). The turn-start tool check must NOT
-        // sync the cached tools to the live registry — the cached prefix is
-        // frozen so the provider prefix cache stays valid.
+        // Tool list stability WITHIN the turn: the schemas are rebased once at the
+        // turn boundary (stale cached tools are what made an announced MCP tool
+        // uncallable), then both requests of the turn ship that same list.
         expect(secondCall.tools).toEqual(firstCall.tools)
         const firstToolNames = new Set(
           (firstCall.tools as Array<{ function: { name: string } }>).map((t) => t.function.name),
         )
         expect(Array.from(firstToolNames)).toEqual(expect.arrayContaining(cachedTools.map((t) => t.function.name)))
 
-        // Cache state after both calls — the ENTIRE cached prefix (system
-        // prompt, tools AND hash) is frozen. Only the user's rebase
-        // (applyDynamicContext) rebuilds it.
+        // Cache state after both calls — the system prompt is still byte
+        // identical (issue #190: a same-turn workspace switch never rebuilds
+        // it), while the tool schemas and hash were rebased once, at the turn
+        // boundary, before the first request.
         const cachedAfter = manager.getCachedPrompt(session.id)
         expect(cachedAfter).toBeDefined()
-        expect(cachedAfter?.hash).toBe(oldHash)
+        expect(cachedAfter?.hash).not.toBe(oldHash)
         expect(cachedAfter?.systemPrompt).toBe(oldSystemPrompt)
-        expect(cachedAfter?.tools).toEqual(cachedTools)
-        expect(setCachedSpy).not.toHaveBeenCalled()
-        expect(resetWarmupSpy).not.toHaveBeenCalled()
+        expect(cachedAfter?.tools).toEqual(firstCall.tools)
+        expect(setCachedSpy).toHaveBeenCalledTimes(1)
+        // setCachedPrompt invalidates the warmup marker: the rebased prefix is
+        // not the warmed one, so the next turn re-warms it.
+        expect(resetWarmupSpy).toHaveBeenCalledTimes(1)
 
         // The workspace reminder reaches the second LLM call with the
         // authoritatively-read workspace, path, and branch — not the requested one.

@@ -36,6 +36,7 @@ import {
   checkToolChangesAndInject,
   computeDynamicContextHash,
   getToolFingerprint,
+  rebaseToolSchemasIfDrifted,
 } from './dynamic-context.js'
 import { runTopLevelAgentLoop } from './agent-loop.js'
 import { loadAllAgentsDefault, findAgentById, resolveDefaultAgentId, getSubAgents } from '../agents/registry.js'
@@ -443,6 +444,17 @@ export async function runAgentTurn(
           ),
       },
       append,
+    )
+    // Rebase the cached tool schemas at the turn boundary. The provider builds
+    // its dispatch map from the request's own `tools`, so a stale cached list
+    // makes an announced tool uncallable. An identical fingerprint is a no-op.
+    await rebaseToolSchemasIfDrifted(
+      options.sessionManager,
+      options.sessionId,
+      agentDef,
+      instructionContent ?? '',
+      skills,
+      modelName,
     )
   }
 

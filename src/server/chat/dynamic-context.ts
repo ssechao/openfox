@@ -622,3 +622,52 @@ export async function applyDynamicContext(
   sessionManager.clearDebugDump(sessionId)
   logger.debug('applyDynamicContext done', { sessionId, hash, toolCount: tools.length })
 }
+
+/**
+ * Rebase the cached prompt when the live tool set no longer matches it.
+ *
+ * Call this ONLY at a turn boundary (never mid-turn): mid-turn the cached
+ * prefix stays frozen so the provider-side prefix cache remains valid, and the
+ * drift is merely announced. At the start of a turn there is no request in
+ * flight, and a stale cached list is not harmless: the provider builds its
+ * dispatch map from the request's own `tools`, so a tool added after the cache
+ * was built (server restart, MEP, MCP server change) is announced by the drift
+ * reminder yet impossible to call — "No such tool available" for a schema the
+ * model was just told it has.
+ *
+ * Returns true when the tool list was rebased. An identical fingerprint returns
+ * false immediately: no rebuild, no request change.
+ *
+ * ONLY the tool schemas are refreshed — the cached system prompt is kept byte
+ * identical, so unrelated guarantees (a same-turn workspace switch, for one)
+ * still hold and the prompt part of the prefix stays warm.
+ */
+export async function rebaseToolSchemasIfDrifted(
+  sessionManager: SessionManager,
+  sessionId: string,
+  agentDef: AgentDefinition,
+  instructionContent: string,
+  skills: SkillMetadata[],
+  modelName?: string,
+): Promise<boolean> {
+  const cached = sessionManager.getCachedPrompt(sessionId)
+  if (!cached) return false
+
+  const liveTools = await getEffectiveToolDefinitions(agentDef, sessionId, modelName)
+  const liveToolFingerprint = getToolFingerprint(liveTools)
+  if (liveToolFingerprint === getToolFingerprint(cached.tools)) return false
+
+  logger.info('Rebasing cached tool schemas at turn boundary', {
+    sessionId,
+    cachedTools: cached.tools.map((tool) => tool.function.name),
+    liveTools: liveTools.map((tool) => tool.function.name),
+  })
+
+  const hash = computeDynamicContextHash(instructionContent, skills, liveToolFingerprint, modelName)
+  const promptHash = computeDynamicContextHash(instructionContent, skills, undefined, modelName)
+  sessionManager.setCachedPrompt(sessionId, cached.systemPrompt, liveTools, hash, promptHash)
+  sessionManager.setAnnouncedPromptHash(sessionId, promptHash)
+  sessionManager.setAnnouncedToolFingerprint(sessionId, getToolSetFingerprint(liveTools))
+  sessionManager.setDynamicContextChanged(sessionId, false)
+  return true
+}

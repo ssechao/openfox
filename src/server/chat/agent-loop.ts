@@ -333,6 +333,10 @@ export async function runTopLevelAgentLoop(
     let result!: import('./stream-pure.js').PureStreamResult
     let assistantMsgId: string
     let assistantMessageStarted = false
+    // Tool names shipped in the request's `tools` for the current attempt —
+    // hoisted out of the attempt loop so the tool batch below can compare the
+    // announced list with the execution registry.
+    let announcedToolNames: ReadonlySet<string> | undefined
 
     for (;;) {
       // Resolve fresh per attempt: resolveClient() supports provider switches
@@ -391,6 +395,7 @@ export async function runTopLevelAgentLoop(
         ...(instructionContent ? { customInstructions: instructionContent } : {}),
         ...(skills.length > 0 ? { skills } : {}),
       })
+      announcedToolNames = new Set((assembledRequest.tools ?? []).map((tool) => tool.function.name))
 
       assistantMsgId = crypto.randomUUID()
       // The assistant message.start is DEFERRED until the first streamed event:
@@ -821,6 +826,7 @@ ${COMPACTION_PROMPT}`,
           sessionManager,
           sessionId,
           workdir: sessionManager.getEffectiveWorkdir(sessionId),
+          announcedToolNames,
           turnMetrics,
           signal,
           onMessage,

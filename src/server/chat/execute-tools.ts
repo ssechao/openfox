@@ -16,12 +16,19 @@ import { loadAllAgentsDefault, findAgentById } from '../agents/registry.js'
 import { serverT } from '../i18n.js'
 import { renderToolResultContent } from './tool-result-content.js'
 import { maxMcpWaitTimeoutSeconds } from '../session/worker/mcp-broker.js'
+import { logger } from '../utils/logger.js'
 
 export interface ToolBatchContext {
   toolRegistry: ToolRegistry
   sessionManager: SessionManager
   sessionId: string
   workdir: string
+  /**
+   * Tool names that were sent to the model in the request's `tools`. Used to
+   * tell a hallucinated name from a server-side mismatch: an announced name the
+   * execution registry cannot run must fail loudly, never silently.
+   */
+  announcedToolNames?: ReadonlySet<string> | undefined
   dangerLevel?: DangerLevel
   nightMode?: boolean
   isSubAgent?: boolean
@@ -317,6 +324,26 @@ export async function executeTools(
       toolResult = {
         success: false,
         error: toolCall.preflightError,
+        durationMs: Date.now() - startTime,
+        truncated: false,
+      }
+    } else if (
+      ctx.announcedToolNames?.has(toolCall.name) &&
+      !ctx.toolRegistry.tools.some((tool) => tool.name === toolCall.name)
+    ) {
+      // The model was told this tool exists (it was in the request's `tools`)
+      // yet the execution registry cannot run it. That is a server-side
+      // mismatch, not a hallucinated name: log it loudly and never dispatch.
+      logger.error('Announced tool is missing from the execution registry', {
+        code: 'TOOL_ANNOUNCED_BUT_NOT_EXECUTABLE',
+        sessionId: ctx.sessionId,
+        tool: toolCall.name,
+        executableTools: ctx.toolRegistry.tools.map((tool) => tool.name),
+      })
+      toolResult = {
+        success: false,
+        // LLM-facing (rendered into the tool content) — English by design.
+        error: `Tool '${toolCall.name}' was announced to the model but is not registered for execution (TOOL_ANNOUNCED_BUT_NOT_EXECUTABLE). The call was not executed — report this mismatch instead of retrying it.`,
         durationMs: Date.now() - startTime,
         truncated: false,
       }
