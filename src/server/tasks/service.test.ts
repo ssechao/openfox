@@ -271,12 +271,29 @@ describe('project tasks service', () => {
       expect(launchSpy).not.toHaveBeenCalled()
     })
 
-    it('seeds the session without a prompt-derived title so auto-naming applies', async () => {
+    it('seeds the session titled after the card prompt', async () => {
       const task = create('Investigate and fix the flaky test in CI')
       await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
 
       expect(sm.createdSessions).toHaveLength(1)
-      expect(sm.createdSessions[0]!.title).toBeUndefined()
+      expect(sm.createdSessions[0]!.title).toBe('Investigate and fix the flaky test in CI')
+    })
+
+    it('kanban launch titles the session after the card', async () => {
+      await service.setSettings(projectId, { slotLimit: 10 })
+      const prompts: [string, string | undefined][] = [
+        ['/default Foo bar\nsuite', 'Foo bar'],
+        ['Plain card title\nmore lines', 'Plain card title'],
+        ['   \n  First real line  \ntail', 'First real line'],
+        ['x'.repeat(150), 'x'.repeat(100)],
+        ['/default', undefined],
+        ['src/foo fix bug', 'src/foo fix bug'],
+      ]
+      for (const [prompt] of prompts) {
+        const task = create(prompt)
+        await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
+      }
+      expect(sm.createdSessions.map((session) => session.title)).toEqual(prompts.map(([, title]) => title))
     })
 
     it('second task queues when the single slot is busy', async () => {
