@@ -49,6 +49,7 @@ import { sanitizeRetryPatterns } from './auto-patterns.js'
 import { getConversationMessages, processEventsForConversation } from './conversation-history.js'
 import { isStaleWorkerGenerationError } from '../session/worker/index.js'
 import { EventStoreBusyTimeoutError } from '../events/store.js'
+import { getAttentionService } from '../session/attention.js'
 
 // Re-export for runner orchestrator
 export {
@@ -217,6 +218,7 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
     if (deletedCount > 0) {
       logger.debug('Cleaned up old events after snapshot', { sessionId, deletedCount, snapshotSeq: snapshotEvent.seq })
     }
+    getAttentionService().observeTurnSucceeded(sessionId)
   } catch (error) {
     if (isStaleWorkerGenerationError(error)) throw error
 
@@ -303,6 +305,7 @@ export async function runChatTurn(options: OrchestratorOptions): Promise<void> {
       ),
     )
     eventStore.append(sessionId, createChatDoneEvent(errorMsgId, 'error'))
+    getAttentionService().observeTurnFailed(sessionId, error instanceof Error ? error.message : String(error))
   } finally {
     try {
       eventStore.append(sessionId, { type: 'running.changed', data: { isRunning: false } })

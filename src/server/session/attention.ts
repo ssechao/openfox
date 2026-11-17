@@ -42,7 +42,12 @@ export interface CallToolFn {
 }
 
 export function formatAttentionMessage(params: AttentionNotifyParams): string {
-  const label = params.reason === 'blocked' ? 'SESSION BLOQUÉE' : 'SESSION EN ATTENTE'
+  const label =
+    params.reason === 'blocked'
+      ? 'SESSION BLOQUÉE'
+      : params.reason === 'turn_failed'
+        ? 'TOUR EN ÉCHEC'
+        : 'SESSION EN ATTENTE'
   const since = new Date(params.sinceMs).toISOString()
   return `⚠ ${label} ${params.title} (${params.sessionId}) : ${params.reason} ${params.detail} depuis ${since}`
 }
@@ -211,11 +216,12 @@ export class SessionAttentionService {
 
   /** A chat turn ended in a non-recoverable LLM error (STALL-NOTIFY-2). */
   observeTurnFailed(sessionId: string, detail: string): void {
+    const truncated = detail.slice(0, 120)
     if (this.forward) {
-      this.forward({ kind: 'turn_failed', detail })
+      this.forward({ kind: 'turn_failed', detail: truncated })
       return
     }
-    void sessionId
+    this.enter(sessionId, 'turn_failed', truncated, true)
   }
 
   /** A chat turn completed without error (STALL-NOTIFY-2). */

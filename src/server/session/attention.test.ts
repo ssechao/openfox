@@ -496,7 +496,7 @@ describe('session attention (STALL-NOTIFY)', () => {
   const NATIVE_CTX_ERROR = `HTTP 400: {"error":{"code":"native_context_unavailable","message":"${'x'.repeat(300)}"}}`
   const RATE_LIMIT_ERROR = 'HTTP 429 (retry-after-ms=1): {"error":{"code":"rate_limit_exceeded","message":"slow down"}}'
 
-  it.fails('a failed chat turn emits attention_required once', async () => {
+  it('a failed chat turn emits attention_required once', async () => {
     const session = manager.createSession(projectId, 'Failing pilot')
     manager.setPhase(session.id, 'build')
     appendUserMessage(session.id, 'Run the thing.')
@@ -536,7 +536,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(attentionEvents(session.id, 'session.attention_cleared')).toHaveLength(0)
   })
 
-  it.fails('a later successful turn clears the attention without notifying again', async () => {
+  it('a later successful turn clears the attention without notifying again', async () => {
     const session = manager.createSession(projectId, 'Recovering pilot')
     appendUserMessage(session.id, 'Run the thing.')
     const notifySpy = vi.fn(async () => {})
@@ -570,16 +570,21 @@ describe('session attention (STALL-NOTIFY)', () => {
     await Promise.resolve()
     expect(notifySpy).toHaveBeenCalledTimes(1)
 
-    // A later failure re-arms: a second required is emitted.
+    // A later failure re-arms: a second required is emitted and notified.
+    // (cleanupOldEvents after the successful turn may prune the first
+    // persisted required, so the re-arm is proven by the second notification.)
     await runChatTurn({
       sessionManager: manager,
       sessionId: session.id,
       llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
     })
-    expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(2)
+    await vi.waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(2))
+    const required = attentionEvents(session.id, 'session.attention_required')
+    expect(required.length).toBeGreaterThanOrEqual(1)
+    expect(required.at(-1)).toMatchObject({ sessionId: session.id, reason: 'turn_failed' })
   })
 
-  it.fails('turn_failed notifies the proven creator only, with explicit send failures', async () => {
+  it('turn_failed notifies the proven creator only, with explicit send failures', async () => {
     const calls: Array<{ toolName: string; args: Record<string, unknown> }> = []
     const callTool: CallToolFn = async (_serverName, _toolName, args) => {
       calls.push({ toolName: String((args as Record<string, unknown>)['tool_name']), args })
@@ -661,7 +666,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     configure()
   })
 
-  it.fails('gateway routes a worker turn_failed IPC observation into the attention service', async () => {
+  it('gateway routes a worker turn_failed IPC observation into the attention service', async () => {
     const { EventEmitter } = await import('node:events')
     const { SessionWorkerManager } = await import('./worker/manager.js')
     const child = Object.assign(new EventEmitter(), {
