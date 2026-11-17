@@ -445,7 +445,7 @@ describe('manager task launch', () => {
     await expectParity('plain launch prompt', 'plain')
   }, 60_000)
 
-  it.fails('kanban launch keeps the card title after the first turn', async () => {
+  it('kanban launch keeps the card title after the first turn', async () => {
     configureScenario('started')
     const projectId = await targetProject('card-title')
     const task = service.create(projectId, { prompt: '/default Title from the card\nbody' }, { actor: 'human' })

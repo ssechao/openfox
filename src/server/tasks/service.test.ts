@@ -271,15 +271,15 @@ describe('project tasks service', () => {
       expect(launchSpy).not.toHaveBeenCalled()
     })
 
-    it('seeds the session without a prompt-derived title so auto-naming applies', async () => {
+    it('seeds the session titled after the card prompt', async () => {
       const task = create('Investigate and fix the flaky test in CI')
       await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
 
       expect(sm.createdSessions).toHaveLength(1)
-      expect(sm.createdSessions[0]!.title).toBeUndefined()
+      expect(sm.createdSessions[0]!.title).toBe('Investigate and fix the flaky test in CI')
     })
 
-    it.fails('kanban launch titles the session after the card', async () => {
+    it('kanban launch titles the session after the card', async () => {
       await service.setSettings(projectId, { slotLimit: 10 })
       const prompts: [string, string | undefined][] = [
         ['/default Foo bar\nsuite', 'Foo bar'],
