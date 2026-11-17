@@ -1,13 +1,69 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdir, writeFile, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, writeFile, rm, readFile, chmod, stat, readdir } from 'node:fs/promises'
+import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const TEST_DIR = join(tmpdir(), `openfox-config-test-${Date.now()}`)
 
+interface ConfigFaultInjection {
+  syncOnTmp?: boolean
+  rename?: boolean
+}
+
+declare global {
+  var __configFaults: ConfigFaultInjection | undefined
+}
+
 // Mock the paths module
 vi.mock('./paths.js', () => ({
   getGlobalConfigPath: (mode: string) => join(TEST_DIR, mode, 'config.json'),
+  getGlobalDataDir: (mode: string) => join(TEST_DIR, mode),
+  getDatabasePath: (mode: string) => join(TEST_DIR, mode, 'sessions.db'),
+  getAuthConfigPath: (mode: string) => join(TEST_DIR, mode, 'auth.json'),
+  getAuthKeyPath: (mode: string) => join(TEST_DIR, mode, 'auth.key'),
+  getSkillsDir: (mode: string) => join(TEST_DIR, mode, 'skills'),
+  ensureDataDirExists: vi.fn(async () => {}),
+}))
+
+// Fault injection for the atomic write: fail while syncing or renaming the temp file.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const injected = (what: 'sync' | 'rename', path?: string): void => {
+    const faults = globalThis.__configFaults
+    if (!faults) return
+    if (what === 'sync' && faults.syncOnTmp && typeof path === 'string' && path.includes('.tmp')) {
+      throw new Error('injected fsync failure on temp file')
+    }
+    if (what === 'rename' && faults.rename) {
+      throw new Error('injected rename failure')
+    }
+  }
+  return {
+    ...actual,
+    open: vi.fn(async (path: string, flags?: string | number, mode?: number | string) => {
+      const handle = await actual.open(path, flags, mode)
+      return new Proxy(handle, {
+        get(target, prop, receiver) {
+          if (prop === 'sync') {
+            return () => {
+              injected('sync', path)
+              return target.sync()
+            }
+          }
+          const value = Reflect.get(target, prop, receiver)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    }),
+    rename: vi.fn(async (from: string, to: string) => {
+      injected('rename', from)
+      return actual.rename(from, to)
+    }),
+  }
+})
+
+vi.mock('../server/index.js', () => ({
+  createServer: vi.fn(async () => {}),
 }))
 
 describe('config', () => {
@@ -441,6 +497,125 @@ describe('config', () => {
         isActive: false,
       }),
     ])
+  })
+
+  describe('atomic write and explicit read failure (config-atomic-write)', () => {
+    const configPath = join(TEST_DIR, 'production', 'config.json')
+
+    const longProvider = {
+      id: 'long-provider',
+      name: 'A provider with a long entry so the first config is much bigger than the second one',
+      url: 'http://long.example.com:9999/v1/completions',
+      backend: 'vllm' as const,
+      models: [{ id: 'model-a', contextWindow: 200000, source: 'user' as const }],
+      isActive: true,
+      createdAt: new Date().toISOString(),
+    }
+
+    function tmpLeftovers(): Promise<string[]> {
+      return readdir(dirname(configPath)).then((files) => files.filter((f) => f.includes('.tmp')))
+    }
+
+    it.fails('config write shorter than the existing file leaves valid JSON without trailing data', async () => {
+      await saveGlobalConfig('production', { providers: [longProvider], activeProviderId: 'long-provider' })
+      await chmod(configPath, 0o600)
+      const before = await readFile(configPath)
+      expect(before.length).toBeGreaterThan(200)
+
+      globalThis.__configFaults = { syncOnTmp: true }
+      let rejected = false
+      try {
+        await saveGlobalConfig('production', { providers: [] })
+      } catch {
+        rejected = true
+      }
+      globalThis.__configFaults = undefined
+
+      expect(rejected).toBe(true)
+      expect((await readFile(configPath)).equals(before)).toBe(true)
+      expect((await stat(configPath)).mode & 0o777).toBe(0o600)
+      expect(await tmpLeftovers()).toEqual([])
+
+      await saveGlobalConfig('production', { providers: [] })
+      const content = await readFile(configPath, 'utf-8')
+      expect(() => JSON.parse(content)).not.toThrow()
+      expect((await stat(configPath)).mode & 0o777).toBe(0o600)
+      expect(await tmpLeftovers()).toEqual([])
+      const reloaded = await loadGlobalConfig('production')
+      expect(reloaded.providers).toEqual([])
+    })
+
+    it.fails('interrupted config write leaves the previous file intact', async () => {
+      await saveGlobalConfig('production', { providers: [longProvider], activeProviderId: 'long-provider' })
+      const before = await readFile(configPath)
+
+      globalThis.__configFaults = { rename: true }
+      let rejected = false
+      try {
+        await saveGlobalConfig('production', { providers: [] })
+      } catch {
+        rejected = true
+      }
+      globalThis.__configFaults = undefined
+
+      expect(rejected).toBe(true)
+      expect((await readFile(configPath)).equals(before)).toBe(true)
+      expect(await tmpLeftovers()).toEqual([])
+      const reloaded = await loadGlobalConfig('production')
+      expect(reloaded.providers).toHaveLength(1)
+      expect(reloaded.activeProviderId).toBe('long-provider')
+    })
+
+    it('missing config.json keeps first-run behaviour', async () => {
+      const loaded = await loadGlobalConfig('production')
+      expect(loaded.providers).toEqual([])
+    })
+
+    it.fails('corrupted config.json fails startup with explicit path and position', async () => {
+      const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+      const ConfigError = configModule['ConfigError'] as new (message: string) => Error
+      await writeFile(configPath, '{"providers":[]}\n{"extra": 1}\n')
+
+      await expect(loadGlobalConfig('production')).rejects.toBeInstanceOf(ConfigError)
+      await expect(loadGlobalConfig('production')).rejects.toThrow(configPath)
+      await expect(loadGlobalConfig('production')).rejects.toThrow(/position \d+|line \d+ column \d+/)
+
+      await writeFile(configPath, JSON.stringify({ providers: [{ id: 'x', backend: 'bogus' }] }))
+      await expect(loadGlobalConfig('production')).rejects.toBeInstanceOf(ConfigError)
+      await expect(loadGlobalConfig('production')).rejects.toThrow(configPath)
+      await expect(loadGlobalConfig('production')).rejects.toThrow(/providers/)
+
+      const { runServe } = await import('./serve.js')
+      const { createServer } = await import('../server/index.js')
+      const { logger } = await import('../server/utils/logger.js')
+
+      class ExitSentinel extends Error {
+        constructor(public readonly exitCode: number | undefined) {
+          super(`process.exit:${String(exitCode)}`)
+        }
+      }
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+        throw new ExitSentinel(code)
+      }) as never)
+      const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+      let exitCode: number | null | 'no-exit' = 'no-exit'
+      let logged: unknown[][] = []
+      try {
+        await runServe({ mode: 'production', openBrowser: false })
+      } catch (err) {
+        if (err instanceof ExitSentinel) exitCode = err.exitCode ?? null
+      } finally {
+        logged = errorSpy.mock.calls.map((call) => [...call])
+        exitSpy.mockRestore()
+        errorSpy.mockRestore()
+      }
+
+      expect(exitCode).not.toBe('no-exit')
+      expect(exitCode).not.toBe(0)
+      expect(logged.some((call) => String(call[0]).includes(configPath))).toBe(true)
+      expect(createServer).not.toHaveBeenCalled()
+    })
   })
 
   describe('provider apiProtocol', () => {
