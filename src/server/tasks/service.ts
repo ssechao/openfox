@@ -1167,7 +1167,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       const providerId = managerLaunch ? (task.providerId ?? null) : (task.providerId ?? defaults.providerId ?? null)
       const model = managerLaunch ? (task.model ?? null) : (task.model ?? defaults.model ?? null)
       try {
-        session = sessionManager.createSession(projectId, undefined, providerId, model)
+        session = sessionManager.createSession(projectId, launchTitle(task.prompt), providerId, model)
       } catch (error) {
         releaseFreshDelete(slot)
         throw error
@@ -1558,6 +1558,22 @@ function normalizeSchedule(input: TaskSchedule): TaskSchedule {
     occurrencesDone: 0,
     nextRunAt: startAt,
   }
+}
+
+/**
+ * Session title for a launched task: the first non-empty prompt line, with a
+ * leading slash-command token (`/default`, `/<workflow>`) stripped, trimmed,
+ * capped at 100 chars. Empty result yields undefined (default session naming).
+ */
+function launchTitle(prompt: string): string | undefined {
+  const firstLine =
+    prompt
+      .split('\n')
+      .find((line) => line.trim().length > 0)
+      ?.trim() ?? ''
+  const cleaned = firstLine.replace(/^\/\S+\s*/, '').trim()
+  if (!cleaned) return undefined
+  return cleaned.slice(0, 100)
 }
 
 /** Short human-readable label for a prompt (first line, truncated) — used for session names and notices. */
