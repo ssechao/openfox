@@ -1,10 +1,18 @@
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile, mkdir, access } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { readFile, mkdir, access, open, rename, rm, stat } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import type { Mode } from './main.js'
 import { getGlobalConfigPath } from './paths.js'
 import type { Provider, ModelConfig } from '../shared/types.js'
+
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ConfigError'
+  }
+}
 
 export async function configFileExists(mode: Mode): Promise<boolean> {
   const configPath = getGlobalConfigPath(mode)
@@ -63,7 +71,7 @@ const providerSchema = z
     authAdapter: z.string().optional(),
     transportAdapter: z.string().optional(),
     credentialRef: z.string().optional(),
-    apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional(),
+    apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional().catch(undefined),
     logo: z.string().optional(),
     icon: z.string().optional(),
   })
@@ -201,16 +209,47 @@ export type GlobalConfig = z.infer<typeof configSchema>
 // Load / Save
 // ============================================================================
 
+/**
+ * Read the global config. An absent file is a first run and yields defaults; a file that exists but
+ * cannot be read, parsed, or validated raises an explicit ConfigError naming the path — never a
+ * silent fallback to defaults, which would start the server without its providers.
+ */
 export async function loadGlobalConfig(mode: Mode, configPathOverride?: string): Promise<GlobalConfig> {
   const configPath = configPathOverride ?? getGlobalConfigPath(mode)
 
+  let content: string
   try {
-    const content = await readFile(configPath, 'utf-8')
-    const parsed = JSON.parse(content)
-    return configSchema.parse(parsed)
-  } catch {
-    return configSchema.parse({})
+    content = await readFile(configPath, 'utf-8')
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') {
+      return configSchema.parse({})
+    }
+    throw new ConfigError(`Unable to read config file ${configPath}: ${(error as Error).message}`)
   }
+
+  let raw: unknown
+  try {
+    raw = JSON.parse(content)
+  } catch (error) {
+    throw new ConfigError(`Invalid JSON in config file ${configPath}: ${(error as Error).message}`)
+  }
+
+  // A hand-edited config may write an explicit null for "no value"; that reads as absent, not as an
+  // invalid file. Anything else (wrong types, unknown enums, trailing data) is a hard ConfigError.
+  const parsed =
+    raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([, v]) => v !== null))
+      : raw
+
+  const result = configSchema.safeParse(parsed)
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.length > 0 ? issue.path.join('.') : '(root)'}: ${issue.message}`)
+      .join('; ')
+    throw new ConfigError(`Invalid configuration in ${configPath}: ${issues}`)
+  }
+  return result.data
 }
 
 export function getDefaultVisionFallback() {
@@ -291,7 +330,55 @@ export async function saveGlobalConfig(
     ...(config.defaultAgent !== undefined ? { defaultAgent: config.defaultAgent } : {}),
   }
   await mkdir(dirname(configPath), { recursive: true })
-  await writeFile(configPath, JSON.stringify(fullConfig, null, 2))
+  await writeConfigAtomically(configPath, JSON.stringify(fullConfig, null, 2))
+}
+
+/**
+ * Single write point for config.json: full content into a temp file in the same directory, fsync,
+ * atomic rename over the target, then fsync of the directory. On any failure the temp file is
+ * removed and the existing config is left untouched — never a truncated or mixed file on disk.
+ * The file mode is preserved when the target already exists (config holds secrets: 0600 otherwise).
+ */
+async function writeConfigAtomically(configPath: string, content: string): Promise<void> {
+  const dir = dirname(configPath)
+  let mode: number
+  try {
+    mode = (await stat(configPath)).mode & 0o777 || 0o600
+  } catch {
+    mode = 0o600
+  }
+
+  const tmpPath = join(dir, `.config.json.${process.pid}.${randomUUID()}.tmp`)
+  let handle: FileHandle | undefined
+  try {
+    handle = await open(tmpPath, 'w', mode)
+    await handle.chmod(mode)
+    await handle.writeFile(content, 'utf-8')
+    await handle.sync()
+    await handle.close()
+    handle = undefined
+    await rename(tmpPath, configPath)
+  } catch (error) {
+    if (handle) {
+      await handle.close().catch(() => {})
+    }
+    await rm(tmpPath, { force: true }).catch(() => {})
+    throw new ConfigError(`Unable to write config file ${configPath}: ${(error as Error).message}`)
+  }
+
+  if (process.platform !== 'win32') {
+    let dirHandle: FileHandle | undefined
+    try {
+      dirHandle = await open(dir, 'r')
+      await dirHandle.sync()
+    } catch {
+      // Directory fsync is best-effort; the rename itself already succeeded.
+    } finally {
+      if (dirHandle) {
+        await dirHandle.close().catch(() => {})
+      }
+    }
+  }
 }
 
 // ============================================================================

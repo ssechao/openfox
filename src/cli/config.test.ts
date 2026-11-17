@@ -516,7 +516,7 @@ describe('config', () => {
       return readdir(dirname(configPath)).then((files) => files.filter((f) => f.includes('.tmp')))
     }
 
-    it.fails('config write shorter than the existing file leaves valid JSON without trailing data', async () => {
+    it('config write shorter than the existing file leaves valid JSON without trailing data', async () => {
       await saveGlobalConfig('production', { providers: [longProvider], activeProviderId: 'long-provider' })
       await chmod(configPath, 0o600)
       const before = await readFile(configPath)
@@ -545,7 +545,7 @@ describe('config', () => {
       expect(reloaded.providers).toEqual([])
     })
 
-    it.fails('interrupted config write leaves the previous file intact', async () => {
+    it('interrupted config write leaves the previous file intact', async () => {
       await saveGlobalConfig('production', { providers: [longProvider], activeProviderId: 'long-provider' })
       const before = await readFile(configPath)
 
@@ -571,7 +571,7 @@ describe('config', () => {
       expect(loaded.providers).toEqual([])
     })
 
-    it.fails('corrupted config.json fails startup with explicit path and position', async () => {
+    it('corrupted config.json fails startup with explicit path and position', async () => {
       const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
       const ConfigError = configModule['ConfigError'] as new (message: string) => Error
       await writeFile(configPath, '{"providers":[]}\n{"extra": 1}\n')

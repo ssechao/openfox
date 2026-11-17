@@ -4,7 +4,8 @@ import { loadConfig } from '../server/config.js'
 import { logger } from '../server/utils/logger.js'
 import { displayStartupBanner } from '../server/utils/network.js'
 import { detectProviderDefaultsFromUrl } from '../server/llm/backend.js'
-import { loadGlobalConfig, getActiveProvider, getDefaultModel } from './config.js'
+import { ConfigError, loadGlobalConfig, getActiveProvider, getDefaultModel } from './config.js'
+import { cliT } from './i18n.js'
 import { getDatabasePath, getGlobalConfigPath, ensureDataDirExists } from './paths.js'
 import open from 'open'
 import type { Mode } from './main.js'
@@ -22,7 +23,21 @@ export async function runServe(options: ServeOptions): Promise<void> {
   // Ensure data directory exists before starting server
   await ensureDataDirExists(mode)
 
-  const globalConfig = await loadGlobalConfig(mode)
+  let globalConfig: Awaited<ReturnType<typeof loadGlobalConfig>>
+  try {
+    globalConfig = await loadGlobalConfig(mode)
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      const message = cliT({
+        en: `Startup aborted: ${error.message}`,
+        fr: `Démarrage interrompu : ${error.message}`,
+      })
+      logger.error(message)
+      console.error(message)
+      process.exit(1)
+    }
+    throw error
+  }
   const activeProvider = getActiveProvider(globalConfig)
   const env = loadConfig()
 
