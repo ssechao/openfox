@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger.js'
 import { getEventStore } from '../events/store.js'
+import type { StoredEvent } from '../events/types.js'
 import { getSession } from '../db/sessions.js'
 import type { AttentionReason } from '../events/types.js'
 
@@ -106,14 +107,24 @@ interface AttentionEntry {
   detail: string
   sinceMs: number
   armed: boolean
+  /** For waiting reasons: callIds still pending; the entry closes when it empties. */
+  waits: Set<string>
+}
+
+const WAITING_REASONS: AttentionReason[] = ['waiting_question', 'waiting_confirmation', 'waiting_workflow_step']
+
+function isWaitingReason(reason: AttentionReason): boolean {
+  return WAITING_REASONS.includes(reason)
 }
 
 /**
- * Tracks one attention state per (session, reason). Entries are created only
- * by live hooks observed after process start (never backfilled from the DB or
- * from pending-interaction maps), so a restart never re-notifies an old state.
- * A required entry survives until cleared: the event is emitted once per entry
- * into the state and never re-emitted, even across restarts of this service.
+ * Tracks one attention state per (session, reason). The registry is seeded
+ * once per service instance from the persisted attention events (read straight
+ * from the events table, never re-emitted at load), so a restart neither
+ * re-notifies a stall that is still open nor loses the ability to close it.
+ * Waiting entries track their pending callIds: a reason closes only when its
+ * last wait resolves. A required entry survives until cleared: the event is
+ * emitted once per entry into the state and never re-emitted.
  */
 export class SessionAttentionService {
   private readonly now: () => number
@@ -126,6 +137,7 @@ export class SessionAttentionService {
     createdBy: string | null
   } | null
   private readonly entries = new Map<string, AttentionEntry>()
+  private readonly seeded = new Set<string>()
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(deps: AttentionServiceDeps = {}) {
@@ -167,16 +179,24 @@ export class SessionAttentionService {
     this.enter(sessionId, reason, detail, false)
   }
 
-  /** A wait observed by observeWaiting resolved (before or after its event). */
+  /**
+   * A wait observed by observeWaiting resolved. `detail` is the callId (or
+   * step id) of the resolved wait; the sentinel 'phase' (a live phase change
+   * away from waiting) closes every waiting reason for the session.
+   */
   observeWaitingResolved(sessionId: string, detail: string): void {
     if (this.forward) {
       this.forward({ kind: 'waiting_resolved', detail })
       return
     }
-    this.leave(sessionId, 'waiting_question')
-    this.leave(sessionId, 'waiting_confirmation')
-    this.leave(sessionId, 'waiting_workflow_step')
-    void detail
+    this.seed(sessionId)
+    for (const reason of WAITING_REASONS) {
+      if (detail === 'phase') {
+        this.leave(sessionId, reason)
+        continue
+      }
+      this.resolveWait(sessionId, reason, detail)
+    }
   }
 
   /** Session left phase 'blocked'. */
@@ -185,18 +205,79 @@ export class SessionAttentionService {
       this.forward({ kind: 'resumed', detail: 'phase' })
       return
     }
+    this.seed(sessionId)
     this.leave(sessionId, 'blocked')
   }
 
+  /**
+   * Lazily rebuild the open-attention registry for one session from persisted
+   * events, once per service instance. Read-only: never emits, so a restart
+   * re-notifies nothing; seeded entries are armed=false (already notified) and
+   * can still be closed by later observations.
+   */
+  private seed(sessionId: string): void {
+    if (this.seeded.has(sessionId)) return
+    this.seeded.add(sessionId)
+    let events: StoredEvent[]
+    try {
+      events = getEventStore().getEvents(sessionId)
+    } catch {
+      return
+    }
+    for (const event of events) {
+      if (event.type === 'session.attention_required') {
+        const data = event.data as { reason: AttentionReason; detail: string; since: string }
+        const key = `${sessionId}:${data.reason}`
+        if (this.entries.has(key)) continue
+        const sinceMs = Date.parse(data.since)
+        this.entries.set(key, {
+          reason: data.reason,
+          detail: data.detail,
+          sinceMs: Number.isFinite(sinceMs) ? sinceMs : this.now(),
+          armed: false,
+          waits: isWaitingReason(data.reason) ? new Set([data.detail]) : new Set<string>(),
+        })
+      } else if (event.type === 'session.attention_cleared') {
+        const data = event.data as { reason: AttentionReason }
+        this.entries.delete(`${sessionId}:${data.reason}`)
+      }
+    }
+  }
+
   private enter(sessionId: string, reason: AttentionReason, detail: string, immediate: boolean): void {
+    this.seed(sessionId)
     const key = `${sessionId}:${reason}`
-    if (this.entries.has(key)) return
-    const entry: AttentionEntry = { reason, detail, sinceMs: this.now(), armed: true }
+    const existing = this.entries.get(key)
+    if (existing) {
+      if (isWaitingReason(reason)) existing.waits.add(detail)
+      return
+    }
+    const entry: AttentionEntry = {
+      reason,
+      detail,
+      sinceMs: this.now(),
+      armed: true,
+      waits: isWaitingReason(reason) ? new Set([detail]) : new Set<string>(),
+    }
     this.entries.set(key, entry)
     if (immediate) {
       entry.armed = false
       this.emitRequired(sessionId, entry)
     }
+  }
+
+  /** Remove one resolved wait; the reason closes only when its last wait goes. */
+  private resolveWait(sessionId: string, reason: AttentionReason, callId: string): void {
+    const key = `${sessionId}:${reason}`
+    const entry = this.entries.get(key)
+    if (!entry) return
+    entry.waits.delete(callId)
+    if (entry.waits.size > 0) {
+      if (entry.detail === callId) entry.detail = entry.waits.values().next().value ?? entry.detail
+      return
+    }
+    this.entries.delete(key)
+    if (!entry.armed) this.emitCleared(sessionId, entry)
   }
 
   private leave(sessionId: string, reason: AttentionReason): void {

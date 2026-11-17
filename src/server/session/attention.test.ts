@@ -22,6 +22,8 @@ import {
 import { createTasksService, type TasksService } from '../tasks/service.js'
 import { createOpenFoxMcpTools } from '../mcp/server/tools.js'
 import type { OpenFoxMcpToolDeps } from '../mcp/server/types.js'
+import { createOpenFoxCallerIdentityAuthority, createOpenFoxEndpointBinding } from '../mcp/server/caller-identity.js'
+import { applyOpenFoxCallerIdentityInjection } from '../mcp/session-id-injection.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -163,6 +165,50 @@ describe('session attention (STALL-NOTIFY)', () => {
     provideAnswer('call-stale', 'cleanup')
   })
 
+  it('dedup survives a service restart (registry rebuilt from persisted events)', () => {
+    const session = manager.createSession(projectId, 'Reboot cycle')
+    const service = getAttentionService()
+    service.observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
+    expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(1)
+
+    // A service restart must not re-notify a stall that is still open: the
+    // registry is rebuilt from persisted events without re-emitting.
+    resetAttentionService()
+    configure()
+    getAttentionService().observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
+    expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(1)
+
+    // After the restart, leaving the blocked phase still closes the stall
+    // persisted before the restart.
+    manager.setPhase(session.id, 'blocked')
+    manager.setPhase(session.id, 'build')
+    const cleared = attentionEvents(session.id, 'session.attention_cleared')
+    expect(cleared).toHaveLength(1)
+    expect(cleared[0]).toMatchObject({ sessionId: session.id, reason: 'blocked' })
+  })
+
+  it('a second open question still alerts after the first is answered', () => {
+    const session = manager.createSession(projectId, 'Two questions')
+    const service = getAttentionService()
+
+    registerPendingQuestion('call-a', session.id, 'First?', 'text')
+    registerPendingQuestion('call-b', session.id, 'Second?', 'text')
+    // Answering the first question before the delay must not cancel the alert
+    // owed for the second one, which is still pending.
+    provideAnswer('call-a', 'first answer')
+    clock.nowMs += 10 * 60 * 1000 + 1
+    service.sweep()
+
+    const required = attentionEvents(session.id, 'session.attention_required')
+    expect(required).toHaveLength(1)
+    expect(required[0]).toMatchObject({ sessionId: session.id, reason: 'waiting_question', detail: 'call-b' })
+
+    provideAnswer('call-b', 'second answer')
+    const cleared = attentionEvents(session.id, 'session.attention_cleared')
+    expect(cleared).toHaveLength(1)
+    expect(cleared[0]).toMatchObject({ sessionId: session.id, reason: 'waiting_question' })
+  })
+
   it('attention_required notifies the creator pilot through Aether', async () => {
     const calls: Array<{
       serverName: string
@@ -219,15 +265,40 @@ describe('session attention (STALL-NOTIFY)', () => {
     await notifyCreator({ ...params, createdBy: null })
     expect(calls).toHaveLength(0)
 
-    // A failed contact lookup is an explicit logged failure, no fallback channel.
+    // A failed contact lookup is an explicit logged failure, no fallback
+    // channel. The spy proves the contact probe really ran exactly once and
+    // the send never was attempted.
     calls.length = 0
     const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
-    const failing: CallToolFn = async () => ({ success: false, error: 'no hub session established yet' })
-    await createAetherNotifier(failing)(params)
-    const logged = errorLog.mock.calls.flat().map(String).join(' ')
-    errorLog.mockRestore()
+    const failingContact: CallToolFn = async (serverName, toolName, args, sessionId) => {
+      calls.push({ serverName, toolName, args, sessionId })
+      return { success: false, error: 'no hub session established yet' }
+    }
+    await createAetherNotifier(failingContact)(params)
+    expect(calls).toHaveLength(1)
+    expect((calls[0]!.args as Record<string, unknown>)['tool_name']).toBe('ht_get_contact_info')
+    let logged = errorLog.mock.calls.map((call) => call.map((arg) => JSON.stringify(arg)).join(' ')).join(' ')
     expect(logged).toContain('attention_notify_failed')
-    expect(calls).toHaveLength(0)
+    expect(logged).toContain('ht_get_contact_info')
+
+    // Contact OK but delivery fails: exactly one send was attempted and the
+    // failure is logged with its stage.
+    calls.length = 0
+    errorLog.mockClear()
+    const failingSend: CallToolFn = async (serverName, toolName, args, sessionId) => {
+      calls.push({ serverName, toolName, args, sessionId })
+      if ((args as Record<string, unknown>)['tool_name'] === 'ht_get_contact_info') {
+        return { success: true, output: 'peer_id: peer-creator-42' }
+      }
+      return { success: false, error: 'peer offline' }
+    }
+    await createAetherNotifier(failingSend)(params)
+    expect(calls).toHaveLength(2)
+    expect((calls[1]!.args as Record<string, unknown>)['tool_name']).toBe('ht_send_to_peer')
+    logged = errorLog.mock.calls.map((call) => call.map((arg) => JSON.stringify(arg)).join(' ')).join(' ')
+    expect(logged).toContain('attention_notify_failed')
+    expect(logged).toContain('ht_send_to_peer')
+    errorLog.mockRestore()
   })
 
   it('session creator is recorded only from a proven identity', async () => {
@@ -280,8 +351,19 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(manager.getSession(launch.sessionId)?.createdBy).toBe(launcher.id)
 
     // --- openfox_create_session records only a proven caller ---------------
+    // Real HMAC authority (not mocked): the gateway is the production
+    // createOpenFoxCallerIdentityAuthority + createOpenFoxEndpointBinding, and
+    // the proof reaches the tool through the real injection helper.
     const created = new Map<string, { createdBy: string | null }>()
-    const issued = new Set<string>()
+    const authority = createOpenFoxCallerIdentityAuthority()
+    const binding = createOpenFoxEndpointBinding({
+      selfEndpointUrl: () => 'http://127.0.0.1:450/mcp',
+      proxyServerName: 'mcp-lazy',
+      proxyTargetName: 'openfox',
+      getProxyConfig: () => ({ transport: 'stdio', command: 'npx', args: ['mcp-lazy'] }),
+      resolveProxyTargetUrl: () => 'http://127.0.0.1:450/mcp',
+    })
+    const gateway = { issueProof: authority.issueProof, isOwnEndpoint: binding }
     const deps = {
       sessionManager: {
         getSession: (id: string) => (id === 'caller-1' ? { id: 'caller-1', projectId, mode: 'manager' } : undefined),
@@ -295,33 +377,39 @@ describe('session attention (STALL-NOTIFY)', () => {
           created.set(id, { createdBy })
         }),
       },
-      verifyCallerIdentity: (input: {
-        callerSessionId: string
-        proof: unknown
-        toolName: string
-        targetSessionId: string
-      }) =>
-        typeof input.proof === 'string' && issued.has(input.proof)
-          ? { ok: true as const, callerSessionId: input.callerSessionId }
-          : { ok: false as const, error: 'trusted OpenFox caller identity is required' },
+      verifyCallerIdentity: (input: Parameters<typeof authority.verify>[0]) => authority.verify(input),
     } as unknown as OpenFoxMcpToolDeps
     const tools = createOpenFoxMcpTools(deps)
     const createTool = tools.find((tool) => tool.name === 'openfox_create_session')
     expect(createTool).toBeDefined()
 
-    // The host injects a proof only for a caller it observed itself.
-    issued.add('proof-1')
-    await createTool!.handler({
-      projectId,
-      title: 'Proven child',
-      openfox_session_id: 'caller-1',
-      openfox_session_proof: 'proof-1',
-    })
+    const serverConfig = { transport: 'http' as const, url: 'http://127.0.0.1:450/mcp' }
+    const inject = (args: Record<string, unknown>, caller: string | undefined) =>
+      applyOpenFoxCallerIdentityInjection(gateway, 'openfox', serverConfig, 'openfox_create_session', args, caller)
+
+    // The host injects an HMAC proof only for a caller it observed itself.
+    const proven = inject({ projectId, title: 'Proven child' }, 'caller-1')
+    if (!proven.ok) throw new Error('host injection refused a proven caller')
+    await createTool!.handler(proven.args)
     expect([...created.values()]).toEqual([{ createdBy: 'caller-1' }])
 
     // A model-declared (unproven) session id must not be trusted.
     await createTool!.handler({ projectId, title: 'Forged child', openfox_session_id: 'caller-1' })
     expect([...created.values()]).toEqual([{ createdBy: 'caller-1' }, { createdBy: null }])
+
+    // A proof issued for another tool tuple must not validate for create.
+    const wrongTuple = authority.issueProof({
+      callerSessionId: 'caller-1',
+      toolName: 'openfox_delete_session',
+      targetSessionId: projectId,
+    })
+    await createTool!.handler({
+      projectId,
+      title: 'Wrong tuple',
+      openfox_session_id: 'caller-1',
+      openfox_session_proof: wrongTuple,
+    })
+    expect([...created.values()]).toEqual([{ createdBy: 'caller-1' }, { createdBy: null }, { createdBy: null }])
 
     // --- migration keeps existing rows and columns -------------------------
     const db = getDatabase()
