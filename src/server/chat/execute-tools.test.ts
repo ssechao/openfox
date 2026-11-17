@@ -6,6 +6,12 @@ import type { TurnEvent } from '../events/types.js'
 import { executeTools, transformSubAgentAliases, createInterruptedResult } from './execute-tools.js'
 import { PathAccessDeniedError } from '../tools/index.js'
 
+const { loggerErrorMock } = vi.hoisted(() => ({ loggerErrorMock: vi.fn() }))
+
+vi.mock('../utils/logger.js', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: loggerErrorMock },
+}))
+
 vi.mock('../agents/registry.js', () => ({
   loadAllAgentsDefault: vi.fn(),
   findAgentById: vi.fn(),
@@ -760,5 +766,44 @@ describe('executeTools', () => {
 
     expect(result.returnValueContent).toBe('my result')
     expect(result.returnValueResult).toBe('completed')
+  })
+
+  it.fails('logs an explicit error when an announced tool is missing from the execution registry', async () => {
+    const append = vi.fn()
+    const executeMock = vi.fn().mockResolvedValue({
+      success: false,
+      error: 'Unknown tool: openfox_delete_session. Available tools: read_file',
+      durationMs: 0,
+      truncated: false,
+    })
+    const registry = {
+      tools: [{ name: 'read_file' }],
+      definitions: [{ type: 'function', function: { name: 'read_file', description: 'Read', parameters: {} } }],
+      execute: executeMock,
+    } as unknown as ToolRegistry
+
+    const toolCalls: ToolCall[] = [{ id: 'call-1', name: 'openfox_delete_session', arguments: {} }]
+
+    const result = await executeTools(
+      'msg-1',
+      toolCalls,
+      makeCtx({
+        toolRegistry: registry,
+        announcedToolNames: new Set(['read_file', 'openfox_delete_session']),
+      }),
+      append,
+    )
+
+    // The mismatch is a server-side fault: never dispatch, never stay silent.
+    expect(executeMock).not.toHaveBeenCalled()
+    expect(loggerErrorMock).toHaveBeenCalledWith(
+      'Announced tool is missing from the execution registry',
+      expect.objectContaining({
+        code: 'TOOL_ANNOUNCED_BUT_NOT_EXECUTABLE',
+        tool: 'openfox_delete_session',
+      }),
+    )
+    // The model gets an explicit, actionable error instead of a silent failure.
+    expect(result.toolMessages[0]?.content).toContain('TOOL_ANNOUNCED_BUT_NOT_EXECUTABLE')
   })
 })
