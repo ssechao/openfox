@@ -528,6 +528,13 @@ function runMigrations(db: Database.Database): void {
     db.exec(`ALTER TABLE sessions ADD COLUMN branch TEXT`)
   }
 
+  // Migration: Add created_by column (proven creator session; STALL-NOTIFY).
+  // Additive only: existing rows keep NULL, no rewrite.
+  if (!columnNames.includes('created_by')) {
+    logger.info('Migrating sessions table: adding created_by column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN created_by TEXT`)
+  }
+
   // Create workflow_executions table for first-class workflow state management
   db.exec(`
     CREATE TABLE IF NOT EXISTS workflow_executions (

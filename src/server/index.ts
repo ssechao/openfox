@@ -331,6 +331,16 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   })
   setMcpManagerForTools(mcpManager)
   const { setGlobalMcpServersProvider } = await import('./mcp/session-overrides.js')
+  // STALL-NOTIFY: the gateway is the sole attention emitter. Observations from
+  // workers arrive over IPC; events append here and Aether notifications use
+  // the gateway's MCP connections. No retroactive sweep at startup (D4).
+  const { configureAttentionService, createAetherNotifier, getAttentionService } =
+    await import('./session/attention.js')
+  configureAttentionService({
+    notify: createAetherNotifier((serverName, toolName, args, sessionId) =>
+      mcpManager.callTool(serverName, toolName, args, sessionId),
+    ),
+  })
   setGlobalMcpServersProvider(() =>
     mcpManager.getAllServers().map((s) => ({ name: s.name, disabled: s.config.disabled })),
   )
@@ -4555,6 +4565,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
           startQueueProcessor: () => queueProcessor.start(),
           runBootAutoContinuations: continueStaleSessions,
           startTaskScheduler: () => taskScheduler.start(),
+          startAttentionSweeper: () => getAttentionService().start(),
         })
         const actualPort = await new Promise<number>((resolve, reject) => {
           const onError = (error: Error) => {
@@ -4588,6 +4599,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         await processSupervisor?.shutdown()
         queueProcessor.stop()
         taskScheduler.stop()
+        getAttentionService().stop()
         diagnosticsCollector.stop()
         throw error
       }
@@ -4606,6 +4618,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }
       queueProcessor.stop()
       taskScheduler.stop()
+      getAttentionService().stop()
       diagnosticsCollector.stop()
       for (const session of sessionManager.listSessions()) {
         cancelQuestionsForSession(session.id, 'Gateway shutdown')

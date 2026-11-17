@@ -28,6 +28,7 @@ import { logger } from '../../utils/logger.js'
 import { shutdownLspManager } from '../../lsp/index.js'
 import { createWorkerDiagnosticsCollector } from '../../diagnostics/worker-collector.js'
 import { setMcpTools } from '../../tools/index.js'
+import { configureAttentionService } from '../attention.js'
 import { WorkerMcpClient } from './mcp-client.js'
 import { WorkerInteractiveClient } from './interactive-client.js'
 import { WorkerBackgroundClient } from './background-client.js'
@@ -79,6 +80,9 @@ process.on('message', (raw) => {
   if (msg.workerId !== token.workerId || msg.generation !== token.generation) return
   if (msg.type === 'start') {
     const identity = { ...token, sessionId: msg.sessionId }
+    configureAttentionService({
+      forward: (observation) => send({ ...identity, type: 'attention.observation', ...observation }),
+    })
     mcpClient = new WorkerMcpClient(identity, send)
     interactiveClient = new WorkerInteractiveClient(identity, send)
     backgroundClient = new WorkerBackgroundClient(identity, send)
