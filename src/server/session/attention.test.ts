@@ -713,7 +713,7 @@ describe('session attention (STALL-NOTIFY)', () => {
   // structured code), never raw error text; no secret may reach the persisted event,
   // the IPC observation or the Aether message; the message is capped at 800 BYTES by
   // truncating the title, never the error detail.
-  it.fails('R-4 detail is whitelisted, no secret leaks, message capped at 800 bytes', async () => {
+  it('R-4 detail is whitelisted, no secret leaks, message capped at 800 bytes', async () => {
     const RAW_ERROR =
       'LLM request failed: HTTP 401 Bad Request: {"error":{"message":"Invalid API key provided: Bearer sk-fake-1234567890 (api_key=SECRET123)","type":"invalid_request_error","code":"invalid_api_key"}}'
 
@@ -736,6 +736,7 @@ describe('session attention (STALL-NOTIFY)', () => {
       sessionManager: manager,
       sessionId: session.id,
       llmClient: scriptedClient([{ error: RAW_ERROR }]) as never,
+      llmRetryPolicy: { maxAttempts: 2, maxDurationMs: 60_000, backoffMs: [1], minIntervalMs: 1 },
     })
 
     const required = attentionEvents(session.id, 'session.attention_required')

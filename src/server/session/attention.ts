@@ -49,7 +49,53 @@ export function formatAttentionMessage(params: AttentionNotifyParams): string {
         ? 'TOUR EN ÉCHEC'
         : 'SESSION EN ATTENTE'
   const since = new Date(params.sinceMs).toISOString()
-  return `⚠ ${label} ${params.title} (${params.sessionId}) : ${params.reason} ${params.detail} depuis ${since}`
+  const errorCore = `${params.reason} ${params.detail}`
+  const template = (title: string) => `⚠ ${label} ${title} (${params.sessionId}) : ${errorCore} depuis ${since}`
+  return withTitleFittingBytes(template, params.title, ATTENTION_MESSAGE_MAX_BYTES)
+}
+
+export const ATTENTION_MESSAGE_MAX_BYTES = 800
+
+/**
+ * Cap the Aether message in UTF-8 bytes by shortening the session title only —
+ * the error core (reason + whitelisted detail) is never cut. Titles are cut on
+ * code points with an ellipse; if even an empty title overflows, the message is
+ * returned as-is rather than mangling the error core.
+ */
+function withTitleFittingBytes(template: (title: string) => string, title: string, maxBytes: number): string {
+  if (Buffer.byteLength(template(title), 'utf8') <= maxBytes) return template(title)
+  const overhead = Buffer.byteLength(template('…'), 'utf8')
+  const budget = maxBytes - overhead
+  if (budget <= 0) return template('')
+  let kept = ''
+  let used = 0
+  for (const char of title) {
+    const size = Buffer.byteLength(char, 'utf8')
+    if (used + size > budget) break
+    kept += char
+    used += size
+  }
+  return template(`${kept}…`)
+}
+
+const HTTP_STATUS_PATTERN = /HTTP\s+(\d{3})/
+const ERROR_CODE_PATTERN = /"code"\s*:\s*"([a-z][a-z0-9_.-]{0,60})"/
+
+/**
+ * Whitelist for the persisted/notified turn detail (Astra B1): `HTTP <status>`
+ * plus a structured error code extracted from the JSON body, nothing else.
+ * Raw provider messages can embed credentials (Bearer keys, api_key values)
+ * and must never reach the event store or the Aether channel.
+ */
+const WHITELISTED_DETAIL = /^HTTP \d{3}( [a-z][a-z0-9_.-]{0,60})?$/
+
+export function sanitizeTurnDetail(raw: string): string {
+  const trimmed = raw.trim()
+  if (WHITELISTED_DETAIL.test(trimmed)) return trimmed
+  const status = raw.match(HTTP_STATUS_PATTERN)?.[1]
+  const code = raw.match(ERROR_CODE_PATTERN)?.[1]
+  if (!status) return code ? `error ${code}` : 'turn_error'
+  return code ? `HTTP ${status} ${code}` : `HTTP ${status}`
 }
 
 function parsePeerId(output: string | undefined): string | null {
@@ -216,12 +262,12 @@ export class SessionAttentionService {
 
   /** A chat turn ended in a non-recoverable LLM error (STALL-NOTIFY-2). */
   observeTurnFailed(sessionId: string, detail: string): void {
-    const truncated = detail.slice(0, 120)
+    const sanitized = sanitizeTurnDetail(detail).slice(0, 120)
     if (this.forward) {
-      this.forward({ kind: 'turn_failed', detail: truncated })
+      this.forward({ kind: 'turn_failed', detail: sanitized })
       return
     }
-    this.enter(sessionId, 'turn_failed', truncated, true)
+    this.enter(sessionId, 'turn_failed', sanitized, true)
   }
 
   /** A chat turn completed without error (STALL-NOTIFY-2). */
