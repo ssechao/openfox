@@ -8,6 +8,7 @@ const TEST_DIR = join(tmpdir(), `openfox-config-test-${Date.now()}`)
 interface ConfigFaultInjection {
   syncOnTmp?: boolean
   rename?: boolean
+  dirSync?: boolean
 }
 
 declare global {
@@ -33,6 +34,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     if (!faults) return
     if (what === 'sync' && faults.syncOnTmp && typeof path === 'string' && path.includes('.tmp')) {
       throw new Error('injected fsync failure on temp file')
+    }
+    if (what === 'sync' && faults.dirSync && typeof path === 'string' && !path.includes('.tmp')) {
+      throw new Error('injected fsync failure on directory')
     }
     if (what === 'rename' && faults.rename) {
       throw new Error('injected rename failure')
@@ -583,7 +587,76 @@ describe('config', () => {
       await writeFile(configPath, JSON.stringify({ providers: [{ id: 'x', backend: 'bogus' }] }))
       await expect(loadGlobalConfig('production')).rejects.toBeInstanceOf(ConfigError)
       await expect(loadGlobalConfig('production')).rejects.toThrow(configPath)
+      await expect(loadGlobalConfig('production')).rejects.toThrow(/providers\.0\.backend/)
+    })
+
+    it('rejects explicit null section values instead of falling back to defaults', async () => {
+      const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+      const ConfigError = configModule['ConfigError'] as new (message: string) => Error
+      await writeFile(configPath, JSON.stringify({ providers: null, server: null }))
+
+      await expect(loadGlobalConfig('production')).rejects.toBeInstanceOf(ConfigError)
       await expect(loadGlobalConfig('production')).rejects.toThrow(/providers/)
+      await expect(loadGlobalConfig('production')).rejects.toThrow(/server/)
+    })
+
+    it('rejects an unknown apiProtocol enum value with its full path', async () => {
+      const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+      const ConfigError = configModule['ConfigError'] as new (message: string) => Error
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          providers: [{ id: 'p', name: 'p', url: 'http://x', backend: 'unknown', apiProtocol: 'bogus' }],
+        }),
+      )
+
+      await expect(loadGlobalConfig('production')).rejects.toBeInstanceOf(ConfigError)
+      await expect(loadGlobalConfig('production')).rejects.toThrow(/providers\.0\.apiProtocol/)
+    })
+
+    it('invalid JSON diagnostic is neutral and never leaks file content', async () => {
+      const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+      const ConfigError = configModule['ConfigError'] as new (message: string) => Error
+      await writeFile(configPath, '{"apiKey": "SENTINELLE-NE-PAS-FUITER" broken}')
+
+      let error: unknown
+      await loadGlobalConfig('production').then(
+        () => undefined,
+        (err: unknown) => {
+          error = err
+        },
+      )
+      expect(error).toBeInstanceOf(ConfigError)
+      expect((error as Error).message).toContain(configPath)
+      expect((error as Error).message).toMatch(/position \d+|line \d+ column \d+/)
+      expect((error as Error).message).not.toContain('SENTINELLE-NE-PAS-FUITER')
+    })
+
+    it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)(
+      'unreadable config file raises an explicit error naming the path',
+      async () => {
+        const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+        const ConfigError = configModule['ConfigError'] as new (message: string) => Error
+        await saveGlobalConfig('production', { providers: [] })
+        await chmod(configPath, 0o000)
+        try {
+          let error: unknown
+          await loadGlobalConfig('production').then(
+            () => undefined,
+            (err: unknown) => {
+              error = err
+            },
+          )
+          expect(error).toBeInstanceOf(ConfigError)
+          expect((error as Error).message).toContain(configPath)
+        } finally {
+          await chmod(configPath, 0o600)
+        }
+      },
+    )
+
+    it('startup on broken JSON exits with code 1, logs once, and does not leak secrets', async () => {
+      await writeFile(configPath, '{"providers": [{"apiKey": "SENTINELLE-DEMARRAGE"} broken}')
 
       const { runServe } = await import('./serve.js')
       const { createServer } = await import('../server/index.js')
@@ -598,23 +671,88 @@ describe('config', () => {
         throw new ExitSentinel(code)
       }) as never)
       const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
       let exitCode: number | null | 'no-exit' = 'no-exit'
       let logged: unknown[][] = []
+      let consoleCalls: unknown[][] = []
       try {
         await runServe({ mode: 'production', openBrowser: false })
       } catch (err) {
         if (err instanceof ExitSentinel) exitCode = err.exitCode ?? null
       } finally {
         logged = errorSpy.mock.calls.map((call) => [...call])
+        consoleCalls = consoleSpy.mock.calls.map((call) => [...call])
         exitSpy.mockRestore()
         errorSpy.mockRestore()
+        consoleSpy.mockRestore()
       }
 
-      expect(exitCode).not.toBe('no-exit')
-      expect(exitCode).not.toBe(0)
-      expect(logged.some((call) => String(call[0]).includes(configPath))).toBe(true)
+      expect(exitCode).toBe(1)
+      expect(logged).toHaveLength(1)
+      expect(consoleCalls).toHaveLength(0)
+      expect(String(logged[0]![0])).toContain(configPath)
+      expect(String(logged[0]![0])).not.toContain('SENTINELLE-DEMARRAGE')
       expect(createServer).not.toHaveBeenCalled()
+    })
+
+    it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)(
+      'startup on unreadable config file exits with code 1',
+      async () => {
+        await saveGlobalConfig('production', { providers: [] })
+        await chmod(configPath, 0o000)
+
+        const { runServe } = await import('./serve.js')
+        const { logger } = await import('../server/utils/logger.js')
+
+        class ExitSentinel extends Error {
+          constructor(public readonly exitCode: number | undefined) {
+            super(`process.exit:${String(exitCode)}`)
+          }
+        }
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+          throw new ExitSentinel(code)
+        }) as never)
+        const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+        let exitCode: number | null | 'no-exit' = 'no-exit'
+        let logged: unknown[][] = []
+        try {
+          await runServe({ mode: 'production', openBrowser: false })
+        } catch (err) {
+          if (err instanceof ExitSentinel) exitCode = err.exitCode ?? null
+        } finally {
+          logged = errorSpy.mock.calls.map((call) => [...call])
+          await chmod(configPath, 0o600)
+          exitSpy.mockRestore()
+          errorSpy.mockRestore()
+        }
+
+        expect(exitCode).toBe(1)
+        expect(logged.some((call) => String(call[0]).includes(configPath))).toBe(true)
+      },
+    )
+
+    it('directory fsync failure after rename surfaces an explicit error without losing the write', async () => {
+      const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+      const ConfigError = configModule['ConfigError'] as new (message: string) => Error
+      await saveGlobalConfig('production', { providers: [] })
+
+      globalThis.__configFaults = { dirSync: true }
+      let error: unknown
+      try {
+        await saveGlobalConfig('production', { providers: [longProvider] })
+      } catch (err) {
+        error = err
+      } finally {
+        globalThis.__configFaults = undefined
+      }
+
+      expect(error).toBeInstanceOf(ConfigError)
+      expect((error as Error).message).toContain(configPath)
+      const written = JSON.parse(await readFile(configPath, 'utf-8'))
+      expect(written.providers).toHaveLength(1)
+      expect(await tmpLeftovers()).toEqual([])
     })
   })
 
@@ -637,7 +775,9 @@ describe('config', () => {
       expect(loaded.providers[0]?.apiProtocol).toBe('responses')
     })
 
-    it('drops an unknown apiProtocol value', async () => {
+    it('rejects an unknown apiProtocol value instead of silently dropping it', async () => {
+      const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+      const ConfigError = configModule['ConfigError'] as new (message: string) => Error
       await writeFile(
         join(TEST_DIR, 'production', 'config.json'),
         JSON.stringify({
@@ -645,8 +785,7 @@ describe('config', () => {
         }),
       )
 
-      const loaded = await loadGlobalConfig('production')
-      expect(loaded.providers[0]?.apiProtocol).toBeUndefined()
+      await expect(loadGlobalConfig('production')).rejects.toBeInstanceOf(ConfigError)
     })
   })
 })

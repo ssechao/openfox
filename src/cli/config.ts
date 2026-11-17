@@ -71,7 +71,7 @@ const providerSchema = z
     authAdapter: z.string().optional(),
     transportAdapter: z.string().optional(),
     credentialRef: z.string().optional(),
-    apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional().catch(undefined),
+    apiProtocol: z.enum(['auto', 'responses', 'chat-completions']).optional(),
     logo: z.string().optional(),
     icon: z.string().optional(),
   })
@@ -232,17 +232,14 @@ export async function loadGlobalConfig(mode: Mode, configPathOverride?: string):
   try {
     raw = JSON.parse(content)
   } catch (error) {
-    throw new ConfigError(`Invalid JSON in config file ${configPath}: ${(error as Error).message}`)
+    const position =
+      /line \d+ column \d+/.exec((error as Error).message)?.[0] ??
+      /position \d+/.exec((error as Error).message)?.[0] ??
+      'an unknown position'
+    throw new ConfigError(`Invalid JSON in config file ${configPath} (${position}).`)
   }
 
-  // A hand-edited config may write an explicit null for "no value"; that reads as absent, not as an
-  // invalid file. Anything else (wrong types, unknown enums, trailing data) is a hard ConfigError.
-  const parsed =
-    raw !== null && typeof raw === 'object' && !Array.isArray(raw)
-      ? Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([, v]) => v !== null))
-      : raw
-
-  const result = configSchema.safeParse(parsed)
+  const result = configSchema.safeParse(raw)
   if (!result.success) {
     const issues = result.error.issues
       .map((issue) => `${issue.path.length > 0 ? issue.path.join('.') : '(root)'}: ${issue.message}`)
@@ -371,8 +368,10 @@ async function writeConfigAtomically(configPath: string, content: string): Promi
     try {
       dirHandle = await open(dir, 'r')
       await dirHandle.sync()
-    } catch {
-      // Directory fsync is best-effort; the rename itself already succeeded.
+    } catch (error) {
+      throw new ConfigError(
+        `Unable to durably commit config file ${configPath}: the rename succeeded but the directory could not be synced: ${(error as Error).message}`,
+      )
     } finally {
       if (dirHandle) {
         await dirHandle.close().catch(() => {})

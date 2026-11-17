@@ -33,7 +33,6 @@ export async function runServe(options: ServeOptions): Promise<void> {
         fr: `Démarrage interrompu : ${error.message}`,
       })
       logger.error(message)
-      console.error(message)
       process.exit(1)
     }
     throw error

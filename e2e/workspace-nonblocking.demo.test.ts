@@ -218,7 +218,6 @@ async function startInstance(): Promise<Instance> {
     JSON.stringify({
       version: 1,
       providers: [],
-      activeProviderId: null,
     }),
     'utf-8',
   )
