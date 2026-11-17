@@ -171,8 +171,8 @@ export type GatewayToWorkerMessage =
 
 export type AttentionObservationMessage = WorkerIpcIdentity & {
   type: 'attention.observation'
-  kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed'
-  reason?: 'blocked' | 'waiting_question' | 'waiting_confirmation' | 'waiting_workflow_step'
+  kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed' | 'turn_failed' | 'turn_succeeded'
+  reason?: 'blocked' | 'waiting_question' | 'waiting_confirmation' | 'waiting_workflow_step' | 'turn_failed'
   detail: string
 }
 

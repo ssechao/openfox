@@ -45,7 +45,8 @@ export interface StoredEvent<T extends TurnEvent = TurnEvent> {
 // Turn Events (discriminated union)
 // ============================================================================
 
-export type AttentionReason = 'blocked' | 'waiting_question' | 'waiting_confirmation' | 'waiting_workflow_step'
+export type AttentionReason =
+  'blocked' | 'waiting_question' | 'waiting_confirmation' | 'waiting_workflow_step' | 'turn_failed'
 
 export type TurnEvent =
   // ----------------------------------------------------------------------------

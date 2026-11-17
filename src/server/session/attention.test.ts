@@ -8,7 +8,7 @@ import type { Config } from '../../shared/types.js'
 import { loadConfig } from '../config.js'
 import { closeDatabase, getDatabase, initDatabase } from '../db/index.js'
 import { createProject, updateProject } from '../db/projects.js'
-import { initEventStore, getEventStore } from '../events/index.js'
+import { initEventStore, getEventStore, getCurrentWindowMessageOptions } from '../events/index.js'
 import { logger } from '../utils/logger.js'
 import { SessionManager } from './manager.js'
 import { provideAnswer, registerPendingQuestion } from '../tools/ask.js'
@@ -24,6 +24,18 @@ import { createOpenFoxMcpTools } from '../mcp/server/tools.js'
 import type { OpenFoxMcpToolDeps } from '../mcp/server/types.js'
 import { createOpenFoxCallerIdentityAuthority, createOpenFoxEndpointBinding } from '../mcp/server/caller-identity.js'
 import { applyOpenFoxCallerIdentityInjection } from '../mcp/session-id-injection.js'
+
+vi.mock('../lsp/index.js', () => ({
+  getLspManager: vi.fn(() => undefined),
+  shutdownLspManager: vi.fn(async () => {}),
+}))
+
+vi.mock('../git/workspace.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../git/workspace.js')>()),
+  getGitBranch: vi.fn(async () => null),
+}))
+
+import { runChatTurn } from '../chat/orchestrator.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -429,5 +441,265 @@ describe('session attention (STALL-NOTIFY)', () => {
     const migrated = getDatabase().prepare(`SELECT created_by FROM sessions WHERE id = 'legacy-1'`).get() as
       { created_by: string | null } | undefined
     expect(migrated?.created_by).toBeNull()
+  })
+
+  // --------------------------------------------------------------------------
+  // STALL-NOTIFY-2: failed plain chat turns
+  // --------------------------------------------------------------------------
+
+  const scriptedClient = (script: Array<{ error?: string; content?: string }>) => {
+    let call = 0
+    return {
+      complete: async () => ({
+        id: 'resp',
+        content: '',
+        toolCalls: [],
+        finishReason: 'stop' as const,
+        usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+      }),
+      getModel: () => 'scripted-model',
+      getProfile: () => ({}) as never,
+      getBackend: () => 'unknown' as const,
+      setBackend: () => {},
+      setModel: () => {},
+      stream: async function* (): AsyncGenerator<import('../llm/types.js').LLMStreamEvent> {
+        const step = script[Math.min(call++, script.length - 1)]!
+        if (step.error) {
+          yield { type: 'error', error: step.error }
+          return
+        }
+        yield { type: 'text_delta', content: step.content ?? 'All done.' }
+        yield {
+          type: 'done',
+          response: {
+            id: 'resp',
+            content: step.content ?? 'All done.',
+            toolCalls: [],
+            finishReason: 'stop' as const,
+            usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11 },
+          },
+        }
+      },
+    }
+  }
+
+  const appendUserMessage = (sessionId: string, content: string) => {
+    const store = getEventStore()
+    const messageId = crypto.randomUUID()
+    store.append(sessionId, {
+      type: 'message.start',
+      data: { messageId, role: 'user', content, ...(getCurrentWindowMessageOptions(sessionId) ?? {}) },
+    })
+    store.append(sessionId, { type: 'message.done', data: { messageId } })
+  }
+
+  const NATIVE_CTX_ERROR = `HTTP 400: {"error":{"code":"native_context_unavailable","message":"${'x'.repeat(300)}"}}`
+  const RATE_LIMIT_ERROR = 'HTTP 429 (retry-after-ms=1): {"error":{"code":"rate_limit_exceeded","message":"slow down"}}'
+
+  it.fails('a failed chat turn emits attention_required once', async () => {
+    const session = manager.createSession(projectId, 'Failing pilot')
+    manager.setPhase(session.id, 'build')
+    appendUserMessage(session.id, 'Run the thing.')
+
+    // One turn whose LLM requests keep failing internally (429 retried to
+    // exhaustion) must emit exactly one attention_required.
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ error: RATE_LIMIT_ERROR }]) as never,
+      llmRetryPolicy: { maxAttempts: 2, maxDurationMs: 60_000, backoffMs: [1], minIntervalMs: 1 },
+    })
+
+    let required = attentionEvents(session.id, 'session.attention_required')
+    expect(required).toHaveLength(1)
+    expect(required[0]).toMatchObject({
+      sessionId: session.id,
+      projectId,
+      reason: 'turn_failed',
+      since: new Date(clock.nowMs).toISOString(),
+    })
+    const detail = String((required[0] as { detail: string }).detail)
+    expect(detail.startsWith('HTTP 429')).toBe(true)
+    expect(detail.length).toBeLessThanOrEqual(120)
+
+    // A non-retryable 400 within the same ongoing failure must not re-emit.
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
+    })
+    required = attentionEvents(session.id, 'session.attention_required')
+    expect(required).toHaveLength(1)
+
+    // The session phase is untouched: a failed chat turn never blocks it.
+    expect(manager.getSession(session.id)?.phase).toBe('build')
+    expect(attentionEvents(session.id, 'session.attention_cleared')).toHaveLength(0)
+  })
+
+  it.fails('a later successful turn clears the attention without notifying again', async () => {
+    const session = manager.createSession(projectId, 'Recovering pilot')
+    appendUserMessage(session.id, 'Run the thing.')
+    const notifySpy = vi.fn(async () => {})
+    notify = notifySpy
+    configure()
+
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
+    })
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
+    })
+    expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(1)
+    await vi.waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1))
+
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ content: 'Recovered.' }]) as never,
+    })
+    const cleared = attentionEvents(session.id, 'session.attention_cleared')
+    expect(cleared).toHaveLength(1)
+    expect(cleared[0]).toMatchObject({ sessionId: session.id, reason: 'turn_failed' })
+
+    // Clearing never notifies over Aether.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+
+    // A later failure re-arms: a second required is emitted.
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
+    })
+    expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(2)
+  })
+
+  it.fails('turn_failed notifies the proven creator only, with explicit send failures', async () => {
+    const calls: Array<{ toolName: string; args: Record<string, unknown> }> = []
+    const callTool: CallToolFn = async (_serverName, _toolName, args) => {
+      calls.push({ toolName: String((args as Record<string, unknown>)['tool_name']), args })
+      if ((args as Record<string, unknown>)['tool_name'] === 'ht_get_contact_info') {
+        return { success: true, output: 'peer_id: peer-creator-77' }
+      }
+      return { success: true, output: 'delivered' }
+    }
+    notify = createAetherNotifier(callTool)
+    configure()
+
+    const session = manager.createSession(projectId, 'Piloted run')
+    manager.setSessionCreatedBy(session.id, 'creator-pilot')
+    appendUserMessage(session.id, 'Run the thing.')
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
+    })
+    await vi.waitFor(() => expect(calls).toHaveLength(2))
+    expect(calls[0]!.toolName).toBe('ht_get_contact_info')
+    expect(calls[1]!.toolName).toBe('ht_send_to_peer')
+    const inner = calls[1]!.args['arguments'] as Record<string, unknown>
+    expect(inner['peer_id']).toBe('peer-creator-77')
+    const message = String(inner['message'])
+    expect(message).toContain('TOUR EN ÉCHEC')
+    expect(message).toContain('Piloted run')
+    expect(message).toContain(session.id)
+    expect(message).toContain('native_context_unavailable')
+    expect(Buffer.byteLength(message)).toBeLessThanOrEqual(800)
+
+    // A session with no proven creator gets the event but no Aether attempt.
+    calls.length = 0
+    const orphan = manager.createSession(projectId, 'Orphan run')
+    appendUserMessage(orphan.id, 'Run the thing.')
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: orphan.id,
+      llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
+    })
+    expect(attentionEvents(orphan.id, 'session.attention_required')).toHaveLength(1)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(calls).toHaveLength(0)
+
+    // A failed delivery is logged as attention_notify_failed, no fallback.
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    notify = createAetherNotifier(async (_s, _t, args) => {
+      if ((args as Record<string, unknown>)['tool_name'] === 'ht_get_contact_info') {
+        return { success: true, output: 'peer_id: peer-creator-77' }
+      }
+      return { success: false, error: 'peer offline' }
+    })
+    configure()
+    const second = manager.createSession(projectId, 'Undelivered run')
+    manager.setSessionCreatedBy(second.id, 'creator-pilot')
+    appendUserMessage(second.id, 'Run the thing.')
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: second.id,
+      llmClient: scriptedClient([{ error: NATIVE_CTX_ERROR }]) as never,
+    })
+    await vi.waitFor(() =>
+      expect(errorLog.mock.calls.some((call) => String(call[0]).includes('attention_notify_failed'))).toBe(true),
+    )
+    errorLog.mockRestore()
+  })
+
+  it('worker forward transports turn observations through the attention service', () => {
+    const forwarded: import('./attention.js').AttentionObservation[] = []
+    configureAttentionService({ forward: (observation) => forwarded.push(observation) })
+    const service = getAttentionService()
+    service.observeTurnFailed('worker-session', 'HTTP 400 native_context_unavailable')
+    service.observeTurnSucceeded('worker-session')
+    expect(forwarded).toEqual([
+      { kind: 'turn_failed', detail: 'HTTP 400 native_context_unavailable' },
+      { kind: 'turn_succeeded', detail: 'turn' },
+    ])
+    configure()
+  })
+
+  it.fails('gateway routes a worker turn_failed IPC observation into the attention service', async () => {
+    const { EventEmitter } = await import('node:events')
+    const { SessionWorkerManager } = await import('./worker/manager.js')
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4242,
+      exitCode: null,
+      signalCode: null,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      send: vi.fn(() => true),
+      kill: vi.fn(() => true),
+    })
+    const workerManager = new SessionWorkerManager({
+      db: () => getDatabase(),
+      config,
+      sessionManager: { setRunning: () => {} } as never,
+      isEnabled: () => true,
+      broadcastForSession: () => {},
+      processSupervisor: { spawnWorker: () => child } as never,
+    })
+    const session = manager.createSession(projectId, 'Worker session')
+    workerManager.launch(session.id, () => {})
+    const token = workerManager.activeWorker(session.id)!.token
+    child.emit('message', {
+      ...token,
+      type: 'attention.observation',
+      kind: 'turn_failed',
+      detail: 'HTTP 429 rate_limit_exceeded',
+    })
+    const required = attentionEvents(session.id, 'session.attention_required')
+    expect(required).toHaveLength(1)
+    expect(required[0]).toMatchObject({
+      sessionId: session.id,
+      reason: 'turn_failed',
+      detail: 'HTTP 429 rate_limit_exceeded',
+    })
+    child.emit('message', { ...token, type: 'attention.observation', kind: 'turn_succeeded', detail: 'turn' })
+    const cleared = attentionEvents(session.id, 'session.attention_cleared')
+    expect(cleared).toHaveLength(1)
+    expect(cleared[0]).toMatchObject({ sessionId: session.id, reason: 'turn_failed' })
   })
 })

@@ -27,7 +27,7 @@ export interface AttentionServiceDeps {
 }
 
 export interface AttentionObservation {
-  kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed'
+  kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed' | 'turn_failed' | 'turn_succeeded'
   reason?: AttentionReason
   detail: string
 }
@@ -207,6 +207,25 @@ export class SessionAttentionService {
     }
     this.seed(sessionId)
     this.leave(sessionId, 'blocked')
+  }
+
+  /** A chat turn ended in a non-recoverable LLM error (STALL-NOTIFY-2). */
+  observeTurnFailed(sessionId: string, detail: string): void {
+    if (this.forward) {
+      this.forward({ kind: 'turn_failed', detail })
+      return
+    }
+    void sessionId
+  }
+
+  /** A chat turn completed without error (STALL-NOTIFY-2). */
+  observeTurnSucceeded(sessionId: string): void {
+    if (this.forward) {
+      this.forward({ kind: 'turn_succeeded', detail: 'turn' })
+      return
+    }
+    this.seed(sessionId)
+    this.leave(sessionId, 'turn_failed')
   }
 
   /**
