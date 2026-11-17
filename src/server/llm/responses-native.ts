@@ -188,7 +188,12 @@ interface ResponsesApiResponse {
   incomplete_details?: { reason?: string } | null
   error?: { message?: string } | null
   output?: ResponsesOutputItem[]
-  usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number }
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    total_tokens?: number
+    input_tokens_details?: { cached_tokens?: number | null } | null
+  }
 }
 
 function mapResponseStatus(
@@ -231,10 +236,21 @@ export function parseResponsesResponse(data: ResponsesApiResponse): ChatCompleti
 
   const promptTokens = data.usage?.input_tokens ?? 0
   const completionTokens = data.usage?.output_tokens ?? 0
+  const cachedTokens = data.usage?.input_tokens_details?.cached_tokens
 
   const message: ChatCompletionResponse['choices'][0]['message'] = { content }
   if (reasoning) message['reasoning_content'] = reasoning
   if (toolCalls.length > 0) message['tool_calls'] = toolCalls
+
+  const usage: ChatCompletionResponse['usage'] = {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: data.usage?.total_tokens ?? promptTokens + completionTokens,
+  }
+  // Presence is a provider measurement (0 stays 0); null/absent stays unknown.
+  if (typeof cachedTokens === 'number' && Number.isFinite(cachedTokens)) {
+    usage.prompt_tokens_details = { cached_tokens: cachedTokens }
+  }
 
   return {
     id: data.id ?? `resp_${Date.now()}`,
@@ -249,11 +265,7 @@ export function parseResponsesResponse(data: ResponsesApiResponse): ChatCompleti
         message,
       },
     ],
-    usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: data.usage?.total_tokens ?? promptTokens + completionTokens,
-    },
+    usage,
   }
 }
 
@@ -376,6 +388,11 @@ function finalChunk(id: string, response?: ResponsesApiResponse): ChatCompletion
       prompt_tokens: usage.input_tokens ?? 0,
       completion_tokens: usage.output_tokens ?? 0,
       total_tokens: usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+    }
+    // Presence is a provider measurement (0 stays 0); null/absent stays unknown.
+    const cachedTokens = usage.input_tokens_details?.cached_tokens
+    if (typeof cachedTokens === 'number' && Number.isFinite(cachedTokens)) {
+      c.usage.prompt_tokens_details = { cached_tokens: cachedTokens }
     }
   }
   return c
