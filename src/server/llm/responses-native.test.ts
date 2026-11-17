@@ -6,6 +6,7 @@ import {
   type ResponsesRequestBody,
 } from './responses-native.js'
 import { LLMError } from '../utils/errors.js'
+import { extractTokenUsage } from './usage.js'
 import type { ChatCompletionCreateParamsStreaming, ChatCompletionMessageParam } from './openai-types.js'
 
 function streamParams(
@@ -311,6 +312,36 @@ describe('parseResponsesResponse', () => {
     const response = parseResponsesResponse({ id: 'resp_4', status: 'failed', output: [] })
     expect(response.choices[0]?.finish_reason).toBe('content_filter')
   })
+
+  it('preserves input_tokens_details.cached_tokens into prompt_tokens_details (JSON)', () => {
+    const parse = (output: unknown[], usage: unknown) =>
+      parseResponsesResponse({
+        id: 'resp_cache',
+        status: 'completed',
+        output,
+        usage,
+      } as unknown as Parameters<typeof parseResponsesResponse>[0]).usage
+
+    const textOut = [{ type: 'message', id: 'm1', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }]
+    const toolOut = [{ type: 'function_call', id: 'fc1', call_id: 'call-1', name: 'glob', arguments: '{}' }]
+    const totals = { input_tokens: 1000, output_tokens: 20, total_tokens: 1020 }
+
+    for (const out of [textOut, toolOut]) {
+      const usage = extractTokenUsage(parse(out, { ...totals, input_tokens_details: { cached_tokens: 832 } }))
+      expect(usage).toMatchObject({ cachedPromptTokens: 832, cacheSource: 'provider' })
+    }
+
+    const zero = extractTokenUsage(parse(textOut, { ...totals, input_tokens_details: { cached_tokens: 0 } }))
+    expect(zero).toMatchObject({ cachedPromptTokens: 0, cacheSource: 'provider' })
+
+    const absent = extractTokenUsage(parse(textOut, totals))
+    expect(absent?.cachedPromptTokens).toBeUndefined()
+    expect(absent?.cacheSource).toBe('unavailable')
+
+    const nul = extractTokenUsage(parse(textOut, { ...totals, input_tokens_details: { cached_tokens: null } }))
+    expect(nul?.cachedPromptTokens).toBeUndefined()
+    expect(nul?.cacheSource).toBe('unavailable')
+  })
 })
 
 describe('parseResponsesEvent terminal errors', () => {
@@ -426,5 +457,35 @@ describe('parseResponsesEvent terminal errors', () => {
       choices: [{ finish_reason: null, delta: { tool_calls: [{ index: 3, id: 'call-b', function: {} }] } }],
     })
     expect(JSON.stringify(chunk)).not.toContain('old_string')
+  })
+
+  it('preserves input_tokens_details.cached_tokens into prompt_tokens_details (stream)', () => {
+    const finalUsage = (output: unknown[], usage: unknown) => {
+      const chunk = parseResponsesEvent({
+        type: 'response.completed',
+        response: { id: 'resp_cache', status: 'completed', output, usage },
+      })
+      return chunk && typeof chunk === 'object' ? chunk.usage : undefined
+    }
+
+    const textOut = [{ type: 'message', id: 'm1', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }]
+    const toolOut = [{ type: 'function_call', id: 'fc1', call_id: 'call-1', name: 'glob', arguments: '{}' }]
+    const totals = { input_tokens: 1000, output_tokens: 20, total_tokens: 1020 }
+
+    for (const out of [textOut, toolOut]) {
+      const usage = extractTokenUsage(finalUsage(out, { ...totals, input_tokens_details: { cached_tokens: 832 } }))
+      expect(usage).toMatchObject({ cachedPromptTokens: 832, cacheSource: 'provider' })
+    }
+
+    const zero = extractTokenUsage(finalUsage(textOut, { ...totals, input_tokens_details: { cached_tokens: 0 } }))
+    expect(zero).toMatchObject({ cachedPromptTokens: 0, cacheSource: 'provider' })
+
+    const absent = extractTokenUsage(finalUsage(textOut, totals))
+    expect(absent?.cachedPromptTokens).toBeUndefined()
+    expect(absent?.cacheSource).toBe('unavailable')
+
+    const nul = extractTokenUsage(finalUsage(textOut, { ...totals, input_tokens_details: { cached_tokens: null } }))
+    expect(nul?.cachedPromptTokens).toBeUndefined()
+    expect(nul?.cacheSource).toBe('unavailable')
   })
 })
