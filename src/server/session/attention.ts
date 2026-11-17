@@ -142,7 +142,7 @@ export class SessionAttentionService {
 
   constructor(deps: AttentionServiceDeps = {}) {
     this.now = deps.now ?? Date.now
-    this.waitMs = deps.waitMs ?? configWaitMs()
+    this.waitMs = deps.waitMs ?? ATTENTION_WAIT_MS_DEFAULT
     if (deps.notify) this.notify = deps.notify
     if (deps.forward) this.forward = deps.forward
     this.getSessionTitle = deps.getSessionTitle ?? defaultSessionLookup
@@ -342,12 +342,6 @@ export class SessionAttentionService {
       data: { sessionId, projectId: info.projectId, reason: entry.reason },
     })
   }
-}
-
-function configWaitMs(): number {
-  const raw = process.env['OPENFOX_ATTENTION_WAIT_MS']
-  const parsed = raw ? Number(raw) : NaN
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : ATTENTION_WAIT_MS_DEFAULT
 }
 
 function defaultSessionLookup(sessionId: string): {
