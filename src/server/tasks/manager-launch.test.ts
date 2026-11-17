@@ -11,6 +11,7 @@ import { createProject, updateProject } from '../db/projects.js'
 import { initEventStore } from '../events/index.js'
 import { setAgentModelOverride } from '../agents/model-overrides.js'
 import { SessionManager } from '../session/manager.js'
+import { needsNameGeneration } from '../session/name-generator.js'
 import { SessionTurnScheduler, type AdmissionResult } from '../session/worker/scheduler.js'
 import { projectTasksTool, setTasksService } from '../tools/project-tasks.js'
 import type { ToolContext } from '../tools/types.js'
@@ -443,6 +444,18 @@ describe('manager task launch', () => {
   it('manager launch matches human move admission for plain prompts', async () => {
     await expectParity('plain launch prompt', 'plain')
   }, 60_000)
+
+  it.fails('kanban launch keeps the card title after the first turn', async () => {
+    configureScenario('started')
+    const projectId = await targetProject('card-title')
+    const task = service.create(projectId, { prompt: '/default Title from the card\nbody' }, { actor: 'human' })
+    const result = await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
+
+    expect(result.sessionId).toBeDefined()
+    const session = manager.getSession(result.sessionId!)
+    expect(session?.metadata.title).toBe('Title from the card')
+    expect(needsNameGeneration(session?.metadata.title, 1)).toBe(false)
+  })
 
   it('manager launch matches human move admission for default workflows', async () => {
     await expectParity('/default', 'workflow')

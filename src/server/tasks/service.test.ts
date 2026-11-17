@@ -279,6 +279,23 @@ describe('project tasks service', () => {
       expect(sm.createdSessions[0]!.title).toBeUndefined()
     })
 
+    it.fails('kanban launch titles the session after the card', async () => {
+      await service.setSettings(projectId, { slotLimit: 10 })
+      const prompts: [string, string | undefined][] = [
+        ['/default Foo bar\nsuite', 'Foo bar'],
+        ['Plain card title\nmore lines', 'Plain card title'],
+        ['   \n  First real line  \ntail', 'First real line'],
+        ['x'.repeat(150), 'x'.repeat(100)],
+        ['/default', undefined],
+        ['src/foo fix bug', 'src/foo fix bug'],
+      ]
+      for (const [prompt] of prompts) {
+        const task = create(prompt)
+        await service.move(projectId, task.id, 'in_progress', { actor: 'human' })
+      }
+      expect(sm.createdSessions.map((session) => session.title)).toEqual(prompts.map(([, title]) => title))
+    })
+
     it('second task queues when the single slot is busy', async () => {
       const first = create('First')
       const second = create('Second')
