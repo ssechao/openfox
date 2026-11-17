@@ -45,6 +45,8 @@ export interface StoredEvent<T extends TurnEvent = TurnEvent> {
 // Turn Events (discriminated union)
 // ============================================================================
 
+export type AttentionReason = 'blocked' | 'waiting_question' | 'waiting_confirmation' | 'waiting_workflow_step'
+
 export type TurnEvent =
   // ----------------------------------------------------------------------------
   // Session lifecycle
@@ -57,6 +59,24 @@ export type TurnEvent =
         title?: string
         contextWindowId: string // First window created with session
         maxTokens?: number // Initial max context from provider
+      }
+    }
+  | {
+      type: 'session.attention_required'
+      data: {
+        sessionId: string
+        projectId: string
+        reason: AttentionReason
+        detail: string
+        since: string
+      }
+    }
+  | {
+      type: 'session.attention_cleared'
+      data: {
+        sessionId: string
+        projectId: string
+        reason: AttentionReason
       }
     }
 

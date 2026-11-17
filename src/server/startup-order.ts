@@ -4,6 +4,7 @@ interface ContinuationServices {
   startQueueProcessor: () => void
   runBootAutoContinuations: () => void | Promise<void>
   startTaskScheduler: () => void
+  startAttentionSweeper?: () => void
 }
 
 export async function startContinuationServices(services: ContinuationServices): Promise<void> {
@@ -12,4 +13,5 @@ export async function startContinuationServices(services: ContinuationServices):
   services.startQueueProcessor()
   await services.runBootAutoContinuations()
   services.startTaskScheduler()
+  services.startAttentionSweeper?.()
 }

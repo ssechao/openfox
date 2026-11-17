@@ -262,6 +262,8 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
         model: z.string().optional().describe('Optional model id from the selected provider'),
         reasoningEffort: z.enum(REASONING_EFFORT_VALUES).optional().describe('Optional session reasoning effort'),
         dangerLevel: z.enum(['normal', 'dangerous']).optional().describe('Optional session danger level'),
+        openfox_session_id: z.string().optional().describe('Reserved for the OpenFox host'),
+        openfox_session_proof: z.string().optional().describe('Reserved for the OpenFox host'),
       },
       handler: async (args) => {
         const projectId = args['projectId']
@@ -341,6 +343,15 @@ export function createOpenFoxMcpTools(deps: OpenFoxMcpToolDeps): OpenFoxMcpTool[
 
         try {
           const session = sessionManager.createSession(projectId, title, null, null)
+          const callerVerification = deps.verifyCallerIdentity?.({
+            callerSessionId: typeof args['openfox_session_id'] === 'string' ? args['openfox_session_id'] : '',
+            proof: args['openfox_session_proof'],
+            toolName: 'openfox_create_session',
+            targetSessionId: projectId,
+          })
+          if (callerVerification?.ok) {
+            sessionManager.setSessionCreatedBy(session.id, callerVerification.callerSessionId)
+          }
           let updated = session
           if (agentId) {
             updated = sessionManager.setMode(session.id, agentId)

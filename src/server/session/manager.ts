@@ -36,6 +36,7 @@ import {
   updateSessionPinnedEffort,
   updateSessionDangerLevel,
   updateSessionNightMode,
+  setSessionCreatedBy as updateSessionCreatedBy,
   updateSessionRunning,
   updateSessionCachedPrompt,
   updateSessionWorkdir,
@@ -111,6 +112,7 @@ import {
 import type { Message, CriterionStatus } from '../../shared/types.js'
 import { isInDangerZone, canCompact } from '../context/tokenizer.js'
 import { serverT } from '../i18n.js'
+import { getAttentionService } from './attention.js'
 import { destroySessionProcesses } from '../tools/background-process/manager.js'
 
 // ============================================================================
@@ -1006,11 +1008,30 @@ export class SessionManager {
 
     emitPhaseChanged(sessionId, phase)
 
+    if (phase === 'blocked') {
+      getAttentionService().observeBlocked(sessionId, 'phase=blocked')
+    } else {
+      // Any live phase transition away from a stall clears it (no-op when the
+      // session was not stalled).
+      getAttentionService().observeResumed(sessionId)
+      if (session.phase === 'waiting') {
+        getAttentionService().observeWaitingResolved(sessionId, 'phase')
+      }
+    }
+
     const updatedSession = this.requireSession(sessionId)
 
     this.emit({ type: 'phase_changed', sessionId, phase })
 
     return updatedSession
+  }
+
+  /**
+   * Record the proven creator session (kanban launcher or openfox_create_session caller).
+   */
+  setSessionCreatedBy(sessionId: string, createdBy: string): void {
+    this.requireSession(sessionId)
+    updateSessionCreatedBy(sessionId, createdBy)
   }
 
   /**
@@ -1344,6 +1365,7 @@ export class SessionManager {
     pendingChoices?: import('../../shared/types.js').UserStepChoice[],
   ): void {
     updateWorkflowExecutionStatus(executionId, 'waiting', stepId, stepName, stepOutput, pendingChoices)
+    getAttentionService().observeWaiting(sessionId, 'waiting_workflow_step', stepId)
     emitWorkflowExecutionChanged(
       sessionId,
       executionId,
@@ -1376,6 +1398,8 @@ export class SessionManager {
     if (row.status !== 'waiting' && row.status !== 'blocked') return null
     // Clear pending choices — they only apply to the paused step being resumed
     updateWorkflowExecutionStatus(executionId, 'running', undefined, undefined, undefined, [])
+    getAttentionService().observeWaitingResolved(sessionId, row.current_step_id ?? executionId)
+    getAttentionService().observeResumed(sessionId)
     emitWorkflowExecutionChanged(
       sessionId,
       executionId,
