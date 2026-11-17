@@ -178,6 +178,35 @@ describe('session attention (STALL-NOTIFY)', () => {
     provideAnswer('call-stale', 'cleanup')
   })
 
+  it('ignores a legacy wait override env var: the delay is a fixed constant', () => {
+    const session = manager.createSession(projectId, 'Env var ignored')
+    vi.stubEnv(['OPENFOX', 'ATTENTION', 'WAIT', 'MS'].join('_'), '1')
+    try {
+      resetAttentionService()
+      configureAttentionService({
+        now: () => clock.nowMs,
+        getSessionTitle: (sessionId: string) => {
+          const found = manager.getSession(sessionId)
+          if (!found) return null
+          return {
+            title: found.metadata?.title ?? '',
+            projectId: found.projectId,
+            createdBy: found.createdBy ?? null,
+          }
+        },
+      })
+      const service = getAttentionService()
+
+      service.observeWaiting(session.id, 'waiting_question', 'call-env')
+      clock.nowMs += 5_000
+      service.sweep()
+
+      expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(0)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('dedup survives a service restart (registry rebuilt from persisted events)', () => {
     const session = manager.createSession(projectId, 'Reboot cycle')
     const service = getAttentionService()
