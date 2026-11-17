@@ -15,6 +15,7 @@ import { provideAnswer, registerPendingQuestion } from '../tools/ask.js'
 import {
   configureAttentionService,
   createAetherNotifier,
+  formatAttentionMessage,
   getAttentionService,
   resetAttentionService,
   type CallToolFn,
@@ -706,5 +707,57 @@ describe('session attention (STALL-NOTIFY)', () => {
     const cleared = attentionEvents(session.id, 'session.attention_cleared')
     expect(cleared).toHaveLength(1)
     expect(cleared[0]).toMatchObject({ sessionId: session.id, reason: 'turn_failed' })
+  })
+
+  // R-4 (Astra B1/B2): the turn_failed detail is a whitelisted token (HTTP status +
+  // structured code), never raw error text; no secret may reach the persisted event,
+  // the IPC observation or the Aether message; the message is capped at 800 BYTES by
+  // truncating the title, never the error detail.
+  it.fails('R-4 detail is whitelisted, no secret leaks, message capped at 800 bytes', async () => {
+    const RAW_ERROR =
+      'LLM request failed: HTTP 401 Bad Request: {"error":{"message":"Invalid API key provided: Bearer sk-fake-1234567890 (api_key=SECRET123)","type":"invalid_request_error","code":"invalid_api_key"}}'
+
+    // Worker side: the forwarded observation carries the whitelisted detail only.
+    const forwarded: import('./attention.js').AttentionObservation[] = []
+    configureAttentionService({ forward: (observation) => forwarded.push(observation) })
+    getAttentionService().observeTurnFailed('worker-session', RAW_ERROR)
+    expect(forwarded).toHaveLength(1)
+    expect(forwarded[0]!.detail).toBe('HTTP 401 invalid_api_key')
+
+    // Main side: orchestrator failure with a long multi-byte title.
+    const notifySpy = vi.fn(async (_params: import('./attention.js').AttentionNotifyParams) => {})
+    notify = notifySpy
+    configure()
+    const longTitle = 'Dépannage 🔥 très long '.repeat(40)
+    const session = manager.createSession(projectId, longTitle)
+    appendUserMessage(session.id, 'Run the thing.')
+
+    await runChatTurn({
+      sessionManager: manager,
+      sessionId: session.id,
+      llmClient: scriptedClient([{ error: RAW_ERROR }]) as never,
+    })
+
+    const required = attentionEvents(session.id, 'session.attention_required')
+    expect(required).toHaveLength(1)
+    const persisted = JSON.stringify(required)
+    expect(persisted).toContain('HTTP 401')
+    expect(persisted).toContain('invalid_api_key')
+    expect(persisted).not.toContain('sk-fake-1234567890')
+    expect(persisted).not.toContain('SECRET123')
+    expect(persisted).not.toContain('Invalid API key')
+
+    await vi.waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1))
+
+    // The rendered Aether payload keeps the error core, truncates the title,
+    // drops the raw text, and stays under 800 bytes.
+    const rendered = formatAttentionMessage(notifySpy.mock.calls[0]![0]!)
+    expect(rendered).toContain('TOUR EN ÉCHEC')
+    expect(rendered).toContain('HTTP 401')
+    expect(rendered).toContain('invalid_api_key')
+    expect(rendered).not.toContain('sk-fake-1234567890')
+    expect(rendered).not.toContain('SECRET123')
+    expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(800)
+    configure()
   })
 })
