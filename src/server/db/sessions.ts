@@ -226,6 +226,11 @@ export function updateSessionDangerLevel(id: string, dangerLevel: DangerLevel): 
   ).run(dangerLevel, now, id)
 }
 
+/** Record the proven creator session (kanban launcher or openfox_create_session caller). */
+export function setSessionCreatedBy(id: string, createdBy: string): void {
+  getDatabase().prepare(`UPDATE sessions SET created_by = ? WHERE id = ?`).run(createdBy, id)
+}
+
 export function updateSessionNightMode(id: string, enabled: boolean): void {
   const db = getDatabase()
   const now = new Date().toISOString()
@@ -656,6 +661,7 @@ function mapSessionBase(row: SessionRow | SessionSummaryRow): {
     ...('provider_pinned_effort' in row
       ? { providerPinnedEffort: (row as SessionRow).provider_pinned_effort ?? null }
       : {}),
+    ...('created_by' in row ? { createdBy: (row as SessionRow).created_by ?? null } : {}),
     providerManual: Boolean((row as SessionRow).provider_manual),
     providerManualActive: Boolean((row as SessionRow).provider_manual_active),
     createdAt: row.created_at,
@@ -725,6 +731,7 @@ interface SessionRow {
   provider_pinned_effort: string | null
   provider_manual: number
   provider_manual_active: number
+  created_by?: string | null
   created_at: string
   updated_at: string
   title: string | null

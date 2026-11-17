@@ -116,6 +116,8 @@ export interface Session {
   providerPinnedEffort?: string | null
   providerManual?: boolean // true when the provider/model was explicitly picked by the user
   providerManualActive?: boolean // false while on an override agent (the agent's override is the label truth); a fresh pick re-activates it
+  /** Session that created this one (proven identity: kanban launcher or openfox_create_session caller). Null when no proven identity. */
+  createdBy?: string | null
   createdAt: string
   updatedAt: string
   messages: Message[]
