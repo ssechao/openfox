@@ -9,6 +9,7 @@ interface ConfigFaultInjection {
   syncOnTmp?: boolean
   rename?: boolean
   dirSync?: boolean
+  rmTmp?: boolean
 }
 
 declare global {
@@ -62,6 +63,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     rename: vi.fn(async (from: string, to: string) => {
       injected('rename', from)
       return actual.rename(from, to)
+    }),
+    rm: vi.fn(async (path: Parameters<typeof actual.rm>[0], options?: Parameters<typeof actual.rm>[1]) => {
+      if (globalThis.__configFaults?.rmTmp && typeof path === 'string' && path.includes('.tmp')) {
+        throw new Error('injected rm failure on temp file')
+      }
+      return actual.rm(path, options)
     }),
   }
 })
@@ -753,6 +760,32 @@ describe('config', () => {
       const written = JSON.parse(await readFile(configPath, 'utf-8'))
       expect(written.providers).toHaveLength(1)
       expect(await tmpLeftovers()).toEqual([])
+    })
+
+    it('failed temp-file cleanup is logged and the original write error is preserved', async () => {
+      const configModule = (await import('./config.js')) as unknown as Record<string, unknown>
+      const ConfigError = configModule['ConfigError'] as new (message: string) => Error
+      const { logger } = await import('../server/utils/logger.js')
+      await saveGlobalConfig('production', { providers: [] })
+      const before = await readFile(configPath)
+
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+      globalThis.__configFaults = { rename: true, rmTmp: true }
+      let error: unknown
+      try {
+        await saveGlobalConfig('production', { providers: [] })
+      } catch (err) {
+        error = err
+      } finally {
+        globalThis.__configFaults = undefined
+      }
+      const warnings = warnSpy.mock.calls.map((call) => String(call[0]))
+      warnSpy.mockRestore()
+
+      expect(error).toBeInstanceOf(ConfigError)
+      expect((error as Error).message).toContain('injected rename failure')
+      expect(warnings.some((w) => w.includes('.tmp') && w.includes('injected rm failure'))).toBe(true)
+      expect((await readFile(configPath)).equals(before)).toBe(true)
     })
   })
 

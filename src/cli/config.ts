@@ -5,6 +5,7 @@ import type { FileHandle } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Mode } from './main.js'
 import { getGlobalConfigPath } from './paths.js'
+import { logger } from '../server/utils/logger.js'
 import type { Provider, ModelConfig } from '../shared/types.js'
 
 export class ConfigError extends Error {
@@ -359,7 +360,13 @@ async function writeConfigAtomically(configPath: string, content: string): Promi
     if (handle) {
       await handle.close().catch(() => {})
     }
-    await rm(tmpPath, { force: true }).catch(() => {})
+    try {
+      await rm(tmpPath, { force: true })
+    } catch (cleanupError) {
+      logger.warn(
+        `Failed to remove temporary config file ${tmpPath} after a failed write: ${(cleanupError as Error).message}`,
+      )
+    }
     throw new ConfigError(`Unable to write config file ${configPath}: ${(error as Error).message}`)
   }
 
