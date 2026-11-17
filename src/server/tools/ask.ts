@@ -4,6 +4,7 @@ import type { PendingQuestionPayload, ChoiceOption } from '../../shared/protocol
 import { normalizeAskOptions } from '../../shared/ask-options.js'
 import { createDeferred } from '../utils/async.js'
 import { relayWorkerQuestion } from '../session/worker/interactive-relay.js'
+import { getAttentionService } from '../session/attention.js'
 
 // Store pending questions by call ID
 const pendingQuestions = new Map<
@@ -104,6 +105,7 @@ export function registerPendingQuestion(
     options,
   })
   relayWorkerQuestion({ callId, sessionId, question, type, ...(options ? { options } : {}) })
+  getAttentionService().observeWaiting(sessionId, 'waiting_question', callId)
   return deferred.promise
 }
 
@@ -127,6 +129,7 @@ export function provideAnswer(callId: string, answer: string, skip?: boolean): b
 
   pending.resolve(skip ? '[user skipped]' : answer)
   pendingQuestions.delete(callId)
+  getAttentionService().observeWaitingResolved(pending.sessionId, callId)
   return true
 }
 
@@ -138,6 +141,7 @@ export function cancelQuestion(callId: string, reason: string): boolean {
 
   pending.reject(new Error(reason))
   pendingQuestions.delete(callId)
+  getAttentionService().observeWaitingResolved(pending.sessionId, callId)
   return true
 }
 
@@ -152,6 +156,7 @@ export function cancelQuestionsForSession(sessionId: string, reason: string): nu
     pending.reject(new Error(reason))
     pendingQuestions.delete(callId)
     cancelledCount += 1
+    getAttentionService().observeWaitingResolved(sessionId, callId)
   }
 
   return cancelledCount

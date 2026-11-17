@@ -92,7 +92,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it.fails('blocked session emits attention_required once', () => {
+  it('blocked session emits attention_required once', () => {
     const session = manager.createSession(projectId, 'Stalled run')
     const service = getAttentionService()
 
@@ -122,7 +122,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(required).toHaveLength(2)
   })
 
-  it.fails('waiting session without wake emits attention_required after the delay', () => {
+  it('waiting session without wake emits attention_required after the delay', () => {
     const session = manager.createSession(projectId, 'Waiting run')
     const service = getAttentionService()
 
@@ -163,7 +163,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     provideAnswer('call-stale', 'cleanup')
   })
 
-  it.fails('attention_required notifies the creator pilot through Aether', async () => {
+  it('attention_required notifies the creator pilot through Aether', async () => {
     const calls: Array<{
       serverName: string
       toolName: string
@@ -172,7 +172,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     }> = []
     const callTool: CallToolFn = async (serverName, toolName, args, sessionId) => {
       calls.push({ serverName, toolName, args, sessionId })
-      if (toolName === 'ht_get_contact_info') {
+      if (args['tool_name'] === 'ht_get_contact_info') {
         return { success: true, output: 'Your hub identity:\n  peer_id: peer-creator-42\n  hub: http://x/mcp' }
       }
       return { success: true, output: 'delivered' }
@@ -193,16 +193,22 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(calls).toHaveLength(2)
     expect(calls[0]).toMatchObject({
       serverName: 'mcp-lazy',
-      toolName: 'ht_get_contact_info',
+      toolName: 'mcp_execute_tool',
       sessionId: 'session-creator',
     })
+    expect((calls[0]!.args as Record<string, unknown>)['server_name']).toBe('llm-aether')
+    expect((calls[0]!.args as Record<string, unknown>)['tool_name']).toBe('ht_get_contact_info')
     expect(calls[1]).toMatchObject({
       serverName: 'mcp-lazy',
-      toolName: 'ht_send_to_peer',
+      toolName: 'mcp_execute_tool',
       sessionId: 'session-stalled',
-      args: { peer_id: 'peer-creator-42' },
     })
-    const message = String((calls[1]!.args as Record<string, unknown>)['message'])
+    const sendArgs = calls[1]!.args as Record<string, unknown>
+    expect(sendArgs['server_name']).toBe('llm-aether')
+    expect(sendArgs['tool_name']).toBe('ht_send_to_peer')
+    const innerSend = sendArgs['arguments'] as Record<string, unknown>
+    expect(innerSend['peer_id']).toBe('peer-creator-42')
+    const message = String(innerSend['message'])
     expect(message).toContain('SESSION BLOQUÉE')
     expect(message).toContain('Worker run')
     expect(message).toContain('session-stalled')
@@ -224,7 +230,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it.fails('session creator is recorded only from a proven identity', async () => {
+  it('session creator is recorded only from a proven identity', async () => {
     // --- kanban launch records the launcher --------------------------------
     const gitDir = join(root, 'launch-project')
     await mkdir(gitDir, { recursive: true })

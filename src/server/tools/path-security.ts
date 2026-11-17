@@ -7,6 +7,7 @@ import { getEventStore } from '../events/index.js'
 import { getPlatformShell } from '../utils/platform.js'
 import { evaluatePluginPathAccess } from '../plugins/danger-levels.js'
 import { relayWorkerPath } from '../session/worker/interactive-relay.js'
+import { getAttentionService } from '../session/attention.js'
 
 // ===========================================================================
 // Constants
@@ -1605,6 +1606,7 @@ export function registerPathConfirmation(
     relayWorkerPath({ callId, paths, sessionId, tool, workdir, reason })
   })
   void promise.catch(() => {})
+  getAttentionService().observeWaiting(sessionId, 'waiting_confirmation', callId)
   return promise
 }
 
@@ -1657,6 +1659,7 @@ export function providePathConfirmation(
 
   pending.resolve(approved)
   pendingConfirmations.delete(callId)
+  getAttentionService().observeWaitingResolved(pending.sessionId, callId)
 
   return { found: true, sessionId: pending.sessionId, approved }
 }
@@ -1676,6 +1679,7 @@ export function cancelPathConfirmation(callId: string, reason: string): boolean 
 
   pending.reject(new Error(reason))
   pendingConfirmations.delete(callId)
+  getAttentionService().observeWaitingResolved(pending.sessionId, callId)
   return true
 }
 
@@ -1690,6 +1694,7 @@ export function cancelPathConfirmationsForSession(sessionId: string, reason: str
     pending.reject(new Error(reason))
     pendingConfirmations.delete(callId)
     cancelledCount += 1
+    getAttentionService().observeWaitingResolved(sessionId, callId)
   }
 
   return cancelledCount

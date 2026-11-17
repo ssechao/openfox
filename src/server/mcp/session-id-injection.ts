@@ -3,6 +3,7 @@ import type { McpServerConfig, OpenFoxCallerIdentityGateway, OpenFoxEndpointBind
 export type SessionIdInjectionResult = { ok: true; args: Record<string, unknown> } | { ok: false; error: string }
 
 const OPENFOX_DELETE_SESSION_TOOL = 'openfox_delete_session'
+const OPENFOX_CREATE_SESSION_TOOL = 'openfox_create_session'
 
 function isArgumentsObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -25,13 +26,16 @@ export function applyOpenFoxCallerIdentityInjection(
   sessionId: string | undefined,
 ): SessionIdInjectionResult {
   let targetSessionId: unknown
+  let proofToolName = toolName
   let sanitizedArgs: Record<string, unknown> | undefined
   let inject: ((callerSessionId: string, proof: string) => Record<string, unknown>) | undefined
   let binding: OpenFoxEndpointBindingInput | undefined
 
-  if (toolName === OPENFOX_DELETE_SESSION_TOOL) {
+  if (toolName === OPENFOX_DELETE_SESSION_TOOL || toolName === OPENFOX_CREATE_SESSION_TOOL) {
+    // Create has no session id yet: the proof binds caller + tool + target
+    // projectId with the same non-forgeable HMAC mechanism.
     const { openfox_session_id: _modelSessionId, openfox_session_proof: _modelProof, ...sanitized } = args
-    targetSessionId = sanitized['sessionId']
+    targetSessionId = toolName === OPENFOX_CREATE_SESSION_TOOL ? sanitized['projectId'] : sanitized['sessionId']
     sanitizedArgs = sanitized
     binding = {
       kind: 'direct',
@@ -46,14 +50,17 @@ export function applyOpenFoxCallerIdentityInjection(
   } else if (
     toolName === 'mcp_execute_tool' &&
     typeof args['server_name'] === 'string' &&
-    args['tool_name'] === OPENFOX_DELETE_SESSION_TOOL
+    (args['tool_name'] === OPENFOX_DELETE_SESSION_TOOL || args['tool_name'] === OPENFOX_CREATE_SESSION_TOOL)
   ) {
+    const proxiedTool = args['tool_name'] as string
+    proofToolName = proxiedTool
     const inner = args['arguments']
     if (!isArgumentsObject(inner)) {
       return { ok: false, error: 'trusted OpenFox caller identity requires object arguments' }
     }
     const { openfox_session_id: _modelSessionId, openfox_session_proof: _modelProof, ...sanitizedInner } = inner
-    targetSessionId = sanitizedInner['sessionId']
+    targetSessionId =
+      proxiedTool === OPENFOX_CREATE_SESSION_TOOL ? sanitizedInner['projectId'] : sanitizedInner['sessionId']
     sanitizedArgs = { ...args, arguments: sanitizedInner }
     binding = {
       kind: 'proxy',
@@ -86,7 +93,7 @@ export function applyOpenFoxCallerIdentityInjection(
   try {
     proof = identity.issueProof({
       callerSessionId: sessionId,
-      toolName: OPENFOX_DELETE_SESSION_TOOL,
+      toolName: proofToolName,
       targetSessionId,
     })
   } catch {

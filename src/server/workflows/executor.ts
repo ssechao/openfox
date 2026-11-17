@@ -32,6 +32,7 @@ import { aggregateParallel, mapPool, runChild, runShellChild, runSubAgentChild, 
 import { resolveTemplate, type TemplateContext } from './template.js'
 import { logger } from '../utils/logger.js'
 import { LLMError } from '../utils/errors.js'
+import { getAttentionService } from '../session/attention.js'
 import { runBackgroundAction } from '../tools/background-process/backend.js'
 
 export { BACKGROUND_WAIT_KEY }
@@ -640,6 +641,7 @@ export async function executeWorkflow(
         // never touched history. The step prompt stays in place so a user
         // retry (resume) reuses the exact same context.
         const blockOnLLMFailure = (errorMessage: string): OrchestratorResult => {
+          getAttentionService().observeBlocked(sessionId, errorMessage)
           sessionManager.setPhase(sessionId, 'blocked')
           if (executionId) {
             sessionManager.blockWorkflow(

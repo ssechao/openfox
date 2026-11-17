@@ -76,6 +76,7 @@ import { WorkerAsapBroker } from './asap-broker.js'
 import { WorkerInteractiveBroker, type InteractiveAnswerResult } from './interactive-broker.js'
 import { cancelQuestion, registerPendingQuestion, provideAnswer } from '../../tools/ask.js'
 import { cancelPathConfirmation, providePathConfirmation, registerPathConfirmation } from '../../tools/path-security.js'
+import { getAttentionService } from '../attention.js'
 import type { HealthAggregator } from '../../diagnostics/aggregator.js'
 import { MAX_WAITING_SESSIONS, SessionTurnScheduler, resolveWorkerPoolSize, type AdmissionResult } from './scheduler.js'
 import { executeBackgroundAction, type BackgroundActionResult } from '../../tools/background-process/actions.js'
@@ -612,6 +613,12 @@ export class SessionWorkerManager {
         this.asapBroker.handleAbort(msg)
       } else if (msg.type === 'interactive.question.open' || msg.type === 'interactive.path.open') {
         this.interactiveBroker.handleOpen(msg)
+      } else if (msg.type === 'attention.observation') {
+        const attention = getAttentionService()
+        if (msg.kind === 'blocked') attention.observeBlocked(sessionId, msg.detail)
+        else if (msg.kind === 'waiting' && msg.reason) attention.observeWaiting(sessionId, msg.reason, msg.detail)
+        else if (msg.kind === 'waiting_resolved') attention.observeWaitingResolved(sessionId, msg.detail)
+        else if (msg.kind === 'resumed') attention.observeResumed(sessionId)
       } else if (msg.type === 'done') {
         worker.doneReceived = true
         worker.doneOk = msg.ok

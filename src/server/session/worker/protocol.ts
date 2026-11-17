@@ -169,6 +169,13 @@ export type GatewayToWorkerMessage =
   | ProjectTasksResponseMessage
   | AsapDrainResponseMessage
 
+export type AttentionObservationMessage = WorkerIpcIdentity & {
+  type: 'attention.observation'
+  kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed'
+  reason?: 'blocked' | 'waiting_question' | 'waiting_confirmation' | 'waiting_workflow_step'
+  detail: string
+}
+
 export type WorkerToGatewayMessage =
   | (WorkerToken & { type: 'ready'; pid: number })
   | (WorkerToken & { type: 'ws'; msg: ServerMessage })
@@ -183,3 +190,4 @@ export type WorkerToGatewayMessage =
   | AsapDrainAckMessage
   | AsapDrainAbortMessage
   | InteractiveOpenMessage
+  | AttentionObservationMessage

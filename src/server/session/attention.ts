@@ -1,3 +1,6 @@
+import { logger } from '../utils/logger.js'
+import { getEventStore } from '../events/store.js'
+import { getSession } from '../db/sessions.js'
 import type { AttentionReason } from '../events/types.js'
 
 export const ATTENTION_WAIT_MS_DEFAULT = 10 * 60 * 1000
@@ -18,6 +21,14 @@ export interface AttentionServiceDeps {
   waitMs?: number
   notify?: (params: AttentionNotifyParams) => Promise<void>
   getSessionTitle?(sessionId: string): { title: string; projectId: string; createdBy: string | null } | null
+  /** Worker mode: observations are forwarded to the gateway instead of tracked locally. */
+  forward?: (observation: AttentionObservation) => void
+}
+
+export interface AttentionObservation {
+  kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed'
+  reason?: AttentionReason
+  detail: string
 }
 
 export interface CallToolFn {
@@ -35,6 +46,12 @@ export function formatAttentionMessage(params: AttentionNotifyParams): string {
   return `⚠ ${label} ${params.title} (${params.sessionId}) : ${params.reason} ${params.detail} depuis ${since}`
 }
 
+function parsePeerId(output: string | undefined): string | null {
+  if (!output) return null
+  const match = output.match(/peer_id:\s*(\S+)/)
+  return match?.[1] ?? null
+}
+
 /**
  * Aether notifier (decision D3): resolve the creator's current peer_id with
  * ht_get_contact_info under the creator's own injected identity, then send
@@ -42,10 +59,53 @@ export function formatAttentionMessage(params: AttentionNotifyParams): string {
  * any failure is logged as attention_notify_failed and the event stands alone.
  */
 export function createAetherNotifier(
-  _callTool: CallToolFn,
-  _proxyServerName = 'mcp-lazy',
+  callTool: CallToolFn,
+  proxyServerName = 'mcp-lazy',
+  hubServerName = 'llm-aether',
 ): (params: AttentionNotifyParams) => Promise<void> {
-  return async () => {}
+  const viaProxy = (toolName: string, args: Record<string, unknown>, identitySessionId: string) =>
+    callTool(
+      proxyServerName,
+      'mcp_execute_tool',
+      { server_name: hubServerName, tool_name: toolName, arguments: args },
+      identitySessionId,
+    )
+  return async (params) => {
+    if (!params.createdBy) return
+    const contact = await viaProxy('ht_get_contact_info', {}, params.createdBy)
+    const peerId = parsePeerId(contact.output)
+    if (!contact.success || !peerId) {
+      logger.error('attention_notify_failed', {
+        sessionId: params.sessionId,
+        createdBy: params.createdBy,
+        reason: params.reason,
+        stage: 'ht_get_contact_info',
+        error: contact.error ?? 'no peer_id in contact info',
+      })
+      return
+    }
+    const send = await viaProxy(
+      'ht_send_to_peer',
+      { peer_id: peerId, message: formatAttentionMessage(params) },
+      params.sessionId,
+    )
+    if (!send.success) {
+      logger.error('attention_notify_failed', {
+        sessionId: params.sessionId,
+        createdBy: params.createdBy,
+        reason: params.reason,
+        stage: 'ht_send_to_peer',
+        error: send.error ?? 'delivery failed',
+      })
+    }
+  }
+}
+
+interface AttentionEntry {
+  reason: AttentionReason
+  detail: string
+  sinceMs: number
+  armed: boolean
 }
 
 /**
@@ -56,14 +116,175 @@ export function createAetherNotifier(
  * into the state and never re-emitted, even across restarts of this service.
  */
 export class SessionAttentionService {
-  constructor(_deps: AttentionServiceDeps = {}) {}
-  start(_intervalMs = ATTENTION_SWEEP_INTERVAL_MS): void {}
-  stop(): void {}
-  observeBlocked(_sessionId: string, _detail: string): void {}
-  observeWaiting(_sessionId: string, _reason: AttentionReason, _detail: string): void {}
-  observeWaitingResolved(_sessionId: string, _detail: string): void {}
-  observeResumed(_sessionId: string): void {}
-  sweep(): void {}
+  private readonly now: () => number
+  private readonly waitMs: number
+  private readonly notify?: (params: AttentionNotifyParams) => Promise<void>
+  private readonly forward?: (observation: AttentionObservation) => void
+  private readonly getSessionTitle: (sessionId: string) => {
+    title: string
+    projectId: string
+    createdBy: string | null
+  } | null
+  private readonly entries = new Map<string, AttentionEntry>()
+  private timer: ReturnType<typeof setInterval> | null = null
+
+  constructor(deps: AttentionServiceDeps = {}) {
+    this.now = deps.now ?? Date.now
+    this.waitMs = deps.waitMs ?? configWaitMs()
+    if (deps.notify) this.notify = deps.notify
+    if (deps.forward) this.forward = deps.forward
+    this.getSessionTitle = deps.getSessionTitle ?? defaultSessionLookup
+  }
+
+  start(intervalMs = ATTENTION_SWEEP_INTERVAL_MS): void {
+    if (this.timer) return
+    this.timer = setInterval(() => this.sweep(), intervalMs)
+    this.timer.unref?.()
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
+    }
+  }
+
+  /** Blocked state observed live (transition into phase 'blocked'). */
+  observeBlocked(sessionId: string, detail: string): void {
+    if (this.forward) {
+      this.forward({ kind: 'blocked', detail })
+      return
+    }
+    this.enter(sessionId, 'blocked', detail, true)
+  }
+
+  /** Waiting state observed live (question, confirmation, workflow user step). */
+  observeWaiting(sessionId: string, reason: AttentionReason, detail: string): void {
+    if (this.forward) {
+      this.forward({ kind: 'waiting', reason, detail })
+      return
+    }
+    this.enter(sessionId, reason, detail, false)
+  }
+
+  /** A wait observed by observeWaiting resolved (before or after its event). */
+  observeWaitingResolved(sessionId: string, detail: string): void {
+    if (this.forward) {
+      this.forward({ kind: 'waiting_resolved', detail })
+      return
+    }
+    this.leave(sessionId, 'waiting_question')
+    this.leave(sessionId, 'waiting_confirmation')
+    this.leave(sessionId, 'waiting_workflow_step')
+    void detail
+  }
+
+  /** Session left phase 'blocked'. */
+  observeResumed(sessionId: string): void {
+    if (this.forward) {
+      this.forward({ kind: 'resumed', detail: 'phase' })
+      return
+    }
+    this.leave(sessionId, 'blocked')
+  }
+
+  private enter(sessionId: string, reason: AttentionReason, detail: string, immediate: boolean): void {
+    const key = `${sessionId}:${reason}`
+    if (this.entries.has(key)) return
+    const entry: AttentionEntry = { reason, detail, sinceMs: this.now(), armed: true }
+    this.entries.set(key, entry)
+    if (immediate) {
+      entry.armed = false
+      this.emitRequired(sessionId, entry)
+    }
+  }
+
+  private leave(sessionId: string, reason: AttentionReason): void {
+    const key = `${sessionId}:${reason}`
+    const entry = this.entries.get(key)
+    if (!entry) return
+    this.entries.delete(key)
+    if (!entry.armed) this.emitCleared(sessionId, entry)
+  }
+
+  sweep(): void {
+    const nowMs = this.now()
+    for (const [key, entry] of this.entries.entries()) {
+      if (!entry.armed) continue
+      const sessionId = key.slice(0, key.lastIndexOf(':'))
+      if (nowMs - entry.sinceMs < this.waitMs) continue
+      entry.armed = false
+      this.emitRequired(sessionId, entry)
+    }
+  }
+
+  private emitRequired(sessionId: string, entry: AttentionEntry): void {
+    const info = this.getSessionTitle(sessionId)
+    if (!info) return
+    getEventStore().append(sessionId, {
+      type: 'session.attention_required',
+      data: {
+        sessionId,
+        projectId: info.projectId,
+        reason: entry.reason,
+        detail: entry.detail,
+        since: new Date(entry.sinceMs).toISOString(),
+      },
+    })
+    if (!this.notify) return
+    const params: AttentionNotifyParams = {
+      sessionId,
+      projectId: info.projectId,
+      title: info.title,
+      reason: entry.reason,
+      detail: entry.detail,
+      sinceMs: entry.sinceMs,
+      createdBy: info.createdBy,
+    }
+    void Promise.resolve()
+      .then(() => this.notify!(params))
+      .catch((error: unknown) => {
+        logger.error('attention_notify_failed', {
+          sessionId,
+          reason: entry.reason,
+          stage: 'notify',
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+  }
+
+  private emitCleared(sessionId: string, entry: AttentionEntry): void {
+    const info = this.getSessionTitle(sessionId)
+    if (!info) return
+    getEventStore().append(sessionId, {
+      type: 'session.attention_cleared',
+      data: { sessionId, projectId: info.projectId, reason: entry.reason },
+    })
+  }
+}
+
+function configWaitMs(): number {
+  const raw = process.env['OPENFOX_ATTENTION_WAIT_MS']
+  const parsed = raw ? Number(raw) : NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : ATTENTION_WAIT_MS_DEFAULT
+}
+
+function defaultSessionLookup(sessionId: string): {
+  title: string
+  projectId: string
+  createdBy: string | null
+} | null {
+  try {
+    const session = getSession(sessionId)
+    if (!session) return null
+    return {
+      title: session.metadata?.title ?? `Session ${sessionId.slice(0, 8)}`,
+      projectId: session.projectId,
+      createdBy: session.createdBy ?? null,
+    }
+  } catch {
+    return null
+  }
 }
 
 let instance: SessionAttentionService | null = null
