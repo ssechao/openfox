@@ -17,7 +17,7 @@ import { execFile, execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { killProcessTree, signalProcessGroup } from '../../utils/process-tree.js'
+import { terminateProcessTreeGuarded, type GuardedProcessTreeOptions } from '../../utils/process-tree.js'
 import { logger } from '../../utils/logger.js'
 
 export interface TrackedChild {
@@ -75,8 +75,7 @@ export interface ChildrenCleanupDependencies {
   readProcessIdentity?: (pid: number) => ProcessIdentityRead
   readInventory?: (pid: number, command?: string) => ProcessInventoryRead
   readGroup?: (pgid: number) => ProcessGroupRead
-  killTree?: (pid: number) => Promise<void>
-  signalGroup?: (pid: number) => Promise<boolean>
+  terminateTree?: (pid: number, options?: GuardedProcessTreeOptions) => Promise<void>
   findReservationPids?: (reservationId: string) => number[] | Promise<number[]>
   retryDelay?: () => Promise<void>
   protectedProcesses?: Partial<Record<ProtectedProcessRole, ProcessInventoryEntry>>
@@ -779,13 +778,12 @@ function processGroupSignalRefusalDetails(
   }
 }
 
-type GuardedGroupSignalResult = 'signaled' | 'absent' | 'positive_only' | 'refused'
+type GuardedGroupSignalResult = 'group_allowed' | 'absent' | 'positive_only' | 'refused'
 
 async function signalRecordedChildGroup(
   child: GuardedGroupTarget,
   identity: ProcessIdentityRead,
   readGroup: (pgid: number) => ProcessGroupRead,
-  signalGroup: (pid: number) => Promise<boolean>,
   protectedProcesses: Partial<Record<ProtectedProcessRole, ProcessInventoryEntry>>,
   logSignalRefusal: (details: Record<string, unknown>) => void,
 ): Promise<GuardedGroupSignalResult> {
@@ -810,7 +808,7 @@ async function signalRecordedChildGroup(
     if (protectedProcesses[role]?.pgid === child.pgid) return refuse(`protected_${role}_process_group`, true)
   }
   if (child.pid !== child.pgid) return refuse('target_not_group_leader', true)
-  return (await signalGroup(child.pgid)) ? 'signaled' : 'absent'
+  return 'group_allowed'
 }
 
 /**
@@ -825,8 +823,7 @@ export async function killTrackedChildren(
   const readProcessIdentity = dependencies.readProcessIdentity ?? processStartIdentity
   const readInventory = dependencies.readInventory ?? readProcessInventory
   const readGroup = dependencies.readGroup ?? readProcessGroup
-  const killTree = dependencies.killTree ?? killProcessTree
-  const signalGroup = dependencies.signalGroup ?? signalProcessGroup
+  const terminateTree = dependencies.terminateTree ?? terminateProcessTreeGuarded
   const findReservationPids = dependencies.findReservationPids ?? findReservationProcesses
   const retryDelay = dependencies.retryDelay ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 50)))
   const protectedProcesses = dependencies.protectedProcesses ?? defaultProtectedProcesses()
@@ -846,19 +843,13 @@ export async function killTrackedChildren(
           ? inventory.process
           : { pid, ...(inventory.status === 'absent' ? { pgid: pid } : {}) }
       const identity = inventory.status === 'found' ? readProcessIdentity(pid) : inventory
-      const result = await signalRecordedChildGroup(
-        target,
-        identity,
-        readGroup,
-        signalGroup,
-        protectedProcesses,
-        logSignalRefusal,
-      )
-      if (result === 'signaled') {
+      const result = await signalRecordedChildGroup(target, identity, readGroup, protectedProcesses, logSignalRefusal)
+      if (result === 'group_allowed') {
+        await terminateTree(pid, { allowedRootPgid: pid })
         killedSet.add(pid)
         killed.push(pid)
       } else if (result === 'positive_only') {
-        await killTree(pid)
+        await terminateTree(pid)
         killedSet.add(pid)
         killed.push(pid)
       } else if (result === 'refused') {
@@ -878,18 +869,12 @@ export async function killTrackedChildren(
         await retryDelay()
         identity = readProcessIdentity(child.pid)
       }
-      const result = await signalRecordedChildGroup(
-        child,
-        identity,
-        readGroup,
-        signalGroup,
-        protectedProcesses,
-        logSignalRefusal,
-      )
-      if (result === 'signaled') {
+      const result = await signalRecordedChildGroup(child, identity, readGroup, protectedProcesses, logSignalRefusal)
+      if (result === 'group_allowed') {
+        await terminateTree(child.pid, { allowedRootPgid: child.pid })
         killed.push(child.pid)
       } else if (result === 'positive_only') {
-        await killTree(child.pid)
+        await terminateTree(child.pid)
         killed.push(child.pid)
       } else if (result === 'refused') {
         hasRefusedGroupSignal = true

@@ -59,6 +59,67 @@ function killProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void {
   }
 }
 
+function runTaskkill(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve) => {
+    const killer = spawn(file, args, { stdio: 'ignore', windowsHide: true })
+    killer.once('exit', () => resolve())
+    killer.once('error', () => resolve())
+  })
+}
+
+export type GuardedTreeSignal = 'SIGTERM' | 'SIGKILL'
+
+export interface GuardedProcessTreeDependencies {
+  enumerate?: (rootPid: number) => Promise<number[]>
+  send?: (pid: number, signal: GuardedTreeSignal) => void
+  isAlive?: (pid: number) => boolean
+  sleep?: (delayMs: number) => Promise<void>
+  platform?: NodeJS.Platform
+  runTaskkill?: (file: string, args: string[]) => Promise<void>
+}
+
+export interface GuardedProcessTreeOptions {
+  allowedRootPgid?: number
+  immediate?: boolean
+  dependencies?: GuardedProcessTreeDependencies
+}
+
+export async function terminateProcessTreeGuarded(
+  rootPid: number,
+  options: GuardedProcessTreeOptions = {},
+): Promise<void> {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) throw new Error('process tree root pid must be positive')
+  const allowedRootPgid = options.allowedRootPgid
+  if (
+    allowedRootPgid !== undefined &&
+    (!Number.isInteger(allowedRootPgid) || allowedRootPgid <= 1 || allowedRootPgid !== rootPid)
+  ) {
+    throw new Error('allowed process group must equal the positive root pid')
+  }
+  const platform = options.dependencies?.platform ?? process.platform
+  if (platform === 'win32') {
+    const taskkill = options.dependencies?.runTaskkill ?? runTaskkill
+    await taskkill('taskkill', ['/pid', String(rootPid), '/f', '/t'])
+    return
+  }
+  const enumerate = options.dependencies?.enumerate ?? getDescendantPids
+  const send = options.dependencies?.send ?? killProcess
+  const readAlive = options.dependencies?.isAlive ?? isAlive
+  const wait = options.dependencies?.sleep ?? sleep
+  const descendants = [...new Set(await enumerate(rootPid))].filter((pid) => pid > 0 && pid !== rootPid)
+  const positivePids = [rootPid, ...descendants]
+  const signalTree = (signal: GuardedTreeSignal) => {
+    if (allowedRootPgid !== undefined) send(-allowedRootPgid, signal)
+    for (const pid of positivePids) send(pid, signal)
+  }
+  if (!options.immediate) {
+    signalTree('SIGTERM')
+    const deadline = Date.now() + SIGKILL_TIMEOUT_MS
+    while (Date.now() < deadline && readAlive(rootPid)) await wait(20)
+  }
+  signalTree('SIGKILL')
+}
+
 export async function signalProcessGroup(pid: number, immediate = false): Promise<boolean> {
   if (process.platform === 'win32') return false
   try {
@@ -101,14 +162,7 @@ export async function signalProcessGroup(pid: number, immediate = false): Promis
  */
 export async function killProcessTree(pid: number, immediate = false): Promise<void> {
   if (process.platform === 'win32') {
-    await new Promise<void>((resolve) => {
-      const killer = spawn('taskkill', ['/pid', String(pid), '/f', '/t'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      })
-      killer.once('exit', () => resolve())
-      killer.once('error', () => resolve())
-    })
+    await runTaskkill('taskkill', ['/pid', String(pid), '/f', '/t'])
     return
   }
 

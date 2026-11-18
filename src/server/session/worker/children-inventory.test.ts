@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  terminateProcessTreeGuarded,
+  type GuardedProcessTreeOptions,
+  type GuardedTreeSignal,
+} from '../../utils/process-tree.js'
+import {
   captureExclusiveProcessInventory,
   captureExclusiveProcessInventoryAsync,
   killTrackedChildren,
@@ -67,6 +72,22 @@ function protectedProcess(pid: number): ProcessInventoryEntry {
   return { pid, pgid: pid, startedAt: `identity-${pid}` }
 }
 
+function guardedTerminator(
+  sent: Array<[number, GuardedTreeSignal]>,
+  descendants: number[] = [],
+): (pid: number, options?: GuardedProcessTreeOptions) => Promise<void> {
+  return (pid, options = {}) =>
+    terminateProcessTreeGuarded(pid, {
+      ...options,
+      dependencies: {
+        enumerate: async () => descendants,
+        send: (target, signal) => sent.push([target, signal]),
+        isAlive: () => false,
+        sleep: async () => {},
+      },
+    })
+}
+
 describe('exclusive process group signal guard', () => {
   it('refuses an unproven or protected process group with structured evidence', async () => {
     const protectedProcesses: Record<ProtectedProcessRole, ProcessInventoryEntry> = {
@@ -119,14 +140,13 @@ describe('exclusive process group signal guard', () => {
         path,
         `${JSON.stringify({ type: 'child', pid: testCase.pid, pgid: testCase.pid, startedAt: 'stable' })}\n`,
       )
-      const killTree = vi.fn(async () => {})
-      const signalGroup = vi.fn(async () => true)
+      const sent: Array<[number, GuardedTreeSignal]> = []
+      const terminateTree = vi.fn(guardedTerminator(sent, [testCase.pid + 1_000]))
       const logSignalRefusal = vi.fn()
       const dependencies: GuardedCleanupDependencies = {
         readProcessIdentity: () => testCase.identity,
         readGroup: () => ({ status: 'found' }),
-        killTree,
-        signalGroup,
+        terminateTree,
         findReservationPids: () => [],
         retryDelay: async () => {},
         protectedProcesses,
@@ -134,9 +154,14 @@ describe('exclusive process group signal guard', () => {
       }
 
       expect(await killTrackedChildren(path, dependencies)).toEqual(testCase.positiveOnly ? [testCase.pid] : [])
-      if (testCase.positiveOnly) expect(killTree).toHaveBeenCalledWith(testCase.pid)
-      else expect(killTree).not.toHaveBeenCalled()
-      expect(signalGroup).not.toHaveBeenCalled()
+      if (testCase.positiveOnly) {
+        expect(terminateTree).toHaveBeenCalledWith(testCase.pid)
+        expect(sent.some(([pid]) => pid < 0)).toBe(false)
+        expect(new Set(sent.map(([pid]) => pid))).toEqual(new Set([testCase.pid, testCase.pid + 1_000]))
+      } else {
+        expect(terminateTree).not.toHaveBeenCalled()
+        expect(sent).toEqual([])
+      }
       expect(existsSync(path)).toBe(!testCase.positiveOnly)
       expect(logSignalRefusal).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -154,8 +179,8 @@ describe('exclusive process group signal guard', () => {
     roots.push(root)
     const path = join(root, 'children.jsonl')
     await writeFile(path, `${JSON.stringify({ type: 'reservation', id: 'r1', command: 'printf x' })}\n`)
-    const killTree = vi.fn(async () => {})
-    const signalGroup = vi.fn(async () => true)
+    const sent: Array<[number, GuardedTreeSignal]> = []
+    const terminateTree = vi.fn(guardedTerminator(sent, [1_401]))
     const logSignalRefusal = vi.fn()
     const protectedReservationPids = vi.fn().mockReturnValueOnce([401]).mockReturnValue([])
     const dependencies: GuardedCleanupDependencies = {
@@ -164,8 +189,7 @@ describe('exclusive process group signal guard', () => {
         process: { pid: 401, pgid: protectedProcesses.gateway.pgid, startedAt: 'stable' },
       }),
       readProcessIdentity: () => ({ status: 'found', identity: 'stable' }),
-      killTree,
-      signalGroup,
+      terminateTree,
       findReservationPids: protectedReservationPids,
       retryDelay: async () => {},
       protectedProcesses,
@@ -173,8 +197,9 @@ describe('exclusive process group signal guard', () => {
     }
 
     expect(await killTrackedChildren(path, dependencies)).toEqual([401])
-    expect(killTree).toHaveBeenCalledWith(401)
-    expect(signalGroup).not.toHaveBeenCalled()
+    expect(terminateTree).toHaveBeenCalledWith(401)
+    expect(sent.some(([pid]) => pid < 0)).toBe(false)
+    expect(new Set(sent.map(([pid]) => pid))).toEqual(new Set([401, 1_401]))
     expect(existsSync(path)).toBe(false)
     expect(logSignalRefusal).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -191,14 +216,13 @@ describe('exclusive process group signal guard', () => {
     roots.push(liveRoot)
     const livePath = join(liveRoot, 'children.jsonl')
     await writeFile(livePath, `${JSON.stringify({ type: 'reservation', id: 'r-live' })}\n`)
-    const liveKillTree = vi.fn(async () => {})
-    const liveSignalGroup = vi.fn(async () => true)
+    const liveSent: Array<[number, GuardedTreeSignal]> = []
+    const liveTerminateTree = vi.fn(guardedTerminator(liveSent))
     const liveLogSignalRefusal = vi.fn()
     const liveDependencies: GuardedCleanupDependencies = {
       readInventory: () => ({ status: 'absent' }),
       readGroup: () => ({ status: 'found' }),
-      killTree: liveKillTree,
-      signalGroup: liveSignalGroup,
+      terminateTree: liveTerminateTree,
       findReservationPids: () => [402],
       retryDelay: async () => {},
       protectedProcesses,
@@ -206,8 +230,8 @@ describe('exclusive process group signal guard', () => {
     }
 
     expect(await killTrackedChildren(livePath, liveDependencies)).toEqual([])
-    expect(liveKillTree).not.toHaveBeenCalled()
-    expect(liveSignalGroup).not.toHaveBeenCalled()
+    expect(liveTerminateTree).not.toHaveBeenCalled()
+    expect(liveSent).toEqual([])
     expect(existsSync(livePath)).toBe(true)
     expect(liveLogSignalRefusal).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -222,8 +246,8 @@ describe('exclusive process group signal guard', () => {
     roots.push(protectedAbsentRoot)
     const protectedAbsentPath = join(protectedAbsentRoot, 'children.jsonl')
     await writeFile(protectedAbsentPath, `${JSON.stringify({ type: 'reservation', id: 'r-protected-absent' })}\n`)
-    const protectedAbsentKillTree = vi.fn(async () => {})
-    const protectedAbsentSignalGroup = vi.fn(async () => true)
+    const protectedAbsentSent: Array<[number, GuardedTreeSignal]> = []
+    const protectedAbsentTerminateTree = vi.fn(guardedTerminator(protectedAbsentSent))
     const protectedAbsentLogSignalRefusal = vi.fn()
     const protectedAbsentReadGroup = vi.fn(() => ({ status: 'found' }) as const)
     const protectedAbsentReservationPids = vi
@@ -233,8 +257,7 @@ describe('exclusive process group signal guard', () => {
     const protectedAbsentDependencies: GuardedCleanupDependencies = {
       readInventory: () => ({ status: 'absent' }),
       readGroup: protectedAbsentReadGroup,
-      killTree: protectedAbsentKillTree,
-      signalGroup: protectedAbsentSignalGroup,
+      terminateTree: protectedAbsentTerminateTree,
       findReservationPids: protectedAbsentReservationPids,
       retryDelay: async () => {},
       protectedProcesses,
@@ -243,8 +266,8 @@ describe('exclusive process group signal guard', () => {
 
     expect(await killTrackedChildren(protectedAbsentPath, protectedAbsentDependencies)).toEqual([])
     expect(protectedAbsentReadGroup).not.toHaveBeenCalled()
-    expect(protectedAbsentKillTree).not.toHaveBeenCalled()
-    expect(protectedAbsentSignalGroup).not.toHaveBeenCalled()
+    expect(protectedAbsentTerminateTree).not.toHaveBeenCalled()
+    expect(protectedAbsentSent).toEqual([])
     expect(protectedAbsentLogSignalRefusal).not.toHaveBeenCalled()
     expect(existsSync(protectedAbsentPath)).toBe(false)
 
@@ -252,15 +275,14 @@ describe('exclusive process group signal guard', () => {
     roots.push(absentRoot)
     const absentPath = join(absentRoot, 'children.jsonl')
     await writeFile(absentPath, `${JSON.stringify({ type: 'reservation', id: 'r-absent' })}\n`)
-    const absentKillTree = vi.fn(async () => {})
-    const absentSignalGroup = vi.fn(async () => true)
+    const absentSent: Array<[number, GuardedTreeSignal]> = []
+    const absentTerminateTree = vi.fn(guardedTerminator(absentSent))
     const absentLogSignalRefusal = vi.fn()
     const absentReservationPids = vi.fn().mockReturnValueOnce([403]).mockReturnValue([])
     const absentDependencies: GuardedCleanupDependencies = {
       readInventory: () => ({ status: 'absent' }),
       readGroup: () => ({ status: 'absent' }),
-      killTree: absentKillTree,
-      signalGroup: absentSignalGroup,
+      terminateTree: absentTerminateTree,
       findReservationPids: absentReservationPids,
       retryDelay: async () => {},
       protectedProcesses,
@@ -268,8 +290,8 @@ describe('exclusive process group signal guard', () => {
     }
 
     expect(await killTrackedChildren(absentPath, absentDependencies)).toEqual([])
-    expect(absentKillTree).not.toHaveBeenCalled()
-    expect(absentSignalGroup).not.toHaveBeenCalled()
+    expect(absentTerminateTree).not.toHaveBeenCalled()
+    expect(absentSent).toEqual([])
     expect(absentLogSignalRefusal).not.toHaveBeenCalled()
     expect(existsSync(absentPath)).toBe(false)
   })
@@ -291,8 +313,8 @@ describe('exclusive process group signal guard', () => {
         }),
       ].join('\n') + '\n',
     )
-    const killTree = vi.fn(async () => {})
-    const signalGroup = vi.fn(async () => true)
+    const sent: Array<[number, GuardedTreeSignal]> = []
+    const terminateTree = vi.fn(guardedTerminator(sent, [1_400]))
     const logSignalRefusal = vi.fn()
     const reservationPids = vi.fn().mockReturnValueOnce([400]).mockReturnValue([])
     const dependencies: GuardedCleanupDependencies = {
@@ -301,8 +323,7 @@ describe('exclusive process group signal guard', () => {
         process: { pid: 400, pgid: 400, startedAt: 'stable' },
       }),
       readProcessIdentity: () => ({ status: 'found', identity: 'stable' }),
-      killTree,
-      signalGroup,
+      terminateTree,
       findReservationPids: reservationPids,
       retryDelay: async () => {},
       protectedProcesses: {
@@ -314,8 +335,12 @@ describe('exclusive process group signal guard', () => {
     }
 
     expect(await killTrackedChildren(path, dependencies)).toEqual([400])
-    expect(signalGroup).toHaveBeenCalledWith(400)
-    expect(killTree).not.toHaveBeenCalled()
+    expect(terminateTree).toHaveBeenCalledWith(400, { allowedRootPgid: 400 })
+    expect(sent.filter(([pid]) => pid < 0)).toEqual([
+      [-400, 'SIGTERM'],
+      [-400, 'SIGKILL'],
+    ])
+    expect(new Set(sent.filter(([pid]) => pid > 0).map(([pid]) => pid))).toEqual(new Set([400, 1_400]))
     expect(logSignalRefusal).not.toHaveBeenCalled()
     expect(existsSync(path)).toBe(false)
   })

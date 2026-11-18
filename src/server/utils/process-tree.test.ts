@@ -1,10 +1,10 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { spawn, execFile } from 'node:child_process'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { terminateProcessTree } from './process-tree.js'
+import { terminateProcessTree, terminateProcessTreeGuarded } from './process-tree.js'
 
 function isAlive(pid: number): boolean {
   try {
@@ -12,6 +12,19 @@ function isAlive(pid: number): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+async function pidExecuting(pid: number): Promise<boolean> {
+  if (process.platform !== 'linux') return isAlive(pid)
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf-8')
+    const stateOffset = stat.lastIndexOf(') ') + 2
+    if (stateOffset < 2) return isAlive(pid)
+    return stat[stateOffset] !== 'Z'
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    return isAlive(pid)
   }
 }
 
@@ -111,6 +124,89 @@ const TREE_SCRIPT = [
   'setInterval(() => {}, 1000);',
 ].join('\n')
 
+describe('terminateProcessTreeGuarded', () => {
+  it('uses only positive pids when no root process group is allowed', async () => {
+    const events: Array<string | [number, string]> = []
+    const send = vi.fn((pid: number, signal: string) => events.push([pid, signal]))
+
+    await terminateProcessTreeGuarded(100, {
+      dependencies: {
+        enumerate: async () => {
+          events.push('enumerate')
+          return [101, 102]
+        },
+        send,
+        isAlive: () => false,
+        sleep: async () => {},
+      },
+    })
+
+    expect(events[0]).toBe('enumerate')
+    expect(send.mock.calls).toEqual([
+      [100, 'SIGTERM'],
+      [101, 'SIGTERM'],
+      [102, 'SIGTERM'],
+      [100, 'SIGKILL'],
+      [101, 'SIGKILL'],
+      [102, 'SIGKILL'],
+    ])
+    expect(send.mock.calls.every(([pid]) => pid > 0)).toBe(true)
+    await expect(terminateProcessTreeGuarded(100, { allowedRootPgid: 1 })).rejects.toThrow()
+    await expect(terminateProcessTreeGuarded(100, { allowedRootPgid: 101 })).rejects.toThrow()
+  })
+
+  it('signals only the allowed root group and positive root and descendant pids', async () => {
+    const send = vi.fn()
+
+    await terminateProcessTreeGuarded(200, {
+      allowedRootPgid: 200,
+      dependencies: {
+        enumerate: async () => [201, 202],
+        send,
+        isAlive: () => false,
+        sleep: async () => {},
+      },
+    })
+
+    expect(send.mock.calls).toEqual([
+      [-200, 'SIGTERM'],
+      [200, 'SIGTERM'],
+      [201, 'SIGTERM'],
+      [202, 'SIGTERM'],
+      [-200, 'SIGKILL'],
+      [200, 'SIGKILL'],
+      [201, 'SIGKILL'],
+      [202, 'SIGKILL'],
+    ])
+    expect(send.mock.calls.filter(([pid]) => pid < 0)).toEqual([
+      [-200, 'SIGTERM'],
+      [-200, 'SIGKILL'],
+    ])
+  })
+
+  it('uses taskkill for the root on win32 without entering the signal boundary', async () => {
+    const runTaskkill = vi.fn(async () => {})
+    const enumerate = vi.fn(async () => [301])
+    const send = vi.fn()
+
+    await terminateProcessTreeGuarded(300, {
+      allowedRootPgid: 300,
+      dependencies: {
+        platform: 'win32',
+        runTaskkill,
+        enumerate,
+        send,
+        isAlive: () => true,
+        sleep: async () => {},
+      },
+    })
+
+    expect(runTaskkill).toHaveBeenCalledWith('taskkill', ['/pid', '300', '/f', '/t'])
+    expect(enumerate).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+})
+
 describe('terminateProcessTree', () => {
   it('kills a simple sleep process', async () => {
     const proc = spawn('sleep', ['30'], { stdio: 'ignore', detached: true })
@@ -137,12 +233,12 @@ describe('terminateProcessTree', () => {
 
     // Terminate the tree
     await terminateProcessTree(proc)
-    await waitFor(allDead(proc.pid!, ...descendants))
+    await waitFor(async () => !isAlive(proc.pid!) && !(await Promise.all(descendants.map(pidExecuting))).some(Boolean))
 
     // All should be dead now
     expect(isAlive(proc.pid!)).toBe(false)
     for (const pid of descendants) {
-      expect(isAlive(pid)).toBe(false)
+      expect(await pidExecuting(pid)).toBe(false)
     }
   }, 20000)
 
@@ -207,11 +303,11 @@ describe('terminateProcessTree', () => {
     expect(descendants.length).toBeGreaterThanOrEqual(1)
 
     await terminateProcessTree(proc, { immediate: true })
-    await waitFor(allDead(proc.pid!, ...descendants))
+    await waitFor(async () => !isAlive(proc.pid!) && !(await Promise.all(descendants.map(pidExecuting))).some(Boolean))
 
     expect(isAlive(proc.pid!)).toBe(false)
     for (const pid of descendants) {
-      expect(isAlive(pid)).toBe(false)
+      expect(await pidExecuting(pid)).toBe(false)
     }
   }, 20000)
 
@@ -237,12 +333,15 @@ describe('terminateProcessTree', () => {
     })
 
     await terminateProcessTree(proc)
-    await waitFor(() => closed && allDead(proc.pid!, ...descendants)(), 15000)
+    await waitFor(
+      async () => closed && !isAlive(proc.pid!) && !(await Promise.all(descendants.map(pidExecuting))).some(Boolean),
+      15000,
+    )
 
     expect(closed).toBe(true)
     expect(isAlive(proc.pid!)).toBe(false)
     for (const pid of descendants) {
-      expect(isAlive(pid)).toBe(false)
+      expect(await pidExecuting(pid)).toBe(false)
     }
   }, 30000)
 

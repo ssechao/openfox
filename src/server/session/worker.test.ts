@@ -449,7 +449,7 @@ describe('exclusive children tracking', () => {
         expect(() => process.kill(firstPid, 0)).not.toThrow()
         expect(() => process.kill(secondPid, 0)).not.toThrow()
 
-        const attempted = await killTrackedChildren(file, { killTree: async () => {} })
+        const attempted = await killTrackedChildren(file, { terminateTree: async () => {} })
         expect(attempted).toEqual(expect.arrayContaining([firstPid, secondPid]))
         expect(() => process.kill(firstPid, 0)).not.toThrow()
         expect(() => process.kill(secondPid, 0)).not.toThrow()
@@ -518,19 +518,18 @@ describe('exclusive children tracking', () => {
     const file = join(dir, 'w.children')
     const pid = 987_654
     writeFileSync(file, `${JSON.stringify({ pid, pgid: pid, startedAt: 'linux:1' })}\n`, 'utf-8')
-    let groupSignals = 0
+    let treeTerminations = 0
     try {
       expect(
         await killTrackedChildren(file, {
           readProcessIdentity: () => ({ status: 'absent' }),
           readGroup: () => ({ status: 'absent' }),
-          signalGroup: async () => {
-            groupSignals += 1
-            return true
+          terminateTree: async () => {
+            treeTerminations += 1
           },
         }),
       ).toEqual([])
-      expect(groupSignals).toBe(0)
+      expect(treeTerminations).toBe(0)
       expect(existsSync(file)).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -543,7 +542,7 @@ describe('exclusive children tracking', () => {
     const pid = 987_654
     writeFileSync(file, `${JSON.stringify({ pid, startedAt: 'linux:1' })}\n`, 'utf-8')
     let identityReads = 0
-    let groupSignals = 0
+    let treeTerminations = 0
     try {
       expect(
         await killTrackedChildren(file, {
@@ -551,15 +550,14 @@ describe('exclusive children tracking', () => {
             identityReads += 1
             return { status: 'unreadable', error: new Error('permission denied') }
           },
-          signalGroup: async () => {
-            groupSignals += 1
-            return true
+          terminateTree: async () => {
+            treeTerminations += 1
           },
           retryDelay: async () => {},
         }),
       ).toEqual([])
       expect(identityReads).toBe(2)
-      expect(groupSignals).toBe(0)
+      expect(treeTerminations).toBe(0)
       expect(existsSync(file)).toBe(true)
     } finally {
       rmSync(dir, { recursive: true, force: true })
