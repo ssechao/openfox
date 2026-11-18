@@ -180,6 +180,18 @@ function errorCodeOf(error: unknown): string {
   return typeof code === 'string' ? code : 'UNKNOWN_ERROR'
 }
 
+function isSupervisorUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /Session process supervisor (is not ready|is unavailable|exited)/i.test(message)
+}
+
+function workerShutdownFailureCode(error: string): string {
+  if (/did not exit/i.test(error)) return 'WORKER_EXIT_TIMEOUT'
+  if (/cleanup exceeded/i.test(error)) return 'CHILD_CLEANUP_TIMEOUT'
+  if (/supervisor (is not ready|is unavailable|exited)/i.test(error)) return 'SUPERVISOR_UNAVAILABLE'
+  return 'CHILD_CLEANUP_FAILED'
+}
+
 /**
  * Prepare a session's interruption events without letting a locked database take
  * the gateway down.
@@ -1088,6 +1100,17 @@ export class SessionWorkerManager {
       )
     }
     const errors = results.map((result) => result.error).filter((error): error is string => error !== undefined)
+    const stopped = results.length - errors.length
+    for (const { worker, error } of results) {
+      if (!error) continue
+      logger.error('Session worker shutdown failed', {
+        sessionId: worker.sessionId,
+        workerId: worker.token.workerId,
+        code: workerShutdownFailureCode(error),
+        error,
+      })
+    }
+    logger.info('Session workers stopped at gateway shutdown', { stopped, failed: errors.length })
     if (errors.length > 0) throw new Error(`Gateway worker shutdown failed: ${errors.join('; ')}`)
   }
 
@@ -1292,13 +1315,9 @@ export class SessionWorkerManager {
     deadlineAt: number,
     deadlineError = 'child cleanup exceeded recovery deadline',
   ): Promise<{ killedChildren: number[]; cleanupError?: string }> {
-    const cleanup =
-      this.deps.cleanupChildren ??
-      (this.deps.processSupervisor
-        ? (path: string) => this.deps.processSupervisor!.cleanupWorkerChildren(path, deadlineAt)
-        : killTrackedChildren)
+    const cleanup = this.resolveChildCleanup(childrenPath, deadlineAt)
     const result = Promise.resolve()
-      .then(() => cleanup(childrenPath))
+      .then(() => cleanup())
       .then((killedChildren) => ({ killedChildren }))
       .catch((error) => ({
         killedChildren: [],
@@ -1313,6 +1332,30 @@ export class SessionWorkerManager {
       })
     }
     return bounded
+  }
+
+  private resolveChildCleanup(childrenPath: string, deadlineAt: number): () => Promise<number[]> {
+    const injected = this.deps.cleanupChildren
+    if (injected) return () => injected(childrenPath)
+    const supervisor = this.deps.processSupervisor
+    if (!supervisor) return () => killTrackedChildren(childrenPath)
+    const ready = typeof supervisor.isReady === 'function' ? supervisor.isReady() : true
+    if (!ready) {
+      logger.warn('Session process supervisor unavailable; cleaning worker children locally', { childrenPath })
+      return () => killTrackedChildren(childrenPath)
+    }
+    return async () => {
+      try {
+        return await supervisor.cleanupWorkerChildren(childrenPath, deadlineAt)
+      } catch (error) {
+        if (!isSupervisorUnavailable(error)) throw error
+        logger.warn('Session process supervisor unavailable; cleaning worker children locally', {
+          childrenPath,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return killTrackedChildren(childrenPath)
+      }
+    }
   }
 
   private retire(worker: ActiveWorker, outcome: WorkerSettledOutcome): boolean {

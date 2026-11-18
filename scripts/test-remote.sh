@@ -63,6 +63,8 @@ if awk -v load="$LOAD_ONE" -v threshold="$MAX_LOAD_ONE" 'BEGIN { exit !(load > t
   exit 1
 fi
 
+echo "test-remote: host=$HOST load1=$LOAD_ONE threshold=$MAX_LOAD_ONE docker_limits=$DOCKER_LIMITS"
+
 if [ "$MODE" = "--all" ]; then
   echo "  Running all pre-commit gates on $HOST ($IMAGE)..."
 else

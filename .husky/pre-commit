@@ -1,16 +1,20 @@
 #!/bin/sh
 
 script_dir=$(dirname "$0")/..
-REMOTE_HOST=$(git config --get openfox.testRemote 2>/dev/null || true)
-if [ -n "$REMOTE_HOST" ] || [ "${OPENFOX_TEST_REMOTE:-}" = "1" ]; then
-  exec "$script_dir/scripts/test-remote.sh" --all
-fi
 
 STAGED=$(git diff --cached --name-only --diff-filter=d)
 if [ -n "$STAGED" ]; then
   echo "$STAGED" | xargs npx prettier --write --ignore-unknown || exit 1
 fi
 git add -u
+
+npm run lint || exit 1
+npm run format || exit 1
+
+REMOTE_HOST=$(git config --get openfox.testRemote 2>/dev/null || true)
+if [ -n "$REMOTE_HOST" ] || [ "${OPENFOX_TEST_REMOTE:-}" = "1" ]; then
+  exec "$script_dir/scripts/test-remote.sh" --all
+fi
 
 . "$script_dir/scripts/parallel-exit-on-failure.sh"
 

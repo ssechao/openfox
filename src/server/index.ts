@@ -4681,7 +4681,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
               ? import('node:fs/promises').then(({ unlink }) => unlink(config.globalConfigPath!).catch(() => {}))
               : Promise.resolve(),
           ])
-          await runGatewayShutdown({
+          const shutdownResult = await runGatewayShutdown({
             workerManager,
             mcpManager,
             processSupervisor,
@@ -4689,6 +4689,19 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
             beforeSupervisorShutdown: () => setExternalGitRunner(null),
             logger,
           })
+          if (!shutdownResult.clean) {
+            recordRuntimeRecovery(false)
+            if (!completed) {
+              const shutdownError =
+                shutdownResult.workerError ??
+                shutdownResult.mcpError ??
+                shutdownResult.supervisorError ??
+                shutdownResult.ancillaryError ??
+                'Gateway shutdown failed'
+              finish(new Error(shutdownError))
+            }
+            return
+          }
           if (completed) {
             recordRuntimeRecovery(false)
             return
@@ -4726,7 +4739,15 @@ export async function createServer(config: Config): Promise<void> {
     }, 3000)
     forceExitTimer.unref() // Don't keep process alive just for this timer
 
-    handle.close().then(() => process.exit(0))
+    handle
+      .close()
+      .then(() => process.exit(0))
+      .catch((error: unknown) => {
+        logger.error('Gateway shutdown failed', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        process.exit(1)
+      })
   }
 
   // Prevent crash on unhandled promise rejections — log and continue

@@ -182,7 +182,13 @@ export class McpManager {
 
       const connectedTransport = transport
       transport.onclose = () => {
-        if (entry.closing || entry.transport !== connectedTransport) return
+        if (entry.transport !== connectedTransport) return
+        if (entry.closing || this.shuttingDown) {
+          entry.client = undefined
+          entry.transport = null
+          entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
+          return
+        }
         const error = 'MCP server disconnected unexpectedly'
         entry.client = undefined
         entry.transport = null
@@ -291,6 +297,7 @@ export class McpManager {
 
   beginShutdown(): void {
     this.shuttingDown = true
+    for (const entry of this.servers.values()) entry.closing = true
   }
 
   async disconnectAll(): Promise<number> {
