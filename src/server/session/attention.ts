@@ -362,8 +362,19 @@ function attentionStore(): EventStore | null {
 }
 
 /**
+ * Attention events still queued behind a busy store, per session. While one is
+ * pending, every later event for that session must queue too: a synchronous
+ * append would otherwise be persisted BEFORE the event still waiting for its
+ * retry, and a replay would end on the wrong state (an alert closed that was
+ * never opened, or an active alert erased by a cleared event that logically
+ * came before it). The persisted order of required/cleared always equals the
+ * logical order.
+ */
+const pendingAttentionAppends = new Map<string, number>()
+
+/**
  * Persist an attention event without ever letting a locked database take the
- * process down.
+ * process down, and without ever reordering the persisted stream.
  *
  * Measured in production (18/11 02:41:54): the gateway tolerates a 5 ms busy
  * wait, so a 10 ms write lock made `append` throw `EventStoreBusyTimeoutError`
@@ -371,10 +382,10 @@ function attentionStore(): EventStore | null {
  * `emitCleared`). Nothing caught it and the 450 died, cutting twelve turns.
  * A sweep timer reaches the same code, so the throw is not tied to a turn.
  *
- * The synchronous attempt stays the fast path. On failure the event is handed to
- * the store's recoverable queue, which retries on its own deadline, so the alert
- * is neither thrown away nor lost silently: both the handover and a failure that
- * survives the retries are journaled with the store's error code.
+ * The synchronous attempt is kept only while nothing is pending for the
+ * session; otherwise the event joins the store's recoverable queue, which is
+ * FIFO per session and retries on its own deadline. Every failure is journaled
+ * with the store's error code, never thrown.
  */
 function appendAttentionEvent(sessionId: string, reason: AttentionReason, event: TurnEvent): void {
   const store = attentionStore()
@@ -388,35 +399,37 @@ function appendAttentionEvent(sessionId: string, reason: AttentionReason, event:
     })
     return
   }
-  try {
-    store.append(sessionId, event)
-    return
-  } catch (error) {
-    logger.error('attention_event_append_failed', {
-      sessionId,
-      reason,
-      eventType: event.type,
-      code: errorCode(error),
-      error: errorMessage(error),
-    })
-  }
-  void store
-    .appendRecoverable(sessionId, event)
-    .then(() => {
-      logger.info('attention_event_append_recovered', {
-        sessionId,
-        reason,
-        eventType: event.type,
-      })
-    })
-    .catch((error: unknown) => {
-      logger.error('attention_event_append_lost', {
+  const pending = pendingAttentionAppends.get(sessionId) ?? 0
+  if (pending === 0) {
+    try {
+      store.append(sessionId, event)
+      return
+    } catch (error) {
+      logger.error('attention_event_append_failed', {
         sessionId,
         reason,
         eventType: event.type,
         code: errorCode(error),
         error: errorMessage(error),
       })
+    }
+  }
+  pendingAttentionAppends.set(sessionId, pending + 1)
+  void store
+    .appendRecoverable(sessionId, event)
+    .catch((error: unknown) => {
+      logger.error('attention_event_append_failed', {
+        sessionId,
+        reason,
+        eventType: event.type,
+        code: errorCode(error),
+        error: errorMessage(error),
+      })
+    })
+    .finally(() => {
+      const left = (pendingAttentionAppends.get(sessionId) ?? 1) - 1
+      if (left <= 0) pendingAttentionAppends.delete(sessionId)
+      else pendingAttentionAppends.set(sessionId, left)
     })
 }
 

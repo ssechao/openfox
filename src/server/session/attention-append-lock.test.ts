@@ -137,19 +137,19 @@ describe('session attention append under a locked database', () => {
     try {
       // With the lock held the append cannot succeed: it must be reported, not thrown.
       expect(() => getAttentionService().observeBlocked(session.id, 'HTTP 400')).not.toThrow()
+      await vi.waitFor(
+        () => {
+          expect(errors.find((entry) => entry['eventType'] === 'session.attention_required')).toBeDefined()
+        },
+        { timeout: 5_000 },
+      )
     } finally {
       errorLog.mockRestore()
+      lock.release()
     }
 
     const failure = errors.find((entry) => entry['eventType'] === 'session.attention_required')
-    expect(failure).toBeDefined()
     expect(failure!['code']).toBe('EVENT_STORE_BUSY_TIMEOUT')
-
-    // Released: the recoverable queue persists the alert instead of losing it.
-    lock.release()
-    await vi.waitFor(() => expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(1), {
-      timeout: 5_000,
-    })
   })
 
   it('a locked database during session.attention_cleared never takes the process down', async () => {
@@ -157,7 +157,9 @@ describe('session attention append under a locked database', () => {
     manager.setSessionCreatedBy(session.id, 'session-creator')
     const service = getAttentionService()
     service.observeBlocked(session.id, 'HTTP 400')
-    expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(1)
+    await vi.waitFor(() => expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(1), {
+      timeout: 5_000,
+    })
 
     const errors: Array<Record<string, unknown>> = []
     const errorLog = vi.spyOn(logger, 'error').mockImplementation((_message, payload) => {
@@ -166,17 +168,78 @@ describe('session attention append under a locked database', () => {
     const lock = await holdWriteLock(config.database.path)
     try {
       expect(() => service.observeResumed(session.id)).not.toThrow()
+      await vi.waitFor(
+        () => {
+          expect(errors.find((entry) => entry['eventType'] === 'session.attention_cleared')).toBeDefined()
+        },
+        { timeout: 5_000 },
+      )
     } finally {
       errorLog.mockRestore()
+      lock.release()
     }
 
     const failure = errors.find((entry) => entry['eventType'] === 'session.attention_cleared')
-    expect(failure).toBeDefined()
     expect(failure!['code']).toBe('EVENT_STORE_BUSY_TIMEOUT')
+  })
 
-    lock.release()
-    await vi.waitFor(() => expect(attentionEvents(session.id, 'session.attention_cleared')).toHaveLength(1), {
+  it('a required event still waiting for its retry is persisted before the cleared event that follows it', async () => {
+    // Logical order: required, then cleared. If the cleared event took a
+    // synchronous shortcut while the required one waits for its retry, the
+    // stream would end on "cleared" and a replay would lose the alert.
+    const session = manager.createSession(projectId, 'Ordered run')
+    manager.setSessionCreatedBy(session.id, 'session-creator')
+    const service = getAttentionService()
+    const lock = await holdWriteLock(config.database.path)
+    try {
+      service.observeBlocked(session.id, 'HTTP 400')
+      lock.release()
+      service.observeResumed(session.id)
+    } finally {
+      lock.release()
+    }
+
+    await vi.waitFor(
+      () => {
+        const types = getEventStore()
+          .getEvents(session.id)
+          .map((event) => event.type)
+          .filter((type) => type.startsWith('session.attention'))
+        expect(types).toEqual(['session.attention_required', 'session.attention_cleared'])
+      },
+      { timeout: 10_000 },
+    )
+  })
+
+  it('a new required event is persisted after the cleared event it follows', async () => {
+    // Logical order: required, cleared, required. A synchronous shortcut on the
+    // second required would erase an alert that is genuinely active.
+    const session = manager.createSession(projectId, 'Re-armed run')
+    manager.setSessionCreatedBy(session.id, 'session-creator')
+    const service = getAttentionService()
+    service.observeBlocked(session.id, 'HTTP 400')
+    await vi.waitFor(() => expect(attentionEvents(session.id, 'session.attention_required')).toHaveLength(1), {
       timeout: 5_000,
     })
+
+    const lock = await holdWriteLock(config.database.path)
+    try {
+      service.observeResumed(session.id)
+      lock.release()
+      service.observeBlocked(session.id, 'HTTP 500')
+    } finally {
+      lock.release()
+    }
+
+    await vi.waitFor(
+      () => {
+        const types = getEventStore()
+          .getEvents(session.id)
+          .map((event) => event.type)
+          .filter((type) => type.startsWith('session.attention'))
+        expect(types).toEqual(['session.attention_required', 'session.attention_cleared', 'session.attention_required'])
+      },
+      { timeout: 10_000 },
+    )
   })
 })
