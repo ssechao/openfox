@@ -137,10 +137,8 @@ export async function createHotfixFixture(appendBusyDeadlineMs = 100): Promise<H
   setRuntimeConfig(config)
   const db = initDatabase(config)
   const store = new EventStore(db, {
-    appendBusyDeadlineMs,
-    appendBusyInitialBackoffMs: 1,
-    appendBusyMaxBackoffMs: 2,
-    appendRecoveryDeadlineMs: 1_000,
+    appendRecoverableDeadlineMs: appendBusyDeadlineMs,
+    appendRecoverableDelayMs: 1,
   })
   getEventStoreMock.mockReturnValue(store)
   const sessionManager = new SessionManager(providerManager as never)
@@ -221,10 +219,10 @@ export function observeBusyAppend(
   eventType: TurnEvent['type'],
   getLock: () => ControlledWriteLock | undefined,
 ): BusyAppendObservation {
-  const retryTarget = store as unknown as { retryBusy: RetryBusy }
-  const originalRetryBusy = retryTarget.retryBusy.bind(retryTarget)
+  const retryTarget = store as unknown as { appendOnce: RetryBusy }
+  const originalRetryBusy = retryTarget.appendOnce.bind(retryTarget)
   const spy = vi.spyOn(store, 'append')
-  const retrySpy = vi.spyOn(retryTarget, 'retryBusy')
+  const retrySpy = vi.spyOn(retryTarget, 'appendOnce')
   retrySpy.mockImplementation(((sessionId, currentEventType, operation, reportTimeout) => {
     try {
       return originalRetryBusy(sessionId, currentEventType, operation, reportTimeout)

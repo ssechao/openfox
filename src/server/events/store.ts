@@ -22,11 +22,7 @@ import type { DiagnosticsCollector } from '../diagnostics/types.js'
 import { logger } from '../utils/logger.js'
 import { foldSessionState, buildSnapshot, trimSnapshotStreamingOutput } from './folding.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
-import {
-  APPEND_BUSY_MAX_ATTEMPTS,
-  GATEWAY_APPEND_BUSY_DEADLINE_MS,
-  GATEWAY_APPEND_RECOVERABLE_ATTEMPT_MS,
-} from '../db/busy-budget.js'
+import { GATEWAY_APPEND_BUSY_DEADLINE_MS, GATEWAY_APPEND_RECOVERABLE_DELAY_MS } from '../db/busy-budget.js'
 import { immutableSnapshot } from './immutable-snapshot.js'
 import { foldContextState } from './fold-state.js'
 import {
@@ -60,13 +56,9 @@ const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 
 export const STREAM_FLUSH_INTERVAL_MS = 250
 export const STREAM_FLUSH_MAX_BYTES = 4096
-export const APPEND_BUSY_DEADLINE_MS = 30_000
+export const APPEND_RECOVERABLE_DEADLINE_MS = 30_000
 export { GATEWAY_APPEND_BUSY_DEADLINE_MS }
-export const GATEWAY_APPEND_RECOVERY_DEADLINE_MS = 10_000
-const APPEND_BUSY_INITIAL_BACKOFF_MS = 5
-const GATEWAY_APPEND_RECOVERY_DELAY_MS = 25
-const APPEND_BUSY_MAX_BACKOFF_MS = 250
-const appendBusySleep = new Int32Array(new SharedArrayBuffer(4))
+const APPEND_RECOVERABLE_DELAY_MS = 25
 
 export class EventStoreBusyTimeoutError extends Error {
   readonly code = 'EVENT_STORE_BUSY_TIMEOUT'
@@ -80,7 +72,9 @@ export class EventStoreBusyTimeoutError extends Error {
     cause: unknown,
   ) {
     super(
-      `Event append busy deadline exceeded after ${elapsedMs} ms (budget ${deadlineMs} ms) for ${eventType} in session ${sessionId} (${attempts} attempts)`,
+      deadlineMs > 0
+        ? `Event append busy deadline exceeded after ${elapsedMs} ms (budget ${deadlineMs} ms) for ${eventType} in session ${sessionId} (${attempts} attempts)`
+        : `Event not persisted: database is locked after ${elapsedMs} ms for ${eventType} in session ${sessionId} (${attempts} attempt, the synchronous path never waits)`,
       { cause },
     )
     this.name = 'EventStoreBusyTimeoutError'
@@ -327,12 +321,8 @@ export class EventStore {
   private eventsReferenceSessions: boolean | undefined
   private readonly streamFlushIntervalMs: number
   private readonly streamFlushMaxBytes: number
-  private readonly appendBusyDeadlineMs: number
-  private readonly appendBusyInitialBackoffMs: number
-  private readonly appendBusyMaxBackoffMs: number
-  private readonly appendBusyMaxAttempts: number
-  private readonly appendRecoverableAttemptMs: number
-  private readonly appendRecoveryDeadlineMs: number
+  private readonly appendRecoverableDeadlineMs: number
+  private readonly appendRecoverableDelayMs: number
   private recoverableAppendTail: Promise<void> = Promise.resolve()
 
   private checkExternalWrites(): void {
@@ -475,12 +465,8 @@ export class EventStore {
       blobStore?: BlobStore
       snapshotCacheMaxBytes?: number
       snapshotCacheMaxEntries?: number
-      appendBusyDeadlineMs?: number
-      appendBusyInitialBackoffMs?: number
-      appendBusyMaxBackoffMs?: number
-      appendBusyMaxAttempts?: number
-      appendRecoverableAttemptMs?: number
-      appendRecoveryDeadlineMs?: number
+      appendRecoverableDeadlineMs?: number
+      appendRecoverableDelayMs?: number
       /** Worker fencing (étape 6a): invoked inside every append transaction;
        *  must throw when this writer's token is stale. Gateway instances leave
        *  it unset. */
@@ -502,18 +488,11 @@ export class EventStore {
     )
     this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? STREAM_FLUSH_INTERVAL_MS
     this.streamFlushMaxBytes = options.streamFlushMaxBytes ?? STREAM_FLUSH_MAX_BYTES
-    this.appendBusyDeadlineMs = Math.max(1, options.appendBusyDeadlineMs ?? APPEND_BUSY_DEADLINE_MS)
-    this.appendBusyInitialBackoffMs = Math.max(1, options.appendBusyInitialBackoffMs ?? APPEND_BUSY_INITIAL_BACKOFF_MS)
-    this.appendBusyMaxBackoffMs = Math.max(
-      this.appendBusyInitialBackoffMs,
-      options.appendBusyMaxBackoffMs ?? APPEND_BUSY_MAX_BACKOFF_MS,
+    this.appendRecoverableDeadlineMs = Math.max(
+      1,
+      options.appendRecoverableDeadlineMs ?? APPEND_RECOVERABLE_DEADLINE_MS,
     )
-    this.appendBusyMaxAttempts = Math.max(1, options.appendBusyMaxAttempts ?? APPEND_BUSY_MAX_ATTEMPTS)
-    this.appendRecoverableAttemptMs = Math.max(1, options.appendRecoverableAttemptMs ?? this.appendBusyDeadlineMs)
-    this.appendRecoveryDeadlineMs = Math.max(
-      this.appendBusyDeadlineMs,
-      options.appendRecoveryDeadlineMs ?? GATEWAY_APPEND_RECOVERY_DEADLINE_MS,
-    )
+    this.appendRecoverableDelayMs = Math.max(1, options.appendRecoverableDelayMs ?? APPEND_RECOVERABLE_DELAY_MS)
     this.db = db
     this.writeFence = options.writeFence
     this.blobStore = options.blobStore ?? blobStoreForDatabase(db.name)
@@ -673,12 +652,12 @@ export class EventStore {
           if (!isBusyError(error)) throw error
           lastError = error
           const elapsedMs = performance.now() - startedAt
-          if (elapsedMs >= this.appendRecoveryDeadlineMs || attempts >= this.appendBusyMaxAttempts) {
+          if (elapsedMs >= this.appendRecoverableDeadlineMs) {
             const timeout = new EventStoreBusyTimeoutError(
               sessionId,
               operationType,
               attempts,
-              this.appendRecoveryDeadlineMs,
+              this.appendRecoverableDeadlineMs,
               Math.round(elapsedMs),
               lastError,
             )
@@ -686,14 +665,15 @@ export class EventStore {
               sessionId,
               type: operationType,
               attempts,
-              deadlineMs: this.appendRecoveryDeadlineMs,
+              deadlineMs: this.appendRecoverableDeadlineMs,
               elapsedMs: Math.round(elapsedMs),
               error: error instanceof Error ? error.message : String(error),
             })
             throw timeout
           }
+          const remainingMs = this.appendRecoverableDeadlineMs - elapsedMs
           await new Promise((resolve) =>
-            setTimeout(resolve, Math.min(GATEWAY_APPEND_RECOVERY_DELAY_MS, this.appendRecoveryDeadlineMs - elapsedMs)),
+            setTimeout(resolve, Math.max(1, Math.floor(Math.min(this.appendRecoverableDelayMs, remainingMs)))),
           )
         }
       }
@@ -713,11 +693,7 @@ export class EventStore {
     options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
   ): Promise<StoredEvent> {
     return this.runRecoverable(sessionId, event.type, () => {
-      const recoverableOptions = {
-        ...options,
-        reportBusyTimeout: false,
-        busyDeadlineMs: this.appendRecoverableAttemptMs,
-      }
+      const recoverableOptions = { ...options, reportBusyTimeout: false }
       return event.type === 'turn.snapshot'
         ? this.measureSnapshotOperation('snapshotAppend', () =>
             this.appendEvent(sessionId, event, true, recoverableOptions),
@@ -754,7 +730,7 @@ export class EventStore {
     if (batch.bytes >= this.streamFlushMaxBytes) this.tryFlushStreaming(sessionId)
   }
 
-  flushStreaming(sessionId: string): void {
+  flushStreaming(sessionId: string, options: { reportBusyTimeout?: boolean } = {}): void {
     const batch = this.pendingStreams.get(sessionId)
     if (!batch) return
     this.pendingStreams.delete(sessionId)
@@ -762,7 +738,7 @@ export class EventStore {
     const fragments = [...batch.fragments]
     for (const [index, [, event]] of fragments.entries()) {
       try {
-        this.appendEvent(sessionId, event, false)
+        this.appendEvent(sessionId, event, false, options)
       } catch (error) {
         if (isBusyError(error)) this.openStreamBatch(sessionId, new Map(fragments.slice(index)))
         throw error
@@ -829,50 +805,24 @@ export class EventStore {
     for (const ref of collectBlobRefs(data)) clear.call(this.blobStore, ref.hash)
   }
 
-  private retryBusy<T>(
-    sessionId: string,
-    eventType: string,
-    operation: () => T,
-    reportTimeout = true,
-    budgetMs = this.appendBusyDeadlineMs,
-  ): T {
+  private appendOnce<T>(sessionId: string, eventType: string, operation: () => T, reportTimeout = true): T {
     const startedAt = performance.now()
-    let attempts = 0
-
-    while (true) {
-      attempts++
-      try {
-        return operation()
-      } catch (error) {
-        if (!isBusyError(error)) throw error
-        const elapsedMs = performance.now() - startedAt
-        if (elapsedMs >= budgetMs || attempts >= this.appendBusyMaxAttempts) {
-          const timeout = new EventStoreBusyTimeoutError(
-            sessionId,
-            eventType,
-            attempts,
-            budgetMs,
-            Math.round(elapsedMs),
-            error,
-          )
-          if (reportTimeout) {
-            logger.error('Event not persisted: database lock deadline exceeded', {
-              sessionId,
-              type: eventType,
-              attempts,
-              deadlineMs: budgetMs,
-              elapsedMs: Math.round(elapsedMs),
-              error: error instanceof Error ? error.message : String(error),
-            })
-          }
-          throw timeout
-        }
-        const exponentialMs = this.appendBusyInitialBackoffMs * 2 ** Math.min(attempts - 1, 16)
-        const jitteredMs = exponentialMs * (0.75 + Math.random() * 0.5)
-        const remainingMs = budgetMs - elapsedMs
-        const delayMs = Math.max(1, Math.floor(Math.min(jitteredMs, this.appendBusyMaxBackoffMs, remainingMs)))
-        Atomics.wait(appendBusySleep, 0, 0, delayMs)
+    try {
+      return operation()
+    } catch (error) {
+      if (!isBusyError(error)) throw error
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      const timeout = new EventStoreBusyTimeoutError(sessionId, eventType, 1, 0, elapsedMs, error)
+      if (reportTimeout) {
+        logger.error('Event not persisted: database is locked (the synchronous path never waits)', {
+          sessionId,
+          type: eventType,
+          attempts: 1,
+          elapsedMs,
+          error: error instanceof Error ? error.message : String(error),
+        })
       }
+      throw timeout
     }
   }
 
@@ -884,11 +834,13 @@ export class EventStore {
       indexSnapshot?: boolean
       searchRemoveIds?: string[]
       reportBusyTimeout?: boolean
-      busyDeadlineMs?: number
     } = {},
   ): StoredEvent {
     this.assertValidEvent(sessionId, event)
-    this.flushStreaming(sessionId)
+    this.flushStreaming(
+      sessionId,
+      options.reportBusyTimeout === undefined ? {} : { reportBusyTimeout: options.reportBusyTimeout },
+    )
 
     this.checkExternalWrites()
     const timestamp = Date.now()
@@ -915,12 +867,11 @@ export class EventStore {
       })
       try {
         this.timed('write', () =>
-          this.retryBusy(
+          this.appendOnce(
             sessionId,
             event.type,
             () => this.searchIndex.withPendingRollback(() => runImmediateTransaction(transaction)),
             options.reportBusyTimeout ?? true,
-            options.busyDeadlineMs,
           ),
         )
         break
@@ -994,7 +945,7 @@ export class EventStore {
           }
         })
         this.timed('write', () =>
-          this.retryBusy(sessionId, `batch:${toStore[0]!.type}`, () => {
+          this.appendOnce(sessionId, `batch:${toStore[0]!.type}`, () => {
             results.length = 0
             return this.searchIndex.withPendingRollback(() => runImmediateTransaction(transaction))
           }),
@@ -2251,11 +2202,8 @@ export function getStaleRunningSessionIds(): string[] {
 
 export function initEventStore(db: Database.Database): EventStore {
   eventStoreInstance = new EventStore(db, {
-    appendBusyDeadlineMs: GATEWAY_APPEND_BUSY_DEADLINE_MS,
-    appendBusyInitialBackoffMs: 1,
-    appendBusyMaxBackoffMs: 2,
-    appendRecoverableAttemptMs: GATEWAY_APPEND_RECOVERABLE_ATTEMPT_MS,
-    appendRecoveryDeadlineMs: GATEWAY_APPEND_RECOVERY_DEADLINE_MS,
+    appendRecoverableDeadlineMs: GATEWAY_APPEND_BUSY_DEADLINE_MS,
+    appendRecoverableDelayMs: GATEWAY_APPEND_RECOVERABLE_DELAY_MS,
   })
 
   // Reset stale running states from previous server runs.

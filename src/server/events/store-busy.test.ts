@@ -13,7 +13,7 @@ import { createProject } from '../db/projects.js'
 import { createSession } from '../db/sessions.js'
 import { assignWorkerToken, type WorkerToken } from '../session/worker/token.js'
 import { logger } from '../utils/logger.js'
-import { EventStore, EventStoreBusyTimeoutError, initEventStore } from './store.js'
+import { EventStore, EventStoreBusyTimeoutError, GATEWAY_APPEND_BUSY_DEADLINE_MS, initEventStore } from './store.js'
 
 const SID = 'session-1'
 const BETTER_SQLITE3 = createRequire(import.meta.url).resolve('better-sqlite3')
@@ -117,7 +117,7 @@ describe('database busy handling', () => {
     const error = vi.spyOn(logger, 'error')
 
     const { exited: holder } = await holdWriteLockInAnotherProcess(path, 300)
-    const stored = store.append(sessionId, { type: 'message.done', data: { messageId: 'u1' } })
+    const stored = await store.appendRecoverable(sessionId, { type: 'message.done', data: { messageId: 'u1' } })
 
     expect(await holder).toBe(0)
     expect(stored.seq).toBe(2)
@@ -130,10 +130,8 @@ describe('database busy handling', () => {
     const eventCount = 8
     const db = initDatabase({ ...loadConfig(), database: { path } })
     const store = new EventStore(db, {
-      appendBusyDeadlineMs: 20,
-      appendBusyInitialBackoffMs: 1,
-      appendBusyMaxBackoffMs: 2,
-      appendRecoveryDeadlineMs: 5_000,
+      appendRecoverableDeadlineMs: 5_000,
+      appendRecoverableDelayMs: 1,
     })
     const project = createProject('Concurrent busy', directory)
     const gatewaySession = createSession(project.id, directory).id
@@ -194,17 +192,13 @@ describe('database busy handling', () => {
     }
   }, 20_000)
 
-  it('retries an append that hits SQLITE_BUSY a bounded number of times', () => {
+  it('fails the synchronous append on the first SQLITE_BUSY instead of retrying', () => {
     const db = new Database(path)
-    const store = new EventStore(db, {
-      appendBusyDeadlineMs: 25,
-      appendBusyInitialBackoffMs: 1,
-      appendBusyMaxBackoffMs: 2,
-    })
+    const store = new EventStore(db)
     store.append(SID, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
     const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
     const prepare = db.prepare.bind(db)
-    let failures = 2
+    let failures = 1
     vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
       const statement = prepare(sql)
       if (!sql.includes('INSERT INTO events')) return statement
@@ -216,25 +210,29 @@ describe('database busy handling', () => {
       }
     }) as never)
 
+    const thrown = (() => {
+      try {
+        store.append(SID, { type: 'message.done', data: { messageId: 'u1' } })
+        return undefined
+      } catch (busyFailure) {
+        return busyFailure as EventStoreBusyTimeoutError
+      }
+    })()
+    expect(thrown).toBeInstanceOf(EventStoreBusyTimeoutError)
+    expect(thrown?.attempts).toBe(1)
+    expect(thrown?.deadlineMs).toBe(0)
+    expect(error).toHaveBeenCalledTimes(1)
+
     expect(store.append(SID, { type: 'message.done', data: { messageId: 'u1' } }).seq).toBe(2)
-    expect(error).not.toHaveBeenCalled()
 
     failures = Number.POSITIVE_INFINITY
-    expect(() => store.append(SID, { type: 'message.done', data: { messageId: 'u1' } })).toThrow(
-      'Event append busy deadline exceeded',
-    )
-    expect(error).toHaveBeenCalledTimes(1)
-
-    failures = 2
-    expect(
-      store
-        .appendBatch(SID, [
-          { type: 'message.done', data: { messageId: 'u2' } },
-          { type: 'message.done', data: { messageId: 'u3' } },
-        ])
-        .map((event) => event.seq),
-    ).toEqual([3, 4])
-    expect(error).toHaveBeenCalledTimes(1)
+    expect(() =>
+      store.appendBatch(SID, [
+        { type: 'message.done', data: { messageId: 'u2' } },
+        { type: 'message.done', data: { messageId: 'u3' } },
+      ]),
+    ).toThrow(expect.objectContaining({ code: 'EVENT_STORE_BUSY_TIMEOUT' }))
+    expect(store.getEvents(SID)).toHaveLength(2)
     db.close()
   })
 
@@ -242,10 +240,8 @@ describe('database busy handling', () => {
     const db = new Database(path, { timeout: 1 })
     db.pragma('journal_mode = WAL')
     const store = new EventStore(db, {
-      appendBusyDeadlineMs: 5,
-      appendBusyInitialBackoffMs: 1,
-      appendBusyMaxBackoffMs: 2,
-      appendRecoveryDeadlineMs: 40,
+      appendRecoverableDeadlineMs: 40,
+      appendRecoverableDelayMs: 1,
     })
     store.append(SID, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
     const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
@@ -269,11 +265,7 @@ describe('database busy handling', () => {
   it('logs and reports an append that stays locked, then keeps working once the lock is released', () => {
     const db = new Database(path, { timeout: 20 })
     db.pragma('journal_mode = WAL')
-    const store = new EventStore(db, {
-      appendBusyDeadlineMs: 25,
-      appendBusyInitialBackoffMs: 1,
-      appendBusyMaxBackoffMs: 2,
-    })
+    const store = new EventStore(db)
     store.append(SID, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
     const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
     const holder = new Database(path)
@@ -292,7 +284,7 @@ describe('database busy handling', () => {
     db.close()
   })
 
-  it.fails('the synchronous append never waits for a slow lock', async () => {
+  it('the synchronous append never waits for a slow lock', async () => {
     const db = initDatabase({ ...loadConfig(), database: { path } })
     const store = initEventStore(db)
     const sessionId = createSession(createProject('Slow lock', directory).id, directory).id
@@ -318,7 +310,7 @@ describe('database busy handling', () => {
     expect(store.getEvents(sessionId).map((event) => event.type)).toEqual(['message.start'])
   })
 
-  it.fails('keeps the gateway responsive while a recoverable append waits with pending fragments', async () => {
+  it('keeps the gateway responsive while a recoverable append waits with pending fragments', async () => {
     const db = initDatabase({ ...loadConfig(), database: { path } })
     const store = initEventStore(db)
     const sessionId = createSession(createProject('Pending fragments', directory).id, directory).id
@@ -346,5 +338,55 @@ describe('database busy handling', () => {
     expect(error).not.toHaveBeenCalled()
     expect(store.getEvents(sessionId).map((event) => event.type)).toContain('message.thinking')
     expect(store.getEvents(sessionId).map((event) => event.type)).toContain('message.done')
+  })
+
+  it('an event write survives a slow lock through the recoverable path', async () => {
+    const db = initDatabase({ ...loadConfig(), database: { path } })
+    const store = initEventStore(db)
+    const sessionId = createSession(createProject('Slow lock', directory).id, directory).id
+    store.append(sessionId, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const lockHoldMs = 1_500
+    const { exited: holder } = await holdWriteLockInAnotherProcess(path, lockHoldMs)
+    const startedAt = performance.now()
+    const stored = await store.appendRecoverable(sessionId, { type: 'message.done', data: { messageId: 'u1' } })
+    const elapsedMs = performance.now() - startedAt
+    expect(await holder).toBe(0)
+
+    expect(stored.seq).toBe(2)
+    expect(store.getEvents(sessionId).map((event) => event.type)).toEqual(['message.start', 'message.done'])
+    expect(error).not.toHaveBeenCalled()
+    expect(elapsedMs).toBeGreaterThanOrEqual(1_000)
+    expect(elapsedMs).toBeLessThanOrEqual(GATEWAY_APPEND_BUSY_DEADLINE_MS + 1_000)
+  })
+
+  it('a recoverable append beyond its budget fails explicitly with the measured delay', async () => {
+    const db = initDatabase({ ...loadConfig(), database: { path } })
+    const store = initEventStore(db)
+    const sessionId = createSession(createProject('Persistent lock', directory).id, directory).id
+    store.append(sessionId, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const { exited: holder } = await holdWriteLockInAnotherProcess(path, GATEWAY_APPEND_BUSY_DEADLINE_MS + 1_500)
+    let thrown: unknown
+    try {
+      await store.appendRecoverable(sessionId, { type: 'message.done', data: { messageId: 'u1' } })
+    } catch (busyError) {
+      thrown = busyError
+    }
+    expect(await holder).toBe(0)
+
+    expect(thrown).toBeInstanceOf(EventStoreBusyTimeoutError)
+    const timeout = thrown as EventStoreBusyTimeoutError
+    expect(timeout.code).toBe('EVENT_STORE_BUSY_TIMEOUT')
+    expect(timeout.sessionId).toBe(sessionId)
+    expect(timeout.eventType).toBe('message.done')
+    expect(timeout.deadlineMs).toBe(GATEWAY_APPEND_BUSY_DEADLINE_MS)
+    expect(timeout.elapsedMs).toBeGreaterThanOrEqual(timeout.deadlineMs)
+    expect(timeout.attempts).toBeGreaterThan(1)
+    expect(error).toHaveBeenCalledTimes(1)
+    expect(error.mock.calls[0]?.[1]).toMatchObject({ sessionId, type: 'message.done' })
+    expect(store.getEvents(sessionId).map((event) => event.type)).toEqual(['message.start'])
   })
 })
