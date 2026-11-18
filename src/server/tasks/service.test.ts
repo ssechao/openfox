@@ -409,6 +409,52 @@ describe('project tasks service', () => {
       }
     })
 
+    it.fails('a workflow parked on a human choice parks the card even while the turn still runs', async () => {
+      const first = create('First')
+      const second = create('Second')
+      const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
+      const sessionId = running.sessionId!
+      // The workflow is paused on a user step while the turn has not unwound yet.
+      sm.workflowExecutions.set(sessionId, { status: 'waiting' })
+
+      const result = await service.move(projectId, second.id, 'in_progress', { actor: 'human' })
+
+      expect(result.task.runState).toBe('running')
+      expect(service.get(projectId, first.id)?.staleSession).toEqual({ sessionId, reason: 'not_advancing' })
+    })
+
+    it.fails('a workflow parked on a human choice parks the card even with a message queued', async () => {
+      const first = create('First')
+      const second = create('Second')
+      const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
+      const sessionId = running.sessionId!
+      sm.sessions.get(sessionId)!.isRunning = false
+      sm.liveQueues.add(sessionId)
+      sm.workflowExecutions.set(sessionId, { status: 'waiting' })
+
+      const result = await service.move(projectId, second.id, 'in_progress', { actor: 'human' })
+
+      expect(result.task.runState).toBe('running')
+      expect(service.get(projectId, first.id)?.staleSession).toEqual({ sessionId, reason: 'not_advancing' })
+    })
+
+    it('a background process wait keeps the slot even when the workflow row reads waiting', async () => {
+      const first = create('First')
+      const second = create('Second')
+      const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
+      const sessionId = running.sessionId!
+      sm.sessions.get(sessionId)!.isRunning = false
+      // A background wait is stored as a `waiting` execution carrying a background
+      // marker: it is NOT a human gate, so the card keeps its slot.
+      sm.workflowExecutions.set(sessionId, { status: 'waiting' })
+      sm.backgroundWaits.set(sessionId, 'exec-bg')
+
+      const result = await service.move(projectId, second.id, 'in_progress', { actor: 'human' })
+
+      expect(result.task.runState).toBe('queued')
+      expect(service.get(projectId, first.id)?.staleSession).toBeUndefined()
+    })
+
     it('a bound session that can still advance on its own keeps the launch slot', async () => {
       const setRunning = (sessionId: string, value: boolean) => {
         sm.sessions.get(sessionId)!.isRunning = value
