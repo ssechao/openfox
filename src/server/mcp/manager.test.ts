@@ -322,6 +322,23 @@ describe('McpManager', () => {
       }
     })
 
+    it.fails('a transport closed during gateway shutdown is not reported as an unexpected disconnect', async () => {
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+      try {
+        await manager.addServer('lazy', { transport: 'stdio', command: 'node' })
+
+        manager.beginShutdown()
+        mockTransportInstance.onclose?.()
+
+        expect(error).not.toHaveBeenCalledWith('MCP server disconnected unexpectedly', { name: 'lazy' })
+        expect(manager.getServer('lazy')).toMatchObject({ status: 'disconnected' })
+        expect(await manager.disconnectAll()).toBe(1)
+        expect(manager.getServer('lazy')).toMatchObject({ status: 'disconnected' })
+      } finally {
+        error.mockRestore()
+      }
+    })
+
     it('call to a disconnected MCP server fails explicitly without reconciliation', async () => {
       await manager.addServer('offline-server', { transport: 'stdio', command: 'node' })
       mockTransportInstance.onclose?.()
