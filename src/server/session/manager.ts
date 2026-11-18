@@ -164,6 +164,14 @@ To land changes from this workspace when the user asks to commit and push:
 // Session Manager
 // ============================================================================
 
+/** Scalar liveness of a session — see `SessionManager.getSessionLiveness`. */
+export interface SessionLiveness {
+  /** Event-derived running flag (falls back to the persisted column). */
+  isRunning: boolean
+  /** Set when a worker crashed; the session needs an explicit human resume. */
+  interruptedAt: string | null
+}
+
 export class SessionManager {
   private events = new EventEmitter<SessionEvents>()
   private activeSessionId: string | null = null
@@ -748,6 +756,21 @@ export class SessionManager {
     this.emit({ type: 'session_created', session: this.requireSession(session.id) })
 
     return this.requireSession(session.id)
+  }
+
+  /**
+   * Cheap liveness snapshot of a session: scalar columns + the event-derived
+   * running flag, WITHOUT folding the event log (unlike getSession, which
+   * rebuilds every message). Returns null when the session row is gone.
+   * Used by admission code that runs once per bound task.
+   */
+  getSessionLiveness(id: string): SessionLiveness | null {
+    const dbSession = dbGetSession(id)
+    if (!dbSession) return null
+    return {
+      isRunning: getEventStore().getRunningState(id, dbSession.isRunning),
+      interruptedAt: dbSession.interruptedAt ?? null,
+    }
   }
 
   /**

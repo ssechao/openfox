@@ -424,6 +424,7 @@ function taskForAgent(task: import('../../shared/types.js').ProjectTask) {
     ...(task.runState ? { runState: task.runState } : {}),
     ...(task.queuePosition ? { queuePosition: task.queuePosition } : {}),
     ...(task.activeSessionId ? { boundSession: task.activeSessionId } : {}),
+    ...(task.staleSession ? { staleSession: task.staleSession } : {}),
     ...(task.model ? { model: task.model } : {}),
     version: task.version,
     attachments: task.attachments.length,

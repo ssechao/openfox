@@ -25,6 +25,7 @@ function makeSM(): FakeSM & {
   queueMessage: (sessionId: string, mode: string, content?: string) => void
   addMessage: () => void
   getSession: () => null
+  getSessionLiveness: () => null
 } {
   const sm: FakeSM = { createdSessions: [], queued: [], modes: new Map() }
   const counter = { n: 0 }
@@ -42,6 +43,7 @@ function makeSM(): FakeSM & {
     },
     addMessage: () => undefined,
     getSession: () => null,
+    getSessionLiveness: () => null,
   }
 }
 

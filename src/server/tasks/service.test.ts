@@ -376,44 +376,38 @@ describe('project tasks service', () => {
       expect(sm.createdSessions).toHaveLength(2)
     })
 
-    it.fails(
-      'a running task whose bound session can no longer advance on its own does not hold a launch slot',
-      async () => {
-        const parkedShapes: Array<[string, (sessionId: string) => void]> = [
-          ['turn over with nothing queued', () => {}],
-          [
-            'workflow parked at a user step',
-            (sessionId) => sm.workflowExecutions.set(sessionId, { status: 'waiting' }),
-          ],
-          ['waiting on a human question', (sessionId) => humanWaits.add(sessionId)],
-        ]
+    it('a running task whose bound session can no longer advance on its own does not hold a launch slot', async () => {
+      const parkedShapes: Array<[string, (sessionId: string) => void]> = [
+        ['turn over with nothing queued', () => {}],
+        ['workflow parked at a user step', (sessionId) => sm.workflowExecutions.set(sessionId, { status: 'waiting' })],
+        ['waiting on a human question', (sessionId) => humanWaits.add(sessionId)],
+      ]
 
-        for (const [label, park] of parkedShapes) {
-          const armRoot = join(root, `parked-${label.replace(/\s+/g, '-')}`)
-          await mkdir(armRoot, { recursive: true })
-          const armProject = createProject(`Parked ${label}`, armRoot).id
-          const first = service.create(armProject, { prompt: `First ${label}` }, { actor: 'human' })
-          const second = service.create(armProject, { prompt: `Second ${label}` }, { actor: 'human' })
+      for (const [label, park] of parkedShapes) {
+        const armRoot = join(root, `parked-${label.replace(/\s+/g, '-')}`)
+        await mkdir(armRoot, { recursive: true })
+        const armProject = createProject(`Parked ${label}`, armRoot).id
+        const first = service.create(armProject, { prompt: `First ${label}` }, { actor: 'human' })
+        const second = service.create(armProject, { prompt: `Second ${label}` }, { actor: 'human' })
 
-          const running = await service.move(armProject, first.id, 'in_progress', { actor: 'human' })
-          const sessionId = running.sessionId!
-          // The turn is over (or parked): no self-advancing signal left.
-          sm.sessions.get(sessionId)!.isRunning = false
-          park(sessionId)
+        const running = await service.move(armProject, first.id, 'in_progress', { actor: 'human' })
+        const sessionId = running.sessionId!
+        // The turn is over (or parked): no self-advancing signal left.
+        sm.sessions.get(sessionId)!.isRunning = false
+        park(sessionId)
 
-          const result = await service.move(armProject, second.id, 'in_progress', { actor: 'human' })
+        const result = await service.move(armProject, second.id, 'in_progress', { actor: 'human' })
 
-          // A queued card starts in the freed slot…
-          expect(result.task.runState, label).toBe('running')
-          expect(result.sessionId, label).toBeTruthy()
-          expect(result.queued, label).toBeUndefined()
-          // …while the parked card stays running on its own session: never requeued.
-          const parked = service.get(armProject, first.id)!
-          expect(parked.runState, label).toBe('running')
-          expect(parked.activeSessionId, label).toBe(sessionId)
-        }
-      },
-    )
+        // A queued card starts in the freed slot…
+        expect(result.task.runState, label).toBe('running')
+        expect(result.sessionId, label).toBeTruthy()
+        expect(result.queued, label).toBeUndefined()
+        // …while the parked card stays running on its own session: never requeued.
+        const parked = service.get(armProject, first.id)!
+        expect(parked.runState, label).toBe('running')
+        expect(parked.activeSessionId, label).toBe(sessionId)
+      }
+    })
 
     it('a bound session that can still advance on its own keeps the launch slot', async () => {
       const setRunning = (sessionId: string, value: boolean) => {
@@ -447,7 +441,7 @@ describe('project tasks service', () => {
       }
     })
 
-    it.fails('the parked card is visible as stale, never relaunched, and reading it never writes', async () => {
+    it('the parked card is visible as stale, never relaunched, and reading it never writes', async () => {
       const first = create('Parked card')
       const second = create('Waiting card')
       const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })

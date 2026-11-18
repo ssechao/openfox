@@ -22,9 +22,10 @@ import type {
   ProjectTaskSettings,
   TaskStatus,
   TaskQueuedInfo,
+  TaskStaleSession,
   Session,
 } from '../../shared/types.js'
-import type { SessionManager } from '../session/manager.js'
+import type { SessionManager, SessionLiveness } from '../session/manager.js'
 import { SessionWorkerQueueFullError } from '../utils/errors.js'
 import type { TasksUpdatePayload } from '../../shared/protocol.js'
 import type { Attachment, WorkflowLaunchScope } from '../../shared/types.js'
@@ -335,10 +336,11 @@ async function sourceBranchExists(cwd: string, sourceBranch: string): Promise<bo
 // ============================================================================
 
 export function createTasksService(deps: TasksServiceDeps): TasksService {
-  const { sessionManager, config, broadcast, configDir, launchWorkflow, canStartSession } = deps
+  const { sessionManager, config, broadcast, configDir, launchWorkflow, canStartSession, isSessionWaitingForHuman } =
+    deps
 
   function snapshot(projectId: string) {
-    const tasks = dbListTasks(projectId)
+    const tasks = dbListTasks(projectId).map(withStaleSession)
     const settings = dbGetTaskSettings(projectId)
     const counts = computeCounts(tasks)
     const gates = dbGetGateConfig(projectId)
@@ -373,12 +375,12 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
   }
 
   function list(projectId: string) {
-    return dbListTasks(projectId)
+    return dbListTasks(projectId).map(withStaleSession)
   }
 
   function get(projectId: string, taskId: string) {
     const task = dbGetTask(taskId)
-    return task && task.projectId === projectId ? task : null
+    return task && task.projectId === projectId ? withStaleSession(task) : null
   }
 
   async function validateLaunchRequest(request: LaunchRequest, queued = false): Promise<LaunchValidation> {
@@ -799,7 +801,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       }
     }
 
-    const fresh = dbGetTask(taskId)!
+    const fresh = withStaleSession(dbGetTask(taskId)!)
     let autoLaunched: TasksUpdatePayload['autoLaunched'] | undefined
     if (wasRunning || (to === 'todo' && from === 'in_progress')) {
       autoLaunched = await maybeAutoLaunch(projectId)
@@ -1054,7 +1056,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
         }
       } else {
         if (task.status !== 'in_progress' || task.runState !== 'running') continue
-        if (task.activeSessionId && sessionManager.getSession(task.activeSessionId)) continue
+        if (task.activeSessionId && sessionManager.getSessionLiveness(task.activeSessionId)) continue
         if (!task.activeSessionId) {
           dbSetTaskRunState(task.id, 'queued')
           changed = true
@@ -1075,7 +1077,60 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
 
   function activeCount(projectId: string): number {
     reconcileSessions(projectId)
-    return dbListTasks(projectId).filter((t) => t.status === 'in_progress' && t.runState === 'running').length
+    return dbListTasks(projectId).filter((t) => holdsLaunchSlot(t)).length
+  }
+
+  /**
+   * A launch slot is held only by a running card whose bound session can still
+   * advance ON ITS OWN. A card whose session is parked (turn over with nothing
+   * queued, awaiting a human, interrupted) stops holding a slot so the FIFO
+   * queue can move — but it keeps `runState: 'running'`, so it is never
+   * relaunched automatically: resuming it stays a human/manager decision.
+   *
+   * Pure read: no database write happens here (a GET must never write).
+   */
+  function holdsLaunchSlot(task: ProjectTask): boolean {
+    if (task.status !== 'in_progress' || task.runState !== 'running') return false
+    if (!task.activeSessionId) return false
+    return sessionCanAdvanceOnItsOwn(task.activeSessionId)
+  }
+
+  /**
+   * Deterministic liveness predicate (no clock): true when at least one signal
+   * shows the session will make progress without external help.
+   */
+  function sessionCanAdvanceOnItsOwn(sessionId: string): boolean {
+    const liveness = sessionManager.getSessionLiveness(sessionId)
+    if (!liveness) return false
+    return canAdvanceFrom(liveness, sessionId)
+  }
+
+  function canAdvanceFrom(liveness: SessionLiveness, sessionId: string): boolean {
+    if (liveness.interruptedAt) return false
+    if (isSessionWaitingForHuman?.(sessionId)) return false
+    if (liveness.isRunning) return true
+    if (sessionManager.hasQueuedMessages(sessionId)) return true
+    if (sessionManager.getPendingToolReconciliations(sessionId).length > 0) return true
+    if (sessionManager.pendingBackgroundWait(sessionId)) return true
+    const execution = sessionManager.getActiveWorkflowExecution(sessionId)
+    return execution?.status === 'running'
+  }
+
+  /** The visible reason a running card stopped holding a slot, if it did. */
+  function staleSessionOf(task: ProjectTask): TaskStaleSession | undefined {
+    if (task.status !== 'in_progress' || task.runState !== 'running') return undefined
+    const sessionId = task.activeSessionId
+    if (!sessionId) return undefined
+    const liveness = sessionManager.getSessionLiveness(sessionId)
+    if (!liveness) return { sessionId, reason: 'session_absent' }
+    return canAdvanceFrom(liveness, sessionId) ? undefined : { sessionId, reason: 'not_advancing' }
+  }
+
+  /** Decorate a task with its derived `staleSession` marker (pure read). */
+  function withStaleSession(task: ProjectTask): ProjectTask {
+    const staleSession = staleSessionOf(task)
+    if (!staleSession) return task
+    return { ...task, staleSession }
   }
 
   const FRESH_DELETE_BUDGET_MS = 2000

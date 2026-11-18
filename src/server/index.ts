@@ -718,6 +718,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     configDir,
     launchWorkflow: (sessionId, launch) => deferTasksLaunchWorkflow(sessionId, launch),
     canStartSession: (sessionId) => deferCanStartSession(sessionId),
+    isSessionWaitingForHuman: (sessionId) => getPendingQuestionsForSession(sessionId).length > 0,
   })
   setTasksService(tasksService)
   // Periodic tick for scheduled tasks: runs once at boot (catch-up for tasks

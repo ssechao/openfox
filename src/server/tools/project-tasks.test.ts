@@ -45,6 +45,10 @@ describe('project_tasks tool', () => {
     const svc = createTasksService({
       sessionManager: {
         getSession: (id: string) => sessions.get(id) ?? null,
+        getSessionLiveness: (id: string) => {
+          const session = sessions.get(id)
+          return session ? { isRunning: true, interruptedAt: null } : null
+        },
         createSession: () => {
           sessionCount += 1
           const session = { id: `task-session-${sessionCount}`, projectId, messages: [] }
