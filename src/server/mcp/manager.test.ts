@@ -331,12 +331,30 @@ describe('McpManager', () => {
         mockTransportInstance.onclose?.()
 
         expect(error).not.toHaveBeenCalledWith('MCP server disconnected unexpectedly', { name: 'lazy' })
-        expect(manager.getServer('lazy')).toMatchObject({ status: 'disconnected' })
-        expect(await manager.disconnectAll()).toBe(1)
+        expect(manager.getServer('lazy')).toMatchObject({ status: 'connected' })
+        expect(await manager.disconnectAll()).toEqual({ disconnected: 1, errors: [] })
         expect(manager.getServer('lazy')).toMatchObject({ status: 'disconnected' })
       } finally {
         error.mockRestore()
       }
+    })
+
+    it('preserves a failed client close and continues disconnecting the remaining servers', async () => {
+      await manager.addServer('first', { transport: 'stdio', command: 'node' })
+      await manager.addServer('second', { transport: 'stdio', command: 'node' })
+      mockClientInstance.close.mockRejectedValueOnce(new Error('first close failed')).mockResolvedValueOnce(undefined)
+
+      manager.beginShutdown()
+      const result = await manager.disconnectAll()
+
+      expect(result).toEqual({
+        disconnected: 1,
+        errors: [{ name: 'first', error: 'first close failed' }],
+      })
+      expect(manager.getServer('first')).toMatchObject({ status: 'connected' })
+      expect(manager.getServer('second')).toMatchObject({ status: 'disconnected' })
+      expect(await manager.callTool('first', 'get_weather', {})).toEqual({ success: true, output: 'Sunny, 72°F' })
+      expect(mockClientInstance.close).toHaveBeenCalledTimes(2)
     })
 
     it('call to a disconnected MCP server fails explicitly without reconciliation', async () => {

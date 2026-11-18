@@ -16,6 +16,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import type Database from 'better-sqlite3'
 import { resolveSessionProcessEntry } from '../process-entry.js'
 import type { SessionProcessSupervisor, SupervisorWorkerHandle } from '../process-supervisor/client.js'
@@ -97,6 +98,22 @@ const WORKER_LOG_RATE_WINDOW_MS = 1_000
 export interface WorkerSettledOutcome {
   crashed: boolean
   error?: string
+}
+
+export interface SessionWorkerShutdownSession {
+  sessionId: string
+  cleanupError?: string
+}
+
+export interface SessionWorkerShutdownResult {
+  sessions: SessionWorkerShutdownSession[]
+  stopped: number
+  failed: number
+}
+
+export interface SessionWorkerDeferredShutdown {
+  interruptedAt: string
+  verdict: 'deferred'
 }
 
 interface ActiveWorker {
@@ -1051,15 +1068,14 @@ export class SessionWorkerManager {
     }
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(request?: SessionWorkerDeferredShutdown): Promise<SessionWorkerShutdownResult> {
+    const ownsVerdict = request === undefined
+    const sharedInterruptedAt = request?.interruptedAt ?? new Date().toISOString()
     this.closeAdmissions()
     const workers = [...this.active.values()]
     const deadlineAt = Date.now() + (this.deps.shutdownTimeoutMs ?? 3_900)
-    const interruptedAtBySession = new Map<string, string>()
     for (const worker of workers) {
-      const interruptedAt = new Date().toISOString()
-      interruptedAtBySession.set(worker.sessionId, interruptedAt)
-      markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
+      markSessionInterrupted(this.deps.db(), worker.sessionId, sharedInterruptedAt)
       this.prepareInterruptedEvents(worker.sessionId, worker.token.generation)
       worker.gatewayShutdown = true
       try {
@@ -1077,7 +1093,7 @@ export class SessionWorkerManager {
         'Gateway shutdown interrupted the worker turn',
       )
       this.sendTo(worker, { ...worker.token, type: 'abort' })
-      const capturedAt = Date.parse(interruptedAt)
+      const capturedAt = Date.parse(sharedInterruptedAt)
       void this.beginWorkerInventoryCapture(
         worker,
         capturedAt,
@@ -1088,17 +1104,6 @@ export class SessionWorkerManager {
     const results = await Promise.all(
       workers.map(async (worker) => ({ worker, error: await this.shutdownWorker(worker, deadlineAt) })),
     )
-    const eventStore = this.deps.eventStore?.() ?? getEventStore()
-    for (const { worker, error } of results) {
-      const interruptedAt = interruptedAtBySession.get(worker.sessionId)
-      if (!interruptedAt) continue
-      eventStore.append(
-        worker.sessionId,
-        error
-          ? { type: 'worker.recovery_blocked', data: { interruptedAt, reason: 'orphan_proof' } }
-          : { type: 'worker.recovery_clean', data: { interruptedAt } },
-      )
-    }
     const errors = results.map((result) => result.error).filter((error): error is string => error !== undefined)
     const stopped = results.length - errors.length
     for (const { worker, error } of results) {
@@ -1111,7 +1116,26 @@ export class SessionWorkerManager {
       })
     }
     logger.info('Session workers stopped at gateway shutdown', { stopped, failed: errors.length })
-    if (errors.length > 0) throw new Error(`Gateway worker shutdown failed: ${errors.join('; ')}`)
+    const sessions = results.map(({ worker, error }) => ({
+      sessionId: worker.sessionId,
+      ...(error ? { cleanupError: error } : {}),
+    }))
+    if (ownsVerdict) {
+      const eventStore = this.deps.eventStore?.() ?? getEventStore()
+      for (const session of sessions) {
+        eventStore.append(
+          session.sessionId,
+          session.cleanupError
+            ? {
+                type: 'worker.recovery_blocked',
+                data: { interruptedAt: sharedInterruptedAt, reason: 'orphan_proof' },
+              }
+            : { type: 'worker.recovery_clean', data: { interruptedAt: sharedInterruptedAt } },
+        )
+      }
+      if (errors.length > 0) throw new Error(`Gateway worker shutdown failed: ${errors.join('; ')}`)
+    }
+    return { sessions, stopped, failed: errors.length }
   }
 
   private async shutdownWorker(worker: ActiveWorker, deadlineAt: number): Promise<string | undefined> {
@@ -1334,15 +1358,21 @@ export class SessionWorkerManager {
     return bounded
   }
 
+  private async cleanupTrackedChildren(childrenPath: string): Promise<number[]> {
+    const killedChildren = await killTrackedChildren(childrenPath)
+    if (existsSync(childrenPath)) throw new Error('worker child cleanup incomplete: sidecar retained')
+    return killedChildren
+  }
+
   private resolveChildCleanup(childrenPath: string, deadlineAt: number): () => Promise<number[]> {
     const injected = this.deps.cleanupChildren
     if (injected) return () => injected(childrenPath)
     const supervisor = this.deps.processSupervisor
-    if (!supervisor) return () => killTrackedChildren(childrenPath)
+    if (!supervisor) return () => this.cleanupTrackedChildren(childrenPath)
     const ready = typeof supervisor.isReady === 'function' ? supervisor.isReady() : true
     if (!ready) {
       logger.warn('Session process supervisor unavailable; cleaning worker children locally', { childrenPath })
-      return () => killTrackedChildren(childrenPath)
+      return () => this.cleanupTrackedChildren(childrenPath)
     }
     return async () => {
       try {
@@ -1353,7 +1383,7 @@ export class SessionWorkerManager {
           childrenPath,
           error: error instanceof Error ? error.message : String(error),
         })
-        return killTrackedChildren(childrenPath)
+        return this.cleanupTrackedChildren(childrenPath)
       }
     }
   }

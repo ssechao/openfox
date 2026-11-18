@@ -125,18 +125,18 @@ describe('gateway shutdown ancillary proof', () => {
     expect({
       interruptedAtAfterBoot: view.session.interruptedAt ?? null,
       resumeAllowed: sessionResumeAllowed(events, interruptedAt!),
-      hasBlocked: events.some(
+      blockedCount: events.filter(
         (event) =>
           event.type === 'worker.recovery_blocked' &&
           proof(event) &&
           (event.data as { reason?: string }).reason === 'orphan_proof',
-      ),
-      hasClean: events.some((event) => event.type === 'worker.recovery_clean' && proof(event)),
+      ).length,
+      cleanCount: events.filter((event) => event.type === 'worker.recovery_clean' && proof(event)).length,
     }).toEqual({
       interruptedAtAfterBoot: interruptedAt,
       resumeAllowed: false,
-      hasBlocked: true,
-      hasClean: false,
+      blockedCount: 1,
+      cleanCount: 0,
     })
   }, 120_000)
 })

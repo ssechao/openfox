@@ -814,6 +814,7 @@ describe('SessionWorkerManager', () => {
     namedDb.prepare(`INSERT INTO sessions (id) VALUES ('sess-2')`).run()
     const order: string[] = []
     const settled: Array<{ sessionId: string; outcome: { crashed: boolean; error?: string } }> = []
+    const append = vi.fn()
     const manager = new SessionWorkerManager({
       db: () => namedDb,
       config,
@@ -828,7 +829,7 @@ describe('SessionWorkerManager', () => {
         ({
           invalidateExternalSession: () => {},
           getEvents: () => [],
-          append: () => {},
+          append,
         }) as never,
     })
     const active = Reflect.get(manager, 'active') as Map<string, unknown>
@@ -862,7 +863,8 @@ describe('SessionWorkerManager', () => {
     }
 
     try {
-      const shutdown = manager.shutdown()
+      const interruptedAt = '2026-11-18T12:00:00.000Z'
+      const shutdown = manager.shutdown({ interruptedAt, verdict: 'deferred' })
       expect(manager.shouldUseWorker('sess-1')).toBe(false)
       expect(order).toEqual(['send:sess-1:abort', 'send:sess-2:abort'])
       expect(() => manager.launch('sess-1', () => {})).toThrow(/admissions.*closed|shutdown/i)
@@ -873,8 +875,18 @@ describe('SessionWorkerManager', () => {
       expect(order.filter((entry) => entry.includes('SIGTERM'))).toEqual(['kill:sess-1:SIGTERM', 'kill:sess-2:SIGTERM'])
       await vi.advanceTimersByTimeAsync(1_000)
       expect(order.filter((entry) => entry.includes('SIGKILL'))).toEqual(['kill:sess-1:SIGKILL', 'kill:sess-2:SIGKILL'])
-      await shutdown
+      const shutdownResult = await shutdown
 
+      expect(shutdownResult).toEqual({
+        sessions: [{ sessionId: 'sess-1' }, { sessionId: 'sess-2' }],
+        stopped: 2,
+        failed: 0,
+      })
+      expect(namedDb.prepare(`SELECT id, interrupted_at FROM sessions ORDER BY id`).all()).toEqual([
+        { id: 'sess-1', interrupted_at: interruptedAt },
+        { id: 'sess-2', interrupted_at: interruptedAt },
+      ])
+      expect(append.mock.calls.some(([, event]) => String(event?.type).startsWith('worker.recovery_'))).toBe(false)
       expect(settled).toHaveLength(2)
       expect(settled.every(({ outcome }) => outcome.crashed && outcome.error?.includes('shutdown'))).toBe(true)
       expect(order.filter((entry) => entry.startsWith('cleanup:'))).toHaveLength(2)
@@ -963,7 +975,80 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it('rejects shutdown when child cleanup exceeds the global deadline', async () => {
+  it('reports incomplete cleanup when P0 refuses a group signal and retains the sidecar', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'openfox-shutdown-refused-sidecar-'))
+    const childrenPath = join(directory, 'sess-1.children')
+    writeFileSync(childrenPath, `${JSON.stringify({ type: 'child', pid: 999_999, startedAt: 'missing' })}\n`)
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-refused-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 42,
+        exitCode: null,
+        signalCode: null,
+        stderr: new EventEmitter(),
+        send: (message: { type?: string }) => {
+          if (message.type === 'abort') queueMicrotask(() => child.emit('exit', 0, null))
+          return true
+        },
+        kill: () => true,
+      }) as unknown as ChildProcess
+      const manager = new SessionWorkerManager({
+        db: () => namedDb,
+        config,
+        sessionManager: { setRunning: () => {} } as unknown as SessionManager,
+        isEnabled: () => true,
+        broadcastForSession: () => {},
+        processSupervisor: {
+          isReady: () => false,
+          spawnWorker: () => child,
+          cleanupWorkerChildren: () => Promise.reject(new Error('Session process supervisor is not ready')),
+          captureWorkerInventory: () => Promise.reject(new Error('Session process supervisor is not ready')),
+          verifyWorkerInventory: () => Promise.reject(new Error('Session process supervisor is not ready')),
+        } as never,
+        eventStore: () =>
+          ({
+            invalidateExternalSession: () => {},
+            getEvents: () => [],
+            append: () => {},
+          }) as never,
+      })
+      const active = Reflect.get(manager, 'active') as Map<string, unknown>
+      active.set('sess-1', {
+        sessionId: 'sess-1',
+        token: assignWorkerToken(namedDb, 'sess-1'),
+        child,
+        childrenPath,
+        doneReceived: false,
+        doneOk: false,
+        stderrTail: [],
+        onSettled: () => {},
+      })
+
+      const result = await manager.shutdown({
+        interruptedAt: '2026-11-18T12:00:00.000Z',
+        verdict: 'deferred',
+      })
+
+      expect(result).toMatchObject({
+        stopped: 0,
+        failed: 1,
+        sessions: [{ sessionId: 'sess-1', cleanupError: 'worker child cleanup incomplete: sidecar retained' }],
+      })
+      expect(existsSync(childrenPath)).toBe(true)
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Worker child cleanup failed; sidecar retained',
+        expect.objectContaining({ sessionId: 'sess-1', error: 'worker child cleanup incomplete: sidecar retained' }),
+      )
+    } finally {
+      errorSpy.mockRestore()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('reports incomplete shutdown when child cleanup exceeds the global deadline', async () => {
     vi.useFakeTimers()
     const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-deadline-${crypto.randomUUID()}.db`))
     openDbs.push(db)
@@ -997,10 +1082,16 @@ describe('SessionWorkerManager', () => {
 
     try {
       manager.launch('sess-1', vi.fn())
-      const shutdown = manager.shutdown()
-      const rejected = expect(shutdown).rejects.toThrow(/cleanup exceeded shutdown deadline/i)
+      const shutdown = manager.shutdown({
+        interruptedAt: '2026-11-18T12:00:00.000Z',
+        verdict: 'deferred',
+      })
       await vi.advanceTimersByTimeAsync(100)
-      await rejected
+      await expect(shutdown).resolves.toMatchObject({
+        stopped: 0,
+        failed: 1,
+        sessions: [{ sessionId: 'sess-1', cleanupError: 'child cleanup exceeded shutdown deadline' }],
+      })
     } finally {
       vi.useRealTimers()
     }

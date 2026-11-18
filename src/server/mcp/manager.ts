@@ -76,6 +76,16 @@ export function estimateToolTokens(
   return Math.ceil(JSON.stringify(def).length / 4)
 }
 
+export interface McpDisconnectError {
+  name: string
+  error: string
+}
+
+export interface McpDisconnectAllResult {
+  disconnected: number
+  errors: McpDisconnectError[]
+}
+
 interface ServerEntry {
   config: McpServerConfig
   client: Client | undefined
@@ -182,13 +192,7 @@ export class McpManager {
 
       const connectedTransport = transport
       transport.onclose = () => {
-        if (entry.transport !== connectedTransport) return
-        if (entry.closing || this.shuttingDown) {
-          entry.client = undefined
-          entry.transport = null
-          entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
-          return
-        }
+        if (entry.closing || entry.transport !== connectedTransport) return
         const error = 'MCP server disconnected unexpectedly'
         entry.client = undefined
         entry.transport = null
@@ -285,14 +289,14 @@ export class McpManager {
     entry.closing = true
     try {
       await entry.client?.close()
-    } catch {
-      /* ignore close errors */
-    } finally {
-      entry.client = undefined
-      entry.transport = null
-      entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
+    } catch (error) {
       entry.closing = this.shuttingDown
+      throw error
     }
+    entry.client = undefined
+    entry.transport = null
+    entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
+    entry.closing = this.shuttingDown
   }
 
   beginShutdown(): void {
@@ -300,12 +304,19 @@ export class McpManager {
     for (const entry of this.servers.values()) entry.closing = true
   }
 
-  async disconnectAll(): Promise<number> {
+  async disconnectAll(): Promise<McpDisconnectAllResult> {
     const names = [...this.servers.keys()]
+    const errors: McpDisconnectError[] = []
+    let disconnected = 0
     for (const name of names) {
-      await this.disconnectServer(name)
+      try {
+        await this.disconnectServer(name)
+        disconnected += 1
+      } catch (error) {
+        errors.push({ name, error: error instanceof Error ? error.message : String(error) })
+      }
     }
-    return names.length
+    return { disconnected, errors }
   }
 
   async reconnectServer(name: string): Promise<void> {
