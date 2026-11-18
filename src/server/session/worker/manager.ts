@@ -29,6 +29,7 @@ import {
 } from '../../ws/protocol.js'
 import { createMessageDoneEvent } from '../../chat/stream-pure.js'
 import { getEventStore } from '../../events/index.js'
+import type { EventStore } from '../../events/store.js'
 import { emitRunningChanged } from '../../events/session.js'
 import type { SessionManager } from '../manager.js'
 import {
@@ -59,7 +60,7 @@ import {
   planWorkerCrashRecovery,
   prepareSessionInterruptionEvents,
 } from './crash.js'
-import type { TurnEvent } from '../../events/types.js'
+import type { StoredEvent, TurnEvent } from '../../events/types.js'
 import { settleOneUnknownToolOutcome } from './settle-unknown.js'
 import type {
   BackgroundRequestMessage,
@@ -170,6 +171,62 @@ export interface SessionWorkerManagerDeps {
 
 function resolveWorkerEntry(): { path: string; execArgv: string[] } {
   return resolveSessionProcessEntry('worker', import.meta.url)
+}
+
+type InterruptedEventStore = Pick<EventStore, 'invalidateExternalSession' | 'getEvents' | 'append'> &
+  Partial<Pick<EventStore, 'runRecoverable'>>
+
+function errorCodeOf(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' ? code : 'UNKNOWN_ERROR'
+}
+
+/**
+ * Prepare a session's interruption events without letting a locked database take
+ * the gateway down.
+ *
+ * Same fatal class as the attention service crash of 18/11 02:41:54: the
+ * gateway's connection only tolerates a 5 ms busy wait, so the synchronous
+ * `append` throws `EventStoreBusyTimeoutError` as soon as that budget is spent.
+ * `shutdown()` and `settle()` reach this code outside any turn and nothing above
+ * them catches, so the throw killed the process. The preparation re-reads the
+ * events before deciding what to settle, so a failed attempt is idempotent and
+ * is retried on the store's own recoverable queue instead of being thrown.
+ */
+export function prepareInterruptedEventsRecoverable(
+  eventStore: InterruptedEventStore,
+  sessionId: string,
+): StoredEvent[] {
+  try {
+    return prepareSessionInterruptionEvents(eventStore, sessionId)
+  } catch (error) {
+    logger.error('Interrupted event preparation failed; retried on the recoverable queue', {
+      sessionId,
+      code: errorCodeOf(error),
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  if (typeof eventStore.runRecoverable !== 'function') {
+    logger.error('Interrupted event preparation lost: no recoverable append available', {
+      sessionId,
+    })
+    return []
+  }
+  void eventStore
+    .runRecoverable(sessionId, 'worker.interrupted.events', () =>
+      prepareSessionInterruptionEvents(eventStore, sessionId),
+    )
+    .then(() => {
+      logger.info('Interrupted event preparation recovered', { sessionId })
+    })
+    .catch((retryError: unknown) => {
+      logger.error('Interrupted event preparation lost', {
+        sessionId,
+        code: errorCodeOf(retryError),
+        error: retryError instanceof Error ? retryError.message : String(retryError),
+      })
+    })
+  return []
 }
 
 export class SessionWorkerManager {
@@ -1220,7 +1277,7 @@ export class SessionWorkerManager {
 
   private prepareInterruptedEvents(sessionId: string) {
     const eventStore = this.deps.eventStore?.() ?? getEventStore()
-    const events = prepareSessionInterruptionEvents(eventStore, sessionId)
+    const events = prepareInterruptedEventsRecoverable(eventStore, sessionId)
     return { eventStore, events }
   }
 
