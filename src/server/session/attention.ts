@@ -15,6 +15,14 @@ export interface AttentionNotifyParams {
   detail: string
   sinceMs: number
   createdBy: string | null
+  /** What the pilot has to do, when the wait is a workflow user step. */
+  notice?: AttentionNotice
+}
+
+/** Actionable context for a paused user step: what to answer, with which tool. */
+export interface AttentionNotice {
+  stepName?: string
+  choices?: Array<{ id: string; label: string }>
 }
 
 export interface AttentionServiceDeps {
@@ -30,6 +38,7 @@ export interface AttentionObservation {
   kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed'
   reason?: AttentionReason
   detail: string
+  notice?: AttentionNotice
 }
 
 export interface CallToolFn {
@@ -41,16 +50,214 @@ export interface CallToolFn {
   ): Promise<{ success: boolean; output?: string; error?: string }>
 }
 
-export function formatAttentionMessage(params: AttentionNotifyParams): string {
-  const label = params.reason === 'blocked' ? 'SESSION BLOQUÉE' : 'SESSION EN ATTENTE'
-  const since = new Date(params.sinceMs).toISOString()
-  return `⚠ ${label} ${params.title} (${params.sessionId}) : ${params.reason} ${params.detail} depuis ${since}`
+export function formatAttentionMessage(params: AttentionNotifyParams): string | null {
+  const parts: AttentionMessageParts = {
+    label: params.reason === 'blocked' ? 'SESSION BLOQUÉE' : 'SESSION EN ATTENTE',
+    title: params.title,
+    sessionId: params.sessionId,
+    reason: params.reason,
+    detail: params.detail,
+    since: new Date(params.sinceMs).toISOString(),
+    actions: actionHints(params),
+  }
+  return fitAttentionMessage(parts)
 }
 
-function parsePeerId(output: string | undefined): string | null {
-  if (!output) return null
-  const match = output.match(/peer_id:\s*(\S+)/)
-  return match?.[1] ?? null
+const ATTENTION_MESSAGE_MAX_BYTES = 800
+const ELLIPSIS = '…'
+
+interface AttentionMessageParts {
+  label: string
+  title: string
+  sessionId: string
+  reason: string
+  detail: string
+  since: string
+  /** Action candidates, most detailed first; the fit drops them in order. */
+  actions: string[]
+}
+
+function bytesOf(text: string): number {
+  return Buffer.byteLength(text, 'utf8')
+}
+
+function renderAttentionMessage(parts: AttentionMessageParts, action: string): string {
+  const detail = parts.detail ? ` ${parts.detail}` : ''
+  const since = parts.since ? ` depuis ${parts.since}` : ''
+  return `⚠ ${parts.label} ${parts.title} (${parts.sessionId}) : ${parts.reason}${detail}${since}${action}`
+}
+
+/** Cut to at most `maxBytes` UTF-8 bytes, at a code-point boundary. */
+function truncateUtf8(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return ''
+  if (bytesOf(text) <= maxBytes) return text
+  const budget = maxBytes - bytesOf(ELLIPSIS)
+  if (budget <= 0) return ''
+  let out = ''
+  let used = 0
+  for (const char of text) {
+    const size = bytesOf(char)
+    if (used + size > budget) break
+    out += char
+    used += size
+  }
+  return out + ELLIPSIS
+}
+
+/**
+ * What the pilot has to do about it, from the most to the least detailed form.
+ * A bare "session waiting" costs the pilot the same time as no alert at all: a
+ * paused user step must name the step, the answers available and the tool that
+ * gives one. The shorter forms exist only so the alert survives the byte budget.
+ */
+function actionHints(params: AttentionNotifyParams): string[] {
+  const notice = params.notice
+  const choices = notice?.choices ?? []
+  if (choices.length === 0) return []
+  const step = notice?.stepName?.trim()
+  const prefix = `${step ? ` — étape "${step}"` : ''} : répondre avec openfox_resume_workflow choice=`
+  const detailed = choices.slice(0, 4).map((choice) => {
+    const id = choice.id.trim()
+    const label = choice.label.trim()
+    return label && label !== id ? `"${id}" (${label})` : `"${id}"`
+  })
+  const idsOnly = choices.slice(0, 4).map((choice) => `"${choice.id.trim()}"`)
+  return [
+    prefix + detailed.join(' ou '),
+    prefix + idsOnly.join('|'),
+    `${step ? ` — étape "${step}"` : ''} : openfox_resume_workflow`,
+  ]
+}
+
+/**
+ * Fit the alert into the hub's per-message budget. `ATTENTION_MESSAGE_MAX_BYTES`
+ * is an absolute invariant, re-checked on whatever remains: the action is
+ * shortened first (labels, then the choice list, then the action itself), then
+ * the detail, then the title, then the timestamp. Every removal is journaled
+ * with what was dropped. When even the irreducible core — reason and session
+ * id — does not fit, there is no message to send and the caller must say so.
+ */
+function fitAttentionMessage(parts: AttentionMessageParts): string | null {
+  for (let index = 0; index < parts.actions.length; index += 1) {
+    const candidate = renderAttentionMessage(parts, parts.actions[index]!)
+    if (bytesOf(candidate) <= ATTENTION_MESSAGE_MAX_BYTES) {
+      if (index > 0) journalTruncation(parts, index === 1 ? 'action labels' : 'action choices', candidate)
+      return candidate
+    }
+  }
+
+  const withoutAction = renderAttentionMessage(parts, '')
+  if (bytesOf(withoutAction) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    if (parts.actions.length > 0) journalTruncation(parts, 'action', withoutAction)
+    return withoutAction
+  }
+
+  const head: AttentionMessageParts = { ...parts, actions: [], detail: '' }
+  const detailBudget = ATTENTION_MESSAGE_MAX_BYTES - bytesOf(renderAttentionMessage(head, ''))
+  const detail = detailBudget > 0 ? truncateUtf8(parts.detail, detailBudget) : ''
+  const withDetail: AttentionMessageParts = detail ? { ...head, detail } : head
+  const withDetailRendered = renderAttentionMessage(withDetail, '')
+  if (detail && bytesOf(withDetailRendered) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    journalTruncation(parts, 'action, detail', withDetailRendered)
+    return withDetailRendered
+  }
+
+  const titleBudget = ATTENTION_MESSAGE_MAX_BYTES - bytesOf(renderAttentionMessage({ ...head, title: '' }, ''))
+  const title = titleBudget > 0 ? truncateUtf8(parts.title, titleBudget) : ''
+  const withTitle = renderAttentionMessage({ ...head, title }, '')
+  if (title && bytesOf(withTitle) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    journalTruncation(parts, 'action, detail, title', withTitle)
+    return withTitle
+  }
+
+  const core = renderAttentionMessage({ ...head, title: '', since: '' }, '')
+  if (bytesOf(core) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    journalTruncation(parts, 'action, detail, title, since', core)
+    return core
+  }
+
+  // Reason and session id alone already exceed the budget: nothing can be sent.
+  logger.error('attention_message_unbounded', {
+    sessionId: parts.sessionId,
+    reason: parts.reason,
+    bytes: bytesOf(core),
+    maxBytes: ATTENTION_MESSAGE_MAX_BYTES,
+  })
+  return null
+}
+
+function journalTruncation(parts: AttentionMessageParts, omitted: string, message: string): void {
+  logger.warn('attention_message_truncated', {
+    sessionId: parts.sessionId,
+    reason: parts.reason,
+    omitted,
+    bytes: bytesOf(message),
+    maxBytes: ATTENTION_MESSAGE_MAX_BYTES,
+  })
+}
+
+/** A canonical hub identity, as the registry derives it (a UUID). */
+const PEER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+interface PeerIdLookup {
+  /** The identity to address, or null when the payload did not carry a usable one. */
+  peerId: string | null
+  /** The value found after `peer_id:`, kept verbatim so a rejection can name it. */
+  candidate: string | null
+}
+
+/**
+ * Unwrap a proxied MCP tool payload.
+ *
+ * Measured: `mcp-lazy`'s `mcp_execute_tool` answers
+ * `content: [{ type: 'text', text: JSON.stringify(result) }]`, and the manager
+ * hands that text through unchanged. The payload is therefore a JSON envelope
+ * in which the inner newlines are the two literal characters '\' and 'n' — not
+ * whitespace. A direct (unproxied) transport still answers plain text, so both
+ * shapes are accepted; a payload that is neither is used verbatim.
+ */
+function unwrapMcpPayload(output: string): string {
+  let current = output
+  for (let depth = 0; depth < 3; depth += 1) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(current)
+    } catch {
+      return current
+    }
+    if (typeof parsed === 'string') {
+      current = parsed
+      continue
+    }
+    const content = (parsed as { content?: unknown } | null)?.content
+    if (!Array.isArray(content)) return current
+    const text = content
+      .filter(
+        (part): part is { type?: string; text: string } =>
+          typeof (part as { text?: unknown } | null)?.text === 'string',
+      )
+      .filter((part) => part.type === undefined || part.type === 'text')
+      .map((part) => part.text)
+    if (text.length === 0) return current
+    current = text.join('\n')
+  }
+  return current
+}
+
+/**
+ * Read the hub identity out of a `ht_get_contact_info` answer.
+ *
+ * The extracted value is validated against the canonical shape rather than
+ * accepted as "whatever follows the colon": an identity that does not have that
+ * shape can never be routed, so it must be reported instead of being used for a
+ * send that is bound to fail with `unknown peer`.
+ */
+function parsePeerId(output: string | undefined): PeerIdLookup {
+  if (!output) return { peerId: null, candidate: null }
+  const match = unwrapMcpPayload(output).match(/peer_id:\s*(\S+)/)
+  const candidate = match?.[1] ?? null
+  if (candidate && PEER_ID_PATTERN.test(candidate)) return { peerId: candidate, candidate }
+  return { peerId: null, candidate }
 }
 
 /**
@@ -74,31 +281,56 @@ export function createAetherNotifier(
   return async (params) => {
     if (!params.createdBy) return
     const contact = await viaProxy('ht_get_contact_info', {}, params.createdBy)
-    const peerId = parsePeerId(contact.output)
-    if (!contact.success || !peerId) {
+    const lookup = parsePeerId(contact.success ? contact.output : undefined)
+    if (!contact.success || !lookup.peerId) {
       logger.error('attention_notify_failed', {
         sessionId: params.sessionId,
         createdBy: params.createdBy,
         reason: params.reason,
         stage: 'ht_get_contact_info',
-        error: contact.error ?? 'no peer_id in contact info',
+        ...(lookup.candidate ? { peerId: lookup.candidate } : {}),
+        error:
+          contact.error ??
+          (lookup.candidate
+            ? `peer_id is not a canonical hub identity: ${lookup.candidate}`
+            : 'no peer_id in contact info'),
       })
       return
     }
-    const send = await viaProxy(
-      'ht_send_to_peer',
-      { peer_id: peerId, message: formatAttentionMessage(params) },
-      params.sessionId,
-    )
+    const peerId = lookup.peerId
+    const message = formatAttentionMessage(params)
+    if (!message) {
+      // The invariant held: nothing above the budget is ever sent.
+      logger.error('attention_notify_failed', {
+        sessionId: params.sessionId,
+        createdBy: params.createdBy,
+        reason: params.reason,
+        stage: 'format_message',
+        peerId,
+        error: `alert cannot be represented within ${ATTENTION_MESSAGE_MAX_BYTES} bytes; nothing sent`,
+      })
+      return
+    }
+    const send = await viaProxy('ht_send_to_peer', { peer_id: peerId, message }, params.sessionId)
     if (!send.success) {
       logger.error('attention_notify_failed', {
         sessionId: params.sessionId,
         createdBy: params.createdBy,
         reason: params.reason,
         stage: 'ht_send_to_peer',
+        peerId,
         error: send.error ?? 'delivery failed',
       })
+      return
     }
+    // Delivery is recorded on success too: "no error logged" is not evidence
+    // that the alert reached anyone.
+    logger.info('attention_notified', {
+      sessionId: params.sessionId,
+      createdBy: params.createdBy,
+      reason: params.reason,
+      peerId,
+    })
   }
 }
 
@@ -109,6 +341,8 @@ interface AttentionEntry {
   armed: boolean
   /** For waiting reasons: callIds still pending; the entry closes when it empties. */
   waits: Set<string>
+  /** Actionable context of the wait, carried to the notification. */
+  notice?: AttentionNotice
 }
 
 const WAITING_REASONS: AttentionReason[] = ['waiting_question', 'waiting_confirmation', 'waiting_workflow_step']
@@ -171,12 +405,12 @@ export class SessionAttentionService {
   }
 
   /** Waiting state observed live (question, confirmation, workflow user step). */
-  observeWaiting(sessionId: string, reason: AttentionReason, detail: string): void {
+  observeWaiting(sessionId: string, reason: AttentionReason, detail: string, notice?: AttentionNotice): void {
     if (this.forward) {
-      this.forward({ kind: 'waiting', reason, detail })
+      this.forward({ kind: 'waiting', reason, detail, ...(notice ? { notice } : {}) })
       return
     }
-    this.enter(sessionId, reason, detail, false)
+    this.enter(sessionId, reason, detail, false, notice)
   }
 
   /**
@@ -244,12 +478,19 @@ export class SessionAttentionService {
     }
   }
 
-  private enter(sessionId: string, reason: AttentionReason, detail: string, immediate: boolean): void {
+  private enter(
+    sessionId: string,
+    reason: AttentionReason,
+    detail: string,
+    immediate: boolean,
+    notice?: AttentionNotice,
+  ): void {
     this.seed(sessionId)
     const key = `${sessionId}:${reason}`
     const existing = this.entries.get(key)
     if (existing) {
       if (isWaitingReason(reason)) existing.waits.add(detail)
+      if (notice) existing.notice = notice
       return
     }
     const entry: AttentionEntry = {
@@ -258,6 +499,7 @@ export class SessionAttentionService {
       sinceMs: this.now(),
       armed: true,
       waits: isWaitingReason(reason) ? new Set([detail]) : new Set<string>(),
+      ...(notice ? { notice } : {}),
     }
     this.entries.set(key, entry)
     if (immediate) {
@@ -321,6 +563,7 @@ export class SessionAttentionService {
       detail: entry.detail,
       sinceMs: entry.sinceMs,
       createdBy: info.createdBy,
+      ...(entry.notice ? { notice: entry.notice } : {}),
     }
     void Promise.resolve()
       .then(() => this.notify!(params))

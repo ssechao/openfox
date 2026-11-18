@@ -40,6 +40,33 @@ const mockProviderManager = () =>
     resolveModelEffort: () => undefined,
   }) as unknown as ConstructorParameters<typeof SessionManager>[0]
 
+const ATTENTION_PROBE_PEER_ID = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+
+/**
+ * Stand-in for the proxied hub: it answers in the measured `mcp-lazy` shape
+ * (`content: [{ type: 'text', text: JSON.stringify(result) }]`) and records what
+ * would have been delivered.
+ */
+function aetherRecorder(peerId: string = ATTENTION_PROBE_PEER_ID) {
+  const delivered: Array<{ toPeerId: string; message: string }> = []
+  const toolCalls: string[] = []
+  const proxied = (text: string) => ({
+    success: true,
+    output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+  })
+  const callTool: CallToolFn = async (_serverName, _toolName, args) => {
+    const target = String(args['tool_name'])
+    toolCalls.push(target)
+    if (target === 'ht_get_contact_info') {
+      return proxied(`Your hub identity:\n  peer_id: ${peerId}\n  hub: http://x/mcp`)
+    }
+    const inner = (args['arguments'] ?? {}) as Record<string, unknown>
+    delivered.push({ toPeerId: String(inner['peer_id'] ?? ''), message: String(inner['message'] ?? '') })
+    return proxied(JSON.stringify({ msg_seq: 1, delivery: 'notified' }))
+  }
+  return { callTool, delivered, toolCalls }
+}
+
 describe('session attention (STALL-NOTIFY)', () => {
   let root: string
   let projectDir: string
@@ -248,7 +275,10 @@ describe('session attention (STALL-NOTIFY)', () => {
     const callTool: CallToolFn = async (serverName, toolName, args, sessionId) => {
       calls.push({ serverName, toolName, args, sessionId })
       if (args['tool_name'] === 'ht_get_contact_info') {
-        return { success: true, output: 'Your hub identity:\n  peer_id: peer-creator-42\n  hub: http://x/mcp' }
+        return {
+          success: true,
+          output: 'Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\n  hub: http://x/mcp',
+        }
       }
       return { success: true, output: 'delivered' }
     }
@@ -282,7 +312,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(sendArgs['server_name']).toBe('llm-aether')
     expect(sendArgs['tool_name']).toBe('ht_send_to_peer')
     const innerSend = sendArgs['arguments'] as Record<string, unknown>
-    expect(innerSend['peer_id']).toBe('peer-creator-42')
+    expect(innerSend['peer_id']).toBe('0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b')
     const message = String(innerSend['message'])
     expect(message).toContain('SESSION BLOQUÉE')
     expect(message).toContain('Worker run')
@@ -317,7 +347,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     const failingSend: CallToolFn = async (serverName, toolName, args, sessionId) => {
       calls.push({ serverName, toolName, args, sessionId })
       if ((args as Record<string, unknown>)['tool_name'] === 'ht_get_contact_info') {
-        return { success: true, output: 'peer_id: peer-creator-42' }
+        return { success: true, output: 'peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b' }
       }
       return { success: false, error: 'peer offline' }
     }
@@ -328,6 +358,341 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(logged).toContain('attention_notify_failed')
     expect(logged).toContain('ht_send_to_peer')
     errorLog.mockRestore()
+  })
+
+  it('the attention alert reaches the creator peer through the proxied MCP payload', async () => {
+    // Measured shape: the Aether call rides mcp-lazy's `mcp_execute_tool`, which
+    // answers `content: [{ type: 'text', text: JSON.stringify(result) }]` — the
+    // inner MCP result is a JSON-encoded string, so the newlines inside it are
+    // the two literal characters '\' and 'n', not whitespace.
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const creatorTitle = 'Openfox — pilote [mgr-sessions] (5)'
+    const delivered: Array<{ toPeerId: string; message: string }> = []
+    const toolCalls: string[] = []
+    const proxied = (text: string) => ({
+      success: true,
+      output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+    })
+    const hubRejection = (toolName: string) => ({
+      success: false,
+      error: JSON.stringify({
+        error: `Failed to execute ${toolName} on llm-aether: MCP error -32602: unknown peer`,
+        alternatives: [],
+      }),
+    })
+    const callTool: CallToolFn = async (_serverName, _toolName, args, sessionId) => {
+      const target = String(args['tool_name'])
+      const inner = (args['arguments'] ?? {}) as Record<string, unknown>
+      toolCalls.push(target)
+      if (target === 'ht_get_contact_info') {
+        // The host injects the creator's own session id as the identity.
+        if (sessionId !== 'session-creator') return hubRejection('ht_get_contact_info')
+        return proxied(
+          `Your hub identity:\n  peer_id: ${creatorPeerId}\n  hub: http://192.168.71.132:4175/mcp\n\nShare the peer_id with another session so it can reach you via ht_send_to_peer(peer_id).`,
+        )
+      }
+      // The hub resolves a peer reference against the sender's subject: an exact
+      // canonical peer id or an exact title. Anything else is `unknown peer`.
+      const reference = String(inner['peer_id'] ?? '')
+      const routable = reference === creatorPeerId || reference.trim().toLowerCase() === creatorTitle.toLowerCase()
+      if (!routable) return hubRejection('ht_send_to_peer')
+      delivered.push({ toPeerId: creatorPeerId, message: String(inner['message'] ?? '') })
+      return proxied(JSON.stringify({ msg_seq: 1, delivery: 'notified' }))
+    }
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId: 'session-stalled',
+        projectId: 'project-1',
+        title: 'Worker run',
+        reason: 'waiting_question',
+        detail: 'call_6dfeb890',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+      })
+    } finally {
+      errorLog.mockRestore()
+    }
+
+    // Judged on arrival at the creator, never on the absence of an error log.
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]!.toPeerId).toBe(creatorPeerId)
+    expect(delivered[0]!.message).toContain('SESSION EN ATTENTE')
+    expect(delivered[0]!.message).toContain('Worker run')
+    expect(delivered[0]!.message).toContain('session-stalled')
+    expect(delivered[0]!.message).toContain('waiting_question')
+    expect(delivered[0]!.message).toContain('call_6dfeb890')
+    expect(toolCalls).toEqual(['ht_get_contact_info', 'ht_send_to_peer'])
+  })
+
+  it('an unroutable peer identity is reported explicitly and never sent', async () => {
+    const session = manager.createSession(projectId, 'Stalled run')
+    manager.setSessionCreatedBy(session.id, 'session-creator')
+    const toolCalls: string[] = []
+    const logged: Array<Record<string, unknown>> = []
+    const hubAnswer = 'MCP error -32602: unknown peer'
+    const proxied = (text: string) => ({
+      success: true,
+      output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+    })
+    let contactPayload = ''
+    const callTool: CallToolFn = async (_serverName, _toolName, args) => {
+      const target = String(args['tool_name'])
+      toolCalls.push(target)
+      if (target === 'ht_get_contact_info') return proxied(contactPayload)
+      return { success: false, error: `Failed to execute ht_send_to_peer on llm-aether: ${hubAnswer}` }
+    }
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') logged.push(payload as Record<string, unknown>)
+    })
+    try {
+      notify = createAetherNotifier(callTool)
+      configure()
+
+      // (1) A captured identity that does not have the canonical peer id shape is
+      // never used: no send is attempted, and the value is named in the log.
+      contactPayload = `Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\\n  hub: http://x/mcp`
+      getAttentionService().observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
+      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0), { timeout: 5000 })
+      expect(toolCalls).toEqual(['ht_get_contact_info'])
+      const malformed = logged.filter((entry) => entry['stage'] === 'ht_get_contact_info')
+      expect(malformed).toHaveLength(1)
+      expect(malformed[0]!['sessionId']).toBe(session.id)
+      expect(malformed[0]!['createdBy']).toBe('session-creator')
+      expect(String(malformed[0]!['peerId'])).toContain('0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b')
+
+      // (2) A well-formed identity the hub does not know: exactly one send, and
+      // the failure names the stage, the identity used and the hub answer.
+      toolCalls.length = 0
+      logged.length = 0
+      contactPayload = `Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\n  hub: http://x/mcp`
+      getAttentionService().observeResumed(session.id)
+      getAttentionService().observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
+      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0), { timeout: 5000 })
+      expect(toolCalls).toEqual(['ht_get_contact_info', 'ht_send_to_peer'])
+      const failedSend = logged.filter((entry) => entry['stage'] === 'ht_send_to_peer')
+      expect(failedSend).toHaveLength(1)
+      expect(failedSend[0]!['sessionId']).toBe(session.id)
+      expect(failedSend[0]!['peerId']).toBe('0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b')
+      expect(String(failedSend[0]!['error'])).toContain(hubAnswer)
+
+      // The attention event itself stands in both cases.
+      expect(attentionEvents(session.id, 'session.attention_required').length).toBe(2)
+    } finally {
+      errorLog.mockRestore()
+      notify = async () => {}
+      configure()
+    }
+  })
+
+  it('a session paused on the real Where to work user step alerts its creator with the answer to give', async () => {
+    // Measured case: an agent-launched session opens on the Build & Verify
+    // "Where to work" step and stays there until a human answers. Nobody is
+    // warned, and a bare "session waiting" would not say what to answer either.
+    const session = manager.createSession(projectId, 'DSH per-user dev')
+    manager.setSessionCreatedBy(session.id, 'session-creator')
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const delivered: Array<{ toPeerId: string; message: string }> = []
+    const proxied = (text: string) => ({
+      success: true,
+      output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+    })
+    const callTool: CallToolFn = async (_serverName, _toolName, args) => {
+      const inner = (args['arguments'] ?? {}) as Record<string, unknown>
+      if (String(args['tool_name']) === 'ht_get_contact_info') {
+        return proxied(`Your hub identity:\n  peer_id: ${creatorPeerId}\n  hub: http://x/mcp`)
+      }
+      delivered.push({ toPeerId: String(inner['peer_id'] ?? ''), message: String(inner['message'] ?? '') })
+      return proxied(JSON.stringify({ msg_seq: 1, delivery: 'notified' }))
+    }
+    notify = createAetherNotifier(callTool)
+    configure()
+
+    // The real workflow definition: id `work_location`, name "Where to work",
+    // one choice per `step_result` transition.
+    manager.waitAtStep(
+      session.id,
+      'execution-1',
+      'work_location',
+      'Where to work',
+      {},
+      'default',
+      'Build & Verify',
+      '#3b82f6',
+      [
+        { id: 'Work in current workspace', label: 'Work in current workspace', goto: 'build' },
+        { id: 'Start a new workspace', label: 'Start a new workspace', goto: 'setup_workspace' },
+      ],
+    )
+    // A waiting entry alerts after the attention delay, through the sweep.
+    clock.nowMs += 10 * 60 * 1000 + 1
+    getAttentionService().sweep()
+    await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 5000 })
+
+    const alert = delivered[0]!
+    expect(alert.toPeerId).toBe(creatorPeerId)
+    expect(alert.message).toContain('SESSION EN ATTENTE')
+    expect(alert.message).toContain('DSH per-user dev')
+    expect(alert.message).toContain(session.id)
+    expect(alert.message).toContain('waiting_workflow_step')
+    // Actionable: which step, which answer, and the tool that gives it.
+    expect(alert.message).toContain('Where to work')
+    expect(alert.message).toContain('openfox_resume_workflow')
+    expect(alert.message).toContain('Work in current workspace')
+    expect(Buffer.byteLength(alert.message, 'utf8')).toBeLessThanOrEqual(800)
+  })
+
+  it('an oversized alert is truncated to the byte budget instead of being refused by the hub', async () => {
+    // A base already far above the budget: a long title AND a long detail, no
+    // action to drop. The invariant must still hold on what is left.
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const sessionId = 'ed072b50-9f23-430e-b3e6-136a75ee49a6'
+    const { callTool, delivered } = aetherRecorder(creatorPeerId)
+    const warnings: Array<Record<string, unknown>> = []
+    const warnLog = vi.spyOn(logger, 'warn').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') warnings.push(payload as Record<string, unknown>)
+    })
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId,
+        projectId: 'project-1',
+        title: 'T'.repeat(400),
+        reason: 'waiting_question',
+        detail: 'd'.repeat(600),
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+      })
+    } finally {
+      warnLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(1)
+    const message = delivered[0]!.message
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(800)
+    // What must survive: what it is about, and which session.
+    expect(message).toContain('waiting_question')
+    expect(message).toContain(sessionId)
+    // And the removal is named, never silent.
+    const truncations = warnings.filter((entry) => entry['omitted'] !== undefined)
+    expect(truncations.length).toBeGreaterThan(0)
+    expect(String(truncations[0]!['omitted'])).toContain('detail')
+  })
+
+  it('a long action degrades to the bare resume tool before the alert is shortened', async () => {
+    // Sized so that only the shortest action form fits (791 bytes with it,
+    // 865 with the choice ids, 920 with the labels).
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const sessionId = 'ed072b50-9f23-430e-b3e6-136a75ee49a6'
+    const { callTool, delivered } = aetherRecorder(creatorPeerId)
+    const warnings: Array<Record<string, unknown>> = []
+    const warnLog = vi.spyOn(logger, 'warn').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') warnings.push(payload as Record<string, unknown>)
+    })
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId,
+        projectId: 'project-1',
+        title: 'T'.repeat(620),
+        reason: 'waiting_workflow_step',
+        detail: '',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+        notice: {
+          stepName: 'Where to work',
+          choices: [
+            { id: 'Work in current workspace', label: 'Work in current workspace' },
+            { id: 'Start a new workspace', label: 'Start a new workspace' },
+          ],
+        },
+      })
+    } finally {
+      warnLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(1)
+    const message = delivered[0]!.message
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(800)
+    expect(message).toContain('waiting_workflow_step')
+    expect(message).toContain(sessionId)
+    // The action survives in its shortest form: the tool, without the choice list.
+    expect(message).toContain('openfox_resume_workflow')
+    expect(message).not.toContain('choice=')
+    expect(warnings.map((entry) => String(entry['omitted']))).toContain('action choices')
+  })
+
+  it('long choice labels are dropped before the alert itself is shortened', async () => {
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const sessionId = 'ed072b50-9f23-430e-b3e6-136a75ee49a6'
+    const choices = [
+      {
+        id: 'Work in the current workspace of this project',
+        label: 'Work in the current workspace of this project and keep the branch',
+      },
+      {
+        id: 'Start a brand new isolated workspace for this card',
+        label: 'Start a brand new isolated workspace for this card now',
+      },
+      {
+        id: 'Continue on the existing feature branch as-is',
+        label: 'Continue on the existing feature branch as-is without any switch',
+      },
+      {
+        id: 'Abort and report back to the pilot before any change',
+        label: 'Abort and report back to the pilot before any change at all',
+      },
+    ]
+    const { callTool, delivered } = aetherRecorder(creatorPeerId)
+    const warnings: Array<Record<string, unknown>> = []
+    const warnLog = vi.spyOn(logger, 'warn').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') warnings.push(payload as Record<string, unknown>)
+    })
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId,
+        projectId: 'project-1',
+        title: 'T'.repeat(200),
+        reason: 'waiting_workflow_step',
+        detail: '',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+        notice: { stepName: 'Where to work', choices },
+      })
+    } finally {
+      warnLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(1)
+    const message = delivered[0]!.message
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(800)
+    expect(message).toContain(sessionId)
+    expect(message).toContain('Where to work')
+    // Ids are kept, the bulky labels are what goes first.
+    expect(message).toContain('Work in the current workspace of this project')
+    expect(message).not.toContain('and keep the branch')
+    expect(warnings.map((entry) => String(entry['omitted']))).toContain('action labels')
+  })
+
+  it('an alert whose irreducible core exceeds the budget is never sent', async () => {
+    // Defensive bound: reason and session id alone are already too long.
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const { callTool, delivered, toolCalls } = aetherRecorder(creatorPeerId)
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId: 'a'.repeat(900),
+        projectId: 'project-1',
+        title: 'Worker run',
+        reason: 'blocked',
+        detail: 'HTTP 400',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+      })
+    } finally {
+      errorLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(0)
+    expect(toolCalls).toEqual(['ht_get_contact_info'])
   })
 
   it('session creator is recorded only from a proven identity', async () => {

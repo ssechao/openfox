@@ -174,6 +174,7 @@ export type AttentionObservationMessage = WorkerIpcIdentity & {
   kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed'
   reason?: 'blocked' | 'waiting_question' | 'waiting_confirmation' | 'waiting_workflow_step'
   detail: string
+  notice?: { stepName?: string; choices?: Array<{ id: string; label: string }> }
 }
 
 export type WorkerToGatewayMessage =
