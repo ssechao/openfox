@@ -40,6 +40,33 @@ const mockProviderManager = () =>
     resolveModelEffort: () => undefined,
   }) as unknown as ConstructorParameters<typeof SessionManager>[0]
 
+const ATTENTION_PROBE_PEER_ID = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+
+/**
+ * Stand-in for the proxied hub: it answers in the measured `mcp-lazy` shape
+ * (`content: [{ type: 'text', text: JSON.stringify(result) }]`) and records what
+ * would have been delivered.
+ */
+function aetherRecorder(peerId: string = ATTENTION_PROBE_PEER_ID) {
+  const delivered: Array<{ toPeerId: string; message: string }> = []
+  const toolCalls: string[] = []
+  const proxied = (text: string) => ({
+    success: true,
+    output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+  })
+  const callTool: CallToolFn = async (_serverName, _toolName, args) => {
+    const target = String(args['tool_name'])
+    toolCalls.push(target)
+    if (target === 'ht_get_contact_info') {
+      return proxied(`Your hub identity:\n  peer_id: ${peerId}\n  hub: http://x/mcp`)
+    }
+    const inner = (args['arguments'] ?? {}) as Record<string, unknown>
+    delivered.push({ toPeerId: String(inner['peer_id'] ?? ''), message: String(inner['message'] ?? '') })
+    return proxied(JSON.stringify({ msg_seq: 1, delivery: 'notified' }))
+  }
+  return { callTool, delivered, toolCalls }
+}
+
 describe('session attention (STALL-NOTIFY)', () => {
   let root: string
   let projectDir: string
@@ -513,6 +540,159 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(alert.message).toContain('openfox_resume_workflow')
     expect(alert.message).toContain('Work in current workspace')
     expect(Buffer.byteLength(alert.message, 'utf8')).toBeLessThanOrEqual(800)
+  })
+
+  it.fails('an oversized alert is truncated to the byte budget instead of being refused by the hub', async () => {
+    // A base already far above the budget: a long title AND a long detail, no
+    // action to drop. The invariant must still hold on what is left.
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const sessionId = 'ed072b50-9f23-430e-b3e6-136a75ee49a6'
+    const { callTool, delivered } = aetherRecorder(creatorPeerId)
+    const warnings: Array<Record<string, unknown>> = []
+    const warnLog = vi.spyOn(logger, 'warn').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') warnings.push(payload as Record<string, unknown>)
+    })
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId,
+        projectId: 'project-1',
+        title: 'T'.repeat(400),
+        reason: 'waiting_question',
+        detail: 'd'.repeat(600),
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+      })
+    } finally {
+      warnLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(1)
+    const message = delivered[0]!.message
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(800)
+    // What must survive: what it is about, and which session.
+    expect(message).toContain('waiting_question')
+    expect(message).toContain(sessionId)
+    // And the removal is named, never silent.
+    const truncations = warnings.filter((entry) => entry['omitted'] !== undefined)
+    expect(truncations.length).toBeGreaterThan(0)
+    expect(String(truncations[0]!['omitted'])).toContain('detail')
+  })
+
+  it.fails('a long action degrades to the bare resume tool before the alert is shortened', async () => {
+    // Sized so that only the shortest action form fits (791 bytes with it,
+    // 865 with the choice ids, 920 with the labels).
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const sessionId = 'ed072b50-9f23-430e-b3e6-136a75ee49a6'
+    const { callTool, delivered } = aetherRecorder(creatorPeerId)
+    const warnings: Array<Record<string, unknown>> = []
+    const warnLog = vi.spyOn(logger, 'warn').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') warnings.push(payload as Record<string, unknown>)
+    })
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId,
+        projectId: 'project-1',
+        title: 'T'.repeat(620),
+        reason: 'waiting_workflow_step',
+        detail: '',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+        notice: {
+          stepName: 'Where to work',
+          choices: [
+            { id: 'Work in current workspace', label: 'Work in current workspace' },
+            { id: 'Start a new workspace', label: 'Start a new workspace' },
+          ],
+        },
+      })
+    } finally {
+      warnLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(1)
+    const message = delivered[0]!.message
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(800)
+    expect(message).toContain('waiting_workflow_step')
+    expect(message).toContain(sessionId)
+    // The action survives in its shortest form: the tool, without the choice list.
+    expect(message).toContain('openfox_resume_workflow')
+    expect(message).not.toContain('choice=')
+    expect(warnings.map((entry) => String(entry['omitted']))).toContain('action choices')
+  })
+
+  it.fails('long choice labels are dropped before the alert itself is shortened', async () => {
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const sessionId = 'ed072b50-9f23-430e-b3e6-136a75ee49a6'
+    const choices = [
+      {
+        id: 'Work in the current workspace of this project',
+        label: 'Work in the current workspace of this project and keep the branch',
+      },
+      {
+        id: 'Start a brand new isolated workspace for this card',
+        label: 'Start a brand new isolated workspace for this card now',
+      },
+      {
+        id: 'Continue on the existing feature branch as-is',
+        label: 'Continue on the existing feature branch as-is without any switch',
+      },
+      {
+        id: 'Abort and report back to the pilot before any change',
+        label: 'Abort and report back to the pilot before any change at all',
+      },
+    ]
+    const { callTool, delivered } = aetherRecorder(creatorPeerId)
+    const warnings: Array<Record<string, unknown>> = []
+    const warnLog = vi.spyOn(logger, 'warn').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') warnings.push(payload as Record<string, unknown>)
+    })
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId,
+        projectId: 'project-1',
+        title: 'T'.repeat(200),
+        reason: 'waiting_workflow_step',
+        detail: '',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+        notice: { stepName: 'Where to work', choices },
+      })
+    } finally {
+      warnLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(1)
+    const message = delivered[0]!.message
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(800)
+    expect(message).toContain(sessionId)
+    expect(message).toContain('Where to work')
+    // Ids are kept, the bulky labels are what goes first.
+    expect(message).toContain('Work in the current workspace of this project')
+    expect(message).not.toContain('and keep the branch')
+    expect(warnings.map((entry) => String(entry['omitted']))).toContain('action labels')
+  })
+
+  it.fails('an alert whose irreducible core exceeds the budget is never sent', async () => {
+    // Defensive bound: reason and session id alone are already too long.
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const { callTool, delivered, toolCalls } = aetherRecorder(creatorPeerId)
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId: 'a'.repeat(900),
+        projectId: 'project-1',
+        title: 'Worker run',
+        reason: 'blocked',
+        detail: 'HTTP 400',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+      })
+    } finally {
+      errorLog.mockRestore()
+    }
+
+    expect(delivered).toHaveLength(0)
+    expect(toolCalls).toEqual(['ht_get_contact_info'])
   })
 
   it('session creator is recorded only from a proven identity', async () => {
