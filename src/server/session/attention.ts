@@ -50,49 +50,150 @@ export interface CallToolFn {
   ): Promise<{ success: boolean; output?: string; error?: string }>
 }
 
-export function formatAttentionMessage(params: AttentionNotifyParams): string {
-  const label = params.reason === 'blocked' ? 'SESSION BLOQUÉE' : 'SESSION EN ATTENTE'
-  const since = new Date(params.sinceMs).toISOString()
-  const base = `⚠ ${label} ${params.title} (${params.sessionId}) : ${params.reason} ${params.detail} depuis ${since}`
-  return boundAttentionMessage(base, actionHint(params))
+export function formatAttentionMessage(params: AttentionNotifyParams): string | null {
+  const parts: AttentionMessageParts = {
+    label: params.reason === 'blocked' ? 'SESSION BLOQUÉE' : 'SESSION EN ATTENTE',
+    title: params.title,
+    sessionId: params.sessionId,
+    reason: params.reason,
+    detail: params.detail,
+    since: new Date(params.sinceMs).toISOString(),
+    actions: actionHints(params),
+  }
+  return fitAttentionMessage(parts)
+}
+
+const ATTENTION_MESSAGE_MAX_BYTES = 800
+const ELLIPSIS = '…'
+
+interface AttentionMessageParts {
+  label: string
+  title: string
+  sessionId: string
+  reason: string
+  detail: string
+  since: string
+  /** Action candidates, most detailed first; the fit drops them in order. */
+  actions: string[]
+}
+
+function bytesOf(text: string): number {
+  return Buffer.byteLength(text, 'utf8')
+}
+
+function renderAttentionMessage(parts: AttentionMessageParts, action: string): string {
+  const detail = parts.detail ? ` ${parts.detail}` : ''
+  const since = parts.since ? ` depuis ${parts.since}` : ''
+  return `⚠ ${parts.label} ${parts.title} (${parts.sessionId}) : ${parts.reason}${detail}${since}${action}`
+}
+
+/** Cut to at most `maxBytes` UTF-8 bytes, at a code-point boundary. */
+function truncateUtf8(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return ''
+  if (bytesOf(text) <= maxBytes) return text
+  const budget = maxBytes - bytesOf(ELLIPSIS)
+  if (budget <= 0) return ''
+  let out = ''
+  let used = 0
+  for (const char of text) {
+    const size = bytesOf(char)
+    if (used + size > budget) break
+    out += char
+    used += size
+  }
+  return out + ELLIPSIS
 }
 
 /**
- * What the pilot has to do about it. A bare "session waiting" costs the pilot
- * the same time as no alert at all: a paused user step must name the step, the
- * answers available and the tool that gives one.
+ * What the pilot has to do about it, from the most to the least detailed form.
+ * A bare "session waiting" costs the pilot the same time as no alert at all: a
+ * paused user step must name the step, the answers available and the tool that
+ * gives one. The shorter forms exist only so the alert survives the byte budget.
  */
-function actionHint(params: AttentionNotifyParams): string {
+function actionHints(params: AttentionNotifyParams): string[] {
   const notice = params.notice
   const choices = notice?.choices ?? []
-  if (choices.length === 0) return ''
+  if (choices.length === 0) return []
   const step = notice?.stepName?.trim()
-  const answers = choices.slice(0, 4).map((choice) => {
+  const prefix = `${step ? ` — étape "${step}"` : ''} : répondre avec openfox_resume_workflow choice=`
+  const detailed = choices.slice(0, 4).map((choice) => {
     const id = choice.id.trim()
     const label = choice.label.trim()
     return label && label !== id ? `"${id}" (${label})` : `"${id}"`
   })
-  return `${step ? ` — étape "${step}"` : ''} : répondre avec openfox_resume_workflow choice=${answers.join(' ou ')}`
+  const idsOnly = choices.slice(0, 4).map((choice) => `"${choice.id.trim()}"`)
+  return [
+    prefix + detailed.join(' ou '),
+    prefix + idsOnly.join('|'),
+    `${step ? ` — étape "${step}"` : ''} : openfox_resume_workflow`,
+  ]
 }
 
-const ATTENTION_MESSAGE_MAX_BYTES = 800
-
 /**
- * Keep the alert inside the hub's per-message budget. The action is what gets
- * shortened first (labels, then the whole hint) — never the alert itself — and a
- * dropped action is journaled rather than lost silently.
+ * Fit the alert into the hub's per-message budget. `ATTENTION_MESSAGE_MAX_BYTES`
+ * is an absolute invariant, re-checked on whatever remains: the action is
+ * shortened first (labels, then the choice list, then the action itself), then
+ * the detail, then the title, then the timestamp. Every removal is journaled
+ * with what was dropped. When even the irreducible core — reason and session
+ * id — does not fit, there is no message to send and the caller must say so.
  */
-function boundAttentionMessage(base: string, hint: string): string {
-  if (!hint) return base
-  const full = base + hint
-  if (Buffer.byteLength(full, 'utf8') <= ATTENTION_MESSAGE_MAX_BYTES) return full
-  const compact = `${base} : openfox_resume_workflow`
-  if (Buffer.byteLength(compact, 'utf8') <= ATTENTION_MESSAGE_MAX_BYTES) {
-    logger.warn('attention_message_truncated', { omitted: 'choices' })
-    return compact
+function fitAttentionMessage(parts: AttentionMessageParts): string | null {
+  for (let index = 0; index < parts.actions.length; index += 1) {
+    const candidate = renderAttentionMessage(parts, parts.actions[index]!)
+    if (bytesOf(candidate) <= ATTENTION_MESSAGE_MAX_BYTES) {
+      if (index > 0) journalTruncation(parts, index === 1 ? 'action labels' : 'action choices', candidate)
+      return candidate
+    }
   }
-  logger.warn('attention_message_truncated', { omitted: 'action' })
-  return base
+
+  const withoutAction = renderAttentionMessage(parts, '')
+  if (bytesOf(withoutAction) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    if (parts.actions.length > 0) journalTruncation(parts, 'action', withoutAction)
+    return withoutAction
+  }
+
+  const head: AttentionMessageParts = { ...parts, actions: [], detail: '' }
+  const detailBudget = ATTENTION_MESSAGE_MAX_BYTES - bytesOf(renderAttentionMessage(head, ''))
+  const detail = detailBudget > 0 ? truncateUtf8(parts.detail, detailBudget) : ''
+  const withDetail: AttentionMessageParts = detail ? { ...head, detail } : head
+  const withDetailRendered = renderAttentionMessage(withDetail, '')
+  if (detail && bytesOf(withDetailRendered) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    journalTruncation(parts, 'action, detail', withDetailRendered)
+    return withDetailRendered
+  }
+
+  const titleBudget = ATTENTION_MESSAGE_MAX_BYTES - bytesOf(renderAttentionMessage({ ...head, title: '' }, ''))
+  const title = titleBudget > 0 ? truncateUtf8(parts.title, titleBudget) : ''
+  const withTitle = renderAttentionMessage({ ...head, title }, '')
+  if (title && bytesOf(withTitle) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    journalTruncation(parts, 'action, detail, title', withTitle)
+    return withTitle
+  }
+
+  const core = renderAttentionMessage({ ...head, title: '', since: '' }, '')
+  if (bytesOf(core) <= ATTENTION_MESSAGE_MAX_BYTES) {
+    journalTruncation(parts, 'action, detail, title, since', core)
+    return core
+  }
+
+  // Reason and session id alone already exceed the budget: nothing can be sent.
+  logger.error('attention_message_unbounded', {
+    sessionId: parts.sessionId,
+    reason: parts.reason,
+    bytes: bytesOf(core),
+    maxBytes: ATTENTION_MESSAGE_MAX_BYTES,
+  })
+  return null
+}
+
+function journalTruncation(parts: AttentionMessageParts, omitted: string, message: string): void {
+  logger.warn('attention_message_truncated', {
+    sessionId: parts.sessionId,
+    reason: parts.reason,
+    omitted,
+    bytes: bytesOf(message),
+    maxBytes: ATTENTION_MESSAGE_MAX_BYTES,
+  })
 }
 
 /** A canonical hub identity, as the registry derives it (a UUID). */
@@ -197,11 +298,20 @@ export function createAetherNotifier(
       return
     }
     const peerId = lookup.peerId
-    const send = await viaProxy(
-      'ht_send_to_peer',
-      { peer_id: peerId, message: formatAttentionMessage(params) },
-      params.sessionId,
-    )
+    const message = formatAttentionMessage(params)
+    if (!message) {
+      // The invariant held: nothing above the budget is ever sent.
+      logger.error('attention_notify_failed', {
+        sessionId: params.sessionId,
+        createdBy: params.createdBy,
+        reason: params.reason,
+        stage: 'format_message',
+        peerId,
+        error: `alert cannot be represented within ${ATTENTION_MESSAGE_MAX_BYTES} bytes; nothing sent`,
+      })
+      return
+    }
+    const send = await viaProxy('ht_send_to_peer', { peer_id: peerId, message }, params.sessionId)
     if (!send.success) {
       logger.error('attention_notify_failed', {
         sessionId: params.sessionId,

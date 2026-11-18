@@ -542,7 +542,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(Buffer.byteLength(alert.message, 'utf8')).toBeLessThanOrEqual(800)
   })
 
-  it.fails('an oversized alert is truncated to the byte budget instead of being refused by the hub', async () => {
+  it('an oversized alert is truncated to the byte budget instead of being refused by the hub', async () => {
     // A base already far above the budget: a long title AND a long detail, no
     // action to drop. The invariant must still hold on what is left.
     const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
@@ -578,7 +578,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(String(truncations[0]!['omitted'])).toContain('detail')
   })
 
-  it.fails('a long action degrades to the bare resume tool before the alert is shortened', async () => {
+  it('a long action degrades to the bare resume tool before the alert is shortened', async () => {
     // Sized so that only the shortest action form fits (791 bytes with it,
     // 865 with the choice ids, 920 with the labels).
     const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
@@ -620,7 +620,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(warnings.map((entry) => String(entry['omitted']))).toContain('action choices')
   })
 
-  it.fails('long choice labels are dropped before the alert itself is shortened', async () => {
+  it('long choice labels are dropped before the alert itself is shortened', async () => {
     const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
     const sessionId = 'ed072b50-9f23-430e-b3e6-136a75ee49a6'
     const choices = [
@@ -672,7 +672,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(warnings.map((entry) => String(entry['omitted']))).toContain('action labels')
   })
 
-  it.fails('an alert whose irreducible core exceeds the budget is never sent', async () => {
+  it('an alert whose irreducible core exceeds the budget is never sent', async () => {
     // Defensive bound: reason and session id alone are already too long.
     const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
     const { callTool, delivered, toolCalls } = aetherRecorder(creatorPeerId)
