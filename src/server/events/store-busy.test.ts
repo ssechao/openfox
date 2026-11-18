@@ -8,12 +8,17 @@ import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadConfig } from '../config.js'
-import { closeDatabase, initDatabase } from '../db/index.js'
+import { closeDatabase, GATEWAY_DB_BUSY_TIMEOUT_MS, initDatabase } from '../db/index.js'
 import { createProject } from '../db/projects.js'
 import { createSession } from '../db/sessions.js'
 import { assignWorkerToken, type WorkerToken } from '../session/worker/token.js'
 import { logger } from '../utils/logger.js'
-import { EventStore } from './store.js'
+import {
+  EventStore,
+  EventStoreBusyTimeoutError,
+  GATEWAY_APPEND_BUSY_DEADLINE_MS,
+  initEventStore,
+} from './store.js'
 
 const SID = 'session-1'
 const BETTER_SQLITE3 = createRequire(import.meta.url).resolve('better-sqlite3')
@@ -290,5 +295,58 @@ describe('database busy handling', () => {
     holder.close()
     expect(store.append(SID, { type: 'message.done', data: { messageId: 'u1' } }).seq).toBe(2)
     db.close()
+  })
+
+  it.fails('an event write survives a slow lock under the gateway configuration', async () => {
+    const db = initDatabase({ ...loadConfig(), database: { path } })
+    const store = initEventStore(db)
+    const sessionId = createSession(createProject('Slow lock', directory).id, directory).id
+    store.append(sessionId, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const { exited: holder } = await holdWriteLockInAnotherProcess(path, 200)
+    const startedAt = performance.now()
+    const stored = store.append(sessionId, { type: 'message.done', data: { messageId: 'u1' } })
+    const elapsedMs = performance.now() - startedAt
+
+    expect(await holder).toBe(0)
+    expect(stored.seq).toBe(2)
+    expect(store.getEvents(sessionId).map((event) => event.type)).toEqual(['message.start', 'message.done'])
+    expect(error).not.toHaveBeenCalled()
+    expect(elapsedMs).toBeGreaterThanOrEqual(180)
+    expect(GATEWAY_DB_BUSY_TIMEOUT_MS).toBeGreaterThanOrEqual(GATEWAY_APPEND_BUSY_DEADLINE_MS)
+  })
+
+  it.fails('a write that really cannot succeed returns an explicit error beyond the maximum budget', async () => {
+    const db = initDatabase({ ...loadConfig(), database: { path } })
+    const store = initEventStore(db)
+    const sessionId = createSession(createProject('Persistent lock', directory).id, directory).id
+    store.append(sessionId, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const { exited: holder } = await holdWriteLockInAnotherProcess(path, GATEWAY_APPEND_BUSY_DEADLINE_MS + 600)
+    const startedAt = performance.now()
+    let thrown: unknown
+    try {
+      store.append(sessionId, { type: 'message.done', data: { messageId: 'u1' } })
+    } catch (busyError) {
+      thrown = busyError
+    }
+    const elapsedMs = performance.now() - startedAt
+    expect(await holder).toBe(0)
+
+    expect(thrown).toBeInstanceOf(EventStoreBusyTimeoutError)
+    const timeout = thrown as EventStoreBusyTimeoutError
+    expect(timeout.code).toBe('EVENT_STORE_BUSY_TIMEOUT')
+    expect(timeout.sessionId).toBe(sessionId)
+    expect(timeout.eventType).toBe('message.done')
+    expect(timeout.deadlineMs).toBe(GATEWAY_APPEND_BUSY_DEADLINE_MS)
+    const measured = timeout as EventStoreBusyTimeoutError & { elapsedMs?: number }
+    expect(measured.elapsedMs).toBeGreaterThanOrEqual(timeout.deadlineMs)
+    expect(measured.elapsedMs).toBeLessThanOrEqual(timeout.deadlineMs + 1_000)
+    expect(elapsedMs).toBeGreaterThanOrEqual(timeout.deadlineMs)
+    expect(error).toHaveBeenCalledTimes(1)
+    expect(error.mock.calls[0]?.[1]).toMatchObject({ sessionId, type: 'message.done' })
+    expect(store.getEvents(sessionId).map((event) => event.type)).toEqual(['message.start'])
   })
 })

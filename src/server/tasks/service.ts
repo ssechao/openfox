@@ -1167,7 +1167,7 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
       const providerId = managerLaunch ? (task.providerId ?? null) : (task.providerId ?? defaults.providerId ?? null)
       const model = managerLaunch ? (task.model ?? null) : (task.model ?? defaults.model ?? null)
       try {
-session = sessionManager.createSession(projectId, launchTitle(task.prompt), providerId, model)
+        session = sessionManager.createSession(projectId, launchTitle(task.prompt), providerId, model)
         if (managerLaunch && task.launchedBy) {
           sessionManager.setSessionCreatedBy(session.id, task.launchedBy)
         }
