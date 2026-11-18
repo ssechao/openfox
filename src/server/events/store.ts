@@ -22,6 +22,11 @@ import type { DiagnosticsCollector } from '../diagnostics/types.js'
 import { logger } from '../utils/logger.js'
 import { foldSessionState, buildSnapshot, trimSnapshotStreamingOutput } from './folding.js'
 import { SETTINGS_KEYS } from '../db/settings.js'
+import {
+  APPEND_BUSY_MAX_ATTEMPTS,
+  GATEWAY_APPEND_BUSY_DEADLINE_MS,
+  GATEWAY_APPEND_RECOVERABLE_ATTEMPT_MS,
+} from '../db/busy-budget.js'
 import { immutableSnapshot } from './immutable-snapshot.js'
 import { foldContextState } from './fold-state.js'
 import {
@@ -56,7 +61,7 @@ const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 export const STREAM_FLUSH_INTERVAL_MS = 250
 export const STREAM_FLUSH_MAX_BYTES = 4096
 export const APPEND_BUSY_DEADLINE_MS = 30_000
-export const GATEWAY_APPEND_BUSY_DEADLINE_MS = 10
+export { GATEWAY_APPEND_BUSY_DEADLINE_MS }
 export const GATEWAY_APPEND_RECOVERY_DEADLINE_MS = 10_000
 const APPEND_BUSY_INITIAL_BACKOFF_MS = 5
 const GATEWAY_APPEND_RECOVERY_DELAY_MS = 25
@@ -71,10 +76,11 @@ export class EventStoreBusyTimeoutError extends Error {
     readonly eventType: string,
     readonly attempts: number,
     readonly deadlineMs: number,
+    readonly elapsedMs: number,
     cause: unknown,
   ) {
     super(
-      `Event append busy deadline exceeded after ${deadlineMs} ms for ${eventType} in session ${sessionId} (${attempts} attempts)`,
+      `Event append busy deadline exceeded after ${elapsedMs} ms (budget ${deadlineMs} ms) for ${eventType} in session ${sessionId} (${attempts} attempts)`,
       { cause },
     )
     this.name = 'EventStoreBusyTimeoutError'
@@ -324,6 +330,8 @@ export class EventStore {
   private readonly appendBusyDeadlineMs: number
   private readonly appendBusyInitialBackoffMs: number
   private readonly appendBusyMaxBackoffMs: number
+  private readonly appendBusyMaxAttempts: number
+  private readonly appendRecoverableAttemptMs: number
   private readonly appendRecoveryDeadlineMs: number
   private recoverableAppendTail: Promise<void> = Promise.resolve()
 
@@ -470,6 +478,8 @@ export class EventStore {
       appendBusyDeadlineMs?: number
       appendBusyInitialBackoffMs?: number
       appendBusyMaxBackoffMs?: number
+      appendBusyMaxAttempts?: number
+      appendRecoverableAttemptMs?: number
       appendRecoveryDeadlineMs?: number
       /** Worker fencing (étape 6a): invoked inside every append transaction;
        *  must throw when this writer's token is stale. Gateway instances leave
@@ -498,6 +508,8 @@ export class EventStore {
       this.appendBusyInitialBackoffMs,
       options.appendBusyMaxBackoffMs ?? APPEND_BUSY_MAX_BACKOFF_MS,
     )
+    this.appendBusyMaxAttempts = Math.max(1, options.appendBusyMaxAttempts ?? APPEND_BUSY_MAX_ATTEMPTS)
+    this.appendRecoverableAttemptMs = Math.max(1, options.appendRecoverableAttemptMs ?? this.appendBusyDeadlineMs)
     this.appendRecoveryDeadlineMs = Math.max(
       this.appendBusyDeadlineMs,
       options.appendRecoveryDeadlineMs ?? GATEWAY_APPEND_RECOVERY_DEADLINE_MS,
@@ -661,12 +673,13 @@ export class EventStore {
           if (!isBusyError(error)) throw error
           lastError = error
           const elapsedMs = performance.now() - startedAt
-          if (elapsedMs >= this.appendRecoveryDeadlineMs) {
+          if (elapsedMs >= this.appendRecoveryDeadlineMs || attempts >= this.appendBusyMaxAttempts) {
             const timeout = new EventStoreBusyTimeoutError(
               sessionId,
               operationType,
               attempts,
               this.appendRecoveryDeadlineMs,
+              Math.round(elapsedMs),
               lastError,
             )
             logger.error('Recoverable database operation deadline exceeded', {
@@ -700,7 +713,11 @@ export class EventStore {
     options: { indexSnapshot?: boolean; searchRemoveIds?: string[] } = {},
   ): Promise<StoredEvent> {
     return this.runRecoverable(sessionId, event.type, () => {
-      const recoverableOptions = { ...options, reportBusyTimeout: false }
+      const recoverableOptions = {
+        ...options,
+        reportBusyTimeout: false,
+        busyDeadlineMs: this.appendRecoverableAttemptMs,
+      }
       return event.type === 'turn.snapshot'
         ? this.measureSnapshotOperation('snapshotAppend', () =>
             this.appendEvent(sessionId, event, true, recoverableOptions),
@@ -812,7 +829,13 @@ export class EventStore {
     for (const ref of collectBlobRefs(data)) clear.call(this.blobStore, ref.hash)
   }
 
-  private retryBusy<T>(sessionId: string, eventType: string, operation: () => T, reportTimeout = true): T {
+  private retryBusy<T>(
+    sessionId: string,
+    eventType: string,
+    operation: () => T,
+    reportTimeout = true,
+    budgetMs = this.appendBusyDeadlineMs,
+  ): T {
     const startedAt = performance.now()
     let attempts = 0
 
@@ -823,12 +846,13 @@ export class EventStore {
       } catch (error) {
         if (!isBusyError(error)) throw error
         const elapsedMs = performance.now() - startedAt
-        if (elapsedMs >= this.appendBusyDeadlineMs) {
+        if (elapsedMs >= budgetMs || attempts >= this.appendBusyMaxAttempts) {
           const timeout = new EventStoreBusyTimeoutError(
             sessionId,
             eventType,
             attempts,
-            this.appendBusyDeadlineMs,
+            budgetMs,
+            Math.round(elapsedMs),
             error,
           )
           if (reportTimeout) {
@@ -836,7 +860,7 @@ export class EventStore {
               sessionId,
               type: eventType,
               attempts,
-              deadlineMs: this.appendBusyDeadlineMs,
+              deadlineMs: budgetMs,
               elapsedMs: Math.round(elapsedMs),
               error: error instanceof Error ? error.message : String(error),
             })
@@ -845,7 +869,7 @@ export class EventStore {
         }
         const exponentialMs = this.appendBusyInitialBackoffMs * 2 ** Math.min(attempts - 1, 16)
         const jitteredMs = exponentialMs * (0.75 + Math.random() * 0.5)
-        const remainingMs = this.appendBusyDeadlineMs - elapsedMs
+        const remainingMs = budgetMs - elapsedMs
         const delayMs = Math.max(1, Math.floor(Math.min(jitteredMs, this.appendBusyMaxBackoffMs, remainingMs)))
         Atomics.wait(appendBusySleep, 0, 0, delayMs)
       }
@@ -856,7 +880,12 @@ export class EventStore {
     sessionId: string,
     event: TurnEvent,
     notify = true,
-    options: { indexSnapshot?: boolean; searchRemoveIds?: string[]; reportBusyTimeout?: boolean } = {},
+    options: {
+      indexSnapshot?: boolean
+      searchRemoveIds?: string[]
+      reportBusyTimeout?: boolean
+      busyDeadlineMs?: number
+    } = {},
   ): StoredEvent {
     this.assertValidEvent(sessionId, event)
     this.flushStreaming(sessionId)
@@ -891,6 +920,7 @@ export class EventStore {
             event.type,
             () => this.searchIndex.withPendingRollback(() => runImmediateTransaction(transaction)),
             options.reportBusyTimeout ?? true,
+            options.busyDeadlineMs,
           ),
         )
         break
@@ -2224,6 +2254,7 @@ export function initEventStore(db: Database.Database): EventStore {
     appendBusyDeadlineMs: GATEWAY_APPEND_BUSY_DEADLINE_MS,
     appendBusyInitialBackoffMs: 1,
     appendBusyMaxBackoffMs: 2,
+    appendRecoverableAttemptMs: GATEWAY_APPEND_RECOVERABLE_ATTEMPT_MS,
     appendRecoveryDeadlineMs: GATEWAY_APPEND_RECOVERY_DEADLINE_MS,
   })
 

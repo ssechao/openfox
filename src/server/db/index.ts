@@ -5,10 +5,11 @@ import { assertTestDatabasePath } from '../utils/test-environment.js'
 import { acquireInstanceLock, releaseInstanceLock } from './instance-lock.js'
 import { recoverRestoreIfNeeded } from '../events/blob-backup.js'
 import { ensureSearchSchema } from '../search/fts-index.js'
+import { GATEWAY_DB_BUSY_TIMEOUT_MS } from './busy-budget.js'
 
 let db: Database.Database | null = null
 const RECENT_PROMPTS_MAX_ENTRIES = 20
-export const GATEWAY_DB_BUSY_TIMEOUT_MS = 5
+export { GATEWAY_DB_BUSY_TIMEOUT_MS } from './busy-budget.js'
 export const WORKER_DB_BUSY_TIMEOUT_MS = 10_000
 
 export function initDatabase(config: Config): Database.Database {
