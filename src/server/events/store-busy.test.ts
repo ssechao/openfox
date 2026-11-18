@@ -13,12 +13,7 @@ import { createProject } from '../db/projects.js'
 import { createSession } from '../db/sessions.js'
 import { assignWorkerToken, type WorkerToken } from '../session/worker/token.js'
 import { logger } from '../utils/logger.js'
-import {
-  EventStore,
-  EventStoreBusyTimeoutError,
-  GATEWAY_APPEND_BUSY_DEADLINE_MS,
-  initEventStore,
-} from './store.js'
+import { EventStore, EventStoreBusyTimeoutError, GATEWAY_APPEND_BUSY_DEADLINE_MS, initEventStore } from './store.js'
 
 const SID = 'session-1'
 const BETTER_SQLITE3 = createRequire(import.meta.url).resolve('better-sqlite3')
