@@ -49,6 +49,10 @@ describe('project_tasks tool', () => {
           const session = sessions.get(id)
           return session ? { isRunning: true, interruptedAt: null } : null
         },
+        hasQueuedMessages: () => false,
+        getPendingToolReconciliations: () => [],
+        pendingBackgroundWait: () => undefined,
+        getActiveWorkflowExecution: () => null,
         createSession: () => {
           sessionCount += 1
           const session = { id: `task-session-${sessionCount}`, projectId, messages: [] }

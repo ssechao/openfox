@@ -409,7 +409,7 @@ describe('project tasks service', () => {
       }
     })
 
-    it.fails('a workflow parked on a human choice parks the card even while the turn still runs', async () => {
+    it('a workflow parked on a human choice parks the card even while the turn still runs', async () => {
       const first = create('First')
       const second = create('Second')
       const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
@@ -423,7 +423,7 @@ describe('project tasks service', () => {
       expect(service.get(projectId, first.id)?.staleSession).toEqual({ sessionId, reason: 'not_advancing' })
     })
 
-    it.fails('a workflow parked on a human choice parks the card even with a message queued', async () => {
+    it('a workflow parked on a human choice parks the card even with a message queued', async () => {
       const first = create('First')
       const second = create('Second')
       const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })

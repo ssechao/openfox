@@ -1106,13 +1106,23 @@ export function createTasksService(deps: TasksServiceDeps): TasksService {
   }
 
   function canAdvanceFrom(liveness: SessionLiveness, sessionId: string): boolean {
+    // 1. HUMAN GATES — unconditional vetoes. Nothing below may override them:
+    //    a session parked on a human decision cannot make progress by itself,
+    //    whatever turn/message/reconciliation state it still reports.
     if (liveness.interruptedAt) return false
     if (isSessionWaitingForHuman?.(sessionId)) return false
+    // A background-process wait is stored as a `waiting` workflow execution with
+    // a background marker — it is NOT a human gate, so it is exempted here and
+    // counted below as a self-advancing signal.
+    const backgroundWait = sessionManager.pendingBackgroundWait(sessionId)
+    const execution = sessionManager.getActiveWorkflowExecution(sessionId)
+    if (!backgroundWait && execution?.status === 'waiting') return false
+
+    // 2. SELF-ADVANCING SIGNALS — the session will make progress on its own.
     if (liveness.isRunning) return true
     if (sessionManager.hasQueuedMessages(sessionId)) return true
     if (sessionManager.getPendingToolReconciliations(sessionId).length > 0) return true
-    if (sessionManager.pendingBackgroundWait(sessionId)) return true
-    const execution = sessionManager.getActiveWorkflowExecution(sessionId)
+    if (backgroundWait) return true
     return execution?.status === 'running'
   }
 
