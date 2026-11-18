@@ -22,6 +22,9 @@ interface FakeSession {
   projectId: string
   title?: string
   messages?: unknown[]
+  /** Liveness: a freshly seeded session is working until a test parks it. */
+  isRunning?: boolean
+  interruptedAt?: string | null
 }
 
 interface FakeSessionManager {
@@ -30,6 +33,14 @@ interface FakeSessionManager {
   queued: { sessionId: string; content: string; attachments?: Attachment[] }[]
   sessions: Map<string, FakeSession>
   modes: Map<string, string>
+  /** Explicit "session still has work queued" markers (liveness simulation). */
+  liveQueues: Set<string>
+  /** Explicit pending tool reconciliations per session. */
+  reconciliations: Map<string, unknown[]>
+  /** Explicit background waits per session. */
+  backgroundWaits: Map<string, string>
+  /** Explicit active workflow execution per session. */
+  workflowExecutions: Map<string, { status: 'running' | 'waiting' }>
 }
 
 function makeSessionManager(): FakeSessionManager & {
@@ -38,6 +49,11 @@ function makeSessionManager(): FakeSessionManager & {
   queueMessage: (sessionId: string, mode: string, content?: string, attachments?: Attachment[]) => void
   setMode: (sessionId: string, mode: string) => void
   getSession: (id: string) => FakeSession | null
+  getSessionLiveness: (id: string) => { isRunning: boolean; interruptedAt: string | null } | null
+  hasQueuedMessages: (id: string) => boolean
+  getPendingToolReconciliations: (id: string) => unknown[]
+  pendingBackgroundWait: (id: string) => string | undefined
+  getActiveWorkflowExecution: (id: string) => { status: 'running' | 'waiting' } | null
   deleteSession: (id: string) => void
 } {
   const mgr = {
@@ -46,6 +62,10 @@ function makeSessionManager(): FakeSessionManager & {
     queued: [] as { sessionId: string; content: string; attachments?: Attachment[] }[],
     sessions: new Map<string, FakeSession>(),
     modes: new Map<string, string>(),
+    liveQueues: new Set<string>(),
+    reconciliations: new Map<string, unknown[]>(),
+    backgroundWaits: new Map<string, string>(),
+    workflowExecutions: new Map<string, { status: 'running' | 'waiting' }>(),
   }
 
   const counter = { n: 0 }
@@ -54,7 +74,7 @@ function makeSessionManager(): FakeSessionManager & {
     ...mgr,
     createSession: (_pid: string, title?: unknown) => {
       counter.n += 1
-      const session: FakeSession = { id: `sess-${counter.n}`, projectId: _pid }
+      const session: FakeSession = { id: `sess-${counter.n}`, projectId: _pid, isRunning: true }
       if (typeof title === 'string' && title.length > 0) session.title = title
       mgr.createdSessions.push(session)
       mgr.sessions.set(session.id, session)
@@ -74,8 +94,21 @@ function makeSessionManager(): FakeSessionManager & {
       mgr.modes.set(sessionId, mode)
     },
     getSession: (id: string) => mgr.sessions.get(id) ?? null,
+    getSessionLiveness: (id: string) => {
+      const session = mgr.sessions.get(id)
+      if (!session) return null
+      return { isRunning: session.isRunning ?? true, interruptedAt: session.interruptedAt ?? null }
+    },
+    hasQueuedMessages: (id: string) => mgr.liveQueues.has(id),
+    getPendingToolReconciliations: (id: string) => mgr.reconciliations.get(id) ?? [],
+    pendingBackgroundWait: (id: string) => mgr.backgroundWaits.get(id),
+    getActiveWorkflowExecution: (id: string) => mgr.workflowExecutions.get(id) ?? null,
     deleteSession: (id: string) => {
       mgr.sessions.delete(id)
+      mgr.liveQueues.delete(id)
+      mgr.reconciliations.delete(id)
+      mgr.backgroundWaits.delete(id)
+      mgr.workflowExecutions.delete(id)
       mgr.reminders.splice(0, mgr.reminders.length, ...mgr.reminders.filter((reminder) => reminder.sessionId !== id))
       mgr.queued.splice(0, mgr.queued.length, ...mgr.queued.filter((item) => item.sessionId !== id))
     },
@@ -89,6 +122,7 @@ describe('project tasks service', () => {
   let broadcasts: TasksUpdatePayload[]
   let sm: ReturnType<typeof makeSessionManager>
   let launchSpy: ReturnType<typeof vi.fn>
+  let humanWaits: Set<string>
 
   beforeEach(async () => {
     closeDatabase()
@@ -164,6 +198,7 @@ describe('project tasks service', () => {
 
     broadcasts = []
     sm = makeSessionManager()
+    humanWaits = new Set<string>()
     launchSpy = vi.fn()
     const configWithDefault = loadConfig()
     service = createTasksService({
@@ -172,6 +207,7 @@ describe('project tasks service', () => {
       broadcast: (_pid, payload) => broadcasts.push(payload),
       configDir,
       launchWorkflow: launchSpy as never,
+      isSessionWaitingForHuman: (sessionId) => humanWaits.has(sessionId),
     })
   })
 
@@ -338,6 +374,113 @@ describe('project tasks service', () => {
       expect(service.get(projectId, first.id)?.auditTrail.at(-1)?.detail).toContain('session deleted')
       expect(service.get(projectId, second.id)).toMatchObject({ runState: 'running' })
       expect(sm.createdSessions).toHaveLength(2)
+    })
+
+    it.fails(
+      'a running task whose bound session can no longer advance on its own does not hold a launch slot',
+      async () => {
+        const parkedShapes: Array<[string, (sessionId: string) => void]> = [
+          ['turn over with nothing queued', () => {}],
+          [
+            'workflow parked at a user step',
+            (sessionId) => sm.workflowExecutions.set(sessionId, { status: 'waiting' }),
+          ],
+          ['waiting on a human question', (sessionId) => humanWaits.add(sessionId)],
+        ]
+
+        for (const [label, park] of parkedShapes) {
+          const armRoot = join(root, `parked-${label.replace(/\s+/g, '-')}`)
+          await mkdir(armRoot, { recursive: true })
+          const armProject = createProject(`Parked ${label}`, armRoot).id
+          const first = service.create(armProject, { prompt: `First ${label}` }, { actor: 'human' })
+          const second = service.create(armProject, { prompt: `Second ${label}` }, { actor: 'human' })
+
+          const running = await service.move(armProject, first.id, 'in_progress', { actor: 'human' })
+          const sessionId = running.sessionId!
+          // The turn is over (or parked): no self-advancing signal left.
+          sm.sessions.get(sessionId)!.isRunning = false
+          park(sessionId)
+
+          const result = await service.move(armProject, second.id, 'in_progress', { actor: 'human' })
+
+          // A queued card starts in the freed slot…
+          expect(result.task.runState, label).toBe('running')
+          expect(result.sessionId, label).toBeTruthy()
+          expect(result.queued, label).toBeUndefined()
+          // …while the parked card stays running on its own session: never requeued.
+          const parked = service.get(armProject, first.id)!
+          expect(parked.runState, label).toBe('running')
+          expect(parked.activeSessionId, label).toBe(sessionId)
+        }
+      },
+    )
+
+    it('a bound session that can still advance on its own keeps the launch slot', async () => {
+      const setRunning = (sessionId: string, value: boolean) => {
+        sm.sessions.get(sessionId)!.isRunning = value
+      }
+      // Each arm parks the session first (isRunning = false), then applies the
+      // single signal that still lets it advance on its own.
+      const arms: Array<[string, (sessionId: string) => void]> = [
+        ['still running', (sessionId) => setRunning(sessionId, true)],
+        ['queued message', (sessionId) => sm.liveQueues.add(sessionId)],
+        ['pending tool reconciliation', (sessionId) => sm.reconciliations.set(sessionId, [{ id: 'call-1' }])],
+        ['background wait', (sessionId) => sm.backgroundWaits.set(sessionId, 'exec-1')],
+        ['running workflow', (sessionId) => sm.workflowExecutions.set(sessionId, { status: 'running' })],
+      ]
+
+      for (const [label, arm] of arms) {
+        const armRoot = join(root, `arm-${label.replace(/\s+/g, '-')}`)
+        await mkdir(armRoot, { recursive: true })
+        const armProject = createProject(`Arm ${label}`, armRoot).id
+        const first = service.create(armProject, { prompt: `First ${label}` }, { actor: 'human' })
+        const second = service.create(armProject, { prompt: `Second ${label}` }, { actor: 'human' })
+
+        const running = await service.move(armProject, first.id, 'in_progress', { actor: 'human' })
+        sm.sessions.get(running.sessionId!)!.isRunning = false
+        arm(running.sessionId!)
+
+        const result = await service.move(armProject, second.id, 'in_progress', { actor: 'human' })
+
+        expect(result.task.runState, label).toBe('queued')
+        expect(service.get(armProject, first.id)?.staleSession, label).toBeUndefined()
+      }
+    })
+
+    it.fails('the parked card is visible as stale, never relaunched, and reading it never writes', async () => {
+      const first = create('Parked card')
+      const second = create('Waiting card')
+      const running = await service.move(projectId, first.id, 'in_progress', { actor: 'human' })
+      const sessionId = running.sessionId!
+      sm.sessions.get(sessionId)!.isRunning = false
+
+      const expected = { sessionId, reason: 'not_advancing' }
+      expect(service.list(projectId).find((task) => task.id === first.id)?.staleSession).toEqual(expected)
+      expect(service.get(projectId, first.id)?.staleSession).toEqual(expected)
+      expect(service.snapshot(projectId).tasks.find((task) => task.id === first.id)?.staleSession).toEqual(expected)
+
+      // The periodic sweep must never re-seed the parked card.
+      const seededBefore = sm.createdSessions.length
+      const result = await service.move(projectId, second.id, 'in_progress', { actor: 'human' })
+      expect(result.task.runState).toBe('running')
+      await service.retryQueuedLaunches()
+      expect(sm.createdSessions).toHaveLength(seededBefore + 1)
+
+      const after = service.get(projectId, first.id)!
+      expect(after.runState).toBe('running')
+      expect(after.activeSessionId).toBe(sessionId)
+      expect(after.staleSession).toEqual(expected)
+
+      // A read must never write: with writes disabled, the board still renders.
+      const db = getDatabase()
+      db.pragma('query_only = 1')
+      try {
+        expect(service.list(projectId).find((task) => task.id === first.id)?.staleSession).toEqual(expected)
+        expect(service.snapshot(projectId).tasks.find((task) => task.id === first.id)?.staleSession).toEqual(expected)
+        expect(service.get(projectId, first.id)?.staleSession).toEqual(expected)
+      } finally {
+        db.pragma('query_only = 0')
+      }
     })
 
     it('move to in_progress over the slot limit returns an explicit queued reason', async () => {

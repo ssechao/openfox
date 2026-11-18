@@ -721,6 +721,13 @@ export interface ProjectTask {
   /** Linked sessions, active working session first, then historical attempts. */
   sessionIds: string[]
   activeSessionId?: string
+  /**
+   * Present on a running card whose bound session can no longer advance on its
+   * own (parked: awaiting a human, or its turn ended with nothing queued).
+   * Such a card is parked: it holds NO launch slot and is never relaunched
+   * automatically — it stays `running` until a human or a manager resumes it.
+   */
+  staleSession?: TaskStaleSession
   gateValues: TaskGateValue[]
   auditTrail: TaskAuditEntry[]
   createdAt: string
@@ -730,6 +737,16 @@ export interface ProjectTask {
 export interface ProjectTaskSettings {
   slotLimit: number
   queuePaused: boolean
+}
+
+/**
+ * Why a running card stopped holding a launch slot: its bound session exists
+ * but can no longer advance on its own.
+ */
+export interface TaskStaleSession {
+  sessionId: string
+  /** `session_absent` = no `sessions` row any more; `not_advancing` = row present but parked. */
+  reason: 'session_absent' | 'not_advancing'
 }
 
 export interface ProjectTaskCounts {

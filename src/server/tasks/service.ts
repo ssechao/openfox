@@ -280,6 +280,13 @@ export interface TasksServiceDeps {
     },
   ) => AdmissionResult | void | Promise<AdmissionResult | void>
   canStartSession?: (sessionId: string) => boolean
+  /**
+   * True when the session is parked on a human interaction (pending question).
+   * A parked session cannot advance on its own, so the card bound to it must
+   * not hold a launch slot. Optional: absent ⇒ only the other liveness signals
+   * are considered.
+   */
+  isSessionWaitingForHuman?: (sessionId: string) => boolean
 }
 
 const REMINDER_COLOR = '#3b82f6'
