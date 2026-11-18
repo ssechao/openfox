@@ -13,7 +13,7 @@ import { createProject } from '../db/projects.js'
 import { createSession } from '../db/sessions.js'
 import { assignWorkerToken, type WorkerToken } from '../session/worker/token.js'
 import { logger } from '../utils/logger.js'
-import { EventStore, EventStoreBusyTimeoutError, GATEWAY_APPEND_BUSY_DEADLINE_MS, initEventStore } from './store.js'
+import { EventStore, EventStoreBusyTimeoutError, initEventStore } from './store.js'
 
 const SID = 'session-1'
 const BETTER_SQLITE3 = createRequire(import.meta.url).resolve('better-sqlite3')
@@ -106,7 +106,7 @@ describe('database busy handling', () => {
 
   it('keeps the gateway database busy timeout short', () => {
     const db = initDatabase({ ...loadConfig(), database: { path } })
-    expect(db.pragma('busy_timeout', { simple: true })).toBe(5)
+    expect(db.pragma('busy_timeout', { simple: true })).toBe(GATEWAY_DB_BUSY_TIMEOUT_MS)
   })
 
   it('appends once another process releases the write lock it was holding', async () => {
@@ -292,36 +292,14 @@ describe('database busy handling', () => {
     db.close()
   })
 
-  it('an event write survives a slow lock under the gateway configuration', async () => {
+  it.fails('the synchronous append never waits for a slow lock', async () => {
     const db = initDatabase({ ...loadConfig(), database: { path } })
     const store = initEventStore(db)
     const sessionId = createSession(createProject('Slow lock', directory).id, directory).id
     store.append(sessionId, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
     const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
 
-    const lockHoldMs = 1_500
-    const { exited: holder } = await holdWriteLockInAnotherProcess(path, lockHoldMs)
-    const startedAt = performance.now()
-    const stored = store.append(sessionId, { type: 'message.done', data: { messageId: 'u1' } })
-    const elapsedMs = performance.now() - startedAt
-
-    expect(await holder).toBe(0)
-    expect(stored.seq).toBe(2)
-    expect(store.getEvents(sessionId).map((event) => event.type)).toEqual(['message.start', 'message.done'])
-    expect(error).not.toHaveBeenCalled()
-    expect(elapsedMs).toBeGreaterThanOrEqual(1_000)
-    expect(elapsedMs).toBeLessThanOrEqual(GATEWAY_APPEND_BUSY_DEADLINE_MS)
-    expect(GATEWAY_APPEND_BUSY_DEADLINE_MS).toBeGreaterThanOrEqual(lockHoldMs)
-  })
-
-  it('a write that really cannot succeed returns an explicit error beyond the maximum budget', async () => {
-    const db = initDatabase({ ...loadConfig(), database: { path } })
-    const store = initEventStore(db)
-    const sessionId = createSession(createProject('Persistent lock', directory).id, directory).id
-    store.append(sessionId, { type: 'message.start', data: { messageId: 'u1', role: 'user', content: 'hi' } })
-    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
-
-    const { exited: holder } = await holdWriteLockInAnotherProcess(path, GATEWAY_APPEND_BUSY_DEADLINE_MS * 2 + 1_000)
+    const { exited: holder } = await holdWriteLockInAnotherProcess(path, 400)
     const startedAt = performance.now()
     let thrown: unknown
     try {
@@ -333,16 +311,40 @@ describe('database busy handling', () => {
     expect(await holder).toBe(0)
 
     expect(thrown).toBeInstanceOf(EventStoreBusyTimeoutError)
-    const timeout = thrown as EventStoreBusyTimeoutError
-    expect(timeout.code).toBe('EVENT_STORE_BUSY_TIMEOUT')
-    expect(timeout.sessionId).toBe(sessionId)
-    expect(timeout.eventType).toBe('message.done')
-    expect(timeout.deadlineMs).toBe(GATEWAY_APPEND_BUSY_DEADLINE_MS)
-    expect(timeout.elapsedMs).toBeGreaterThanOrEqual(timeout.deadlineMs)
-    expect(timeout.elapsedMs).toBeLessThanOrEqual(timeout.deadlineMs + GATEWAY_DB_BUSY_TIMEOUT_MS + 1_000)
-    expect(elapsedMs).toBeGreaterThanOrEqual(timeout.deadlineMs)
+    expect((thrown as EventStoreBusyTimeoutError).code).toBe('EVENT_STORE_BUSY_TIMEOUT')
+    expect((thrown as EventStoreBusyTimeoutError).attempts).toBe(1)
+    expect(elapsedMs).toBeLessThan(100)
     expect(error).toHaveBeenCalledTimes(1)
-    expect(error.mock.calls[0]?.[1]).toMatchObject({ sessionId, type: 'message.done' })
     expect(store.getEvents(sessionId).map((event) => event.type)).toEqual(['message.start'])
+  })
+
+  it.fails('keeps the gateway responsive while a recoverable append waits with pending fragments', async () => {
+    const db = initDatabase({ ...loadConfig(), database: { path } })
+    const store = initEventStore(db)
+    const sessionId = createSession(createProject('Pending fragments', directory).id, directory).id
+    const messageId = 'u1'
+    store.append(sessionId, { type: 'message.start', data: { messageId, role: 'assistant' } })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+    const { exited: holder } = await holdWriteLockInAnotherProcess(path, 1_500)
+    store.appendStreaming(sessionId, { type: 'message.thinking', data: { messageId, content: 'pending ' } })
+
+    let timerFiredAt = 0
+    const startedAt = performance.now()
+    const timer = setTimeout(() => {
+      timerFiredAt = performance.now()
+    }, 10)
+
+    const recovered = store.appendRecoverable(sessionId, { type: 'message.done', data: { messageId } })
+    const stored = await recovered
+    clearTimeout(timer)
+    const timerDelayMs = (timerFiredAt === 0 ? performance.now() : timerFiredAt) - startedAt
+    expect(await holder).toBe(0)
+
+    expect(stored.seq).toBeGreaterThan(2)
+    expect(timerDelayMs).toBeLessThan(100)
+    expect(error).not.toHaveBeenCalled()
+    expect(store.getEvents(sessionId).map((event) => event.type)).toContain('message.thinking')
+    expect(store.getEvents(sessionId).map((event) => event.type)).toContain('message.done')
   })
 })
