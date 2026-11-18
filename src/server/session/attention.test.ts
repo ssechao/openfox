@@ -248,7 +248,10 @@ describe('session attention (STALL-NOTIFY)', () => {
     const callTool: CallToolFn = async (serverName, toolName, args, sessionId) => {
       calls.push({ serverName, toolName, args, sessionId })
       if (args['tool_name'] === 'ht_get_contact_info') {
-        return { success: true, output: 'Your hub identity:\n  peer_id: peer-creator-42\n  hub: http://x/mcp' }
+        return {
+          success: true,
+          output: 'Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\n  hub: http://x/mcp',
+        }
       }
       return { success: true, output: 'delivered' }
     }
@@ -282,7 +285,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(sendArgs['server_name']).toBe('llm-aether')
     expect(sendArgs['tool_name']).toBe('ht_send_to_peer')
     const innerSend = sendArgs['arguments'] as Record<string, unknown>
-    expect(innerSend['peer_id']).toBe('peer-creator-42')
+    expect(innerSend['peer_id']).toBe('0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b')
     const message = String(innerSend['message'])
     expect(message).toContain('SESSION BLOQUÉE')
     expect(message).toContain('Worker run')
@@ -317,7 +320,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     const failingSend: CallToolFn = async (serverName, toolName, args, sessionId) => {
       calls.push({ serverName, toolName, args, sessionId })
       if ((args as Record<string, unknown>)['tool_name'] === 'ht_get_contact_info') {
-        return { success: true, output: 'peer_id: peer-creator-42' }
+        return { success: true, output: 'peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b' }
       }
       return { success: false, error: 'peer offline' }
     }
@@ -330,7 +333,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     errorLog.mockRestore()
   })
 
-  it.fails('the attention alert reaches the creator peer through the proxied MCP payload', async () => {
+  it('the attention alert reaches the creator peer through the proxied MCP payload', async () => {
     // Measured shape: the Aether call rides mcp-lazy's `mcp_execute_tool`, which
     // answers `content: [{ type: 'text', text: JSON.stringify(result) }]` — the
     // inner MCP result is a JSON-encoded string, so the newlines inside it are
@@ -395,7 +398,7 @@ describe('session attention (STALL-NOTIFY)', () => {
     expect(toolCalls).toEqual(['ht_get_contact_info', 'ht_send_to_peer'])
   })
 
-  it.fails('an unroutable peer identity is reported explicitly and never sent', async () => {
+  it('an unroutable peer identity is reported explicitly and never sent', async () => {
     const session = manager.createSession(projectId, 'Stalled run')
     manager.setSessionCreatedBy(session.id, 'session-creator')
     const toolCalls: string[] = []
@@ -423,7 +426,7 @@ describe('session attention (STALL-NOTIFY)', () => {
       // never used: no send is attempted, and the value is named in the log.
       contactPayload = `Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\\n  hub: http://x/mcp`
       getAttentionService().observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
-      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0))
+      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0), { timeout: 5000 })
       expect(toolCalls).toEqual(['ht_get_contact_info'])
       const malformed = logged.filter((entry) => entry['stage'] === 'ht_get_contact_info')
       expect(malformed).toHaveLength(1)
@@ -438,7 +441,7 @@ describe('session attention (STALL-NOTIFY)', () => {
       contactPayload = `Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\n  hub: http://x/mcp`
       getAttentionService().observeResumed(session.id)
       getAttentionService().observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
-      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0))
+      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0), { timeout: 5000 })
       expect(toolCalls).toEqual(['ht_get_contact_info', 'ht_send_to_peer'])
       const failedSend = logged.filter((entry) => entry['stage'] === 'ht_send_to_peer')
       expect(failedSend).toHaveLength(1)
@@ -453,6 +456,63 @@ describe('session attention (STALL-NOTIFY)', () => {
       notify = async () => {}
       configure()
     }
+  })
+
+  it('a session paused on the real Where to work user step alerts its creator with the answer to give', async () => {
+    // Measured case: an agent-launched session opens on the Build & Verify
+    // "Where to work" step and stays there until a human answers. Nobody is
+    // warned, and a bare "session waiting" would not say what to answer either.
+    const session = manager.createSession(projectId, 'DSH per-user dev')
+    manager.setSessionCreatedBy(session.id, 'session-creator')
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const delivered: Array<{ toPeerId: string; message: string }> = []
+    const proxied = (text: string) => ({
+      success: true,
+      output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+    })
+    const callTool: CallToolFn = async (_serverName, _toolName, args) => {
+      const inner = (args['arguments'] ?? {}) as Record<string, unknown>
+      if (String(args['tool_name']) === 'ht_get_contact_info') {
+        return proxied(`Your hub identity:\n  peer_id: ${creatorPeerId}\n  hub: http://x/mcp`)
+      }
+      delivered.push({ toPeerId: String(inner['peer_id'] ?? ''), message: String(inner['message'] ?? '') })
+      return proxied(JSON.stringify({ msg_seq: 1, delivery: 'notified' }))
+    }
+    notify = createAetherNotifier(callTool)
+    configure()
+
+    // The real workflow definition: id `work_location`, name "Where to work",
+    // one choice per `step_result` transition.
+    manager.waitAtStep(
+      session.id,
+      'execution-1',
+      'work_location',
+      'Where to work',
+      {},
+      'default',
+      'Build & Verify',
+      '#3b82f6',
+      [
+        { id: 'Work in current workspace', label: 'Work in current workspace', goto: 'build' },
+        { id: 'Start a new workspace', label: 'Start a new workspace', goto: 'setup_workspace' },
+      ],
+    )
+    // A waiting entry alerts after the attention delay, through the sweep.
+    clock.nowMs += 10 * 60 * 1000 + 1
+    getAttentionService().sweep()
+    await vi.waitFor(() => expect(delivered.length).toBe(1), { timeout: 5000 })
+
+    const alert = delivered[0]!
+    expect(alert.toPeerId).toBe(creatorPeerId)
+    expect(alert.message).toContain('SESSION EN ATTENTE')
+    expect(alert.message).toContain('DSH per-user dev')
+    expect(alert.message).toContain(session.id)
+    expect(alert.message).toContain('waiting_workflow_step')
+    // Actionable: which step, which answer, and the tool that gives it.
+    expect(alert.message).toContain('Where to work')
+    expect(alert.message).toContain('openfox_resume_workflow')
+    expect(alert.message).toContain('Work in current workspace')
+    expect(Buffer.byteLength(alert.message, 'utf8')).toBeLessThanOrEqual(800)
   })
 
   it('session creator is recorded only from a proven identity', async () => {

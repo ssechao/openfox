@@ -616,7 +616,8 @@ export class SessionWorkerManager {
       } else if (msg.type === 'attention.observation') {
         const attention = getAttentionService()
         if (msg.kind === 'blocked') attention.observeBlocked(sessionId, msg.detail)
-        else if (msg.kind === 'waiting' && msg.reason) attention.observeWaiting(sessionId, msg.reason, msg.detail)
+        else if (msg.kind === 'waiting' && msg.reason)
+          attention.observeWaiting(sessionId, msg.reason, msg.detail, msg.notice)
         else if (msg.kind === 'waiting_resolved') attention.observeWaitingResolved(sessionId, msg.detail)
         else if (msg.kind === 'resumed') attention.observeResumed(sessionId)
       } else if (msg.type === 'done') {

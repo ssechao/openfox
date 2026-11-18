@@ -15,6 +15,14 @@ export interface AttentionNotifyParams {
   detail: string
   sinceMs: number
   createdBy: string | null
+  /** What the pilot has to do, when the wait is a workflow user step. */
+  notice?: AttentionNotice
+}
+
+/** Actionable context for a paused user step: what to answer, with which tool. */
+export interface AttentionNotice {
+  stepName?: string
+  choices?: Array<{ id: string; label: string }>
 }
 
 export interface AttentionServiceDeps {
@@ -30,6 +38,7 @@ export interface AttentionObservation {
   kind: 'blocked' | 'waiting' | 'waiting_resolved' | 'resumed'
   reason?: AttentionReason
   detail: string
+  notice?: AttentionNotice
 }
 
 export interface CallToolFn {
@@ -44,13 +53,110 @@ export interface CallToolFn {
 export function formatAttentionMessage(params: AttentionNotifyParams): string {
   const label = params.reason === 'blocked' ? 'SESSION BLOQUÉE' : 'SESSION EN ATTENTE'
   const since = new Date(params.sinceMs).toISOString()
-  return `⚠ ${label} ${params.title} (${params.sessionId}) : ${params.reason} ${params.detail} depuis ${since}`
+  const base = `⚠ ${label} ${params.title} (${params.sessionId}) : ${params.reason} ${params.detail} depuis ${since}`
+  return boundAttentionMessage(base, actionHint(params))
 }
 
-function parsePeerId(output: string | undefined): string | null {
-  if (!output) return null
-  const match = output.match(/peer_id:\s*(\S+)/)
-  return match?.[1] ?? null
+/**
+ * What the pilot has to do about it. A bare "session waiting" costs the pilot
+ * the same time as no alert at all: a paused user step must name the step, the
+ * answers available and the tool that gives one.
+ */
+function actionHint(params: AttentionNotifyParams): string {
+  const notice = params.notice
+  const choices = notice?.choices ?? []
+  if (choices.length === 0) return ''
+  const step = notice?.stepName?.trim()
+  const answers = choices.slice(0, 4).map((choice) => {
+    const id = choice.id.trim()
+    const label = choice.label.trim()
+    return label && label !== id ? `"${id}" (${label})` : `"${id}"`
+  })
+  return `${step ? ` — étape "${step}"` : ''} : répondre avec openfox_resume_workflow choice=${answers.join(' ou ')}`
+}
+
+const ATTENTION_MESSAGE_MAX_BYTES = 800
+
+/**
+ * Keep the alert inside the hub's per-message budget. The action is what gets
+ * shortened first (labels, then the whole hint) — never the alert itself — and a
+ * dropped action is journaled rather than lost silently.
+ */
+function boundAttentionMessage(base: string, hint: string): string {
+  if (!hint) return base
+  const full = base + hint
+  if (Buffer.byteLength(full, 'utf8') <= ATTENTION_MESSAGE_MAX_BYTES) return full
+  const compact = `${base} : openfox_resume_workflow`
+  if (Buffer.byteLength(compact, 'utf8') <= ATTENTION_MESSAGE_MAX_BYTES) {
+    logger.warn('attention_message_truncated', { omitted: 'choices' })
+    return compact
+  }
+  logger.warn('attention_message_truncated', { omitted: 'action' })
+  return base
+}
+
+/** A canonical hub identity, as the registry derives it (a UUID). */
+const PEER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+interface PeerIdLookup {
+  /** The identity to address, or null when the payload did not carry a usable one. */
+  peerId: string | null
+  /** The value found after `peer_id:`, kept verbatim so a rejection can name it. */
+  candidate: string | null
+}
+
+/**
+ * Unwrap a proxied MCP tool payload.
+ *
+ * Measured: `mcp-lazy`'s `mcp_execute_tool` answers
+ * `content: [{ type: 'text', text: JSON.stringify(result) }]`, and the manager
+ * hands that text through unchanged. The payload is therefore a JSON envelope
+ * in which the inner newlines are the two literal characters '\' and 'n' — not
+ * whitespace. A direct (unproxied) transport still answers plain text, so both
+ * shapes are accepted; a payload that is neither is used verbatim.
+ */
+function unwrapMcpPayload(output: string): string {
+  let current = output
+  for (let depth = 0; depth < 3; depth += 1) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(current)
+    } catch {
+      return current
+    }
+    if (typeof parsed === 'string') {
+      current = parsed
+      continue
+    }
+    const content = (parsed as { content?: unknown } | null)?.content
+    if (!Array.isArray(content)) return current
+    const text = content
+      .filter(
+        (part): part is { type?: string; text: string } =>
+          typeof (part as { text?: unknown } | null)?.text === 'string',
+      )
+      .filter((part) => part.type === undefined || part.type === 'text')
+      .map((part) => part.text)
+    if (text.length === 0) return current
+    current = text.join('\n')
+  }
+  return current
+}
+
+/**
+ * Read the hub identity out of a `ht_get_contact_info` answer.
+ *
+ * The extracted value is validated against the canonical shape rather than
+ * accepted as "whatever follows the colon": an identity that does not have that
+ * shape can never be routed, so it must be reported instead of being used for a
+ * send that is bound to fail with `unknown peer`.
+ */
+function parsePeerId(output: string | undefined): PeerIdLookup {
+  if (!output) return { peerId: null, candidate: null }
+  const match = unwrapMcpPayload(output).match(/peer_id:\s*(\S+)/)
+  const candidate = match?.[1] ?? null
+  if (candidate && PEER_ID_PATTERN.test(candidate)) return { peerId: candidate, candidate }
+  return { peerId: null, candidate }
 }
 
 /**
@@ -74,17 +180,23 @@ export function createAetherNotifier(
   return async (params) => {
     if (!params.createdBy) return
     const contact = await viaProxy('ht_get_contact_info', {}, params.createdBy)
-    const peerId = parsePeerId(contact.output)
-    if (!contact.success || !peerId) {
+    const lookup = parsePeerId(contact.success ? contact.output : undefined)
+    if (!contact.success || !lookup.peerId) {
       logger.error('attention_notify_failed', {
         sessionId: params.sessionId,
         createdBy: params.createdBy,
         reason: params.reason,
         stage: 'ht_get_contact_info',
-        error: contact.error ?? 'no peer_id in contact info',
+        ...(lookup.candidate ? { peerId: lookup.candidate } : {}),
+        error:
+          contact.error ??
+          (lookup.candidate
+            ? `peer_id is not a canonical hub identity: ${lookup.candidate}`
+            : 'no peer_id in contact info'),
       })
       return
     }
+    const peerId = lookup.peerId
     const send = await viaProxy(
       'ht_send_to_peer',
       { peer_id: peerId, message: formatAttentionMessage(params) },
@@ -96,9 +208,19 @@ export function createAetherNotifier(
         createdBy: params.createdBy,
         reason: params.reason,
         stage: 'ht_send_to_peer',
+        peerId,
         error: send.error ?? 'delivery failed',
       })
+      return
     }
+    // Delivery is recorded on success too: "no error logged" is not evidence
+    // that the alert reached anyone.
+    logger.info('attention_notified', {
+      sessionId: params.sessionId,
+      createdBy: params.createdBy,
+      reason: params.reason,
+      peerId,
+    })
   }
 }
 
@@ -109,6 +231,8 @@ interface AttentionEntry {
   armed: boolean
   /** For waiting reasons: callIds still pending; the entry closes when it empties. */
   waits: Set<string>
+  /** Actionable context of the wait, carried to the notification. */
+  notice?: AttentionNotice
 }
 
 const WAITING_REASONS: AttentionReason[] = ['waiting_question', 'waiting_confirmation', 'waiting_workflow_step']
@@ -171,12 +295,12 @@ export class SessionAttentionService {
   }
 
   /** Waiting state observed live (question, confirmation, workflow user step). */
-  observeWaiting(sessionId: string, reason: AttentionReason, detail: string): void {
+  observeWaiting(sessionId: string, reason: AttentionReason, detail: string, notice?: AttentionNotice): void {
     if (this.forward) {
-      this.forward({ kind: 'waiting', reason, detail })
+      this.forward({ kind: 'waiting', reason, detail, ...(notice ? { notice } : {}) })
       return
     }
-    this.enter(sessionId, reason, detail, false)
+    this.enter(sessionId, reason, detail, false, notice)
   }
 
   /**
@@ -244,12 +368,19 @@ export class SessionAttentionService {
     }
   }
 
-  private enter(sessionId: string, reason: AttentionReason, detail: string, immediate: boolean): void {
+  private enter(
+    sessionId: string,
+    reason: AttentionReason,
+    detail: string,
+    immediate: boolean,
+    notice?: AttentionNotice,
+  ): void {
     this.seed(sessionId)
     const key = `${sessionId}:${reason}`
     const existing = this.entries.get(key)
     if (existing) {
       if (isWaitingReason(reason)) existing.waits.add(detail)
+      if (notice) existing.notice = notice
       return
     }
     const entry: AttentionEntry = {
@@ -258,6 +389,7 @@ export class SessionAttentionService {
       sinceMs: this.now(),
       armed: true,
       waits: isWaitingReason(reason) ? new Set([detail]) : new Set<string>(),
+      ...(notice ? { notice } : {}),
     }
     this.entries.set(key, entry)
     if (immediate) {
@@ -321,6 +453,7 @@ export class SessionAttentionService {
       detail: entry.detail,
       sinceMs: entry.sinceMs,
       createdBy: info.createdBy,
+      ...(entry.notice ? { notice: entry.notice } : {}),
     }
     void Promise.resolve()
       .then(() => this.notify!(params))
