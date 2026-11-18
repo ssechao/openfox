@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js'
-import { getEventStore } from '../events/store.js'
-import type { StoredEvent } from '../events/types.js'
+import { getEventStore, type EventStore } from '../events/store.js'
+import type { StoredEvent, TurnEvent } from '../events/types.js'
 import { getSession } from '../db/sessions.js'
 import type { AttentionReason } from '../events/types.js'
 
@@ -302,7 +302,7 @@ export class SessionAttentionService {
   private emitRequired(sessionId: string, entry: AttentionEntry): void {
     const info = this.getSessionTitle(sessionId)
     if (!info) return
-    getEventStore().append(sessionId, {
+    appendAttentionEvent(sessionId, entry.reason, {
       type: 'session.attention_required',
       data: {
         sessionId,
@@ -337,11 +337,87 @@ export class SessionAttentionService {
   private emitCleared(sessionId: string, entry: AttentionEntry): void {
     const info = this.getSessionTitle(sessionId)
     if (!info) return
-    getEventStore().append(sessionId, {
+    appendAttentionEvent(sessionId, entry.reason, {
       type: 'session.attention_cleared',
       data: { sessionId, projectId: info.projectId, reason: entry.reason },
     })
   }
+}
+
+function errorCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' ? code : 'UNKNOWN_ERROR'
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function attentionStore(): EventStore | null {
+  try {
+    return getEventStore()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Persist an attention event without ever letting a locked database take the
+ * process down.
+ *
+ * Measured in production (18/11 02:41:54): the gateway tolerates a 5 ms busy
+ * wait, so a 10 ms write lock made `append` throw `EventStoreBusyTimeoutError`
+ * straight out of an event handler (`observeWaitingResolved` -> `resolveWait` ->
+ * `emitCleared`). Nothing caught it and the 450 died, cutting twelve turns.
+ * A sweep timer reaches the same code, so the throw is not tied to a turn.
+ *
+ * The synchronous attempt stays the fast path. On failure the event is handed to
+ * the store's recoverable queue, which retries on its own deadline, so the alert
+ * is neither thrown away nor lost silently: both the handover and a failure that
+ * survives the retries are journaled with the store's error code.
+ */
+function appendAttentionEvent(sessionId: string, reason: AttentionReason, event: TurnEvent): void {
+  const store = attentionStore()
+  if (!store) {
+    logger.error('attention_event_append_failed', {
+      sessionId,
+      reason,
+      eventType: event.type,
+      code: 'EVENT_STORE_UNAVAILABLE',
+      error: 'event store is not initialized',
+    })
+    return
+  }
+  try {
+    store.append(sessionId, event)
+    return
+  } catch (error) {
+    logger.error('attention_event_append_failed', {
+      sessionId,
+      reason,
+      eventType: event.type,
+      code: errorCode(error),
+      error: errorMessage(error),
+    })
+  }
+  void store
+    .appendRecoverable(sessionId, event)
+    .then(() => {
+      logger.info('attention_event_append_recovered', {
+        sessionId,
+        reason,
+        eventType: event.type,
+      })
+    })
+    .catch((error: unknown) => {
+      logger.error('attention_event_append_lost', {
+        sessionId,
+        reason,
+        eventType: event.type,
+        code: errorCode(error),
+        error: errorMessage(error),
+      })
+    })
 }
 
 function defaultSessionLookup(sessionId: string): {
