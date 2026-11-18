@@ -58,10 +58,9 @@ import {
   markSessionInterrupted,
   markWorkerSessionInterrupted,
   planWorkerCrashRecovery,
-  prepareSessionInterruptionEvents,
 } from './crash.js'
 import type { StoredEvent, TurnEvent } from '../../events/types.js'
-import { settleOneUnknownToolOutcome } from './settle-unknown.js'
+import { settleOneUnknownToolOutcome, settleUnknownToolOutcomes } from './settle-unknown.js'
 import type {
   BackgroundRequestMessage,
   GatewayToWorkerMessage,
@@ -193,40 +192,133 @@ function errorCodeOf(error: unknown): string {
  * events before deciding what to settle, so a failed attempt is idempotent and
  * is retried on the store's own recoverable queue instead of being thrown.
  */
-export function prepareInterruptedEventsRecoverable(
+function settledCallIds(events: readonly TurnEvent[]): string[] {
+  return events
+    .filter((event) => event.type === 'tool.result')
+    .map((event) => (event.data as { toolCallId: string }).toolCallId)
+}
+
+/**
+ * Replay a settlement that could not be persisted, bounded by what was captured.
+ *
+ * Astra's probe (review R2): a replay that re-reads the history settles whatever
+ * turn is current when it finally runs, so a new turn started in the meantime
+ * gets its pending call marked `outcomeUnknown` while the interrupted one stays
+ * unsettled. The replay therefore works from the EXACT events captured at
+ * failure time and only for the call ids it captured, and it refuses to touch
+ * anything when the turn has moved on.
+ */
+function replaySettlement(
   eventStore: InterruptedEventStore,
   sessionId: string,
-): StoredEvent[] {
-  try {
-    return prepareSessionInterruptionEvents(eventStore, sessionId)
-  } catch (error) {
-    logger.error('Interrupted event preparation failed; retried on the recoverable queue', {
-      sessionId,
-      code: errorCodeOf(error),
-      error: error instanceof Error ? error.message : String(error),
-    })
-  }
+  generation: number,
+  captured: readonly StoredEvent[],
+  remaining: readonly TurnEvent[],
+): void {
+  const callIds = settledCallIds(remaining)
+  const lastSeq = captured.reduce((max, event) => Math.max(max, event.seq), 0)
   if (typeof eventStore.runRecoverable !== 'function') {
-    logger.error('Interrupted event preparation lost: no recoverable append available', {
+    logger.error('Interrupted event settlement lost: no recoverable append available', {
       sessionId,
+      generation,
+      callIds,
     })
-    return []
+    return
   }
   void eventStore
-    .runRecoverable(sessionId, 'worker.interrupted.events', () =>
-      prepareSessionInterruptionEvents(eventStore, sessionId),
-    )
+    .runRecoverable(sessionId, 'worker.interrupted.events', () => {
+      const current = eventStore.getEvents(sessionId)
+      if (current.length === 0) {
+        logger.warn('Interrupted event settlement skipped', {
+          sessionId,
+          generation,
+          reason: 'history_empty',
+          callIds,
+        })
+        return
+      }
+      const turnChanged = current.some(
+        (event) =>
+          event.seq > lastSeq &&
+          ((event.type === 'message.start' && (event.data as { role?: string }).role === 'user') ||
+            (event.type === 'running.changed' && (event.data as { isRunning?: boolean }).isRunning === true)),
+      )
+      if (turnChanged) {
+        logger.warn('Interrupted event settlement skipped', {
+          sessionId,
+          generation,
+          reason: 'turn_changed',
+          callIds,
+        })
+        return
+      }
+      const already = new Set(
+        current
+          .filter((event) => event.type === 'tool.result')
+          .map((event) => (event.data as { toolCallId: string }).toolCallId),
+      )
+      for (const event of remaining) {
+        const callId = event.type === 'tool.result' ? (event.data as { toolCallId: string }).toolCallId : null
+        if (callId && already.has(callId)) continue
+        eventStore.append(sessionId, event)
+      }
+    })
     .then(() => {
-      logger.info('Interrupted event preparation recovered', { sessionId })
+      logger.info('Interrupted event preparation recovered', { sessionId, generation, callIds })
     })
     .catch((retryError: unknown) => {
-      logger.error('Interrupted event preparation lost', {
+      logger.error('Interrupted event settlement lost', {
         sessionId,
+        generation,
+        callIds,
         code: errorCodeOf(retryError),
         error: retryError instanceof Error ? retryError.message : String(retryError),
       })
     })
-  return []
+}
+
+/**
+ * Prepare a session's interruption events without letting a locked database take
+ * the gateway down, and without ever settling a call it did not capture.
+ *
+ * Same fatal class as the attention service crash of 18/11 02:41:54: the
+ * gateway's connection only tolerates a 5 ms busy wait, so the synchronous
+ * `append` throws `EventStoreBusyTimeoutError` as soon as that budget is spent.
+ * `shutdown()` and `settle()` reach this code outside any turn and nothing above
+ * them catches, so the throw killed the process.
+ *
+ * The history is read ONCE, at failure time: the generation and the exact
+ * settlement events are captured there, and a failed append replays exactly
+ * those, never a re-read of whatever turn happens to be current later.
+ */
+export function prepareInterruptedEventsRecoverable(
+  eventStore: InterruptedEventStore,
+  sessionId: string,
+  generation = 0,
+): StoredEvent[] {
+  eventStore.invalidateExternalSession(sessionId)
+  const captured = eventStore.getEvents(sessionId)
+  const settlement: TurnEvent[] = []
+  settleUnknownToolOutcomes(captured, (event) => settlement.push(event))
+
+  let index = 0
+  for (; index < settlement.length; index += 1) {
+    try {
+      eventStore.append(sessionId, settlement[index]!)
+    } catch (error) {
+      logger.error('Interrupted event preparation failed; retried on the recoverable queue', {
+        sessionId,
+        generation,
+        code: errorCodeOf(error),
+        error: error instanceof Error ? error.message : String(error),
+        callIds: settledCallIds(settlement.slice(index)),
+      })
+      break
+    }
+  }
+  const remaining = settlement.slice(index)
+  if (remaining.length > 0) replaySettlement(eventStore, sessionId, generation, captured, remaining)
+  return eventStore.getEvents(sessionId)
 }
 
 export class SessionWorkerManager {
@@ -955,7 +1047,7 @@ export class SessionWorkerManager {
       const interruptedAt = new Date().toISOString()
       interruptedAtBySession.set(worker.sessionId, interruptedAt)
       markSessionInterrupted(this.deps.db(), worker.sessionId, interruptedAt)
-      this.prepareInterruptedEvents(worker.sessionId)
+      this.prepareInterruptedEvents(worker.sessionId, worker.token.generation)
       worker.gatewayShutdown = true
       try {
         this.deps.sessionManager.setRunning(worker.sessionId, false)
@@ -1275,9 +1367,9 @@ export class SessionWorkerManager {
     }
   }
 
-  private prepareInterruptedEvents(sessionId: string) {
+  private prepareInterruptedEvents(sessionId: string, generation?: number) {
     const eventStore = this.deps.eventStore?.() ?? getEventStore()
-    const events = prepareInterruptedEventsRecoverable(eventStore, sessionId)
+    const events = prepareInterruptedEventsRecoverable(eventStore, sessionId, generation ?? 0)
     return { eventStore, events }
   }
 
@@ -1332,6 +1424,7 @@ export class SessionWorkerManager {
         this.pendingInterruptions.delete(worker.sessionId)
         await this.finalizePersistedInterruption(
           worker.sessionId,
+          worker.token.generation,
           interruptedAt,
           report,
           afterVerification,
@@ -1374,6 +1467,7 @@ export class SessionWorkerManager {
 
   private async finalizePersistedInterruption(
     sessionId: string,
+    generation: number,
     interruptedAt: string,
     report: WorkerCrashReport,
     afterVerification: (continueTurn: () => void) => void,
@@ -1396,7 +1490,7 @@ export class SessionWorkerManager {
     }
 
     try {
-      const { events } = this.prepareInterruptedEvents(sessionId)
+      const { events } = this.prepareInterruptedEvents(sessionId, generation)
       const hasActiveWorkflow = this.deps.sessionManager.getActiveWorkflowExecution(sessionId) != null
       const plan = planWorkerCrashRecovery(events, hasActiveWorkflow)
       if (plan?.finalizeMessageId) {
@@ -1469,7 +1563,7 @@ export class SessionWorkerManager {
     this.deps.healthAggregator?.expireWorker(token, expectedExit ? 'exit' : 'crash')
 
     if (worker.stopRequestedAt !== undefined && expectedExit) {
-      if (gatewayEscalatedStop) this.prepareInterruptedEvents(sessionId)
+      if (gatewayEscalatedStop) this.prepareInterruptedEvents(sessionId, worker.token.generation)
       const inventory = await this.beginWorkerInventoryCapture(worker, worker.stopRequestedAt, recoveryDeadlineAt)
       const verification = gatewayEscalatedStop
         ? this.beginWorkerInventoryVerification(worker, inventory, recoveryDeadlineAt)

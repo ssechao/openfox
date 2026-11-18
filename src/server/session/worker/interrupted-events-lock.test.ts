@@ -9,6 +9,7 @@ import { loadConfig } from '../../config.js'
 import { closeDatabase, getDatabase, initDatabase } from '../../db/index.js'
 import { createProject } from '../../db/projects.js'
 import { getEventStore, initEventStore } from '../../events/index.js'
+import type { StoredEvent } from '../../events/types.js'
 import { logger } from '../../utils/logger.js'
 import { SessionManager } from '../manager.js'
 import { prepareInterruptedEventsRecoverable } from './manager.js'
@@ -66,6 +67,23 @@ async function holdWriteLock(databasePath: string): Promise<HeldLock> {
   }
 }
 
+/** Append once the other process has released the lock (busy -> retry, same tick). */
+function appendWhenFree(
+  store: ReturnType<typeof getEventStore>,
+  sessionId: string,
+  event: Parameters<ReturnType<typeof getEventStore>['append']>[1],
+): void {
+  for (let attempt = 0; attempt < 2_000; attempt += 1) {
+    try {
+      store.append(sessionId, event)
+      return
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'EVENT_STORE_BUSY_TIMEOUT') throw error
+    }
+  }
+  throw new Error('the write lock was never released')
+}
+
 describe('interruption events under a locked database', () => {
   let root: string
   let projectDir: string
@@ -112,7 +130,7 @@ describe('interruption events under a locked database', () => {
       if (payload && typeof payload === 'object') errors.push(payload as Record<string, unknown>)
     })
     const lock = await holdWriteLock(config.database.path)
-    let prepared: unknown[] = []
+    let prepared: StoredEvent[] = []
     try {
       // This is the call both settle() and shutdown() make, outside any turn.
       expect(() => {
@@ -121,7 +139,8 @@ describe('interruption events under a locked database', () => {
     } finally {
       errorLog.mockRestore()
     }
-    expect(prepared).toEqual([])
+    // Nothing was settled synchronously: the outcome is left to the replay.
+    expect(prepared.filter((event) => event.type === 'tool.result')).toEqual([])
 
     const failure = errors.find((entry) => entry['code'] === 'EVENT_STORE_BUSY_TIMEOUT')
     expect(failure).toBeDefined()
@@ -137,5 +156,45 @@ describe('interruption events under a locked database', () => {
       },
       { timeout: 10_000 },
     )
+  })
+
+  it('a turn that started before the replay is never settled in place of the interrupted one', async () => {
+    // Astra's probe: the interrupted turn holds call-1; a NEW turn with call-2
+    // starts before the replay runs. A replay that re-reads the history settles
+    // call-2 (the current turn) and leaves call-1 behind.
+    const store = getEventStore()
+    const skipped: Array<Record<string, unknown>> = []
+    const warnLog = vi.spyOn(logger, 'warn').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') skipped.push(payload as Record<string, unknown>)
+    })
+    const lock = await holdWriteLock(config.database.path)
+    const captured = prepareInterruptedEventsRecoverable(store, sessionId, 7)
+    expect(captured.filter((event) => event.type === 'tool.result')).toEqual([])
+
+    // Release, then start the new turn before the queued replay gets its turn.
+    lock.release()
+    appendWhenFree(store, sessionId, { type: 'message.start', data: { messageId: 'user-2', role: 'user' } })
+    appendWhenFree(store, sessionId, {
+      type: 'tool.call',
+      data: { messageId: 'assistant-2', toolCall: { id: 'call-2', name: 'run_command', arguments: {} } },
+    })
+
+    try {
+      await vi.waitFor(
+        () => {
+          expect(skipped.find((entry) => entry['reason'] === 'turn_changed')).toBeDefined()
+        },
+        { timeout: 10_000 },
+      )
+    } finally {
+      warnLog.mockRestore()
+    }
+    const settled = store
+      .getEvents(sessionId)
+      .filter((event) => event.type === 'tool.result')
+      .map((event) => (event.data as { toolCallId: string }).toolCallId)
+    // The new turn's call is intact, and nothing else was settled either.
+    expect(settled).not.toContain('call-2')
+    expect(settled).toEqual([])
   })
 })
