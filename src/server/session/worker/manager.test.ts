@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +9,7 @@ import type { Config } from '../../../shared/types.js'
 import type { SessionManager } from '../manager.js'
 import { SessionRuntimeRegistry } from '../runtime.js'
 import { SessionWorkerManager } from './manager.js'
+import { initChildrenTracking, trackExclusiveChild } from './children.js'
 import { assignWorkerToken } from './token.js'
 import { logger } from '../../utils/logger.js'
 
@@ -24,6 +25,17 @@ vi.mock('./children.js', async (importOriginal) => {
     },
   }
 })
+
+function waitForProcessExit(child: ChildProcess, timeoutMs = 5_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(), timeoutMs)
+    child.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
 
 function createDb(name: string): { db: Database.Database; namedDb: Database.Database } {
   const db = new Database(':memory:')
@@ -868,6 +880,86 @@ describe('SessionWorkerManager', () => {
       expect(order.filter((entry) => entry.startsWith('cleanup:'))).toHaveLength(2)
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it.fails('a gateway shutdown leaves no retained worker sidecar', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'openfox-shutdown-sidecar-'))
+    const childrenPath = join(directory, 'sess-1.children')
+    const previousChildrenPath = process.env['OPENFOX_WORKER_CHILDREN']
+    process.env['OPENFOX_WORKER_CHILDREN'] = childrenPath
+    initChildrenTracking(childrenPath)
+    const sidecar = spawn('sleep', ['60'], { stdio: 'ignore' })
+    trackExclusiveChild(sidecar.pid)
+    const { db, namedDb } = createDb(join(tmpdir(), `openfox-worker-manager-sidecar-${crypto.randomUUID()}.db`))
+    openDbs.push(db)
+    const errors: string[] = []
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation((message) => {
+      errors.push(message)
+    })
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 42,
+        exitCode: null,
+        signalCode: null,
+        stderr: new EventEmitter(),
+        send: (message: { type?: string }) => {
+          if (message.type === 'abort') queueMicrotask(() => child.emit('exit', 0, null))
+          return true
+        },
+        kill: () => true,
+      }) as unknown as ChildProcess
+      const manager = new SessionWorkerManager({
+        db: () => namedDb,
+        config,
+        sessionManager: {
+          setRunning: () => {},
+          getActiveWorkflowExecution: () => null,
+          addMessage: () => ({ id: 'notice', role: 'user', content: 'interrupted' }),
+        } as unknown as SessionManager,
+        isEnabled: () => true,
+        broadcastForSession: () => {},
+        processSupervisor: {
+          isReady: () => false,
+          spawnWorker: () => child,
+          cleanupWorkerChildren: () => Promise.reject(new Error('Session process supervisor is not ready')),
+          captureWorkerInventory: () => Promise.reject(new Error('Session process supervisor is not ready')),
+          verifyWorkerInventory: () => Promise.reject(new Error('Session process supervisor is not ready')),
+        } as never,
+        eventStore: () =>
+          ({
+            invalidateExternalSession: () => {},
+            getEvents: () => [],
+            append: () => {},
+          }) as never,
+      })
+      const active = Reflect.get(manager, 'active') as Map<string, unknown>
+      active.set('sess-1', {
+        sessionId: 'sess-1',
+        token: assignWorkerToken(namedDb, 'sess-1'),
+        child,
+        childrenPath,
+        doneReceived: false,
+        doneOk: false,
+        stderrTail: [],
+        onSettled: () => {},
+      })
+
+      await manager.shutdown()
+
+      expect(errors.filter((message) => message === 'Worker child cleanup failed; sidecar retained')).toEqual([])
+      expect(infoSpy).toHaveBeenCalledWith('Session workers stopped at gateway shutdown', { stopped: 1, failed: 0 })
+      await waitForProcessExit(sidecar)
+      expect(sidecar.exitCode !== null || sidecar.signalCode !== null).toBe(true)
+    } finally {
+      errorSpy.mockRestore()
+      infoSpy.mockRestore()
+      if (sidecar.exitCode === null && sidecar.signalCode === null) sidecar.kill('SIGKILL')
+      if (previousChildrenPath === undefined) delete process.env['OPENFOX_WORKER_CHILDREN']
+      else process.env['OPENFOX_WORKER_CHILDREN'] = previousChildrenPath
+      rmSync(directory, { recursive: true, force: true })
     }
   })
 

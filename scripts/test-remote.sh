@@ -31,6 +31,8 @@ IMAGE=${OPENFOX_TEST_IMAGE:-node:24-bookworm}
 RUN_USER=${OPENFOX_TEST_USER:-node}
 WORKERS=${OPENFOX_E2E_MAX_WORKERS:-4}
 MODE=${1:-test}
+MAX_LOAD_ONE=24
+DOCKER_LIMITS="--memory 8g --memory-swap 8g --cpus 8"
 SSH="ssh -o BatchMode=yes"
 
 if [ "$MODE" != "test" ] && [ "$MODE" != "--all" ]; then
@@ -45,6 +47,19 @@ fi
 
 if ! $SSH "$HOST" 'docker info >/dev/null 2>&1'; then
   echo "test-remote: docker is not usable on $HOST." >&2
+  exit 1
+fi
+
+LOAD_ONE=$($SSH "$HOST" "awk '{print \$1}' /proc/loadavg" 2>/dev/null) || {
+  echo "test-remote: cannot measure the 1-minute load on $HOST." >&2
+  exit 1
+}
+if ! awk -v load="$LOAD_ONE" 'BEGIN { exit !(load ~ /^[0-9]+([.][0-9]+)?$/) }'; then
+  echo "test-remote: invalid 1-minute load reported by $HOST: $LOAD_ONE" >&2
+  exit 1
+fi
+if awk -v load="$LOAD_ONE" -v threshold="$MAX_LOAD_ONE" 'BEGIN { exit !(load > threshold) }'; then
+  echo "test-remote: refusing Docker on $HOST: 1-minute load $LOAD_ONE exceeds threshold $MAX_LOAD_ONE." >&2
   exit 1
 fi
 
@@ -74,7 +89,7 @@ $SSH "$HOST" "rm -f '$DIR'/*.db '$DIR'/*.db-wal '$DIR'/*.db-shm"
 # cache next to them), hence the chown to the container user.
 if ! $SSH "$HOST" "test -d '$DIR/node_modules'"; then
   echo "  Bootstrapping dependencies on $HOST (first run only)..."
-  $SSH "$HOST" "docker run --rm -v '$DIR:/work' -w /work '$IMAGE' sh -c 'npm ci --no-audit --no-fund >/dev/null 2>&1 && npm rebuild esbuild node-pty core-js >/dev/null 2>&1 && chown -R 1000:1000 /work'" || {
+  $SSH "$HOST" "docker run --rm $DOCKER_LIMITS -v '$DIR:/work' -w /work '$IMAGE' sh -c 'npm ci --no-audit --no-fund >/dev/null 2>&1 && npm rebuild esbuild node-pty core-js >/dev/null 2>&1 && chown -R 1000:1000 /work'" || {
     echo "test-remote: dependency bootstrap failed on $HOST." >&2
     exit 1
   }
@@ -86,4 +101,4 @@ else
   COMMAND="OPENFOX_E2E_MAX_WORKERS=$WORKERS npm test"
 fi
 
-$SSH "$HOST" "docker run --rm --user '$RUN_USER' -v '$DIR:/work' -w /work '$IMAGE' sh -c '$COMMAND'"
+$SSH "$HOST" "docker run --rm $DOCKER_LIMITS --user '$RUN_USER' -v '$DIR:/work' -w /work '$IMAGE' sh -c '$COMMAND'"

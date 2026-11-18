@@ -101,6 +101,7 @@ export class McpManager {
   private onServersChanged: (() => void) | undefined
   private onToolsDiscovered: ((serverName: string, tools: CachedToolInfo[]) => void) | undefined
   private openFoxCallerIdentity: McpManagerOptions['openFoxCallerIdentity']
+  private shuttingDown = false
 
   constructor(options?: McpManagerOptions) {
     this.onServersChanged = options?.onServersChanged
@@ -284,14 +285,20 @@ export class McpManager {
       entry.client = undefined
       entry.transport = null
       entry.state = { name, config: entry.config, status: 'disconnected', tools: [], estimatedTokens: 0 }
-      entry.closing = false
+      entry.closing = this.shuttingDown
     }
   }
 
-  async disconnectAll(): Promise<void> {
-    for (const name of this.servers.keys()) {
+  beginShutdown(): void {
+    this.shuttingDown = true
+  }
+
+  async disconnectAll(): Promise<number> {
+    const names = [...this.servers.keys()]
+    for (const name of names) {
       await this.disconnectServer(name)
     }
+    return names.length
   }
 
   async reconnectServer(name: string): Promise<void> {

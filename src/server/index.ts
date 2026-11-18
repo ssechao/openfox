@@ -49,6 +49,7 @@ import { createServerMessage } from '../shared/protocol.js'
 import { createContextStateMessage, createSessionInterruptedMessage } from './ws/protocol.js'
 import { createWebSocketServer } from './ws/index.js'
 import { SessionManager } from './session/manager.js'
+import { runGatewayShutdown } from './session/gateway-shutdown.js'
 import { readProcessInventory } from './session/worker/children.js'
 import { markSessionInterrupted, prepareSessionInterruptionEvents } from './session/worker/crash.js'
 import { admitWithStartFailure, consumeAfterAdmission } from './session/worker/resume-admission.js'
@@ -4680,9 +4681,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
               ? import('node:fs/promises').then(({ unlink }) => unlink(config.globalConfigPath!).catch(() => {}))
               : Promise.resolve(),
           ])
-          await workerManager.shutdown()
-          setExternalGitRunner(null)
-          await Promise.all([ancillaryCleanup, mcpManager.disconnectAll(), processSupervisor?.shutdown()])
+          await runGatewayShutdown({
+            workerManager,
+            mcpManager,
+            processSupervisor,
+            ancillaryCleanup,
+            beforeSupervisorShutdown: () => setExternalGitRunner(null),
+            logger,
+          })
           if (completed) {
             recordRuntimeRecovery(false)
             return
