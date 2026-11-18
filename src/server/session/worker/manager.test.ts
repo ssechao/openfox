@@ -883,7 +883,7 @@ describe('SessionWorkerManager', () => {
     }
   })
 
-  it.fails('a gateway shutdown leaves no retained worker sidecar', async () => {
+  it('a gateway shutdown leaves no retained worker sidecar', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'openfox-shutdown-sidecar-'))
     const childrenPath = join(directory, 'sess-1.children')
     const previousChildrenPath = process.env['OPENFOX_WORKER_CHILDREN']

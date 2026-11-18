@@ -38,7 +38,7 @@ function createHarness(overrides: Partial<GatewayShutdownDeps> = {}): Harness {
 }
 
 describe('gateway shutdown', () => {
-  it.fails('a gateway shutdown raises no unhandled rejection', async () => {
+  it('a gateway shutdown raises no unhandled rejection', async () => {
     const failure = Object.assign(new Error('Worker child cleanup failed: sidecar retained'), {
       code: 'WORKER_SHUTDOWN_FAILED',
     })
@@ -61,7 +61,7 @@ describe('gateway shutdown', () => {
     expect(order).toEqual(['mcp:begin', 'workers', 'mcp:disconnect', 'supervisor'])
   })
 
-  it.fails('the MCP servers are disconnected in order', async () => {
+  it('the MCP servers are disconnected in order', async () => {
     const { deps, order, logger } = createHarness()
 
     const result = await runGatewayShutdown(deps)

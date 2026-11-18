@@ -322,7 +322,7 @@ describe('McpManager', () => {
       }
     })
 
-    it.fails('a transport closed during gateway shutdown is not reported as an unexpected disconnect', async () => {
+    it('a transport closed during gateway shutdown is not reported as an unexpected disconnect', async () => {
       const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
       try {
         await manager.addServer('lazy', { transport: 'stdio', command: 'node' })

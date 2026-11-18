@@ -79,6 +79,9 @@ test('remote gates limit both bootstrap and suite containers', () => {
       NODE_MODULES_STATUS: '1',
     })
     expect(result.status).toBe(0)
+    expect(result.stdout).toContain(
+      'test-remote: host=test.invalid load1=24.00 threshold=24 docker_limits=--memory 8g --memory-swap 8g --cpus 8',
+    )
     const dockerRuns = readFileSync(dockerCapture, 'utf8').trim().split('\n')
     expect(dockerRuns).toHaveLength(2)
     for (const dockerRun of dockerRuns) {
