@@ -330,6 +330,131 @@ describe('session attention (STALL-NOTIFY)', () => {
     errorLog.mockRestore()
   })
 
+  it.fails('the attention alert reaches the creator peer through the proxied MCP payload', async () => {
+    // Measured shape: the Aether call rides mcp-lazy's `mcp_execute_tool`, which
+    // answers `content: [{ type: 'text', text: JSON.stringify(result) }]` — the
+    // inner MCP result is a JSON-encoded string, so the newlines inside it are
+    // the two literal characters '\' and 'n', not whitespace.
+    const creatorPeerId = '0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b'
+    const creatorTitle = 'Openfox — pilote [mgr-sessions] (5)'
+    const delivered: Array<{ toPeerId: string; message: string }> = []
+    const toolCalls: string[] = []
+    const proxied = (text: string) => ({
+      success: true,
+      output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+    })
+    const hubRejection = (toolName: string) => ({
+      success: false,
+      error: JSON.stringify({
+        error: `Failed to execute ${toolName} on llm-aether: MCP error -32602: unknown peer`,
+        alternatives: [],
+      }),
+    })
+    const callTool: CallToolFn = async (_serverName, _toolName, args, sessionId) => {
+      const target = String(args['tool_name'])
+      const inner = (args['arguments'] ?? {}) as Record<string, unknown>
+      toolCalls.push(target)
+      if (target === 'ht_get_contact_info') {
+        // The host injects the creator's own session id as the identity.
+        if (sessionId !== 'session-creator') return hubRejection('ht_get_contact_info')
+        return proxied(
+          `Your hub identity:\n  peer_id: ${creatorPeerId}\n  hub: http://192.168.71.132:4175/mcp\n\nShare the peer_id with another session so it can reach you via ht_send_to_peer(peer_id).`,
+        )
+      }
+      // The hub resolves a peer reference against the sender's subject: an exact
+      // canonical peer id or an exact title. Anything else is `unknown peer`.
+      const reference = String(inner['peer_id'] ?? '')
+      const routable = reference === creatorPeerId || reference.trim().toLowerCase() === creatorTitle.toLowerCase()
+      if (!routable) return hubRejection('ht_send_to_peer')
+      delivered.push({ toPeerId: creatorPeerId, message: String(inner['message'] ?? '') })
+      return proxied(JSON.stringify({ msg_seq: 1, delivery: 'notified' }))
+    }
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    try {
+      await createAetherNotifier(callTool)({
+        sessionId: 'session-stalled',
+        projectId: 'project-1',
+        title: 'Worker run',
+        reason: 'waiting_question',
+        detail: 'call_6dfeb890',
+        sinceMs: 1_700_000_000_000,
+        createdBy: 'session-creator',
+      })
+    } finally {
+      errorLog.mockRestore()
+    }
+
+    // Judged on arrival at the creator, never on the absence of an error log.
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]!.toPeerId).toBe(creatorPeerId)
+    expect(delivered[0]!.message).toContain('SESSION EN ATTENTE')
+    expect(delivered[0]!.message).toContain('Worker run')
+    expect(delivered[0]!.message).toContain('session-stalled')
+    expect(delivered[0]!.message).toContain('waiting_question')
+    expect(delivered[0]!.message).toContain('call_6dfeb890')
+    expect(toolCalls).toEqual(['ht_get_contact_info', 'ht_send_to_peer'])
+  })
+
+  it.fails('an unroutable peer identity is reported explicitly and never sent', async () => {
+    const session = manager.createSession(projectId, 'Stalled run')
+    manager.setSessionCreatedBy(session.id, 'session-creator')
+    const toolCalls: string[] = []
+    const logged: Array<Record<string, unknown>> = []
+    const hubAnswer = 'MCP error -32602: unknown peer'
+    const proxied = (text: string) => ({
+      success: true,
+      output: JSON.stringify({ content: [{ type: 'text', text }], isError: false }),
+    })
+    let contactPayload = ''
+    const callTool: CallToolFn = async (_serverName, _toolName, args) => {
+      const target = String(args['tool_name'])
+      toolCalls.push(target)
+      if (target === 'ht_get_contact_info') return proxied(contactPayload)
+      return { success: false, error: `Failed to execute ht_send_to_peer on llm-aether: ${hubAnswer}` }
+    }
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation((_message, payload) => {
+      if (payload && typeof payload === 'object') logged.push(payload as Record<string, unknown>)
+    })
+    try {
+      notify = createAetherNotifier(callTool)
+      configure()
+
+      // (1) A captured identity that does not have the canonical peer id shape is
+      // never used: no send is attempted, and the value is named in the log.
+      contactPayload = `Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\\n  hub: http://x/mcp`
+      getAttentionService().observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
+      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0))
+      expect(toolCalls).toEqual(['ht_get_contact_info'])
+      const malformed = logged.filter((entry) => entry['stage'] === 'ht_get_contact_info')
+      expect(malformed).toHaveLength(1)
+      expect(malformed[0]!['sessionId']).toBe(session.id)
+      expect(malformed[0]!['createdBy']).toBe('session-creator')
+      expect(String(malformed[0]!['peerId'])).toContain('0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b')
+
+      // (2) A well-formed identity the hub does not know: exactly one send, and
+      // the failure names the stage, the identity used and the hub answer.
+      toolCalls.length = 0
+      logged.length = 0
+      contactPayload = `Your hub identity:\n  peer_id: 0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b\n  hub: http://x/mcp`
+      getAttentionService().observeResumed(session.id)
+      getAttentionService().observeBlocked(session.id, 'HTTP 400 native_context_unavailable')
+      await vi.waitFor(() => expect(logged.length).toBeGreaterThan(0))
+      expect(toolCalls).toEqual(['ht_get_contact_info', 'ht_send_to_peer'])
+      const failedSend = logged.filter((entry) => entry['stage'] === 'ht_send_to_peer')
+      expect(failedSend).toHaveLength(1)
+      expect(failedSend[0]!['sessionId']).toBe(session.id)
+      expect(failedSend[0]!['peerId']).toBe('0f9a1b2c-3d4e-5f60-7a8b-9c0d1e2f3a4b')
+      expect(String(failedSend[0]!['error'])).toContain(hubAnswer)
+
+      // The attention event itself stands in both cases.
+      expect(attentionEvents(session.id, 'session.attention_required').length).toBe(2)
+    } finally {
+      errorLog.mockRestore()
+      notify = async () => {}
+      configure()
+    }
+  })
+
   it('session creator is recorded only from a proven identity', async () => {
     // --- kanban launch records the launcher --------------------------------
     const gitDir = join(root, 'launch-project')
