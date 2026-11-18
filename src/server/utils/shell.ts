@@ -48,13 +48,6 @@ export function spawnShell(command: string, options: SpawnShellOptions): ChildPr
   try {
     finalizeExclusiveChild(reservation, child.pid)
   } catch (error) {
-    if (options.detached && process.platform !== 'win32' && child.pid) {
-      try {
-        process.kill(-child.pid, 'SIGKILL')
-      } catch (killError) {
-        void killError
-      }
-    }
     try {
       child.kill('SIGKILL')
     } catch (killError) {

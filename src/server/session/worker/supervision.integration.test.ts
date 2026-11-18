@@ -68,7 +68,7 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('w
     expect(inventory.errors).toEqual([expect.stringMatching(/inventory read timed out/i)])
   })
 
-  it('inventories identities, groups, and reservations before proving zero orphans at T+2s', async () => {
+  it('retains an orphan group when its root identity is gone before cleanup', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'openfox-supervision-'))
     directories.push(directory)
     const childrenPath = join(directory, 'worker.children')
@@ -114,9 +114,9 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')('w
     const check = await verifyExclusiveProcessInventoryAfter(inventory, inventoryDependencies)
     expect(check.checkedAt - inventory.capturedAt).toBeGreaterThanOrEqual(2_000)
     expect(check).toMatchObject({
-      clean: true,
+      clean: false,
       survivingIdentities: [],
-      survivingGroups: [],
+      survivingGroups: [exclusive.pid],
       liveReservations: [],
       errors: [],
     })

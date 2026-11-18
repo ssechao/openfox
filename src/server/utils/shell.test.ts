@@ -125,6 +125,22 @@ describe('spawnShell', () => {
     expect(() => spawnShell('sleep 300', { cwd: '/tmp', detached: true })).toThrow(/track spawned child/)
     expect(killChild).toHaveBeenCalledWith('SIGKILL')
   })
+
+  it('never signals an unproven process group when child finalization fails', () => {
+    const processKill = vi.spyOn(process, 'kill').mockReturnValue(true)
+    vi.mocked(finalizeExclusiveChild).mockImplementation(() => {
+      throw new Error('process identity unavailable')
+    })
+
+    try {
+      expect(() => spawnShell('true', { cwd: '/tmp', detached: true })).toThrow(/track spawned child/)
+      expect(processKill).not.toHaveBeenCalled()
+      expect(killChild).toHaveBeenCalledWith('SIGKILL')
+      expect(reserveExclusiveChild).toHaveBeenCalledTimes(1)
+    } finally {
+      processKill.mockRestore()
+    }
+  })
 })
 
 describe('spawnShellProcess', () => {

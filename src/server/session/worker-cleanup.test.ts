@@ -41,6 +41,19 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+async function pidExecuting(pid: number): Promise<boolean> {
+  if (process.platform !== 'linux') return pidAlive(pid)
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf-8')
+    const stateOffset = stat.lastIndexOf(') ') + 2
+    if (stateOffset < 2) return pidAlive(pid)
+    return stat[stateOffset] !== 'Z'
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    return pidAlive(pid)
+  }
+}
+
 async function processGroupMembers(pgid: number): Promise<number[]> {
   try {
     const { stdout } = await execFileAsync('pgrep', ['-g', String(pgid)])
@@ -175,7 +188,7 @@ describe('worker crash cleanup', () => {
     return data.servers.find((s) => s.name === 'test-server')?.status
   }
 
-  it('reaps a marked child when SIGKILL lands before reservation finalization', async () => {
+  it('stops a marked child when SIGKILL lands before reservation finalization', async () => {
     const childrenPath = join(dbDir, `reservation-window-${randomUUID()}.children`)
     const reservationId = randomUUID()
     const script = `
@@ -207,7 +220,8 @@ describe('worker crash cleanup', () => {
 
       const { killTrackedChildren } = await import('./worker/children.js')
       expect(await killTrackedChildren(childrenPath)).toContain(childPid)
-      await waitFor(async () => (!pidAlive(childPid) ? true : null), 5000, 'unfinalized marked child cleanup')
+      await waitFor(async () => (!(await pidExecuting(childPid)) ? true : null), 5000, 'unfinalized marked child stop')
+      expect(existsSync(childrenPath)).toBe(false)
     } finally {
       try {
         process.kill(-childPid, 'SIGKILL')

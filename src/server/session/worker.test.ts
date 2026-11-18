@@ -513,23 +513,24 @@ describe('exclusive children tracking', () => {
     }
   })
 
-  it('kills a recorded process group when the process root is absent', async () => {
+  it('removes tracking without signaling when the process root and group are absent', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openfox-children-absent-root-'))
     const file = join(dir, 'w.children')
     const pid = 987_654
-    writeFileSync(file, `${JSON.stringify({ pid, startedAt: 'linux:1' })}\n`, 'utf-8')
+    writeFileSync(file, `${JSON.stringify({ pid, pgid: pid, startedAt: 'linux:1' })}\n`, 'utf-8')
     let groupSignals = 0
     try {
       expect(
         await killTrackedChildren(file, {
           readProcessIdentity: () => ({ status: 'absent' }),
+          readGroup: () => ({ status: 'absent' }),
           signalGroup: async () => {
             groupSignals += 1
             return true
           },
         }),
-      ).toEqual([pid])
-      expect(groupSignals).toBe(1)
+      ).toEqual([])
+      expect(groupSignals).toBe(0)
       expect(existsSync(file)).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -565,7 +566,7 @@ describe('exclusive children tracking', () => {
     }
   })
 
-  it('kills a recorded process group after its root exits', async () => {
+  it('preserves a recorded live process group after its root exits', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openfox-children-orphan-group-'))
     const file = join(dir, 'w.children')
     initChildrenTracking(file)
@@ -578,17 +579,9 @@ describe('exclusive children tracking', () => {
       expect(() => process.kill(pid, 0)).toThrow()
       expect(() => process.kill(-pid, 0)).not.toThrow()
 
-      expect(await killTrackedChildren(file)).toEqual([pid])
-      const deadline = Date.now() + 3000
-      while (Date.now() < deadline) {
-        try {
-          process.kill(-pid, 0)
-          await new Promise((resolve) => setTimeout(resolve, 25))
-        } catch {
-          break
-        }
-      }
-      expect(() => process.kill(-pid, 0)).toThrow()
+      expect(await killTrackedChildren(file)).toEqual([])
+      expect(() => process.kill(-pid, 0)).not.toThrow()
+      expect(existsSync(file)).toBe(true)
     } finally {
       if (root.pid) {
         try {

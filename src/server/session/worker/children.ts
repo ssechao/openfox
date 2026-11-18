@@ -69,12 +69,18 @@ export type ProcessIdentityRead =
 export type ProcessInventoryRead =
   { status: 'found'; process: ProcessInventoryEntry } | { status: 'absent' } | { status: 'unreadable'; error: Error }
 
+export type ProtectedProcessRole = 'sender' | 'gateway' | 'supervisor'
+
 export interface ChildrenCleanupDependencies {
   readProcessIdentity?: (pid: number) => ProcessIdentityRead
+  readInventory?: (pid: number, command?: string) => ProcessInventoryRead
+  readGroup?: (pgid: number) => ProcessGroupRead
   killTree?: (pid: number) => Promise<void>
   signalGroup?: (pid: number) => Promise<boolean>
   findReservationPids?: (reservationId: string) => number[] | Promise<number[]>
   retryDelay?: () => Promise<void>
+  protectedProcesses?: Partial<Record<ProtectedProcessRole, ProcessInventoryEntry>>
+  logSignalRefusal?: (details: Record<string, unknown>) => void
 }
 
 export type ProcessGroupRead = { status: 'found' } | { status: 'absent' } | { status: 'unreadable'; error: Error }
@@ -736,6 +742,77 @@ export async function verifyExclusiveProcessInventoryAfter(
   }
 }
 
+function defaultProtectedProcesses(): Partial<Record<ProtectedProcessRole, ProcessInventoryEntry>> {
+  const protectedProcesses: Partial<Record<ProtectedProcessRole, ProcessInventoryEntry>> = {}
+  const sender = readProcessInventory(process.pid)
+  if (sender.status === 'found') protectedProcesses.sender = sender.process
+  const parent = readProcessInventory(process.ppid)
+  if (parent.status === 'found') {
+    protectedProcesses.gateway = parent.process
+    protectedProcesses.supervisor = parent.process
+  }
+  return protectedProcesses
+}
+
+interface GuardedGroupTarget {
+  pid: number
+  startedAt?: string
+  pgid?: number
+}
+
+function processGroupSignalRefusalDetails(
+  child: GuardedGroupTarget,
+  protectedProcesses: Partial<Record<ProtectedProcessRole, ProcessInventoryEntry>>,
+  reason: string,
+): Record<string, unknown> {
+  return {
+    senderPid: protectedProcesses.sender?.pid ?? null,
+    senderPgid: protectedProcesses.sender?.pgid ?? null,
+    gatewayPid: protectedProcesses.gateway?.pid ?? null,
+    gatewayPgid: protectedProcesses.gateway?.pgid ?? null,
+    supervisorPid: protectedProcesses.supervisor?.pid ?? null,
+    supervisorPgid: protectedProcesses.supervisor?.pgid ?? null,
+    targetPid: child.pid,
+    targetPgid: child.pgid ?? null,
+    signal: 'SIGKILL',
+    reason,
+  }
+}
+
+type GuardedGroupSignalResult = 'signaled' | 'absent' | 'positive_only' | 'refused'
+
+async function signalRecordedChildGroup(
+  child: GuardedGroupTarget,
+  identity: ProcessIdentityRead,
+  readGroup: (pgid: number) => ProcessGroupRead,
+  signalGroup: (pid: number) => Promise<boolean>,
+  protectedProcesses: Partial<Record<ProtectedProcessRole, ProcessInventoryEntry>>,
+  logSignalRefusal: (details: Record<string, unknown>) => void,
+): Promise<GuardedGroupSignalResult> {
+  const refuse = (reason: string, positiveOnly = false): GuardedGroupSignalResult => {
+    logSignalRefusal(processGroupSignalRefusalDetails(child, protectedProcesses, reason))
+    return positiveOnly ? 'positive_only' : 'refused'
+  }
+  if (identity.status === 'absent') {
+    if (child.pgid === undefined) return refuse('target_group_identity_unavailable')
+    for (const role of ['sender', 'gateway', 'supervisor'] as const) {
+      if (protectedProcesses[role]?.pgid === child.pgid) return 'absent'
+    }
+    const group = readGroup(child.pgid)
+    if (group.status === 'absent') return 'absent'
+    if (group.status === 'unreadable') return refuse('target_group_unreadable')
+    return refuse('target_identity_unavailable')
+  }
+  if (identity.status === 'unreadable' || child.startedAt === undefined) return refuse('target_identity_unavailable')
+  if (identity.identity !== child.startedAt) return refuse('target_identity_changed')
+  if (child.pgid === undefined) return refuse('target_group_identity_unavailable', true)
+  for (const role of ['sender', 'gateway', 'supervisor'] as const) {
+    if (protectedProcesses[role]?.pgid === child.pgid) return refuse(`protected_${role}_process_group`, true)
+  }
+  if (child.pid !== child.pgid) return refuse('target_not_group_leader', true)
+  return (await signalGroup(child.pgid)) ? 'signaled' : 'absent'
+}
+
 /**
  * Kill every recorded child's process group, then unlink the file. Returns
  * the pids that were signaled (the cleanup proof). Missing processes are
@@ -746,23 +823,51 @@ export async function killTrackedChildren(
   dependencies: ChildrenCleanupDependencies = {},
 ): Promise<number[]> {
   const readProcessIdentity = dependencies.readProcessIdentity ?? processStartIdentity
+  const readInventory = dependencies.readInventory ?? readProcessInventory
+  const readGroup = dependencies.readGroup ?? readProcessGroup
   const killTree = dependencies.killTree ?? killProcessTree
   const signalGroup = dependencies.signalGroup ?? signalProcessGroup
   const findReservationPids = dependencies.findReservationPids ?? findReservationProcesses
   const retryDelay = dependencies.retryDelay ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 50)))
+  const protectedProcesses = dependencies.protectedProcesses ?? defaultProtectedProcesses()
+  const logSignalRefusal =
+    dependencies.logSignalRefusal ??
+    ((details: Record<string, unknown>) => logger.error('Refused unproven process group signal', details))
   const state = readChildrenState(path)
   const killed: number[] = []
   const killedSet = new Set<number>()
-  let hasUnreadableIdentity = false
-  for (const reservationId of state.reservations.keys()) {
+  let hasRefusedGroupSignal = false
+  for (const [reservationId, command] of state.reservations) {
     for (const pid of await findReservationPids(reservationId)) {
       if (killedSet.has(pid)) continue
-      await killTree(pid)
-      killedSet.add(pid)
-      killed.push(pid)
+      const inventory = readInventory(pid, command)
+      const target =
+        inventory.status === 'found'
+          ? inventory.process
+          : { pid, ...(inventory.status === 'absent' ? { pgid: pid } : {}) }
+      const identity = inventory.status === 'found' ? readProcessIdentity(pid) : inventory
+      const result = await signalRecordedChildGroup(
+        target,
+        identity,
+        readGroup,
+        signalGroup,
+        protectedProcesses,
+        logSignalRefusal,
+      )
+      if (result === 'signaled') {
+        killedSet.add(pid)
+        killed.push(pid)
+      } else if (result === 'positive_only') {
+        await killTree(pid)
+        killedSet.add(pid)
+        killed.push(pid)
+      } else if (result === 'refused') {
+        hasRefusedGroupSignal = true
+      }
     }
   }
   for (const child of state.children) {
+    if (killedSet.has(child.pid)) continue
     try {
       let identity = readProcessIdentity(child.pid)
       if (identity.status === 'unreadable') {
@@ -773,19 +878,24 @@ export async function killTrackedChildren(
         await retryDelay()
         identity = readProcessIdentity(child.pid)
       }
-      if (identity.status === 'found' && identity.identity === child.startedAt) {
+      const result = await signalRecordedChildGroup(
+        child,
+        identity,
+        readGroup,
+        signalGroup,
+        protectedProcesses,
+        logSignalRefusal,
+      )
+      if (result === 'signaled') {
+        killed.push(child.pid)
+      } else if (result === 'positive_only') {
         await killTree(child.pid)
         killed.push(child.pid)
-      } else if (identity.status === 'absent' && (await signalGroup(child.pid))) {
-        killed.push(child.pid)
-      } else if (identity.status === 'unreadable') {
-        hasUnreadableIdentity = true
-        logger.error('Unable to read worker child process identity; process group left untouched', {
-          pid: child.pid,
-          error: identity.error.message,
-        })
+      } else if (result === 'refused') {
+        hasRefusedGroupSignal = true
       }
     } catch (error) {
+      hasRefusedGroupSignal = true
       logger.debug('Worker child already gone', {
         pid: child.pid,
         error: error instanceof Error ? error.message : String(error),
@@ -799,7 +909,7 @@ export async function killTrackedChildren(
       break
     }
   }
-  if (!hasUnreadableIdentity && !hasMarkedReservationProcesses) removeChildrenFile(path)
+  if (!hasRefusedGroupSignal && !hasMarkedReservationProcesses) removeChildrenFile(path)
   return killed
 }
 
