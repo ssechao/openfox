@@ -1365,7 +1365,12 @@ export class SessionManager {
     pendingChoices?: import('../../shared/types.js').UserStepChoice[],
   ): void {
     updateWorkflowExecutionStatus(executionId, 'waiting', stepId, stepName, stepOutput, pendingChoices)
-    getAttentionService().observeWaiting(sessionId, 'waiting_workflow_step', stepId)
+    getAttentionService().observeWaiting(sessionId, 'waiting_workflow_step', stepId, {
+      stepName,
+      ...(pendingChoices && pendingChoices.length > 0
+        ? { choices: pendingChoices.map((choice) => ({ id: choice.id, label: choice.label })) }
+        : {}),
+    })
     emitWorkflowExecutionChanged(
       sessionId,
       executionId,
