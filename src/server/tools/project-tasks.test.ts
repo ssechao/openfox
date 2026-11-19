@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -686,6 +687,132 @@ describe('project_tasks tool', () => {
     const result = await execute('list', { status: 'archived' }, projectId)
     expect(result.success).toBe(false)
     expect(result.error).toContain('status')
+  })
+
+  // ------------------------------------------------------------------
+  // list returns summaries; get returns one full task
+  // ------------------------------------------------------------------
+
+  it.fails(
+    'list returns summaries without prompt or auditTrail',
+    async () => {
+      const longPrompt = 'L'.repeat(20_000)
+      const lastAuditTimestamps: string[] = []
+      for (let i = 0; i < 25; i++) {
+        const task = service.create(projectId, { prompt: longPrompt }, { actor: 'human' })
+        for (let edit = 0; edit < 29; edit++) {
+          await service.update(projectId, task.id, { prompt: longPrompt }, { actor: 'human' })
+        }
+        lastAuditTimestamps.push(service.get(projectId, task.id)!.auditTrail.at(-1)!.timestamp)
+      }
+
+      const result = await execute('list', { status: 'all', limit: 25 }, projectId)
+      expect(result.success).toBe(true)
+      const parsed = JSON.parse(result.output!) as {
+        tasks: {
+          id: string
+          promptChars: number
+          auditCount: number
+          lastAudit: { action: string; actor: string; timestamp: string }
+        }[]
+        total: number
+        hasMore: boolean
+      }
+
+      expect(parsed.total).toBe(25)
+      expect(parsed.hasMore).toBe(false)
+      expect(parsed.tasks).toHaveLength(25)
+      for (const [index, card] of parsed.tasks.entries()) {
+        expect(Object.keys(card)).not.toContain('prompt')
+        expect(Object.keys(card)).not.toContain('auditTrail')
+        expect(card.promptChars).toBe(20_000)
+        expect(card.auditCount).toBe(30)
+        expect(card.lastAudit).toEqual({ action: 'edit', actor: 'human', timestamp: lastAuditTimestamps[index] })
+      }
+      expect(result.output!.length).toBeLessThan(40_000)
+    },
+    60_000,
+  )
+
+  it.fails('list title is the first non-command line', async () => {
+    const commandThenTitle = service.create(projectId, { prompt: '/default\nClasse : R1\n# Titre' }, { actor: 'human' })
+    const commandOnly = service.create(projectId, { prompt: '/default' }, { actor: 'human' })
+    const longLine = service.create(projectId, { prompt: 'X'.repeat(500) }, { actor: 'human' })
+    const indentedTitle = service.create(projectId, { prompt: '/default\n\n   Classe : R1   ' }, { actor: 'human' })
+
+    const result = await execute('list', { status: 'all', limit: 25 }, projectId)
+    expect(result.success).toBe(true)
+    const parsed = JSON.parse(result.output!) as { tasks: { id: string; title: string }[] }
+    const titleOf = (id: string) => parsed.tasks.find((task) => task.id === id)?.title
+
+    expect(titleOf(commandThenTitle.id)).toBe('Classe : R1')
+    expect(titleOf(commandOnly.id)).toBe('')
+    expect(titleOf(longLine.id)).toBe('X'.repeat(200))
+    expect(titleOf(indentedTitle.id)).toBe('Classe : R1')
+  })
+
+  it.fails('get returns one full task', async () => {
+    const prompt = 'Full prompt body\nsecond line'
+    const created = service.create(projectId, { prompt }, { actor: 'human' })
+    service.setGateConfig(
+      projectId,
+      [{ id: 'proof', name: 'Proof', description: 'need proof', required: false, variant: 'done' }],
+      { actor: 'human' },
+    )
+
+    const full = await execute('get', { taskId: created.id }, projectId)
+    expect(full.success).toBe(true)
+    const task = JSON.parse(full.output!) as {
+      id: string
+      prompt: string
+      auditTrail: { action: string }[]
+      gates: { id: string }[]
+    }
+    expect(task.id).toBe(created.id)
+    expect(task.prompt).toBe(prompt)
+    expect(task.auditTrail.map((entry) => entry.action)).toEqual(['create'])
+    expect(task.gates.map((gate) => gate.id)).toEqual(['proof'])
+
+    const missingTaskId = await execute('get', {}, projectId)
+    expect(missingTaskId.success).toBe(false)
+    expect(missingTaskId.error).toContain('taskId')
+
+    const unknownTaskId = await execute('get', { taskId: 'missing-task' }, projectId)
+    expect(unknownTaskId.success).toBe(false)
+    expect(unknownTaskId.error).toContain('Task not found')
+
+    const restricted = await projectTasksTool.execute(
+      { action: 'get', taskId: created.id },
+      { ...makeContext(projectId), permittedActions: { project_tasks: ['list'] } },
+    )
+    expect(restricted.success).toBe(false)
+    expect(restricted.error).toContain('not allowed')
+  })
+
+  it.fails('tool description points to get', async () => {
+    const description = projectTasksTool.definition.function.description
+    const listLine = description.split('\n').find((line) => line.startsWith('- list:'))
+    expect(listLine).toBe(
+      '- list: paginated task summaries, gates, queue positions, sessions (status, limit, offset); use get for the full prompt and audit of one task',
+    )
+    expect(description).toContain('- get: one full task with its prompt, audit trail, and the project gates (taskId)')
+    const parameters = projectTasksTool.definition.function.parameters as {
+      properties: Record<string, { description?: string }>
+    }
+    const taskIdParam = parameters.properties['taskId']
+    expect(taskIdParam?.description).toContain('get')
+
+    const readDefault = (relative: string) => readFileSync(new URL(relative, import.meta.url), 'utf8')
+    for (const agentFile of ['planner.agent.md', 'builder.agent.md', 'manager.agent.md']) {
+      const content = readDefault(`../../agents/defaults/${agentFile}`)
+      expect(content).not.toMatch(/list[^\n]*\bprompt\b/i)
+      expect(content).not.toContain('auditTrail')
+    }
+    const markDone = readDefault('../../commands/defaults/mark-done.command.md')
+    expect(markDone).toContain("action=list, status='in_progress'")
+    expect(markDone).toContain('to find the task bound to your current session')
+    expect(markDone).not.toMatch(/list[^\n]*\bprompt\b/i)
+    expect(markDone).not.toContain('auditTrail')
   })
 
   it('surfaces the queue position of a queued task in list', async () => {
