@@ -95,13 +95,14 @@ describe('gateway shutdown', () => {
       ancillaryCleanup: Promise.reject(new Error('ancillary failed immediately')),
     })
 
+    let shutdown: ReturnType<typeof runGatewayShutdown> | undefined
     try {
-      const shutdown = runGatewayShutdown(deps)
-      await Promise.resolve()
+      shutdown = runGatewayShutdown(deps)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(unhandled).not.toHaveBeenCalled()
       expect(order).toEqual(['mcp:begin', 'workers:start'])
       releaseWorker?.()
       const result = await shutdown
-      await new Promise<void>((resolve) => setImmediate(resolve))
 
       expect(unhandled).not.toHaveBeenCalled()
       expect(order).toEqual(['mcp:begin', 'workers:start', 'workers:done', 'mcp:disconnect', 'supervisor'])
@@ -111,6 +112,8 @@ describe('gateway shutdown', () => {
         ancillaryError: 'ancillary failed immediately',
       })
     } finally {
+      releaseWorker?.()
+      await shutdown?.catch(() => undefined)
       process.off('unhandledRejection', unhandled)
     }
   })
