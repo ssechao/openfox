@@ -104,8 +104,16 @@ describe('project_tasks tool', () => {
     const result = await execute('list', { projectId: foreignProjectId, status: 'all' }, projectId, 'manager')
 
     expect(result.success).toBe(true)
-    const parsed = JSON.parse(result.output!) as { tasks: { prompt: string }[] }
-    expect(parsed.tasks.map((task) => task.prompt)).toEqual(['Foreign project task'])
+    const parsed = JSON.parse(result.output!) as { tasks: { id: string; title: string }[] }
+    expect(parsed.tasks.map((task) => task.title)).toEqual(['Foreign project task'])
+    const prompts = await Promise.all(
+      parsed.tasks.map(async (task) => {
+        const full = await execute('get', { projectId: foreignProjectId, taskId: task.id }, projectId, 'manager')
+        expect(full.success).toBe(true)
+        return (JSON.parse(full.output!) as { prompt: string }).prompt
+      }),
+    )
+    expect(prompts).toEqual(['Foreign project task'])
   })
 
   it('rejects an unknown explicit projectId before the task service', async () => {
@@ -693,48 +701,44 @@ describe('project_tasks tool', () => {
   // list returns summaries; get returns one full task
   // ------------------------------------------------------------------
 
-  it.fails(
-    'list returns summaries without prompt or auditTrail',
-    async () => {
-      const longPrompt = 'L'.repeat(20_000)
-      const lastAuditTimestamps: string[] = []
-      for (let i = 0; i < 25; i++) {
-        const task = service.create(projectId, { prompt: longPrompt }, { actor: 'human' })
-        for (let edit = 0; edit < 29; edit++) {
-          await service.update(projectId, task.id, { prompt: longPrompt }, { actor: 'human' })
-        }
-        lastAuditTimestamps.push(service.get(projectId, task.id)!.auditTrail.at(-1)!.timestamp)
+  it('list returns summaries without prompt or auditTrail', async () => {
+    const longPrompt = 'L'.repeat(20_000)
+    const lastAuditTimestamps: string[] = []
+    for (let i = 0; i < 25; i++) {
+      const task = service.create(projectId, { prompt: longPrompt }, { actor: 'human' })
+      for (let edit = 0; edit < 29; edit++) {
+        await service.update(projectId, task.id, { prompt: longPrompt }, { actor: 'human' })
       }
+      lastAuditTimestamps.push(service.get(projectId, task.id)!.auditTrail.at(-1)!.timestamp)
+    }
 
-      const result = await execute('list', { status: 'all', limit: 25 }, projectId)
-      expect(result.success).toBe(true)
-      const parsed = JSON.parse(result.output!) as {
-        tasks: {
-          id: string
-          promptChars: number
-          auditCount: number
-          lastAudit: { action: string; actor: string; timestamp: string }
-        }[]
-        total: number
-        hasMore: boolean
-      }
+    const result = await execute('list', { status: 'all', limit: 25 }, projectId)
+    expect(result.success).toBe(true)
+    const parsed = JSON.parse(result.output!) as {
+      tasks: {
+        id: string
+        promptChars: number
+        auditCount: number
+        lastAudit: { action: string; actor: string; timestamp: string }
+      }[]
+      total: number
+      hasMore: boolean
+    }
 
-      expect(parsed.total).toBe(25)
-      expect(parsed.hasMore).toBe(false)
-      expect(parsed.tasks).toHaveLength(25)
-      for (const [index, card] of parsed.tasks.entries()) {
-        expect(Object.keys(card)).not.toContain('prompt')
-        expect(Object.keys(card)).not.toContain('auditTrail')
-        expect(card.promptChars).toBe(20_000)
-        expect(card.auditCount).toBe(30)
-        expect(card.lastAudit).toEqual({ action: 'edit', actor: 'human', timestamp: lastAuditTimestamps[index] })
-      }
-      expect(result.output!.length).toBeLessThan(40_000)
-    },
-    60_000,
-  )
+    expect(parsed.total).toBe(25)
+    expect(parsed.hasMore).toBe(false)
+    expect(parsed.tasks).toHaveLength(25)
+    for (const [index, card] of parsed.tasks.entries()) {
+      expect(Object.keys(card)).not.toContain('prompt')
+      expect(Object.keys(card)).not.toContain('auditTrail')
+      expect(card.promptChars).toBe(20_000)
+      expect(card.auditCount).toBe(30)
+      expect(card.lastAudit).toEqual({ action: 'edit', actor: 'human', timestamp: lastAuditTimestamps[index] })
+    }
+    expect(result.output!.length).toBeLessThan(40_000)
+  }, 60_000)
 
-  it.fails('list title is the first non-command line', async () => {
+  it('list title is the first non-command line', async () => {
     const commandThenTitle = service.create(projectId, { prompt: '/default\nClasse : R1\n# Titre' }, { actor: 'human' })
     const commandOnly = service.create(projectId, { prompt: '/default' }, { actor: 'human' })
     const longLine = service.create(projectId, { prompt: 'X'.repeat(500) }, { actor: 'human' })
@@ -751,7 +755,7 @@ describe('project_tasks tool', () => {
     expect(titleOf(indentedTitle.id)).toBe('Classe : R1')
   })
 
-  it.fails('get returns one full task', async () => {
+  it('get returns one full task', async () => {
     const prompt = 'Full prompt body\nsecond line'
     const created = service.create(projectId, { prompt }, { actor: 'human' })
     service.setGateConfig(
@@ -789,7 +793,7 @@ describe('project_tasks tool', () => {
     expect(restricted.error).toContain('not allowed')
   })
 
-  it.fails('tool description points to get', async () => {
+  it('tool description points to get', async () => {
     const description = projectTasksTool.definition.function.description
     const listLine = description.split('\n').find((line) => line.startsWith('- list:'))
     expect(listLine).toBe(
@@ -804,11 +808,11 @@ describe('project_tasks tool', () => {
 
     const readDefault = (relative: string) => readFileSync(new URL(relative, import.meta.url), 'utf8')
     for (const agentFile of ['planner.agent.md', 'builder.agent.md', 'manager.agent.md']) {
-      const content = readDefault(`../../agents/defaults/${agentFile}`)
+      const content = readDefault(`../agents/defaults/${agentFile}`)
       expect(content).not.toMatch(/list[^\n]*\bprompt\b/i)
       expect(content).not.toContain('auditTrail')
     }
-    const markDone = readDefault('../../commands/defaults/mark-done.command.md')
+    const markDone = readDefault('../commands/defaults/mark-done.command.md')
     expect(markDone).toContain("action=list, status='in_progress'")
     expect(markDone).toContain('to find the task bound to your current session')
     expect(markDone).not.toMatch(/list[^\n]*\bprompt\b/i)
@@ -887,12 +891,12 @@ describe('project_tasks tool', () => {
     expect(deleted.message).toBe('Deleted: Original')
     expect(deleted.prompt).toBe('Original')
     const list = await execute('list', {}, projectId)
-    const parsed = JSON.parse(list.output!) as { tasks: { prompt: string }[] }
+    const parsed = JSON.parse(list.output!) as { tasks: unknown[] }
     expect(parsed.tasks).toHaveLength(0)
   })
 
   it('rejects actions removed from the agent surface', async () => {
-    for (const action of ['get', 'duplicate', 'reorder', 'set_gates']) {
+    for (const action of ['duplicate', 'reorder', 'set_gates']) {
       const result = await execute(action, { taskId: 'x' }, projectId)
       expect(result.success).toBe(false)
       expect(result.error).toContain('Invalid action')
@@ -947,18 +951,18 @@ describe('project_tasks tool', () => {
     const list = await execute('list', {}, projectId)
     const parsed = JSON.parse(list.output!) as {
       tasks: {
-        prompt: string
+        title: string
         attachments?: number
         attachmentList?: { id: string; filename: string; mimeType: string; size: number }[]
       }[]
     }
-    const withAtts = parsed.tasks.find((t) => t.prompt === 'With attachments')!
+    const withAtts = parsed.tasks.find((t) => t.title === 'With attachments')!
     expect(withAtts.attachments).toBe(2)
     expect(withAtts.attachmentList).toEqual([
       { id: 'att-1', filename: 'notes.txt', mimeType: 'text/plain', size: 11 },
       { id: 'att-2', filename: 'pic.png', mimeType: 'image/png', size: PNG_SIZE },
     ])
-    const bare = parsed.tasks.find((t) => t.prompt === 'Bare')!
+    const bare = parsed.tasks.find((t) => t.title === 'Bare')!
     expect(bare.attachments).toBe(0)
     expect(bare.attachmentList).toBeUndefined()
   })

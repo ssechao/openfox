@@ -14,7 +14,7 @@ import { OpenFoxError } from '../utils/errors.js'
 /**
  * project_tasks — agent participation on the project task board.
  *
- * Lean agent surface: list, create, edit, move, set_gate_value, get_attachment, delete.
+ * Lean agent surface: list, get, create, edit, move, set_gate_value, get_attachment, delete.
  * The service retains full CRUD (human UI uses duplicate/reorder/gate
  * config directly); this tool only exposes what agents actually need.
  *
@@ -50,10 +50,12 @@ function getTasksService(): TasksService {
   return tasksService
 }
 
-type TaskAction = 'list' | 'create' | 'edit' | 'move' | 'launch' | 'set_gate_value' | 'delete' | 'get_attachment'
+type TaskAction =
+  'list' | 'get' | 'create' | 'edit' | 'move' | 'launch' | 'set_gate_value' | 'delete' | 'get_attachment'
 
 const VALID_ACTIONS: TaskAction[] = [
   'list',
+  'get',
   'create',
   'edit',
   'move',
@@ -67,6 +69,7 @@ const LIST_STATUSES = ['todo', 'in_progress', 'done', 'all'] as const
 
 const LIST_DEFAULT_LIMIT = 10
 const LIST_MAX_LIMIT = 25
+const TASK_TITLE_MAX_CHARS = 200
 
 export interface ProjectTasksArgs {
   action: TaskAction
@@ -105,7 +108,8 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
         '- Done requires its gates; fill them with set_gate_value, then retry.\n' +
         '- CONFLICT means re-list and retry.\n\n' +
         'Actions:\n' +
-        '- list: paginated tasks, gates, queue positions, sessions, and audit (status, limit, offset)\n' +
+        '- list: paginated task summaries, gates, queue positions, sessions (status, limit, offset); use get for the full prompt and audit of one task\n' +
+        '- get: one full task with its prompt, audit trail, and the project gates (taskId)\n' +
         '- create: add a To Do task (prompt required)\n' +
         '- edit: update prompt, attachments, agent, provider, or model\n' +
         '- move: change column (todo | in_progress | done)\n' +
@@ -123,7 +127,7 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
           },
           taskId: {
             type: 'string',
-            description: 'Target task id (edit, move, launch, set_gate_value, get_attachment, delete)',
+            description: 'Target task id (edit, move, launch, set_gate_value, get, get_attachment, delete)',
           },
           attachmentId: {
             type: 'string',
@@ -229,7 +233,7 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
             JSON.stringify(
               {
                 gates,
-                tasks: pageTasks.map((t) => taskForAgent(t)),
+                tasks: pageTasks.map((t) => taskSummaryForAgent(t)),
                 total: filtered.length,
                 limit: page.limit,
                 offset: page.offset,
@@ -239,6 +243,13 @@ export const projectTasksTool = createTool<ProjectTasksArgs>(
               2,
             ),
           )
+        }
+
+        case 'get': {
+          if (!args.taskId) return helpers.error('Parameter "taskId" is required for action=get')
+          const task = svc.get(projectId, args.taskId)
+          if (!task) return helpers.error(`Task not found: ${args.taskId}`)
+          return helpers.success(JSON.stringify({ ...taskForAgent(task), gates: getGateConfig(projectId) }, null, 2))
         }
 
         case 'create': {
@@ -421,24 +432,11 @@ function taskForAgent(task: import('../../shared/types.js').ProjectTask) {
     id: task.id,
     prompt: task.prompt,
     status: task.status,
-    ...(task.runState ? { runState: task.runState } : {}),
-    ...(task.queuePosition ? { queuePosition: task.queuePosition } : {}),
-    ...(task.activeSessionId ? { boundSession: task.activeSessionId } : {}),
-    ...(task.staleSession ? { staleSession: task.staleSession } : {}),
-    ...(task.model ? { model: task.model } : {}),
+    ...progressFieldsForAgent(task),
     version: task.version,
     attachments: task.attachments.length,
-    ...(task.attachments.length > 0
-      ? {
-          attachmentList: task.attachments.map((a) => ({
-            id: a.id,
-            filename: a.filename,
-            mimeType: a.mimeType,
-            size: a.size,
-          })),
-        }
-      : {}),
-    gateValues: task.gateValues.map((v) => ({ [v.gateId]: v.value, actor: v.actor, timestamp: v.timestamp })),
+    ...(task.attachments.length > 0 ? { attachmentList: attachmentListForAgent(task) } : {}),
+    gateValues: gateValuesForAgent(task),
     auditTrail: task.auditTrail.map((a) => ({
       action: a.action,
       actor: a.actor,
@@ -447,6 +445,59 @@ function taskForAgent(task: import('../../shared/types.js').ProjectTask) {
     })),
     updatedAt: task.updatedAt,
   }
+}
+
+/**
+ * `list` returns one summary per card: never the prompt body nor the audit trail,
+ * only their sizes plus the last audit entry. `get` reads a single full card.
+ */
+function taskSummaryForAgent(task: import('../../shared/types.js').ProjectTask) {
+  const lastAudit = task.auditTrail.at(-1)
+  return {
+    id: task.id,
+    title: taskTitle(task.prompt),
+    status: task.status,
+    version: task.version,
+    updatedAt: task.updatedAt,
+    promptChars: task.prompt.length,
+    auditCount: task.auditTrail.length,
+    ...(lastAudit
+      ? { lastAudit: { action: lastAudit.action, actor: lastAudit.actor, timestamp: lastAudit.timestamp } }
+      : {}),
+    ...progressFieldsForAgent(task),
+    attachments: task.attachments.length,
+    ...(task.attachments.length > 0 ? { attachmentList: attachmentListForAgent(task) } : {}),
+    gateValues: gateValuesForAgent(task),
+  }
+}
+
+/** Live progress fields shared by the full card and its list summary. */
+function progressFieldsForAgent(task: import('../../shared/types.js').ProjectTask) {
+  return {
+    ...(task.runState ? { runState: task.runState } : {}),
+    ...(task.queuePosition ? { queuePosition: task.queuePosition } : {}),
+    ...(task.activeSessionId ? { boundSession: task.activeSessionId } : {}),
+    ...(task.staleSession ? { staleSession: task.staleSession } : {}),
+    ...(task.model ? { model: task.model } : {}),
+  }
+}
+
+function attachmentListForAgent(task: import('../../shared/types.js').ProjectTask) {
+  return task.attachments.map((a) => ({ id: a.id, filename: a.filename, mimeType: a.mimeType, size: a.size }))
+}
+
+function gateValuesForAgent(task: import('../../shared/types.js').ProjectTask) {
+  return task.gateValues.map((v) => ({ [v.gateId]: v.value, actor: v.actor, timestamp: v.timestamp }))
+}
+
+/** First non-empty prompt line that is not a slash command, trimmed and capped. */
+function taskTitle(prompt: string): string {
+  for (const line of prompt.split('\n')) {
+    const candidate = line.trim()
+    if (candidate === '' || candidate.startsWith('/')) continue
+    return candidate.slice(0, TASK_TITLE_MAX_CHARS)
+  }
+  return ''
 }
 
 function sanitizeAttachments(raw: unknown[]): Attachment[] {
