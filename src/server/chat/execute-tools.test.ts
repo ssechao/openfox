@@ -3,7 +3,12 @@ import type { ToolCall } from '../../shared/types.js'
 import type { TurnMetrics } from './stream-pure.js'
 import type { ToolRegistry } from '../tools/types.js'
 import type { TurnEvent } from '../events/types.js'
-import { executeTools, transformSubAgentAliases, createInterruptedResult } from './execute-tools.js'
+import {
+  executeTools,
+  transformSubAgentAliases,
+  createInterruptedResult,
+  isEffectfulToolCall,
+} from './execute-tools.js'
 import { PathAccessDeniedError } from '../tools/index.js'
 
 vi.mock('../agents/registry.js', () => ({
@@ -159,6 +164,15 @@ describe('executeTools', () => {
     )
 
     expect(mockToolRegistry.execute).toHaveBeenCalledOnce()
+  })
+
+  it.fails('treats project_tasks get as read-only while edit stays effectful', () => {
+    expect(
+      isEffectfulToolCall({ id: 'call-1', name: 'project_tasks', arguments: { action: 'get', taskId: 'task-1' } }),
+    ).toBe(false)
+    expect(
+      isEffectfulToolCall({ id: 'call-2', name: 'project_tasks', arguments: { action: 'edit', taskId: 'task-1' } }),
+    ).toBe(true)
   })
 
   it('uncertain failure result is explicit', async () => {
