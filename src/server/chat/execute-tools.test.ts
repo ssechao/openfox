@@ -166,7 +166,7 @@ describe('executeTools', () => {
     expect(mockToolRegistry.execute).toHaveBeenCalledOnce()
   })
 
-  it.fails('treats project_tasks get as read-only while edit stays effectful', () => {
+  it('treats project_tasks get as read-only while edit stays effectful', () => {
     expect(
       isEffectfulToolCall({ id: 'call-1', name: 'project_tasks', arguments: { action: 'get', taskId: 'task-1' } }),
     ).toBe(false)

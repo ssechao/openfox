@@ -79,7 +79,7 @@ export function isEffectfulToolCall(toolCall: ToolCall): boolean {
     return !['get', 'list', 'schema'].includes(String(toolCall.arguments['action'] ?? ''))
   }
   if (toolCall.name === 'project_tasks') {
-    return !['list', 'get_attachment'].includes(String(toolCall.arguments['action'] ?? ''))
+    return !['list', 'get', 'get_attachment'].includes(String(toolCall.arguments['action'] ?? ''))
   }
   if (toolCall.name === 'workspace') return toolCall.arguments['action'] !== 'list'
   return true
