@@ -41,6 +41,19 @@ interface RegistrationService {
 interface RegistrationModule {
   IdlePeerRegistrationService: new (deps: RegistrationDeps) => RegistrationService
   drainPendingPeerDeliveries: () => Promise<void>
+  recordPendingPeerDelivery: (delivery: {
+    sessionId: string
+    targetSessionId: string
+    reason: 'blocked'
+    error: string
+    message: string
+    peerId: string
+  }) => void
+  installIdlePeerRegistration: (
+    deps: RegistrationDeps,
+    deliver: (sessionId: string, peerId: string, message: string, msgSeq?: string) => Promise<{ success: boolean }>,
+  ) => RegistrationService
+  startsRegistrationFor?: (name: string) => boolean
 }
 
 const REGISTRATION_MODULE: string = './idle-peer-registration.js'
@@ -72,8 +85,11 @@ function peerIdFor(sessionId) {
 function record(entry) {
   appendFileSync(process.env.HUB_LOG, JSON.stringify(entry) + '\\n')
 }
+function controlMode() {
+  try { return readFileSync(process.env.HUB_CONTROL, 'utf8').trim() } catch { return '' }
+}
 function sendFails() {
-  try { return readFileSync(process.env.HUB_CONTROL, 'utf8').trim() === 'fail' } catch { return false }
+  return controlMode() === 'fail'
 }
 const server = new McpServer({ name: 'hub-double', version: '0.0.0' })
 const listener = createServer((socket) => {
@@ -92,6 +108,14 @@ server.tool('mcp_execute_tool', {
     return { content: [{ type: 'text', text: 'ok' }] }
   }
   if (args.tool_name === 'ht_get_contact_info') {
+    if (controlMode() === 'hang') {
+      record({ tool: args.tool_name, sessionId, ok: false, error: 'hang' })
+      return new Promise(() => {})
+    }
+    if (controlMode() === 'fail-contact') {
+      record({ tool: args.tool_name, sessionId, ok: false, error: 'MCP error -32602: unknown peer' })
+      return { isError: true, content: [{ type: 'text', text: 'MCP error -32602: unknown peer' }] }
+    }
     if (!sessionId) {
       record({ tool: args.tool_name, sessionId, ok: false, error: 'missing session' })
       return { isError: true, content: [{ type: 'text', text: 'missing session' }] }
@@ -236,7 +260,7 @@ interface Harness {
   base: string
 }
 
-async function startHarness(control: 'fail' | 'ok'): Promise<Harness> {
+async function startHarness(control: 'fail' | 'ok' | 'fail-contact' | 'hang'): Promise<Harness> {
   process.env['OPENFOX_MOCK_LLM'] = 'true'
   process.env['OPENFOX_SESSION_WORKER'] = 'false'
   const root = await mkdtemp(join(tmpdir(), 'openfox-idle-peer-'))
@@ -584,4 +608,402 @@ describe.sequential('idle peer registration', () => {
     expect(notices).toHaveLength(1)
     expect(service.audit()).toEqual({ state: 'degraded', sessionIds: ids })
   })
+})
+
+describe.sequential('idle peer registration B1-B6', () => {
+  it.fails('a rejected registration is not ready', async () => {
+    const api = await loadRegistration()
+    const service = new api.IdlePeerRegistrationService({
+      listSessionIds: () => ['s1'],
+      callTool: () => Promise.reject(new Error('hub down')),
+      schedule: () => () => {},
+    })
+    const outcome = await service.start()
+    console.log(`DEFECT ${JSON.stringify({ test: 'B1-reject', outcome })}`)
+    expect(outcome).toBe('degraded')
+    expect(service.audit()).toMatchObject({ state: 'degraded', sessionIds: ['s1'] })
+  })
+
+  it.fails('a false registration result is not ready', async () => {
+    const api = await loadRegistration()
+    const service = new api.IdlePeerRegistrationService({
+      listSessionIds: () => ['s1'],
+      callTool: () => Promise.resolve({ success: false, error: 'unknown peer' }),
+      schedule: () => () => {},
+    })
+    const outcome = await service.start()
+    console.log(`DEFECT ${JSON.stringify({ test: 'B1-false', outcome })}`)
+    expect(outcome).toBe('degraded')
+  })
+
+  it.fails('registration starts only for mcp-lazy', async () => {
+    const api = await loadRegistration()
+    const gate = (api as { startsRegistrationFor?: (name: string) => boolean }).startsRegistrationFor
+    const observed = {
+      other: gate ? gate('other') : true,
+      lazy: gate ? gate('mcp-lazy') : false,
+    }
+    console.log(`DEFECT ${JSON.stringify({ test: 'B1-discovery', ...observed })}`)
+    expect(observed).toEqual({ other: false, lazy: true })
+  })
+
+  it.fails(
+    'degraded audit and attention survive a new service',
+    async () => {
+      const harness = await startHarness('ok')
+      try {
+        await waitForHub(harness)
+        const ids: string[] = []
+        for (let index = 0; index < 20; index += 1) ids.push(await createSession(harness, `audit-${index}`))
+        const api = await loadRegistration()
+        const timers: Array<() => void> = []
+        const service = new api.IdlePeerRegistrationService({
+          listSessionIds: () => ids,
+          callTool: () => new Promise(() => {}),
+          schedule: (callback) => {
+            timers.push(callback)
+            return () => {}
+          },
+        })
+        const done = service.start()
+        const fire = timers[0]
+        if (!fire) throw new Error('deadline was not scheduled')
+        fire()
+        await done
+        const reloaded = new api.IdlePeerRegistrationService({
+          listSessionIds: () => [],
+          callTool: () => Promise.resolve({ success: true }),
+          schedule: () => () => {},
+        })
+        const { getEventStore } = await import('../events/index.js')
+        const attention = ids.flatMap((id) =>
+          getEventStore()
+            .getEvents(id)
+            .filter((event) => String(event.type) === 'session.peer_registration_attention'),
+        )
+        const durable = reloaded.audit()
+        console.log(
+          `DEFECT ${JSON.stringify({ test: 'B2', state: durable.state, durable: durable.sessionIds.length, attention: attention.length })}`,
+        )
+        expect({ state: durable.state, sessionIds: durable.sessionIds, attention: attention.length }).toEqual({
+          state: 'degraded',
+          sessionIds: ids,
+          attention: 1,
+        })
+      } finally {
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
+
+  it.fails(
+    'a failed contact lookup leaves a pending delivery',
+    async () => {
+      const harness = await startHarness('fail-contact')
+      try {
+        const creatorId = await createSession(harness, `creator-${randomUUID()}`)
+        const stalledId = await createSession(harness, `stalled-${randomUUID()}`)
+        const { setSessionCreatedBy } = await import('../db/sessions.js')
+        setSessionCreatedBy(stalledId, creatorId)
+        await waitForHub(harness)
+        const { getAttentionService } = await import('../session/attention.js')
+        getAttentionService().observeBlocked(stalledId, 'blocked in test')
+        await whenWatched(
+          harness.logPath,
+          async () => (await readHub(harness.logPath)).some((row) => row.tool === 'ht_get_contact_info'),
+          'contact lookup',
+        )
+        const { getEventStore } = await import('../events/index.js')
+        const pending = getEventStore()
+          .getEvents(stalledId)
+          .filter((event) => event.type === PEER_DELIVERY_PENDING)
+        console.log(`DEFECT ${JSON.stringify({ test: 'B3-lookup', pending: pending.length })}`)
+        expect(pending).toHaveLength(1)
+        expect(pending[0]?.data).toMatchObject({
+          targetSessionId: creatorId,
+          reason: 'blocked',
+          error: expect.stringMatching(/unknown peer/),
+        })
+      } finally {
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
+
+  it.fails(
+    'a gateway restart drains a pending delivery',
+    async () => {
+      const harness = await startHarness('fail')
+      try {
+        const creatorId = await createSession(harness, `creator-${randomUUID()}`)
+        const stalledId = await createSession(harness, `stalled-${randomUUID()}`)
+        const { setSessionCreatedBy } = await import('../db/sessions.js')
+        setSessionCreatedBy(stalledId, creatorId)
+        await waitForHub(harness)
+        const { getAttentionService } = await import('../session/attention.js')
+        getAttentionService().observeBlocked(stalledId, 'blocked in test')
+        await whenWatched(
+          harness.server.ctx.config.database.path,
+          async () => {
+            const { getEventStore } = await import('../events/index.js')
+            return getEventStore()
+              .getEvents(stalledId)
+              .some((event) => event.type === PEER_DELIVERY_PENDING)
+          },
+          'pending delivery',
+          true,
+        )
+        await writeFile(harness.controlPath, 'ok')
+        await restart(harness)
+        await waitForHub(harness)
+        const { getEventStore } = await import('../events/index.js')
+        await whenWatched(
+          harness.server.ctx.config.database.path,
+          async () =>
+            getEventStore()
+              .getEvents(stalledId)
+              .some((event) => event.type === PEER_DELIVERY_DELIVERED),
+          'restart drain',
+          true,
+        ).catch(() => {})
+        const delivered = getEventStore()
+          .getEvents(stalledId)
+          .filter((event) => event.type === PEER_DELIVERY_DELIVERED)
+        const sends = (await readHub(harness.logPath)).filter((row) => row.tool === 'ht_send_to_peer' && row.ok)
+        console.log(
+          `DEFECT ${JSON.stringify({ test: 'B3-restart', delivered: delivered.length, sends: sends.length })}`,
+        )
+        expect(delivered).toHaveLength(1)
+        expect(sends).toHaveLength(1)
+      } finally {
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
+
+  it.fails(
+    'pending records stay bounded and drop secrets',
+    async () => {
+      const harness = await startHarness('ok')
+      try {
+        const sessionId = await createSession(harness, `bounded-${randomUUID()}`)
+        const api = await loadRegistration()
+        const secret = 'sk-secret-token'
+        api.recordPendingPeerDelivery({
+          sessionId,
+          targetSessionId: sessionId,
+          reason: 'blocked',
+          error: `${secret} ${'e'.repeat(100_000)}`,
+          message: `${secret} ${'m'.repeat(100_000)}`,
+          peerId: 'peer',
+        })
+        const { getEventStore } = await import('../events/index.js')
+        const stored = getEventStore()
+          .getEvents(sessionId)
+          .find((event) => event.type === PEER_DELIVERY_PENDING)?.data as
+          { error?: string; message?: string } | undefined
+        const error = stored?.error ?? ''
+        const message = stored?.message ?? ''
+        console.log(
+          `DEFECT ${JSON.stringify({ test: 'B4-bounds', errorBytes: Buffer.byteLength(error), messageBytes: Buffer.byteLength(message), secret: error.includes(secret) || message.includes(secret) })}`,
+        )
+        expect(Buffer.byteLength(error)).toBeLessThanOrEqual(240)
+        expect(Buffer.byteLength(message)).toBeLessThanOrEqual(800)
+        expect(error.includes(secret) || message.includes(secret)).toBe(false)
+      } finally {
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
+
+  it.fails(
+    'one crashed delivery is retried once under the same msg_seq',
+    async () => {
+      const harness = await startHarness('ok')
+      try {
+        const sessionId = await createSession(harness, `crash-${randomUUID()}`)
+        const api = await loadRegistration()
+        const seen = new Map<string, number>()
+        let crash = true
+        api.installIdlePeerRegistration(
+          {
+            listSessionIds: () => [sessionId],
+            callTool: () => Promise.resolve({ success: true }),
+            schedule: () => () => {},
+          },
+          (id, peerId, message, msgSeq) => {
+            const seq = msgSeq && msgSeq.length > 0 ? msgSeq : 'missing'
+            seen.set(seq, (seen.get(seq) ?? 0) + 1)
+            if (crash) {
+              crash = false
+              throw new Error('crash after accept')
+            }
+            void id
+            void peerId
+            void message
+            return Promise.resolve({ success: true })
+          },
+        )
+        api.recordPendingPeerDelivery({
+          sessionId,
+          targetSessionId: sessionId,
+          reason: 'blocked',
+          error: 'unknown peer',
+          message: 'retry me',
+          peerId: 'peer',
+        })
+        await api.drainPendingPeerDeliveries().catch(() => {})
+        await api.drainPendingPeerDeliveries()
+        const seqs = [...seen.keys()]
+        console.log(`DEFECT ${JSON.stringify({ test: 'B4-seq', seqs })}`)
+        expect(seqs).toEqual([expect.not.stringMatching(/^missing$/)])
+        expect(seen.get(seqs[0] ?? '')).toBe(2)
+      } finally {
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
+
+  it.fails(
+    'two drains send one delivery',
+    async () => {
+      const harness = await startHarness('ok')
+      try {
+        const sessionId = await createSession(harness, `race-${randomUUID()}`)
+        const api = await loadRegistration()
+        let sends = 0
+        let release = (): void => {}
+        const held = new Promise<void>((resolve) => {
+          release = resolve
+        })
+        api.installIdlePeerRegistration(
+          {
+            listSessionIds: () => [sessionId],
+            callTool: () => Promise.resolve({ success: true }),
+            schedule: () => () => {},
+          },
+          () => {
+            sends += 1
+            return held.then(() => ({ success: true }))
+          },
+        )
+        api.recordPendingPeerDelivery({
+          sessionId,
+          targetSessionId: sessionId,
+          reason: 'blocked',
+          error: 'unknown peer',
+          message: 'once',
+          peerId: 'peer',
+        })
+        const pending = Promise.all([api.drainPendingPeerDeliveries(), api.drainPendingPeerDeliveries()])
+        await Promise.resolve()
+        console.log(`DEFECT ${JSON.stringify({ test: 'B4-race', sends })}`)
+        expect(sends).toBe(1)
+        release()
+        await pending
+        expect(sends).toBe(1)
+      } finally {
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
+
+  it.fails('register joins the sweep and forgets a deleted session', async () => {
+    const api = await loadRegistration()
+    let active = 0
+    let maxActive = 0
+    const service = new api.IdlePeerRegistrationService({
+      listSessionIds: () => Array.from({ length: 20 }, (_value, index) => `s${index}`),
+      callTool: () => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        return new Promise(() => {})
+      },
+      schedule: () => () => {},
+    })
+    void service.start()
+    void service.register('extra')
+    await Promise.resolve()
+    const forget = (service as { forget?: (sessionId: string) => void }).forget
+    forget?.('s0')
+    console.log(
+      `DEFECT ${JSON.stringify({ test: 'B5-flight', maxActive, forgot: typeof forget === 'function', keeps: service.audit().sessionIds.includes('s0') })}`,
+    )
+    expect({
+      maxActive,
+      forgot: typeof forget === 'function',
+      keeps: service.audit().sessionIds.includes('s0'),
+    }).toEqual({
+      maxActive: 16,
+      forgot: true,
+      keeps: false,
+    })
+  })
+
+  it.fails('an inflight registration can run again after it settles', async () => {
+    const api = await loadRegistration()
+    let calls = 0
+    let release = (): void => {}
+    const service = new api.IdlePeerRegistrationService({
+      listSessionIds: () => [],
+      callTool: () => {
+        calls += 1
+        return new Promise((resolve) => {
+          release = () => resolve({ success: true })
+        })
+      },
+      schedule: () => () => {},
+    })
+    const first = service.register('same')
+    expect(calls).toBe(1)
+    release()
+    await first
+    const second = service.register('same')
+    console.log(`DEFECT ${JSON.stringify({ test: 'B5-inflight', calls })}`)
+    expect(calls).toBe(2)
+    release()
+    await second
+  })
+
+  it.fails(
+    'session creation does not block on registration',
+    async () => {
+      const harness = await startHarness('hang')
+      try {
+        await waitForHub(harness)
+        const projectDir = join(harness.root, 'fast')
+        await mkdir(projectDir, { recursive: true })
+        const projectResponse = await fetch(`${harness.base}/api/projects`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'fast', workdir: projectDir }),
+        })
+        if (projectResponse.status !== 201) throw new Error(`project create failed: ${projectResponse.status}`)
+        const projectId = ((await projectResponse.json()) as { project: { id: string } }).project.id
+        let status = 0
+        try {
+          const response = await fetch(`${harness.base}/api/sessions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ projectId, title: 'fast' }),
+            signal: AbortSignal.timeout(4_000),
+          })
+          status = response.status
+        } catch {
+          status = 0
+        }
+        console.log(`DEFECT ${JSON.stringify({ test: 'B5-post', status })}`)
+        expect(status).toBe(201)
+      } finally {
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
 })
