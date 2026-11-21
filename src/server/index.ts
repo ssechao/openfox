@@ -305,7 +305,9 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
   const registration: {
     service?: {
       start(): Promise<unknown>
+      waitUntilSettled(): Promise<void>
       register(sessionId: string): Promise<void>
+      forget(sessionId: string): void
     }
   } = {}
   const mcpManager = new McpManager({
@@ -320,8 +322,14 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       }),
     },
     onToolsDiscovered: async (name, tools) => {
+      if (startsRegistrationFor(name)) {
+        try {
+          await registration.service?.start()
+        } catch (err) {
+          logger.warn('Idle peer registration failed', { name, error: String(err) })
+        }
+      }
       try {
-        await registration.service?.start()
         const { loadGlobalConfig, saveGlobalConfig } = await import('../cli/config.js')
         const mode = config.mode ?? 'production'
         const globalConfig = await loadGlobalConfig(mode, config.globalConfigPath)
@@ -349,7 +357,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
       mcpManager.callTool(serverName, toolName, args, sessionId),
     ),
   })
-  const { installIdlePeerRegistration } = await import('./mcp/idle-peer-registration.js')
+  const { installIdlePeerRegistration, startsRegistrationFor } = await import('./mcp/idle-peer-registration.js')
   const { listSessionIds } = await import('./db/sessions.js')
   const { setPeerSendBarrier } = await import('./mcp/manager.js')
   const peerTool = (sessionId: string, toolName: string, args: Record<string, unknown>) =>
@@ -378,9 +386,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     },
     (sessionId, peerId, message) => peerTool(sessionId, 'ht_send_to_peer', { peer_id: peerId, message }),
   )
-  setPeerSendBarrier(() => registration.service?.start().then(() => undefined) ?? Promise.resolve())
+  setPeerSendBarrier(() => registration.service?.waitUntilSettled() ?? Promise.resolve())
   sessionManager.subscribe((event) => {
     if (event.type === 'session_created') void registration.service?.register(event.session.id)
+    if (event.type === 'session_deleted') registration.service?.forget(event.sessionId)
   })
   setGlobalMcpServersProvider(() =>
     mcpManager.getAllServers().map((s) => ({ name: s.name, disabled: s.config.disabled })),
@@ -1082,7 +1091,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     // maxTokens is no longer passed - it comes from providerManager.getCurrentModelContext() at query time
     const session = sessionManager.createSession(projectId, title, providerId ?? null, model ?? null)
-    await registration.service?.register(session.id)
+    void registration.service?.register(session.id)
 
     res.status(201).json({ session: toClientSession(session) })
   })

@@ -96,6 +96,16 @@ export type TurnEvent =
         id: string
       }
     }
+  | {
+      type: 'session.peer_registration_attention'
+      data: {
+        count: number
+        sample: string[]
+        omitted: number
+        reason: string
+        sessionIds: string[]
+      }
+    }
 
   // ----------------------------------------------------------------------------
   // Message lifecycle

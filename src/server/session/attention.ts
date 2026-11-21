@@ -284,18 +284,38 @@ export function createAetherNotifier(
     const contact = await viaProxy('ht_get_contact_info', {}, params.createdBy)
     const lookup = parsePeerId(contact.success ? contact.output : undefined)
     if (!contact.success || !lookup.peerId) {
+      const error =
+        contact.error ??
+        (lookup.candidate
+          ? `peer_id is not a canonical hub identity: ${lookup.candidate}`
+          : 'no peer_id in contact info')
       logger.error('attention_notify_failed', {
         sessionId: params.sessionId,
         createdBy: params.createdBy,
         reason: params.reason,
         stage: 'ht_get_contact_info',
         ...(lookup.candidate ? { peerId: lookup.candidate } : {}),
-        error:
-          contact.error ??
-          (lookup.candidate
-            ? `peer_id is not a canonical hub identity: ${lookup.candidate}`
-            : 'no peer_id in contact info'),
+        error,
       })
+      try {
+        recordPendingPeerDelivery({
+          sessionId: params.sessionId,
+          targetSessionId: params.createdBy,
+          reason: params.reason,
+          error,
+          message: formatAttentionMessage(params) ?? params.reason,
+          peerId: lookup.candidate ?? '',
+        })
+      } catch (recordError) {
+        logger.error('attention_notify_failed', {
+          sessionId: params.sessionId,
+          createdBy: params.createdBy,
+          reason: params.reason,
+          stage: 'record_pending',
+          ...(lookup.candidate ? { peerId: lookup.candidate } : {}),
+          error: recordError instanceof Error ? recordError.message : String(recordError),
+        })
+      }
       return
     }
     const peerId = lookup.peerId
