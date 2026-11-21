@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { watch, type FSWatcher } from 'node:fs'
+import { readFileSync, watch, type FSWatcher } from 'node:fs'
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { connect as connectTcp } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Config } from '../../shared/types.js'
 import { getDatabase } from '../db/index.js'
 import type { ServerHandle } from '../context.js'
@@ -71,7 +71,7 @@ function hubScript(): string {
   return `
 const { createRequire } = require('module')
 const { createHash } = require('crypto')
-const { appendFileSync, readFileSync } = require('fs')
+const { appendFileSync, readFileSync, watch } = require('fs')
 const { createServer } = require('net')
 const requireFromRepo = createRequire(process.env.HUB_REQUIRE_FROM)
 const { McpServer } = requireFromRepo('@modelcontextprotocol/sdk/server/mcp.js')
@@ -139,8 +139,18 @@ server.tool('mcp_execute_tool', {
   record({ tool: args.tool_name, sessionId, ok: false, error: 'unsupported tool' })
   return { isError: true, content: [{ type: 'text', text: 'unsupported tool' }] }
 })
+function waitReleased() {
+  if (controlMode() !== 'hold') return Promise.resolve()
+  return new Promise((resolve) => {
+    const watcher = watch(process.env.HUB_CONTROL, () => {
+      if (controlMode() === 'hold') return
+      watcher.close()
+      resolve()
+    })
+  })
+}
 function serve() {
-  return new Promise((resolve, reject) => {
+  return waitReleased().then(() => new Promise((resolve, reject) => {
     listener.once('error', reject)
     listener.listen(0, '127.0.0.1', () => {
       const bound = listener.address()
@@ -150,7 +160,7 @@ function serve() {
         resolve()
       }, reject)
     })
-  })
+  }))
 }
 serve().catch((error) => {
   record({ event: 'fatal', error: String(error && error.stack || error) })
@@ -260,7 +270,7 @@ interface Harness {
   base: string
 }
 
-async function startHarness(control: 'fail' | 'ok' | 'fail-contact' | 'hang'): Promise<Harness> {
+async function startHarness(control: 'fail' | 'ok' | 'fail-contact' | 'hang' | 'hold'): Promise<Harness> {
   process.env['OPENFOX_MOCK_LLM'] = 'true'
   process.env['OPENFOX_SESSION_WORKER'] = 'false'
   const root = await mkdtemp(join(tmpdir(), 'openfox-idle-peer-'))
@@ -648,6 +658,67 @@ describe.sequential('idle peer registration B1-B6', () => {
   })
 
   it.fails(
+    'barrier wait does not start before mcp-lazy discovery',
+    async () => {
+      const api = await loadRegistration()
+      const managerMod = await import('./manager.js')
+      const originalStart = api.IdlePeerRegistrationService.prototype.start
+      const originalSet = managerMod.setPeerSendBarrier
+      let lazyLog = ''
+      let starts = 0
+      let installed: (() => Promise<void>) | null = null
+      api.IdlePeerRegistrationService.prototype.start = function (this: RegistrationService) {
+        let discovered = false
+        if (lazyLog.length > 0) {
+          try {
+            discovered = readFileSync(lazyLog, 'utf8').includes('"event":"serving"')
+          } catch {
+            discovered = false
+          }
+        }
+        if (!discovered) starts += 1
+        return originalStart.call(this)
+      }
+      const spy = vi.spyOn(managerMod, 'setPeerSendBarrier').mockImplementation((barrier) => {
+        installed = barrier
+        originalSet(barrier)
+      })
+      let harness: Harness | undefined
+      try {
+        harness = await startHarness('hold')
+        lazyLog = harness.logPath
+        let discoveredDuringBoot = false
+        try {
+          discoveredDuringBoot = readFileSync(lazyLog, 'utf8').includes('"event":"serving"')
+        } catch {
+          discoveredDuringBoot = false
+        }
+        if (!installed) throw new Error('precondition: production barrier was not installed')
+        if (discoveredDuringBoot) throw new Error('precondition: mcp-lazy discovered before the barrier')
+        const before = starts
+        const pending = installed().then(
+          () => undefined,
+          () => undefined,
+        )
+        await Promise.resolve()
+        const startsBeforeDiscovery = starts - before
+        console.log(
+          `DEFECT ${JSON.stringify({ test: 'B1-barrier', startsBeforeDiscovery, discovered: false, before })}`,
+        )
+        expect(startsBeforeDiscovery).toBe(0)
+        await writeFile(harness.controlPath, 'ok')
+        await deadlock(pending, 'barrier wait')
+      } finally {
+        spy.mockRestore()
+        api.IdlePeerRegistrationService.prototype.start = originalStart
+        if (harness) await writeFile(harness.controlPath, 'ok').catch(() => {})
+        await stopHarness(harness)
+      }
+    },
+    60_000,
+  )
+
+  it.fails(
     'degraded audit and attention survive a new service',
     async () => {
       const harness = await startHarness('ok')
@@ -709,12 +780,16 @@ describe.sequential('idle peer registration B1-B6', () => {
         await waitForHub(harness)
         const { getAttentionService } = await import('../session/attention.js')
         getAttentionService().observeBlocked(stalledId, 'blocked in test')
-        await whenWatched(
-          harness.logPath,
-          async () => (await readHub(harness.logPath)).some((row) => row.tool === 'ht_get_contact_info'),
-          'contact lookup',
-        )
         const { getEventStore } = await import('../events/index.js')
+        await whenWatched(
+          harness.server.ctx.config.database.path,
+          async () =>
+            getEventStore()
+              .getEvents(stalledId)
+              .some((event) => event.type === PEER_DELIVERY_PENDING),
+          'contact lookup pending',
+          true,
+        )
         const pending = getEventStore()
           .getEvents(stalledId)
           .filter((event) => event.type === PEER_DELIVERY_PENDING)
