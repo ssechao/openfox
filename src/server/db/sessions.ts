@@ -408,6 +408,11 @@ export function getSessionMessageCount(id: string): number {
   }
 }
 
+export function listSessionIds(): string[] {
+  const rows = getDatabase().prepare('SELECT id FROM sessions').all() as { id: string }[]
+  return rows.map((row) => row.id)
+}
+
 export function listSessions(): SessionSummary[] {
   const db = getDatabase()
 

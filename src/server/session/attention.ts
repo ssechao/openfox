@@ -2,6 +2,7 @@ import { logger } from '../utils/logger.js'
 import { getEventStore, type EventStore } from '../events/store.js'
 import type { StoredEvent, TurnEvent } from '../events/types.js'
 import { getSession } from '../db/sessions.js'
+import { recordPendingPeerDelivery } from '../mcp/idle-peer-registration.js'
 import type { AttentionReason } from '../events/types.js'
 
 export const ATTENTION_WAIT_MS_DEFAULT = 10 * 60 * 1000
@@ -313,14 +314,34 @@ export function createAetherNotifier(
     }
     const send = await viaProxy('ht_send_to_peer', { peer_id: peerId, message }, params.sessionId)
     if (!send.success) {
+      const error = send.error ?? 'delivery failed'
       logger.error('attention_notify_failed', {
         sessionId: params.sessionId,
         createdBy: params.createdBy,
         reason: params.reason,
         stage: 'ht_send_to_peer',
         peerId,
-        error: send.error ?? 'delivery failed',
+        error,
       })
+      try {
+        recordPendingPeerDelivery({
+          sessionId: params.sessionId,
+          targetSessionId: params.createdBy,
+          reason: params.reason,
+          error,
+          message,
+          peerId,
+        })
+      } catch (recordError) {
+        logger.error('attention_notify_failed', {
+          sessionId: params.sessionId,
+          createdBy: params.createdBy,
+          reason: params.reason,
+          stage: 'record_pending',
+          peerId,
+          error: recordError instanceof Error ? recordError.message : String(recordError),
+        })
+      }
       return
     }
     // Delivery is recorded on success too: "no error logged" is not evidence

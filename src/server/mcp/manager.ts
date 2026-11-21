@@ -90,6 +90,20 @@ function matchesReadOnlyMcpToolName(value: unknown): boolean {
   return [...READ_ONLY_MCP_TOOL_NAMES].some((name) => value === name || value.endsWith(`_${name}`))
 }
 
+let peerSendBarrier: (() => Promise<void>) | null = null
+let peerSendBarrierSettled = false
+
+export function setPeerSendBarrier(barrier: (() => Promise<void>) | null): void {
+  peerSendBarrier = barrier
+  peerSendBarrierSettled = false
+}
+
+function isAetherPeerSend(toolName: string, args: Record<string, unknown>): boolean {
+  if (toolName === 'ht_send_to_peer') return true
+  const proxied = toolName === 'mcp_execute_tool' || toolName.endsWith('_mcp_execute_tool')
+  return proxied && args['server_name'] === 'llm-aether' && args['tool_name'] === 'ht_send_to_peer'
+}
+
 function isReadOnlyMcpTool(toolName: string, args: Record<string, unknown>): boolean {
   if (matchesReadOnlyMcpToolName(toolName)) return true
   const proxy = toolName === 'mcp_execute_tool' || toolName.endsWith('_mcp_execute_tool')
@@ -398,6 +412,10 @@ export class McpManager {
     )
     if (!callerIdentityArgs.ok) return { success: false, error: callerIdentityArgs.error }
     const dispatchArgs = callerIdentityArgs.args
+    if (!peerSendBarrierSettled && peerSendBarrier && isAetherPeerSend(toolName, args)) {
+      await peerSendBarrier()
+      peerSendBarrierSettled = true
+    }
     const timeoutSeconds = effectiveRequestTimeoutSeconds(entry.config.timeout, dispatchArgs)
     const timeoutMs = timeoutSeconds * 1000
     const controller = new AbortController()

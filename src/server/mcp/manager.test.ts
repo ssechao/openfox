@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { McpManager } from './manager.js'
+import { McpManager, setPeerSendBarrier } from './manager.js'
 import { createMcpTools } from './tool-adapter.js'
 import { logger } from '../utils/logger.js'
 
@@ -359,6 +359,41 @@ describe('McpManager', () => {
       const result = await manager.callTool('test', 'get_weather', { location: 'Paris' })
       expect(result.success).toBe(true)
       expect(result.output).toBe('Sunny, 72°F')
+    })
+
+    it('waits for idle peer registration once before an Aether peer send', async () => {
+      await manager.addServer('mcp-lazy', { transport: 'stdio', command: 'node' })
+      let waits = 0
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      setPeerSendBarrier(() => {
+        waits += 1
+        return gate
+      })
+      try {
+        const pending = manager.callTool('mcp-lazy', 'mcp_execute_tool', {
+          server_name: 'llm-aether',
+          tool_name: 'ht_send_to_peer',
+          arguments: { peer_id: 'p', message: 'go' },
+        })
+        await Promise.resolve()
+        expect(mockClientInstance.callTool).not.toHaveBeenCalled()
+        expect(waits).toBe(1)
+        release()
+        const result = await pending
+        expect(result.success).toBe(true)
+        expect(mockClientInstance.callTool).toHaveBeenCalledTimes(1)
+        await manager.callTool('mcp-lazy', 'mcp_execute_tool', {
+          server_name: 'llm-aether',
+          tool_name: 'ht_send_to_peer',
+          arguments: { peer_id: 'p', message: 'again' },
+        })
+        expect(waits).toBe(1)
+      } finally {
+        setPeerSendBarrier(null)
+      }
     })
 
     it('should return error for unknown server', async () => {

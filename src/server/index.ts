@@ -301,6 +301,13 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     })
 
   // Initialize MCP manager and connect to configured servers
+  let bootSessionIds: string[] = []
+  const registration: {
+    service?: {
+      start(): Promise<unknown>
+      register(sessionId: string): Promise<void>
+    }
+  } = {}
   const mcpManager = new McpManager({
     openFoxCallerIdentity: {
       issueProof: callerIdentityAuthority.issueProof,
@@ -314,6 +321,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     },
     onToolsDiscovered: async (name, tools) => {
       try {
+        await registration.service?.start()
         const { loadGlobalConfig, saveGlobalConfig } = await import('../cli/config.js')
         const mode = config.mode ?? 'production'
         const globalConfig = await loadGlobalConfig(mode, config.globalConfigPath)
@@ -340,6 +348,39 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     notify: createAetherNotifier((serverName, toolName, args, sessionId) =>
       mcpManager.callTool(serverName, toolName, args, sessionId),
     ),
+  })
+  const { installIdlePeerRegistration } = await import('./mcp/idle-peer-registration.js')
+  const { listSessionIds } = await import('./db/sessions.js')
+  const { setPeerSendBarrier } = await import('./mcp/manager.js')
+  const peerTool = (sessionId: string, toolName: string, args: Record<string, unknown>) =>
+    mcpManager.callTool(
+      'mcp-lazy',
+      'mcp_execute_tool',
+      { server_name: 'llm-aether', tool_name: toolName, arguments: args },
+      sessionId,
+    )
+  registration.service = installIdlePeerRegistration(
+    {
+      listSessionIds: () => bootSessionIds,
+      callTool: (sessionId) => peerTool(sessionId, 'ht_get_contact_info', {}),
+      schedule: (callback, delayMs) => {
+        const timer = setTimeout(callback, delayMs)
+        return () => clearTimeout(timer)
+      },
+      journal: (line) => logger.error(line),
+      attention: (notice) =>
+        logger.error('idle_peer_registration_attention', {
+          count: notice.count,
+          sample: notice.sample.join(','),
+          omitted: notice.omitted,
+          reason: notice.reason,
+        }),
+    },
+    (sessionId, peerId, message) => peerTool(sessionId, 'ht_send_to_peer', { peer_id: peerId, message }),
+  )
+  setPeerSendBarrier(() => registration.service?.start().then(() => undefined) ?? Promise.resolve())
+  sessionManager.subscribe((event) => {
+    if (event.type === 'session_created') void registration.service?.register(event.session.id)
   })
   setGlobalMcpServersProvider(() =>
     mcpManager.getAllServers().map((s) => ({ name: s.name, disabled: s.config.disabled })),
@@ -1041,6 +1082,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
 
     // maxTokens is no longer passed - it comes from providerManager.getCurrentModelContext() at query time
     const session = sessionManager.createSession(projectId, title, providerId ?? null, model ?? null)
+    await registration.service?.register(session.id)
 
     res.status(201).json({ session: toClientSession(session) })
   })
@@ -4582,6 +4624,7 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
         })
         setMcpOAuthServerPort(actualPort)
         mcpActualPort = actualPort
+        bootSessionIds = listSessionIds()
         connectMcpServers().catch((err) => {
           logger.error('MCP server startup connection failed', {
             error: err instanceof Error ? err.message : String(err),

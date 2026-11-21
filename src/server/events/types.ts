@@ -79,6 +79,23 @@ export type TurnEvent =
         reason: AttentionReason
       }
     }
+  | {
+      type: 'session.peer_delivery_pending'
+      data: {
+        id: string
+        targetSessionId: string
+        reason: AttentionReason
+        error: string
+        message: string
+        peerId: string
+      }
+    }
+  | {
+      type: 'session.peer_delivery_delivered'
+      data: {
+        id: string
+      }
+    }
 
   // ----------------------------------------------------------------------------
   // Message lifecycle

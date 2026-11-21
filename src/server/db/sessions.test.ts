@@ -21,6 +21,7 @@ import {
   getLatestWorkflowExecution,
   getSession,
   listSessions,
+  listSessionIds,
   listSessionsByProject,
   listHomeSessions,
   listSessionsLimited,
@@ -66,6 +67,11 @@ describe('db sessions', () => {
     closeDatabase()
     await rm(rootA, { recursive: true, force: true })
     await rm(rootB, { recursive: true, force: true })
+  })
+
+  it('lists session ids without loading their events', () => {
+    const session = createSession(projectAId, rootA, 'Listed Session')
+    expect(listSessionIds()).toEqual([session.id])
   })
 
   it('creates sessions with default values', () => {
